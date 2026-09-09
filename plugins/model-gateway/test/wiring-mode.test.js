@@ -13,7 +13,10 @@ const DEFAULT_BASE_URL = 'http://127.0.0.1:9';
 const COMPAT_BASE_URL = 'http://api.anthropic.com';
 
 function fixture(t) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-wiring-'));
+  // realpath the root: the registry records each project as the CLI child's
+  // canonical cwd, so on macOS a /var/... tmpdir would never match the
+  // /private/var/... paths it writes.
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-wiring-')));
   const home = path.join(root, 'home');
   const project = path.join(root, 'project');
   fs.mkdirSync(home, { recursive: true });

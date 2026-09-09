@@ -296,7 +296,7 @@ test('cache ownership resolves physical install roots before accepting sibling v
   linkDirectory(foreignRoot, foreignLinkedSibling);
 
   assert.equal(installBelongsToThisPlugin(olderSibling, currentSibling), true);
-  assert.equal(installBelongsToThisPlugin(olderSibling.replace('loadout', 'EIGENWISE-TOOLSHED'), currentSibling), true);
+  assert.equal(installBelongsToThisPlugin(olderSibling.replace('loadout', 'LOADOUT'), currentSibling), true);
   assert.equal(installBelongsToThisPlugin(`${olderSibling}${path.sep}`, currentSibling), true);
   if (process.platform === 'win32') assert.equal(installBelongsToThisPlugin(olderSibling.replaceAll('\\', '/'), currentSibling), true);
   assert.equal(installBelongsToThisPlugin(foreignLinkedSibling, currentSibling), false);
@@ -420,7 +420,10 @@ test('isolated ensure preserves a foreign serve-shim process and cleans its own 
 });
 
 test('sibling ensure retires dead records without deleting replacement worker and proxy records', async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-sibling-record-replacement-'));
+  // realpath the fixture home: the replacement worker's recorded command comes
+  // from the ensure process's canonicalized __filename, so on macOS a /var/...
+  // tmpdir home would never match the /private/var/... it logs.
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-sibling-record-replacement-')));
   const { olderCli, newerCli } = installCachedGatewayCliVersions(home);
   const shimReservation = net.createServer();
   const shimPort = await listen(shimReservation);

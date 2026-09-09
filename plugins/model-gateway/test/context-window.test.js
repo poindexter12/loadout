@@ -199,8 +199,11 @@ test('window policy marks measured rows and advertises unmeasured Codex defaults
   const { MODEL_WINDOW_POLICY, gatewayClientModelId, resolveGatewayModelPolicy } = require(RUNTIME);
 
   for (const policy of Object.values(MODEL_WINDOW_POLICY)) {
-    if (policy.backendId === 'default') continue;
-    assert.equal(policy.pickerAlias.endsWith('[1m]'), policy.backendWindow > 200000);
+    // Template-only default rows ('default', 'geminiDefault') carry a
+    // pickerAliasTemplate instead of a concrete pickerAlias; the rendered
+    // alias must still mark [1m] exactly when the window exceeds 200k.
+    const alias = policy.pickerAlias ?? policy.pickerAliasTemplate.replace('{backendId}', policy.backendId);
+    assert.equal(alias.endsWith('[1m]'), policy.backendWindow > 200000);
   }
   assert.equal(MODEL_WINDOW_POLICY['grok-4.5'].pickerAlias, 'claude-grok-4.5[1m]');
   assert.match(MODEL_WINDOW_POLICY.default.measurement, /^unmeasured/);
@@ -210,6 +213,14 @@ test('window policy marks measured rows and advertises unmeasured Codex defaults
     pickerAlias: 'claude-gpt-5.2[1m]',
   });
   assert.equal(gatewayClientModelId('gpt-5.2'), 'claude-gpt-5.2[1m]');
+  assert.match(MODEL_WINDOW_POLICY.geminiDefault.measurement, /^unmeasured/);
+  assert.deepEqual(resolveGatewayModelPolicy('claude-gemini-3-pro'), {
+    ...MODEL_WINDOW_POLICY.geminiDefault,
+    backendId: 'gemini-3-pro',
+    pickerAlias: 'claude-gemini-3-pro',
+  });
+  assert.equal(gatewayClientModelId('gemini-3-pro'), 'claude-gemini-3-pro');
+  assert.equal(gatewayModel('gemini-3-pro', 'antigravity').max_input_tokens, 200000);
   assert.equal(resolveGatewayModelPolicy('claude-opus-4-8[1m]').sentry, 'none');
   assert.equal(gatewayModel('gpt-6-astra-fast', 'codex').max_input_tokens, 920000);
 });
@@ -1415,7 +1426,11 @@ test('doctor policy table includes gateway and native model rows', () => {
 test('doctor detects live shim ids that differ from the policy aliases', () => {
   const { expectedShimModelIds } = require(COMMANDS);
   const expectedIds = expectedShimModelIds();
-  const matching = doctorWithStubShim(expectedIds);
+  // Template-only policy rows are never advertised by the shim, so the doctor
+  // must not expect them; live Antigravity rows come from its catalog only and
+  // must be accepted as matching rather than flagged as extra.
+  assert.equal(expectedIds.some((id) => id.includes('geminiDefault')), false);
+  const matching = doctorWithStubShim([...expectedIds, 'claude-gemini-3-pro']);
   const staleIds = expectedIds.map((id) => id.replace('[1m]', ''));
   const stale = doctorWithStubShim(staleIds);
 

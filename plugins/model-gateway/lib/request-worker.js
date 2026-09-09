@@ -934,7 +934,9 @@ function runWorker() {
   process.once('disconnect', () => process.exit(0));
   let modelCache = {
     at: 0,
-    data: [...DEFAULT_MODELS, ...(LIST_DISPATCH_MODEL ? ['auto'] : [])].map(gatewayModel),
+    // gatewayModel takes (id, backend); a bare .map(gatewayModel) would pass
+    // the array index as the backend and null out every boot-catalog row.
+    data: [...DEFAULT_MODELS, ...(LIST_DISPATCH_MODEL ? ['auto'] : [])].map((id) => gatewayModel(id)),
   };
   const counters = { models: 0, codex: 0, grok: 0, gemini: 0, anthropic: 0 };
   const dispatchRoutes = new DispatchSessionRouteCache({ cachePath: DISPATCH_ROUTE_CACHE_PATH });

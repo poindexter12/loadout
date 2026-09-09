@@ -109,7 +109,9 @@ function waitForChildExit(child) {
 }
 
 test('restart with drain submits the newest installed CLI path', async (t) => {
-  const cacheRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-worker-cache-'));
+  // realpath the cache root: Node canonicalizes required module paths, so the
+  // supervisor reports the /private/var/... form of a macOS /var/... tmpdir.
+  const cacheRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-worker-cache-')));
   t.after(() => fs.rmSync(cacheRoot, { recursive: true, force: true }));
   const olderCliPath = createCachedCli(cacheRoot, '0.48.12');
   const newerCliPath = createCachedCli(cacheRoot, '0.48.13');

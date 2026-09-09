@@ -47,7 +47,7 @@ For each session, usage observability also keeps a small high-water file under `
 
 When the gateway disappears or restarts, ask Claude to run `doctor`. It names the lifecycle evidence at `~/.claude/model-gateway/logs/lifecycle.jsonl` and distinguishes an observed supervisor, worker, or proxy exit from no exit evidence. The bounded records identify PIDs, orderly setup/stop/restart requests, signals, and recovery outcomes. A force-killed supervisor or OS termination can leave no final record, so a missing exit entry does not prove an orderly shutdown.
 
-Doctor also prints a model-window table for Codex, Grok, and native Claude pins: backend and picker ids,
+Doctor also prints a model-window table for Codex, Grok, live Antigravity Gemini rows, and native Claude pins: backend and picker ids,
 backend and advertised windows, Claude Code's client window and compaction point, sentry mode and trigger,
 and the measurement date. It compares the live shim ids with the installed policy when those ids are
 available, but a `PASS` does not prove that every supported model is present. In particular, an older

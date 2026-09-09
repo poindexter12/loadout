@@ -1005,12 +1005,15 @@ function modelWindowPolicyRow(id, pickerId = gatewayClientModelId(id)) {
 function policyGatewayModelIds(liveIds = []) {
   if (liveIds.length) {
     return [...new Set(liveIds.filter((id) => {
-      const policy = resolveGatewayModelPolicy(id);
-      return policy?.backend === 'codex' || policy?.backend === 'grok';
+      const backend = resolveGatewayModelPolicy(id)?.backend;
+      return backend === 'codex' || backend === 'grok' || backend === 'antigravity';
     }))];
   }
+  // Template-only default rows ('default', 'geminiDefault') have no concrete
+  // pickerAlias and are never advertised by the shim, so they stay out of the
+  // policy table and the expected live-id set.
   return Object.values(MODEL_WINDOW_POLICY)
-    .filter((policy) => policy.backendId !== 'default' && policy.backend !== 'anthropic')
+    .filter((policy) => policy.pickerAlias && policy.backend !== 'anthropic')
     .map((policy) => policy.backendId);
 }
 
