@@ -2,14 +2,14 @@
 
 Codebase Mapper gives Claude a current map of your project, so future sessions can find the right files and understand the main flows without starting from zero.
 
-[Setup guide](https://eigenwise.github.io/eigenwise-toolshed/getting-started/codebase-mapper/) · [Generated reference](https://eigenwise.github.io/eigenwise-toolshed/reference/codebase-mapper/) · [Toolshed marketplace](../../README.md)
+[Setup guide](https://poindexter12.github.io/eigenwise-toolshed/getting-started/codebase-mapper/) · [Generated reference](https://poindexter12.github.io/eigenwise-toolshed/reference/codebase-mapper/) · [Toolshed marketplace](../../README.md)
 
 ## Install
 
 Run these in Claude Code:
 
 ```text
-/plugin marketplace add Eigenwise/eigenwise-toolshed
+/plugin marketplace add poindexter12/eigenwise-toolshed
 /plugin install codebase-mapper@eigenwise-toolshed --scope project
 ```
 
@@ -42,10 +42,6 @@ You can also ask directly:
 - **The map is missing for teammates:** Check whether an explicit no-commit instruction left it uncommitted, then review and commit `.claude/.codebase-info/`.
 
 Codebase Mapper works with existing and greenfield projects. It leaves `CLAUDE.md` alone.
-
-## Support
-
-Optional support is welcome through [Ko-fi](https://ko-fi.com/eigenwise) or [GitHub Sponsors](https://github.com/sponsors/Eigenwise).
 
 ## License
 

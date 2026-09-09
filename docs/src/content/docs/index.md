@@ -46,5 +46,5 @@ template: splash
 </section>
 
 <section>
-  <p class="page-ledge">Use <a href="./getting-started/">the setup path</a> for a first project, then open a plugin guide for its first workflow. Maintainers can read <a href="./architecture/">architecture</a> and <a href="./contributing/">contributing</a>. See <a href="https://eigenwise.github.io/eigenwise-toolshed/support/">support</a> if you want to help keep the project going.</p>
+  <p class="page-ledge">Use <a href="./getting-started/">the setup path</a> for a first project, then open a plugin guide for its first workflow. Maintainers can read <a href="./architecture/">architecture</a> and <a href="./contributing/">contributing</a>. See <a href="https://poindexter12.github.io/eigenwise-toolshed/support/">support and attribution</a> for help channels and credit for the original work.</p>
 </section>

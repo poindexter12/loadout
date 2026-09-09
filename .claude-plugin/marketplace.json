@@ -1,10 +1,9 @@
 {
   "name": "eigenwise-toolshed",
   "owner": {
-    "name": "Eigenwise",
-    "email": "kenny@eigenwise.io"
+    "name": "poindexter12"
   },
-  "description": "Eigenwise's toolshed of Claude Code plugins.",
+  "description": "A toolshed of Claude Code plugins. Independently maintained fork of the Eigenwise Toolshed; original work by Eigenwise.",
   "version": "3.534.0",
   "plugins": [
     {
@@ -15,8 +14,8 @@
       "author": {
         "name": "Eigenwise"
       },
-      "homepage": "https://github.com/Eigenwise/eigenwise-toolshed/tree/main/plugins/observability",
-      "repository": "https://github.com/Eigenwise/eigenwise-toolshed",
+      "homepage": "https://github.com/poindexter12/eigenwise-toolshed/tree/main/plugins/observability",
+      "repository": "https://github.com/poindexter12/eigenwise-toolshed",
       "license": "MIT",
       "category": "productivity",
       "keywords": [
@@ -38,8 +37,8 @@
       "author": {
         "name": "Eigenwise"
       },
-      "homepage": "https://github.com/Eigenwise/eigenwise-toolshed/tree/main/plugins/model-gateway",
-      "repository": "https://github.com/Eigenwise/eigenwise-toolshed",
+      "homepage": "https://github.com/poindexter12/eigenwise-toolshed/tree/main/plugins/model-gateway",
+      "repository": "https://github.com/poindexter12/eigenwise-toolshed",
       "license": "MIT",
       "category": "development",
       "keywords": [
@@ -61,8 +60,8 @@
       "author": {
         "name": "Eigenwise"
       },
-      "homepage": "https://github.com/Eigenwise/eigenwise-toolshed/tree/main/plugins/sidequest",
-      "repository": "https://github.com/Eigenwise/eigenwise-toolshed",
+      "homepage": "https://github.com/poindexter12/eigenwise-toolshed/tree/main/plugins/sidequest",
+      "repository": "https://github.com/poindexter12/eigenwise-toolshed",
       "license": "MIT",
       "category": "productivity",
       "keywords": [
@@ -84,8 +83,8 @@
       "author": {
         "name": "Eigenwise"
       },
-      "homepage": "https://github.com/Eigenwise/eigenwise-toolshed/tree/main/plugins/codebase-mapper",
-      "repository": "https://github.com/Eigenwise/eigenwise-toolshed",
+      "homepage": "https://github.com/poindexter12/eigenwise-toolshed/tree/main/plugins/codebase-mapper",
+      "repository": "https://github.com/poindexter12/eigenwise-toolshed",
       "license": "MIT",
       "category": "documentation",
       "keywords": [
@@ -107,8 +106,8 @@
       "author": {
         "name": "Eigenwise"
       },
-      "homepage": "https://github.com/Eigenwise/eigenwise-toolshed/tree/main/plugins/quartermaster",
-      "repository": "https://github.com/Eigenwise/eigenwise-toolshed",
+      "homepage": "https://github.com/poindexter12/eigenwise-toolshed/tree/main/plugins/quartermaster",
+      "repository": "https://github.com/poindexter12/eigenwise-toolshed",
       "license": "MIT",
       "category": "productivity",
       "keywords": [
@@ -132,8 +131,8 @@
       "author": {
         "name": "Eigenwise"
       },
-      "homepage": "https://github.com/Eigenwise/eigenwise-toolshed/tree/main/plugins/live-rules",
-      "repository": "https://github.com/Eigenwise/eigenwise-toolshed",
+      "homepage": "https://github.com/poindexter12/eigenwise-toolshed/tree/main/plugins/live-rules",
+      "repository": "https://github.com/poindexter12/eigenwise-toolshed",
       "license": "MIT",
       "category": "development",
       "keywords": [

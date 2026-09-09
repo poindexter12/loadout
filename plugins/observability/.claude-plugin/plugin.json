@@ -6,8 +6,8 @@
     "name": "Eigenwise",
     "email": "kenny@eigenwise.io"
   },
-  "homepage": "https://github.com/Eigenwise/eigenwise-toolshed/tree/main/plugins/observability",
-  "repository": "https://github.com/Eigenwise/eigenwise-toolshed",
+  "homepage": "https://github.com/poindexter12/eigenwise-toolshed/tree/main/plugins/observability",
+  "repository": "https://github.com/poindexter12/eigenwise-toolshed",
   "license": "MIT",
   "suiteTimeout": 300000,
   "keywords": [

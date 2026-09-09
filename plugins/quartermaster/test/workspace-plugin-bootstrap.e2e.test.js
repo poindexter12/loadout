@@ -39,7 +39,7 @@ if (command === 'marketplace list --json') {
   const source = args[2];
   state.events.push({ type: 'marketplace-add', source });
   state.marketplaces.push({
-    name: source === 'Eigenwise/eigenwise-toolshed' ? 'eigenwise-toolshed' : 'cloudflare',
+    name: source === 'poindexter12/eigenwise-toolshed' ? 'eigenwise-toolshed' : 'cloudflare',
     source: 'github',
     repo: source,
   });
@@ -139,7 +139,7 @@ function selectedPlan(projectDir, overrides = {}) {
     version: 1,
     projectDir,
     marketplaces: [
-      { name: 'eigenwise-toolshed', source: 'Eigenwise/eigenwise-toolshed' },
+      { name: 'eigenwise-toolshed', source: 'poindexter12/eigenwise-toolshed' },
       { name: 'cloudflare', source: 'cloudflare/skills' },
     ],
     plugins: [
@@ -160,7 +160,7 @@ test('bootstraps the interviewed core and stack selection through a real fake Cl
   assert.equal(first.json.ok, true);
   assert.equal(first.json.reloadRequired, true);
   assert.deepEqual(readJson(fixture.stateFile).events, [
-    { type: 'marketplace-add', source: 'Eigenwise/eigenwise-toolshed' },
+    { type: 'marketplace-add', source: 'poindexter12/eigenwise-toolshed' },
     { type: 'marketplace-add', source: 'cloudflare/skills' },
     { type: 'plugin-install', id: 'codebase-mapper@eigenwise-toolshed', scope: 'project' },
     { type: 'plugin-install', id: 'live-rules@eigenwise-toolshed', scope: 'project' },
@@ -227,7 +227,7 @@ test('stops before reload-ready success on partial failure and safely resumes on
 
 test('honors a personal local scope only when it is explicit in the plan', () => withFixture((fixture) => {
   const plan = selectedPlan(fixture.projectDir, {
-    marketplaces: [{ name: 'eigenwise-toolshed', source: 'Eigenwise/eigenwise-toolshed' }],
+    marketplaces: [{ name: 'eigenwise-toolshed', source: 'poindexter12/eigenwise-toolshed' }],
     plugins: [{ id: 'personal-rules@eigenwise-toolshed', scope: 'local', role: 'optional' }],
   });
   const result = runInstaller(fixture, plan);

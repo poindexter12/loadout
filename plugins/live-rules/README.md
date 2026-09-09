@@ -2,14 +2,14 @@
 
 Live Rules keeps project instructions in front of Claude Code when they apply to a prompt or edit. Use it for conventions, guardrails, and reminders that should follow the project instead of relying on memory.
 
-[Setup guide](https://eigenwise.github.io/eigenwise-toolshed/getting-started/live-rules/) · [Generated reference](https://eigenwise.github.io/eigenwise-toolshed/reference/live-rules/) · [Toolshed marketplace](../../README.md)
+[Setup guide](https://poindexter12.github.io/eigenwise-toolshed/getting-started/live-rules/) · [Generated reference](https://poindexter12.github.io/eigenwise-toolshed/reference/live-rules/) · [Toolshed marketplace](../../README.md)
 
 ## Install
 
 Run these in Claude Code from the project where the rules should live:
 
 ```text
-/plugin marketplace add Eigenwise/eigenwise-toolshed
+/plugin marketplace add poindexter12/eigenwise-toolshed
 /plugin install live-rules@eigenwise-toolshed --scope project
 ```
 
@@ -44,10 +44,6 @@ Ask Claude to add or edit rule content with `add-rule`. Use `manage-rules` to li
 Tell Claude the symptom and ask it to audit the live rules. The audit checks both the rule files and generated manifest. If `.claude/live-rules/rules/` exists but `manifest.json` is missing, malformed, or out of sync, run the plugin-owned sync command to rebuild it. If no atomic rules exist, check the legacy path resolved from `LIVE_RULES_PATH` or the default `.claude/live-rules.md`, then reload plugins or restart Claude Code after an install or update.
 
 Migration can write and remove tracked project files at SessionStart as described above. Review those changes before committing. An explicit `LIVE_RULES_PATH` is never deleted by automatic migration, and verification failure leaves the legacy file for recovery.
-
-## Support
-
-Optional support is welcome through [Ko-fi](https://ko-fi.com/eigenwise) or [GitHub Sponsors](https://github.com/sponsors/Eigenwise).
 
 ## License
 

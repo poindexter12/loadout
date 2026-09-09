@@ -2,14 +2,14 @@
 
 Model Gateway adds ChatGPT/Codex and Grok subscription models to Claude Code. Claude Code v2.1.129+ can show those gateway models in its `/model` picker. It keeps normal Claude models on Anthropic and routes only the selected gateway models through your subscription.
 
-[Setup guide](https://eigenwise.github.io/eigenwise-toolshed/getting-started/model-gateway/) · [Generated reference](https://eigenwise.github.io/eigenwise-toolshed/reference/model-gateway/) · [Toolshed marketplace](../../README.md)
+[Setup guide](https://poindexter12.github.io/eigenwise-toolshed/getting-started/model-gateway/) · [Generated reference](https://poindexter12.github.io/eigenwise-toolshed/reference/model-gateway/) · [Toolshed marketplace](../../README.md)
 
 ## Install
 
 Run these in Claude Code:
 
 ```text
-/plugin marketplace add Eigenwise/eigenwise-toolshed
+/plugin marketplace add poindexter12/eigenwise-toolshed
 /plugin install model-gateway@eigenwise-toolshed --scope project
 ```
 
@@ -33,7 +33,7 @@ new rows appear after a full Claude Code restart. `/reload-plugins` does not rel
 - A gateway row above Claude Code's 200k unknown-model window gets a `[1m]` picker alias. That alias gives Claude Code a 1M client window, but a lower explicit `autoCompactWindow` still wins. The optional `325000` setting is a cap, and with that cap the client compacts around `292000`. The alias is removed before forwarding to Codex or Grok, and it does not promise a 1M backend input limit. Use `/context` to inspect the selected model and effective cap.
 - Claude models keep using Anthropic normally.
 
-That’s it for daily use. The plugin keeps the gateway running: its shim supervisor checks the proxy's `/v1/models` endpoint, recovers an unavailable proxy with bounded backoff, and leaves a healthy proxy alone. A newer Model Gateway cache version replaces an older sibling version from the same marketplace and plugin name. An older session left open through an update leaves a newer shim running and tells you to reload plugins or restart Claude Code. A different marketplace, plugin name, or non-cache install stays foreign and is never stopped. Sidequest can select gateway models automatically when both plugins are installed.
+The plugin keeps the gateway running: its shim supervisor checks the proxy's `/v1/models` endpoint, recovers an unavailable proxy with bounded backoff, and leaves a healthy proxy alone. A newer Model Gateway cache version replaces an older sibling version from the same marketplace and plugin name. An older session left open through an update leaves a newer shim running and tells you to reload plugins or restart Claude Code. A different marketplace, plugin name, or non-cache install stays foreign and is never stopped. Sidequest can select gateway models automatically when both plugins are installed.
 
 On Windows, startup uses WMI to launch the supervisor outside the calling terminal or hook's process tree and Job Object. Closing or timing out that caller therefore leaves the shared gateway running. Startup preserves the caller's environment, hides the launcher window, and reports a launch failure instead of falling back to a process that can be killed with the hook.
 
@@ -75,7 +75,7 @@ Tell Claude what happened, for example:
 
 > Codex models fail, but Claude models still work. Repair Model Gateway.
 
-Claude checks authentication, local processes, ports, model discovery, updates, and settings precedence through the bundled skill. You don’t need to run the gateway’s internal commands yourself.
+Claude checks authentication, local processes, ports, model discovery, updates, and settings precedence through the bundled skill. The bundled skill runs the gateway's internal commands.
 
 Authentication recovery and picker recovery have different boundaries. If auth is missing, complete `login` and let Claude run `setup` again; the already-running proxy can use the refreshed credential without killing the current Claude Code process. If settings, discovery cache, plugin files, or model rows changed, fully restart the Claude Code process for the affected project. `/reload-plugins` alone does not refresh the picker.
 
@@ -94,10 +94,6 @@ Ask Claude to enable, disable, or diagnose RC-compatibility. Its read-only diagn
 To get Remote Control without RC-compatibility, remove only `ANTHROPIC_BASE_URL` from the `env` object in that project's `.claude/settings.local.json`. Keep every other gateway setting, then restart Claude Code. The project talks to `api.anthropic.com` directly and Remote Control becomes available.
 
 That project has no gateway models after the restart: gateway rows disappear from `/model` and typed gateway ids do not work either. A manually exported `ANTHROPIC_BASE_URL` still wins over the file edit, so remove that environment variable before restarting if the project remains wired.
-
-## Support
-
-If Model Gateway saves you time, you can support its maintenance through [Ko-fi](https://ko-fi.com/eigenwise) or [GitHub Sponsors](https://github.com/sponsors/Eigenwise).
 
 ## License
 

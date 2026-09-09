@@ -58,7 +58,7 @@ that apply.
 ### 1. Install the plugin (once)
 
 ```text
-/plugin marketplace add Eigenwise/eigenwise-toolshed
+/plugin marketplace add poindexter12/eigenwise-toolshed
 /plugin install codebase-mapper@eigenwise-toolshed
 ```
 
@@ -148,8 +148,4 @@ file is git-ignored so running the tool never dirties the repo.
 
 ---
 
-*Part of the [eigenwise-toolshed](../../README.md), free and MIT. If it helps you, [a coffee](https://ko-fi.com/eigenwise) or [a GitHub sponsorship](https://github.com/sponsors/Eigenwise) keeps the shed stocked.*
-
-| Ko-fi | GitHub Sponsors |
-|:-----:|:---------------:|
-| <a href="https://ko-fi.com/eigenwise"><img height="32" alt="Support me on Ko-fi" src="https://ko-fi.com/img/githubbutton_sm.svg"></a> | <a href="https://github.com/sponsors/Eigenwise"><img height="32" alt="Sponsor on GitHub" src="https://img.shields.io/badge/Sponsor-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white"></a> |
+*Part of the [eigenwise-toolshed](../../README.md), free and MIT. Original work by [Eigenwise](https://github.com/Eigenwise).*

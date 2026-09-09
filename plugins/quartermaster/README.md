@@ -11,7 +11,7 @@ When setup wires Model Gateway or Sidequest routing, it can also offer the optio
 Quartermaster works at user, project, or local scope. Install it at the scope you want, for example:
 
 ```text
-/plugin marketplace add Eigenwise/eigenwise-toolshed
+/plugin marketplace add poindexter12/eigenwise-toolshed
 /plugin install quartermaster@eigenwise-toolshed --scope project
 ```
 
@@ -81,10 +81,10 @@ Environment variables are optional:
 
 ## Links
 
-- [Quartermaster guide](https://eigenwise.github.io/eigenwise-toolshed/getting-started/quartermaster/)
-- [Toolshed plugin reference](https://eigenwise.github.io/eigenwise-toolshed/reference/quartermaster/)
-- [Repository](https://github.com/Eigenwise/eigenwise-toolshed)
+- [Quartermaster guide](https://poindexter12.github.io/eigenwise-toolshed/getting-started/quartermaster/)
+- [Toolshed plugin reference](https://poindexter12.github.io/eigenwise-toolshed/reference/quartermaster/)
+- [Repository](https://github.com/poindexter12/eigenwise-toolshed)
 
-## Support
+## License
 
-Optional support is available through [Ko-fi](https://ko-fi.com/eigenwise) or [GitHub Sponsors](https://github.com/sponsors/Eigenwise).
+MIT — original work by Eigenwise.

@@ -10,7 +10,7 @@ Eigenwise Toolshed is six independent Claude Code plugins. Start with Quartermas
 Run these in Claude Code from the project you want to prepare:
 
 ```text
-/plugin marketplace add Eigenwise/eigenwise-toolshed
+/plugin marketplace add poindexter12/eigenwise-toolshed
 /plugin install quartermaster@eigenwise-toolshed --scope project
 ```
 
@@ -51,4 +51,4 @@ Quartermaster's updater covers every active Eigenwise Toolshed install in Claude
 
 Freshness hooks report cached availability and loaded-version mismatches. They do not install plugins or restart Claude Code. Marketplace auto-update is optional and must be enabled for the Eigenwise Toolshed marketplace. After any plugin update, reload affected open sessions. Restart Claude Code when process-level gateway wiring or model discovery changed.
 
-The [generated plugin reference](../reference/) lists the agent-facing skills, hooks, and commands. Maintainer material lives under [contributing](../contributing/), and the separate [support page](https://eigenwise.github.io/eigenwise-toolshed/support/) covers ways to help.
+The [generated plugin reference](../reference/) lists the agent-facing skills, hooks, and commands. Maintainer material lives under [contributing](../contributing/), and the separate [support page](https://poindexter12.github.io/eigenwise-toolshed/support/) covers ways to help.

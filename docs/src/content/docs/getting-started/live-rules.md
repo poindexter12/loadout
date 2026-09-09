@@ -10,7 +10,7 @@ Live Rules keeps project instructions in front of Claude Code when they apply to
 Run these in Claude Code from the project where the rules should live:
 
 ```text
-/plugin marketplace add Eigenwise/eigenwise-toolshed
+/plugin marketplace add poindexter12/eigenwise-toolshed
 /plugin install live-rules@eigenwise-toolshed --scope project
 ```
 

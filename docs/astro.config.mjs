@@ -2,7 +2,7 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 export default defineConfig({
-  site: 'https://eigenwise.github.io',
+  site: 'https://poindexter12.github.io',
   base: '/eigenwise-toolshed',
   redirects: {
     '/getting-started/codex-gateway': '/eigenwise-toolshed/getting-started/model-gateway',
@@ -11,7 +11,7 @@ export default defineConfig({
   integrations: [
     starlight({
       title: 'Eigenwise Toolshed',
-      description: 'Sharp little tools for Claude Code, kept in one shed.',
+      description: 'Independent Claude Code plugins for project context, work tracking, model routing, and local usage observability.',
       customCss: ['./src/styles/custom.css'],
       head: [
         { tag: 'link', attrs: { rel: 'preconnect', href: 'https://fonts.googleapis.com' } },
@@ -28,7 +28,7 @@ export default defineConfig({
         {
           icon: 'github',
           label: 'GitHub',
-          href: 'https://github.com/Eigenwise/eigenwise-toolshed',
+          href: 'https://github.com/poindexter12/eigenwise-toolshed',
         },
       ],
       sidebar: [
@@ -83,7 +83,7 @@ export default defineConfig({
         },
         {
           label: 'Support',
-          items: [{ label: 'Support the Toolshed', slug: 'support' }],
+          items: [{ label: 'Support and attribution', slug: 'support' }],
         },
       ],
     }),

@@ -167,7 +167,7 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/quartermaster.js" decisions add --project "${CLA
 
 Close with what they got, a short next-actions list using only what was installed and verified,
 a reminder to commit `.claude/`, and a pointer to
-https://eigenwise.github.io/eigenwise-toolshed/getting-started/ naming the page for each plugin
+https://poindexter12.github.io/eigenwise-toolshed/getting-started/ naming the page for each plugin
 just installed. `/quartermaster:resupply` picks it up from here: once real sessions exist, it asks
 what would make the user's current work easier and whether this setup is earning its place.
 

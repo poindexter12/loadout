@@ -3,8 +3,8 @@
   "version": "0.7.7",
   "description": "Set up a project from your existing Claude Code habits, keep Toolshed installs healthy, and find missing capabilities after real work accumulates. Local scripts reduce session history to a bounded summary before the active model sees it; setup, resupply, updates, and config changes happen only with your approval.",
   "author": { "name": "Eigenwise", "email": "kenny@eigenwise.io" },
-  "homepage": "https://github.com/Eigenwise/eigenwise-toolshed/tree/main/plugins/quartermaster",
-  "repository": "https://github.com/Eigenwise/eigenwise-toolshed",
+  "homepage": "https://github.com/poindexter12/eigenwise-toolshed/tree/main/plugins/quartermaster",
+  "repository": "https://github.com/poindexter12/eigenwise-toolshed",
   "license": "MIT",
   "keywords": ["resupply", "self-improvement", "capability", "measurement", "transcripts", "friction", "recommendations", "plugins", "rules", "permissions", "setup", "developer-experience"]
 }

@@ -27,7 +27,7 @@ function planFor(projectDir, overrides = {}) {
   return {
     version: 1,
     projectDir,
-    marketplaces: [{ name: 'eigenwise-toolshed', source: 'Eigenwise/eigenwise-toolshed' }],
+    marketplaces: [{ name: 'eigenwise-toolshed', source: 'poindexter12/eigenwise-toolshed' }],
     plugins: [{ id: 'codebase-mapper@eigenwise-toolshed', scope: 'project', role: 'core' }],
     ...overrides,
   };
@@ -48,7 +48,7 @@ function inventoryRunner({ marketplaces = [], plugins = [], fail = () => false }
     }
     if (command.args.slice(0, 3).join(' ') === 'plugin marketplace add') {
       const source = command.args[3];
-      const name = source === 'Eigenwise/eigenwise-toolshed' ? 'eigenwise-toolshed' : source;
+      const name = source === 'poindexter12/eigenwise-toolshed' ? 'eigenwise-toolshed' : source;
       state.marketplaces.push({ name, source: 'github', repo: source });
       return { ok: true, output: 'added marketplace', status: 0 };
     }
@@ -79,7 +79,7 @@ test('installs a fresh portable marketplace and selected plugin from the project
   assert.deepEqual(runner.calls.map((call) => call.args), [
     ['plugin', 'marketplace', 'list', '--json'],
     ['plugin', 'list', '--json'],
-    ['plugin', 'marketplace', 'add', 'Eigenwise/eigenwise-toolshed', '--scope', 'project'],
+    ['plugin', 'marketplace', 'add', 'poindexter12/eigenwise-toolshed', '--scope', 'project'],
     ['plugin', 'marketplace', 'list', '--json'],
     ['plugin', 'install', 'codebase-mapper@eigenwise-toolshed', '--scope', 'project'],
     ['plugin', 'list', '--json'],
@@ -91,7 +91,7 @@ test('installs a fresh portable marketplace and selected plugin from the project
 
 test('does no mutations when every selected plugin is enabled at the planned scope', () => withWorkspace((projectDir) => {
   const runner = inventoryRunner({
-    marketplaces: [{ name: 'eigenwise-toolshed', source: 'github', repo: 'Eigenwise/eigenwise-toolshed' }],
+    marketplaces: [{ name: 'eigenwise-toolshed', source: 'github', repo: 'poindexter12/eigenwise-toolshed' }],
     plugins: [{ id: 'codebase-mapper@eigenwise-toolshed', scope: 'project', enabled: true, projectPath: projectDir }],
   });
   const result = runInstall({ plan: planFor(projectDir), run: runner.run });
@@ -104,7 +104,7 @@ test('does no mutations when every selected plugin is enabled at the planned sco
 
 test('installs a selected plugin for this project when it is enabled for another project', () => withWorkspace((projectDir) => {
   const runner = inventoryRunner({
-    marketplaces: [{ name: 'eigenwise-toolshed', source: 'github', repo: 'Eigenwise/eigenwise-toolshed' }],
+    marketplaces: [{ name: 'eigenwise-toolshed', source: 'github', repo: 'poindexter12/eigenwise-toolshed' }],
     plugins: [{ id: 'codebase-mapper@eigenwise-toolshed', scope: 'project', enabled: true, projectPath: path.join(projectDir, 'other') }],
   });
   const result = runInstall({ plan: planFor(projectDir), run: runner.run });
@@ -118,7 +118,7 @@ test('installs a selected plugin for this project when it is enabled for another
 
 test('treats an enabled user-scope plugin as covering a project plan', () => withWorkspace((projectDir) => {
   const runner = inventoryRunner({
-    marketplaces: [{ name: 'eigenwise-toolshed', source: 'github', repo: 'Eigenwise/eigenwise-toolshed' }],
+    marketplaces: [{ name: 'eigenwise-toolshed', source: 'github', repo: 'poindexter12/eigenwise-toolshed' }],
     plugins: [{ id: 'codebase-mapper@eigenwise-toolshed', scope: 'user', enabled: true }],
   });
   const result = runInstall({ plan: planFor(projectDir), run: runner.run });
@@ -129,7 +129,7 @@ test('treats an enabled user-scope plugin as covering a project plan', () => wit
 }));
 
 test('reports a same-id plugin at this project with the wrong scope', () => withWorkspace((projectDir) => {
-  const scopeDelta = computeDelta(planFor(projectDir), [{ name: 'eigenwise-toolshed', source: 'github', repo: 'Eigenwise/eigenwise-toolshed' }], [
+  const scopeDelta = computeDelta(planFor(projectDir), [{ name: 'eigenwise-toolshed', source: 'github', repo: 'poindexter12/eigenwise-toolshed' }], [
     { id: 'codebase-mapper@eigenwise-toolshed', scope: 'local', enabled: true, projectPath: projectDir },
   ]);
 
@@ -143,13 +143,13 @@ test('installs a missing marketplace before any selected plugin', () => withWork
   assert.equal(result.ok, true);
   assert.deepEqual(result.marketplaces.map((marketplace) => marketplace.status), ['missing']);
   assert.equal(runner.calls[2].args[2], 'add');
-  assert.equal(runner.calls[2].args[3], 'Eigenwise/eigenwise-toolshed');
+  assert.equal(runner.calls[2].args[3], 'poindexter12/eigenwise-toolshed');
   assert.equal(runner.calls.some((call) => call.args[1] === 'install'), false);
 }));
 
 test('normalizes Windows project paths when comparing project installs', () => {
   assert.equal(normalizeProjectPath('C:\\Work\\Repo\\'), normalizeProjectPath('c:/work/repo'));
-  const delta = computeDelta(planFor('C:/Work/Repo'), [{ name: 'eigenwise-toolshed', source: 'github', repo: 'Eigenwise/eigenwise-toolshed' }], [
+  const delta = computeDelta(planFor('C:/Work/Repo'), [{ name: 'eigenwise-toolshed', source: 'github', repo: 'poindexter12/eigenwise-toolshed' }], [
     { id: 'codebase-mapper@eigenwise-toolshed', scope: 'project', enabled: true, projectPath: 'c:\\work\\repo' },
   ]);
   assert.equal(delta.plugins[0].status, 'skipped');
@@ -183,7 +183,7 @@ test('rejects malformed and user-scope plans before querying or mutating Claude 
 
 test('installs disabled selected plugins again so Claude can enable them', () => withWorkspace((projectDir) => {
   const runner = inventoryRunner({
-    marketplaces: [{ name: 'eigenwise-toolshed', source: 'github', repo: 'Eigenwise/eigenwise-toolshed' }],
+    marketplaces: [{ name: 'eigenwise-toolshed', source: 'github', repo: 'poindexter12/eigenwise-toolshed' }],
     plugins: [{ id: 'codebase-mapper@eigenwise-toolshed', scope: 'project', enabled: false, projectPath: projectDir }],
   });
   const result = runInstall({ plan: planFor(projectDir), run: runner.run });

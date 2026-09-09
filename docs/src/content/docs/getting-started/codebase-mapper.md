@@ -10,7 +10,7 @@ Codebase Mapper creates a project map that helps Claude understand where things 
 Run these in Claude Code:
 
 ```text
-/plugin marketplace add Eigenwise/eigenwise-toolshed
+/plugin marketplace add poindexter12/eigenwise-toolshed
 /plugin install codebase-mapper@eigenwise-toolshed --scope project
 ```
 

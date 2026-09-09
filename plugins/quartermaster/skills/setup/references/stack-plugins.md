@@ -10,9 +10,9 @@ Select these for every codebase:
 
 | Plugin | Marketplace source | Role |
 |---|---|---|
-| `codebase-mapper@eigenwise-toolshed` | `Eigenwise/eigenwise-toolshed` | Codebase map and injected index |
-| `live-rules@eigenwise-toolshed` | `Eigenwise/eigenwise-toolshed` | Scoped, live workspace rules |
-| `sidequest@eigenwise-toolshed` | `Eigenwise/eigenwise-toolshed` | Local work board and board-first orchestration loop: routes category-classified tickets to the right model and effort, then dispatches token-gated executors |
+| `codebase-mapper@eigenwise-toolshed` | `poindexter12/eigenwise-toolshed` | Codebase map and injected index |
+| `live-rules@eigenwise-toolshed` | `poindexter12/eigenwise-toolshed` | Scoped, live workspace rules |
+| `sidequest@eigenwise-toolshed` | `poindexter12/eigenwise-toolshed` | Local work board and board-first orchestration loop: routes category-classified tickets to the right model and effort, then dispatches token-gated executors |
 
 The helper installs the toolshed marketplace at project scope. Preserve its portable
 `extraKnownMarketplaces` declaration only when the plugin CLI did not already make it visible in
@@ -21,7 +21,7 @@ The helper installs the toolshed marketplace at project scope. Preserve its port
 ```json
 {
   "eigenwise-toolshed": {
-    "source": { "source": "github", "repo": "Eigenwise/eigenwise-toolshed" }
+    "source": { "source": "github", "repo": "poindexter12/eigenwise-toolshed" }
   }
 }
 ```
@@ -180,7 +180,7 @@ Use only these sources in bootstrap plans. They are reproducible and safe to wri
 
 | Marketplace | Source |
 |---|---|
-| `eigenwise-toolshed` | `Eigenwise/eigenwise-toolshed` |
+| `eigenwise-toolshed` | `poindexter12/eigenwise-toolshed` |
 | `cloudflare` | `cloudflare/skills` |
 | `svelte` | `sveltejs/ai-tools` |
 | `claude-community` | `anthropics/claude-plugins-community` |

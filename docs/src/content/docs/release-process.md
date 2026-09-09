@@ -43,4 +43,4 @@ GitHub Releases publish at most once per UTC day. When several marketplace tags 
 
 Executors stop at a verified commit. Integration, release cutting, manifest versioning, and publishing happen after their submission.
 
-See [`scripts/release/README.md`](https://github.com/Eigenwise/eigenwise-toolshed/blob/main/scripts/release/README.md), [`.release/README.md`](https://github.com/Eigenwise/eigenwise-toolshed/blob/main/.release/README.md), and the [workflow docs](https://github.com/Eigenwise/eigenwise-toolshed/tree/main/.github/workflows) for current safeguards.
+See [`scripts/release/README.md`](https://github.com/poindexter12/eigenwise-toolshed/blob/main/scripts/release/README.md), [`.release/README.md`](https://github.com/poindexter12/eigenwise-toolshed/blob/main/.release/README.md), and the [workflow docs](https://github.com/poindexter12/eigenwise-toolshed/tree/main/.github/workflows) for current safeguards.

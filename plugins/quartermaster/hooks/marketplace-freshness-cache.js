@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const CACHE_MAX_AGE_MS = 60 * 60 * 1000;
-const MARKETPLACE_URL = 'https://raw.githubusercontent.com/Eigenwise/eigenwise-toolshed/main/.claude-plugin/marketplace.json';
+const MARKETPLACE_URL = 'https://raw.githubusercontent.com/poindexter12/eigenwise-toolshed/main/.claude-plugin/marketplace.json';
 const REQUEST_TIMEOUT_MS = 5_000;
 
 function cacheFile(home = os.homedir()) {

@@ -14,7 +14,7 @@ Observability requires Claude Code 2.1.212 or newer.
 Run these in Claude Code:
 
 ```text
-/plugin marketplace add Eigenwise/eigenwise-toolshed
+/plugin marketplace add poindexter12/eigenwise-toolshed
 /plugin install observability@eigenwise-toolshed --scope project
 ```
 

@@ -3,7 +3,7 @@
 Internal test helper code for the Eigenwise Toolshed repository. This directory is not a Claude Code
 plugin and has no `.claude-plugin/plugin.json`, skills, hooks, or release version.
 
-> See the [full docs site](https://eigenwise.github.io/eigenwise-toolshed/). There is no setup guide for this directory, because there is nothing to install.
+> See the [full docs site](https://poindexter12.github.io/eigenwise-toolshed/). There is no setup guide for this directory, because there is nothing to install.
 
 Test-support is project-scoped internal tooling, not a user-installable plugin. It travels with the repository and is not installed separately.
 

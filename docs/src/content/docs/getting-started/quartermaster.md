@@ -10,7 +10,7 @@ Quartermaster helps with project setup, Toolshed maintenance, workspace health, 
 Install Quartermaster in the project you want to set up. This example uses project scope:
 
 ```text
-/plugin marketplace add Eigenwise/eigenwise-toolshed
+/plugin marketplace add poindexter12/eigenwise-toolshed
 /plugin install quartermaster@eigenwise-toolshed --scope project
 ```
 
@@ -82,4 +82,4 @@ A SessionEnd hook tallies each session locally in one streamed pass. Once enough
 
 Tallies and decisions live under `~/.claude/quartermaster-state/`: per-session counters and a decision ledger with fingerprints. The bounded aggregate is the model-facing summary for setup and resupply. Raw transcripts are not loaded into model context, and the resupply skill must not open them. Transcript-derived text in the aggregate is clipped, and scratch directories are dropped from path areas.
 
-The [generated Quartermaster reference](../../reference/quartermaster/) contains the agent-facing skill and command details. See [contributing](../../contributing/) for maintainer workflows and the separate [support page](https://eigenwise.github.io/eigenwise-toolshed/support/) for ways to help.
+The [generated Quartermaster reference](../../reference/quartermaster/) contains the agent-facing skill and command details. See [contributing](../../contributing/) for maintainer workflows and the separate [support page](https://poindexter12.github.io/eigenwise-toolshed/support/) for ways to help.

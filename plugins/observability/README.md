@@ -2,7 +2,7 @@
 
 Local, metadata-only usage telemetry for Claude Code. Choose the repositories you want to track, keep reports on your machine, and optionally use a loopback dashboard or a remote sink.
 
-[Observability guide](https://eigenwise.github.io/eigenwise-toolshed/observability/) · [Generated reference](https://eigenwise.github.io/eigenwise-toolshed/reference/observability/) · [Toolshed marketplace](../../README.md)
+[Observability guide](https://poindexter12.github.io/eigenwise-toolshed/observability/) · [Generated reference](https://poindexter12.github.io/eigenwise-toolshed/reference/observability/) · [Toolshed marketplace](../../README.md)
 
 The intended policy is per-repository opt-in. A separate machine-level setup consent starts the shared local observer and Collector, and can add a dashboard or remote sink. The project command then opts the current repository into that shared service. Telemetry records are designed to contain metadata such as session IDs, prompt IDs, agent IDs, task IDs, tool-use IDs, and SendMessage recipient IDs, with no prompt or response text, code or file contents, tool inputs or results, credentials, or environment values. Sink configuration you provide stays in the private observability config file so the exporter can authenticate.
 
@@ -13,11 +13,11 @@ Known limitation: the current hook and ingest path does not enforce the per-repo
 Run these in Claude Code:
 
 ```text
-/plugin marketplace add Eigenwise/eigenwise-toolshed
+/plugin marketplace add poindexter12/eigenwise-toolshed
 /plugin install observability@eigenwise-toolshed --scope project
 ```
 
-Any scope works (user, project, or local). Pick user scope to cover every project at once, or project/local scope to keep the plugin out of repositories that did not opt in.
+The plugin installs at user, project, or local scope. User scope covers every project at once; project or local scope keeps the plugin out of repositories that did not opt in.
 
 Reload plugins or start a new Claude Code session. Then, from the repository you want to track, run:
 
@@ -52,10 +52,6 @@ Tell Claude what happened:
 Claude checks project wiring, recent activity, and the local services. Existing Claude Code sessions need a restart after opt-in or settings changes, and that restart must happen before new activity or verification. A dashboard outage does not stop local observer ingestion. The outbox retries a failed delivery up to eight times. If rows become exhausted, ask Claude to show the pre-requeue outbox count and health, get approval for the explicit requeue action, then report the post-requeue count and health. `POST /v1/outbox/requeue` resets every exhausted row in the shared local outbox, not just rows from one project, so never describe it as project-scoped recovery.
 
 If generated dashboards were reprovisioned or reset, create fresh activity, let setup or SessionStart provision the current dashboards, fully reload the Grafana browser tab, and then verify. Grafana Refresh reruns queries already loaded in the page and does not replace stale dashboard definitions.
-
-## Support
-
-If Observability saves you time, you can support its maintenance through [Ko-fi](https://ko-fi.com/eigenwise) or [GitHub Sponsors](https://github.com/sponsors/Eigenwise).
 
 ## License
 
