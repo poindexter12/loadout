@@ -33,9 +33,9 @@ test('every mapped hook event yields an acceptable canonical observation', () =>
     SubagentStop: { hook_event_name: 'SubagentStop', session_id: 'session-1', agent_id: 'agent-a', agent_type: 'sidequest-exec-dispatch-high', model: 'gpt-5.6-sol', status: 'completed' },
   };
   for (const [event, payload] of Object.entries(payloads)) {
-    const observation = buildObservation({ ...payload, cwd: 'C:\\dev\\eigenwise-public\\eigenwise-toolshed' }, NOW);
+    const observation = buildObservation({ ...payload, cwd: 'C:\\dev\\eigenwise-public\\loadout' }, NOW);
     assert.equal(observation.event_name, EVENT_MAP[event]);
-    assert.equal(observation.attributes.project_name, 'eigenwise-toolshed');
+    assert.equal(observation.attributes.project_name, 'loadout');
     assert.match(observation.project_id, /^[0-9a-f]{64}$/);
     if (event === 'SessionStart') assert.equal(observation.attributes.effort, 'high');
     accept(observation);
@@ -64,11 +64,11 @@ test('every mapped hook event ingests without schema drops', (t) => {
   assert.equal(store.database.prepare("SELECT COUNT(*) AS count FROM observation WHERE event_name = 'schema_drop'").get().count, 0);
 });
 test('session start emits the project basename and cwd hash, never the path itself', () => {
-  const cwd = 'C:\\dev\\eigenwise-public\\eigenwise-toolshed';
+  const cwd = 'C:\\dev\\eigenwise-public\\loadout';
   const observation = buildObservation({
     hook_event_name: 'SessionStart', session_id: 'session-1', source: 'startup', cwd,
   }, NOW);
-  assert.equal(observation.attributes.project_name, 'eigenwise-toolshed');
+  assert.equal(observation.attributes.project_name, 'loadout');
   assert.match(observation.project_id, /^[0-9a-f]{64}$/);
   const serialized = JSON.stringify(observation);
   assert.equal(serialized.includes('eigenwise-public'), false, 'full path leaked into the observation');
@@ -85,9 +85,9 @@ test('post-tool observations re-announce their project after an observer restart
     hook_event_name: 'PostToolUse',
     session_id: 'session-1',
     tool_name: 'Bash',
-    cwd: 'C:\\dev\\eigenwise-public\\eigenwise-toolshed',
+    cwd: 'C:\\dev\\eigenwise-public\\loadout',
   }, NOW);
-  assert.equal(observation.attributes.project_name, 'eigenwise-toolshed');
+  assert.equal(observation.attributes.project_name, 'loadout');
   assert.match(observation.project_id, /^[0-9a-f]{64}$/);
   accept(observation);
 });
@@ -236,7 +236,7 @@ test('session end records exact recharge-weighted result bytes by tool', (t) => 
   const ingest = (payload, seconds) => store.ingest(buildObservation({
     ...payload,
     session_id: sessionId,
-    cwd: 'C:\\dev\\eigenwise-public\\eigenwise-toolshed',
+    cwd: 'C:\\dev\\eigenwise-public\\loadout',
   }, at(seconds)));
 
   const bashResult = 'alpha';

@@ -92,7 +92,7 @@ test('stable updater launches the highest installed model-gateway version', (t) 
   fs.mkdirSync(registryDirectory, { recursive: true });
   fs.writeFileSync(path.join(registryDirectory, 'installed_plugins.json'), JSON.stringify({
     plugins: {
-      'model-gateway@eigenwise-toolshed': [
+      'model-gateway@loadout': [
         { version: '0.1.9', installPath: oldInstall },
         { version: '0.1.10', installPath: newInstall },
       ],

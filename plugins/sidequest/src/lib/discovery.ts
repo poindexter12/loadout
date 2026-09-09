@@ -108,7 +108,7 @@ function newestGatewayCatalogCommand(): string | null {
   if (process.env.SIDEQUEST_DISCOVERY_DIRS?.trim()) return null;
   const registry = readJsonSafe(path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json'));
   if (!isRecord(registry) || !isRecord(registry.plugins)) return null;
-  const entries = registry.plugins['model-gateway@eigenwise-toolshed'];
+  const entries = registry.plugins['model-gateway@loadout'];
   if (!Array.isArray(entries)) return null;
   let newest: { command: string; version: [number, number, number] } | null = null;
   for (const entry of entries) {

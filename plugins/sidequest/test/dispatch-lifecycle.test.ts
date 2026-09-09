@@ -381,7 +381,7 @@ test('tokened stale compatibility refusals retire only proven mismatches', () =>
   fs.writeFileSync(manifestPath, originalManifest);
   const loadedVersion = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '.claude-plugin', 'plugin.json'), 'utf8')).version;
   fs.writeFileSync(path.join(isolatedClaudeHome, 'plugins', 'installed_plugins.json'), JSON.stringify({
-    plugins: { 'sidequest@eigenwise-toolshed': [{ scope: 'user', installPath: isolatedInstallPath, version: loadedVersion }] },
+    plugins: { 'sidequest@loadout': [{ scope: 'user', installPath: isolatedInstallPath, version: loadedVersion }] },
   }));
   const sharedClaudeHome = process.env.SIDEQUEST_CLAUDE_HOME;
   process.env.SIDEQUEST_CLAUDE_HOME = isolatedClaudeHome;
@@ -419,7 +419,7 @@ test('tokened stale compatibility refusals retire only proven mismatches', () =>
 
     const mcpBeforeVersionChange = fs.readFileSync(manifestPath, 'utf8');
     const registry = JSON.parse(fs.readFileSync(path.join(isolatedClaudeHome, 'plugins', 'installed_plugins.json'), 'utf8'));
-    registry.plugins['sidequest@eigenwise-toolshed'][0].version = `${loadedVersion}-runtime-identity-test`;
+    registry.plugins['sidequest@loadout'][0].version = `${loadedVersion}-runtime-identity-test`;
     fs.writeFileSync(path.join(isolatedClaudeHome, 'plugins', 'installed_plugins.json'), JSON.stringify(registry));
     const versionChangedInstall = checkSidequestInstall(PROJECT);
     assert.equal(fs.readFileSync(manifestPath, 'utf8'), mcpBeforeVersionChange);

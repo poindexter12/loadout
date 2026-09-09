@@ -64,7 +64,7 @@ function warningStateFile(input, directory) {
 
 function markWarning(input, options = {}) {
   const directory = options.warningStateDirectory
-    || path.join(os.tmpdir(), 'eigenwise-toolshed', 'billing-path-warnings');
+    || path.join(os.tmpdir(), 'loadout', 'billing-path-warnings');
   const stateFile = warningStateFile(input, directory);
   if (!stateFile) return true;
   try {

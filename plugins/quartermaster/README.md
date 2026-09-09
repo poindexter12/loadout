@@ -2,7 +2,7 @@
 
 Quartermaster helps with the setup work that tends to get repeated. It looks at a project and at bounded summaries of recent Claude Code sessions, asks what would help, and proposes one change at a time. Setup, resupply, updates, and health checks are separate workflows, and every install, file edit, or settings change waits for your approval.
 
-It can set up a new or existing workspace, keep active Toolshed installs current, check their health, and suggest a missing skill, rule, measurement, permission, or plugin after real work has accumulated. A later pass checks whether an accepted change helped. Unused or ineffective changes can be rolled back.
+It can set up a new or existing workspace, keep active Loadout installs current, check their health, and suggest a missing skill, rule, measurement, permission, or plugin after real work has accumulated. A later pass checks whether an accepted change helped. Unused or ineffective changes can be rolled back.
 
 When setup wires Model Gateway or Sidequest routing, it can also offer the optional `325000` `autoCompactWindow` setting for a consistent Codex compaction point. This is a consistency choice, not a prerequisite. Setup asks before writing it, and an existing user or project value is reported and preserved.
 
@@ -11,8 +11,8 @@ When setup wires Model Gateway or Sidequest routing, it can also offer the optio
 Quartermaster works at user, project, or local scope. Install it at the scope you want, for example:
 
 ```text
-/plugin marketplace add poindexter12/eigenwise-toolshed
-/plugin install quartermaster@eigenwise-toolshed --scope project
+/plugin marketplace add poindexter12/loadout
+/plugin install quartermaster@loadout --scope project
 ```
 
 Project scope is the recommended starting point when the setup belongs to one repository. User scope makes its skills available in every project. Local scope keeps the install out of shared settings.
@@ -23,12 +23,12 @@ After installing, run `/reload-plugins` or start a new Claude Code session. Then
 
 Quartermaster has hooks for setup hints, local tallies, freshness notices, and resupply offers. The hooks do not call a model for the mining pass. The plugin also ships skills for `setup`, `resupply`, `update-toolshed`, and `toolshed-doctor`.
 
-- **Setup** assesses one project, mines a cross-project history summary, asks a short interview, and proposes a project baseline. The Toolshed pieces remain independent and opt in separately.
+- **Setup** assesses one project, mines a cross-project history summary, asks a short interview, and proposes a project baseline. The Loadout pieces remain independent and opt in separately.
 - **Resupply** mines the current project by default after you approve a round. It ranks missing measurements, manual work, re-derived knowledge, underperforming capabilities, and setup friction, then asks for approval for each finding.
-- **Update** runs the requested updater for active Eigenwise Toolshed registry installs, at their recorded user, project, or local scope and project path. It does not update third-party marketplaces.
+- **Update** runs the requested updater for active Loadout registry installs, at their recorded user, project, or local scope and project path. It does not update third-party marketplaces.
 - **Doctor** is read-only. It checks installed versions, freshness, workspace wiring, and any installed Observability or Model Gateway health it can inspect.
 
-The updater and the freshness hooks have different jobs. `/quartermaster:update-toolshed` changes installs when you request it. Freshness hooks report cached availability or loaded-version mismatches and point to the updater; they do not install or restart anything. Marketplace auto-update is optional and must be enabled for the Eigenwise Toolshed marketplace in Claude Code. An open session still needs `/reload-plugins` after plugin code changes. Process-level gateway wiring or model discovery may need a new Claude Code process.
+The updater and the freshness hooks have different jobs. `/quartermaster:update-toolshed` changes installs when you request it. Freshness hooks report cached availability or loaded-version mismatches and point to the updater; they do not install or restart anything. Marketplace auto-update is optional and must be enabled for the Loadout marketplace in Claude Code. An open session still needs `/reload-plugins` after plugin code changes. Process-level gateway wiring or model discovery may need a new Claude Code process.
 
 ## Privacy and the history summary
 
@@ -81,9 +81,9 @@ Environment variables are optional:
 
 ## Links
 
-- [Quartermaster guide](https://poindexter12.github.io/eigenwise-toolshed/getting-started/quartermaster/)
-- [Toolshed plugin reference](https://poindexter12.github.io/eigenwise-toolshed/reference/quartermaster/)
-- [Repository](https://github.com/poindexter12/eigenwise-toolshed)
+- [Quartermaster guide](https://poindexter12.github.io/loadout/getting-started/quartermaster/)
+- [Loadout plugin reference](https://poindexter12.github.io/loadout/reference/quartermaster/)
+- [Repository](https://github.com/poindexter12/loadout)
 
 ## License
 

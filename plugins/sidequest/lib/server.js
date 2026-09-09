@@ -1165,7 +1165,7 @@ async function findNewerInstall(options) {
     } catch (_) {
       registry = null;
     }
-    const installed = registry && registry.plugins && registry.plugins["sidequest@eigenwise-toolshed"];
+    const installed = registry && registry.plugins && registry.plugins["sidequest@loadout"];
     if (Array.isArray(installed)) {
       const entries2 = await Promise.all(installed.map(async (install) => {
         const root = install && install.installPath;

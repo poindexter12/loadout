@@ -168,7 +168,7 @@ function runGatewayCli(cliPath, command, environment, { arguments: commandArgume
 }
 
 function installCachedGatewayCliVersions(home) {
-  const cacheRoot = path.join(home, '.claude', 'plugins', 'cache', 'eigenwise-toolshed', 'model-gateway');
+  const cacheRoot = path.join(home, '.claude', 'plugins', 'cache', 'loadout', 'model-gateway');
   const cliPaths = {};
   for (const version of ['0.49.0', '0.50.0']) {
     const pluginRoot = path.join(cacheRoot, version);
@@ -284,9 +284,9 @@ test('cache ownership resolves physical install roots before accepting sibling v
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-cache-identity-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const cacheRoot = path.join(home, '.claude', 'plugins', 'cache');
-  const olderSibling = path.join(cacheRoot, 'eigenwise-toolshed', 'model-gateway', '0.48.0');
-  const currentSibling = path.join(cacheRoot, 'eigenwise-toolshed', 'model-gateway', '0.50.0');
-  const foreignLinkedSibling = path.join(cacheRoot, 'eigenwise-toolshed', 'model-gateway', '0.49.0');
+  const olderSibling = path.join(cacheRoot, 'loadout', 'model-gateway', '0.48.0');
+  const currentSibling = path.join(cacheRoot, 'loadout', 'model-gateway', '0.50.0');
+  const foreignLinkedSibling = path.join(cacheRoot, 'loadout', 'model-gateway', '0.49.0');
   const foreignRoot = path.join(home, 'dev', 'foreign-model-gateway');
   const foreignMarketplace = path.join(cacheRoot, 'other-marketplace', 'model-gateway', '0.49.0');
 
@@ -296,7 +296,7 @@ test('cache ownership resolves physical install roots before accepting sibling v
   linkDirectory(foreignRoot, foreignLinkedSibling);
 
   assert.equal(installBelongsToThisPlugin(olderSibling, currentSibling), true);
-  assert.equal(installBelongsToThisPlugin(olderSibling.replace('eigenwise-toolshed', 'EIGENWISE-TOOLSHED'), currentSibling), true);
+  assert.equal(installBelongsToThisPlugin(olderSibling.replace('loadout', 'EIGENWISE-TOOLSHED'), currentSibling), true);
   assert.equal(installBelongsToThisPlugin(`${olderSibling}${path.sep}`, currentSibling), true);
   if (process.platform === 'win32') assert.equal(installBelongsToThisPlugin(olderSibling.replaceAll('\\', '/'), currentSibling), true);
   assert.equal(installBelongsToThisPlugin(foreignLinkedSibling, currentSibling), false);

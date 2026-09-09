@@ -5,7 +5,7 @@ import './_temp-cleanup.js';
  *
  * Before the fix, `resolveProject()` in bin/sidequest.js checked whether the
  * --project value was an exact registered SLUG (a folder name like
- * "eigenwise-toolshed-f61e9c29"), and if not, silently treated it as a
+ * "loadout-f61e9c29"), and if not, silently treated it as a
  * filesystem PATH and auto-registered a brand-new board at
  * path.resolve(cwd, arg) — so a plain display NAME (what every caller
  * actually passes) fell straight through into minting a phantom empty board.

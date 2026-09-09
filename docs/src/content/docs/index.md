@@ -1,12 +1,12 @@
 ---
-title: Eigenwise Toolshed
+title: Loadout
 description: Six independent Claude Code plugins for keeping project context current, finishing tracked work, choosing models, and seeing local usage.
 template: splash
 ---
 
 <section class="hero">
   <p class="hero-kicker">Six independent Claude Code plugins</p>
-  <p class="hero-copy">Toolshed covers the work that keeps getting repeated: learning a repository, remembering rules, tracking side work, choosing a model, seeing usage, and setting up the workspace around it.</p>
+  <p class="hero-copy">Loadout covers the work that keeps getting repeated: learning a repository, remembering rules, tracking side work, choosing a model, seeing usage, and setting up the workspace around it.</p>
   <div class="hero-links">
     <a href="./getting-started/">Get started</a>
     <a href="./getting-started/quartermaster/">Start with Quartermaster</a>
@@ -19,7 +19,7 @@ template: splash
   <div class="shed-grid">
     <article class="shed-card card">
       <h2>Setup keeps repeating</h2>
-      <p><a href="./getting-started/quartermaster/">Quartermaster</a> proposes a project setup, keeps active Toolshed installs current, and checks workspace health.</p>
+      <p><a href="./getting-started/quartermaster/">Quartermaster</a> proposes a project setup, keeps active Loadout installs current, and checks workspace health.</p>
     </article>
     <article class="shed-card card">
       <h2>Claude keeps re-learning the repository</h2>
@@ -46,5 +46,5 @@ template: splash
 </section>
 
 <section>
-  <p class="page-ledge">Use <a href="./getting-started/">the setup path</a> for a first project, then open a plugin guide for its first workflow. Maintainers can read <a href="./architecture/">architecture</a> and <a href="./contributing/">contributing</a>. See <a href="https://poindexter12.github.io/eigenwise-toolshed/support/">support and attribution</a> for help channels and credit for the original work.</p>
+  <p class="page-ledge">Use <a href="./getting-started/">the setup path</a> for a first project, then open a plugin guide for its first workflow. Maintainers can read <a href="./architecture/">architecture</a> and <a href="./contributing/">contributing</a>. See <a href="https://poindexter12.github.io/loadout/support/">support and attribution</a> for help channels and credit for the original work.</p>
 </section>

@@ -6,8 +6,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const GATEWAY_MARKETPLACE = 'eigenwise-toolshed';
-const OBSERVABILITY_PLUGIN = 'observability@eigenwise-toolshed';
+const GATEWAY_MARKETPLACE = 'loadout';
+const OBSERVABILITY_PLUGIN = 'observability@loadout';
 const LEGACY_GATEWAY_PLUGIN = `codex-gateway@${GATEWAY_MARKETPLACE}`;
 const MODEL_GATEWAY_PLUGIN = `model-gateway@${GATEWAY_MARKETPLACE}`;
 const UPDATE_SCOPES = new Set(['user', 'project', 'local']);
@@ -37,7 +37,7 @@ function parseArgs(argv) {
 function usage() {
   return `Usage: node update-toolshed.js [--check] [--dry-run] [--claude <command>]
 
-Refreshes the eigenwise-toolshed marketplace, then updates every recorded Toolshed
+Refreshes the loadout marketplace, then updates every recorded Loadout
 plugin install at user, project, and local scope. Project and local installs run from
 their recorded project directory so Claude Code updates the right scope.
 
@@ -125,7 +125,7 @@ function cleanStaleAgentWorktreeInstalls(registryFile, registry, options, report
 }
 
 function workbenchStatuslinePin(command) {
-  return /[\\/]plugins[\\/]cache[\\/]eigenwise-toolshed[\\/]workbench[\\/][^\\/]+[\\/]bin[\\/]workbench-statusline\.js/i.test(String(command || ''));
+  return /[\\/]plugins[\\/]cache[\\/]loadout[\\/]workbench[\\/][^\\/]+[\\/]bin[\\/]workbench-statusline\.js/i.test(String(command || ''));
 }
 
 function readSettings(filePath) {
@@ -293,10 +293,10 @@ function versionTransitions(before, after) {
 
 function reportVersionTransitions(transitions, report) {
   if (transitions.length === 0) {
-    report('Toolshed version transitions: none recorded.');
+    report('Loadout version transitions: none recorded.');
     return;
   }
-  report('Toolshed version transitions:');
+  report('Loadout version transitions:');
   for (const { instance, from, to } of transitions) {
     report(`- ${instance.id} ${from} -> ${to} (${instance.scope}${instance.projectPath ? `, ${instance.projectPath}` : ''})`);
   }
@@ -561,12 +561,12 @@ function runUpdate({ registryFile = registryPath(), home = os.homedir(), options
 
   reportStaleProjectInstances(staleInstances, report);
   if (instances.length === 0) {
-    report(`No active user, project, or local Toolshed plugin installs found in ${registryFile}.`);
+    report(`No active user, project, or local Loadout plugin installs found in ${registryFile}.`);
     return { ok: true, instances, staleInstances, registryGc, failures: [] };
   }
 
   const marketplaces = marketplacesFor(instances);
-  report(`Found ${instances.length} Toolshed plugin install(s) from ${marketplaces.length} marketplace(s):`);
+  report(`Found ${instances.length} Loadout plugin install(s) from ${marketplaces.length} marketplace(s):`);
   for (const instance of instances) report(`- ${instance.id} ${instance.version ?? 'unknown'} (${instance.scope}${instance.projectPath ? `, ${instance.projectPath}` : ''})`);
   report('Other marketplaces are managed by Claude Code auto-update — not touched.');
 
@@ -650,7 +650,7 @@ function main() {
       : runUpdate({ options });
     if (!result.ok) process.exitCode = 1;
   } catch (error) {
-    console.error(`Toolshed update failed: ${error.message}`);
+    console.error(`Loadout update failed: ${error.message}`);
     process.exitCode = 1;
   }
 }

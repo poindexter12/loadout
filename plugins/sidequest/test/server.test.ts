@@ -147,7 +147,7 @@ test('findNewerInstall: resolves the registry install after the cache layout mov
   fs.writeFileSync(path.join(newestRoot, '.claude-plugin', 'plugin.json'), '{}');
   fs.mkdirSync(path.dirname(registryPath), { recursive: true });
   fs.writeFileSync(registryPath, JSON.stringify({ plugins: {
-    'sidequest@eigenwise-toolshed': [{ installPath: newestRoot, version: '2.0.0' }],
+    'sidequest@loadout': [{ installPath: newestRoot, version: '2.0.0' }],
   } }));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -559,7 +559,7 @@ test('dashboard self-updates to a newer cached install at the same URL', { timeo
   copyPlugin(source, oldRoot, '1.37.0');
   fs.mkdirSync(path.dirname(registryPath), { recursive: true });
   fs.writeFileSync(registryPath, JSON.stringify({ plugins: {
-    'sidequest@eigenwise-toolshed': [{ installPath: newRoot, version: '1.37.1' }],
+    'sidequest@loadout': [{ installPath: newRoot, version: '1.37.1' }],
   } }));
 
   const port = await availablePort();
@@ -627,7 +627,7 @@ test('dashboard heals a stale recorded server through the registry launcher', { 
   copyPlugin(source, newRoot, '2.0.0');
   fs.mkdirSync(path.dirname(registryPath), { recursive: true });
   fs.writeFileSync(registryPath, JSON.stringify({ plugins: {
-    'sidequest@eigenwise-toolshed': [{ installPath: newRoot, version: '2.0.0' }],
+    'sidequest@loadout': [{ installPath: newRoot, version: '2.0.0' }],
   } }));
   const env = Object.assign({}, process.env, {
     SIDEQUEST_HOME: home,

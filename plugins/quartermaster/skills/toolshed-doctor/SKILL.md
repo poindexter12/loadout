@@ -1,11 +1,11 @@
 ---
 name: toolshed-doctor
 description: >-
-  Run a read-only health check for Quartermaster and installed Toolshed plugins. Use to diagnose Toolshed,
+  Run a read-only health check for Quartermaster and installed Loadout plugins. Use to diagnose Loadout,
   check workspace health, or troubleshoot stale plugins.
 ---
 
-# Toolshed Doctor
+# Loadout Doctor
 
 Run the updater in check mode first. It only reads the installed-plugin registry and runs the Codex gateway
 health check when that plugin is installed:
@@ -35,7 +35,7 @@ Telemetry lives in the separate Observability plugin. Its files are under a diff
 that root first and skip this whole section when the plugin is absent:
 
 ```sh
-node -e "const fs=require('node:fs'),os=require('node:os'),path=require('node:path');const reg=JSON.parse(fs.readFileSync(path.join(os.homedir(),'.claude','plugins','installed_plugins.json'),'utf8'));const installs=reg?.plugins?.['observability@eigenwise-toolshed']||[];const hit=installs.map(i=>i?.installPath).filter(Boolean).find(p=>fs.existsSync(path.join(p,'bin','setup-observability.js')));console.log(hit||'');"
+node -e "const fs=require('node:fs'),os=require('node:os'),path=require('node:path');const reg=JSON.parse(fs.readFileSync(path.join(os.homedir(),'.claude','plugins','installed_plugins.json'),'utf8'));const installs=reg?.plugins?.['observability@loadout']||[];const hit=installs.map(i=>i?.installPath).filter(Boolean).find(p=>fs.existsSync(path.join(p,'bin','setup-observability.js')));console.log(hit||'');"
 ```
 
 An empty result means observability is not installed. Say so in one line and move on. Otherwise use that path

@@ -4,7 +4,7 @@ import test from 'node:test';
 import { JsonEditError, readValue, replaceValue } from '../lib/jsonedit.mjs';
 
 const MANIFEST = `{
-  "name": "eigenwise-toolshed",
+  "name": "loadout",
   "owner": {
     "name": "Eigenwise",
     "version": "not the top level one"

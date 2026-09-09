@@ -1,11 +1,11 @@
 ---
 name: update-toolshed
 description: >-
-  Update installed Eigenwise Toolshed plugins and model-gateway, or check their status. Use to update
-  Toolshed, refresh the marketplace, or check versions.
+  Update installed Loadout plugins and model-gateway, or check their status. Use to update
+  Loadout, refresh the marketplace, or check versions.
 ---
 
-# Update Toolshed
+# Update Loadout
 
 Run the portable updater from this plugin installation:
 
@@ -13,8 +13,8 @@ Run the portable updater from this plugin installation:
 node "${CLAUDE_PLUGIN_ROOT}/bin/update-toolshed.js"
 ```
 
-It reads Claude Code's installed-plugin registry, refreshes the Eigenwise Toolshed marketplace, and
-updates every active Toolshed install recorded there at its recorded scope and project directory. That
+It reads Claude Code's installed-plugin registry, refreshes the Loadout marketplace, and
+updates every active Loadout install recorded there at its recorded scope and project directory. That
 includes user, project, and local installs across projects, not only the project where this skill is
 invoked. It does not inspect, refresh, or update third-party marketplaces or plugins. When Model Gateway
 is installed, it runs its stable updater, `node ~/.claude/model-gateway/update.js`, and surfaces that
@@ -66,7 +66,7 @@ local installs affect sessions open in their recorded project directories.
 ## Optional marketplace auto-update
 
 Marketplace auto-update is optional. To enable it, open `/plugin`, open **Marketplaces**, select
-`eigenwise-toolshed`, and choose **Enable auto-update**. Claude Code checks after session start with a
+`loadout`, and choose **Enable auto-update**. Claude Code checks after session start with a
 random delay of up to 10 minutes. Third-party marketplaces start with auto-update off, and an already-open
 session still needs `/reload-plugins` or a restart after an update lands.
 

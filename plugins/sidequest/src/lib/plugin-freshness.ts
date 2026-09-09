@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-export const SIDEQUEST_PLUGIN_ID = 'sidequest@eigenwise-toolshed';
+export const SIDEQUEST_PLUGIN_ID = 'sidequest@loadout';
 
 interface PluginInstall {
   projectPath?: unknown;
@@ -179,7 +179,7 @@ export function sidequestReloadWarning(projectPath: string, options: FreshnessOp
 }
 
 function stateDirectory(options: FreshnessOptions = {}): string {
-  return options.stateDirectory || path.join(os.tmpdir(), 'eigenwise-toolshed', 'freshness-warnings', 'loaded-plugin-versions');
+  return options.stateDirectory || path.join(os.tmpdir(), 'loadout', 'freshness-warnings', 'loaded-plugin-versions');
 }
 
 function sessionId(input: Record<string, unknown>): string {

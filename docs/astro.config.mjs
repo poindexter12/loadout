@@ -3,14 +3,14 @@ import starlight from '@astrojs/starlight';
 
 export default defineConfig({
   site: 'https://poindexter12.github.io',
-  base: '/eigenwise-toolshed',
+  base: '/loadout',
   redirects: {
-    '/getting-started/codex-gateway': '/eigenwise-toolshed/getting-started/model-gateway',
-    '/reference/codex-gateway': '/eigenwise-toolshed/reference/model-gateway',
+    '/getting-started/codex-gateway': '/loadout/getting-started/model-gateway',
+    '/reference/codex-gateway': '/loadout/reference/model-gateway',
   },
   integrations: [
     starlight({
-      title: 'Eigenwise Toolshed',
+      title: 'Loadout',
       description: 'Independent Claude Code plugins for project context, work tracking, model routing, and local usage observability.',
       customCss: ['./src/styles/custom.css'],
       head: [
@@ -28,7 +28,7 @@ export default defineConfig({
         {
           icon: 'github',
           label: 'GitHub',
-          href: 'https://github.com/poindexter12/eigenwise-toolshed',
+          href: 'https://github.com/poindexter12/loadout',
         },
       ],
       sidebar: [
@@ -63,7 +63,7 @@ export default defineConfig({
           label: 'Maintainer docs',
           items: [
             { label: 'Architecture', slug: 'architecture' },
-            { label: 'Modular Toolshed', slug: 'architecture/modular-architecture' },
+            { label: 'Modular Loadout', slug: 'architecture/modular-architecture' },
             { label: 'Contributing to the docs', slug: 'contributing' },
             { label: 'Release process', slug: 'release-process' },
           ],

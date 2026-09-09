@@ -44,7 +44,7 @@ var import_node_crypto = __toESM(require("node:crypto"));
 var import_node_fs = __toESM(require("node:fs"));
 var import_node_os = __toESM(require("node:os"));
 var import_node_path = __toESM(require("node:path"));
-const SIDEQUEST_PLUGIN_ID = "sidequest@eigenwise-toolshed";
+const SIDEQUEST_PLUGIN_ID = "sidequest@loadout";
 const CLAIM_SELF_HEAL_VERSION = "4.48.1";
 function claudeHome(options = {}) {
   return options.claudeHome || process.env.SIDEQUEST_CLAUDE_HOME || import_node_path.default.join(import_node_os.default.homedir(), ".claude");
@@ -172,7 +172,7 @@ function sidequestReloadWarning(projectPath, options = {}) {
   return `Sidequest: loaded ${loadedVersion}, installed ${installedVersion}. Run /reload-plugins or restart Claude Code before dispatching work.`;
 }
 function stateDirectory(options = {}) {
-  return options.stateDirectory || import_node_path.default.join(import_node_os.default.tmpdir(), "eigenwise-toolshed", "freshness-warnings", "loaded-plugin-versions");
+  return options.stateDirectory || import_node_path.default.join(import_node_os.default.tmpdir(), "loadout", "freshness-warnings", "loaded-plugin-versions");
 }
 function sessionId(input) {
   const value = input.session_id ?? input.sessionId;

@@ -89,6 +89,6 @@ test('generated references and homepage avoid duplicate visible headings', () =>
 
 test('legacy Model Gateway redirects preserve the docs base path', () => {
   const configuration = fs.readFileSync(path.join(docsRoot, 'astro.config.mjs'), 'utf8');
-  assert.match(configuration, /'\/getting-started\/codex-gateway': '\/eigenwise-toolshed\/getting-started\/model-gateway'/);
-  assert.match(configuration, /'\/reference\/codex-gateway': '\/eigenwise-toolshed\/reference\/model-gateway'/);
+  assert.match(configuration, /'\/getting-started\/codex-gateway': '\/loadout\/getting-started\/model-gateway'/);
+  assert.match(configuration, /'\/reference\/codex-gateway': '\/loadout\/reference\/model-gateway'/);
 });

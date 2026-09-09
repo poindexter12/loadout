@@ -18,7 +18,7 @@ function tempDirectory() {
 }
 
 function registry(installs) {
-  return { plugins: { 'quartermaster@eigenwise-toolshed': installs, 'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:\\dev\\other', version: '1.0.0' }], 'other@elsewhere': [{ scope: 'user', version: '0.0.1' }] } };
+  return { plugins: { 'quartermaster@loadout': installs, 'sidequest@loadout': [{ scope: 'project', projectPath: 'C:\\dev\\other', version: '1.0.0' }], 'other@elsewhere': [{ scope: 'user', version: '0.0.1' }] } };
 }
 
 // A session running an OLDER quartermaster than the installed copy. Each case gets independent
@@ -28,7 +28,7 @@ function reloadPending(directory) {
   const pluginRoot = path.join(directory, 'loaded');
   fs.mkdirSync(path.join(pluginRoot, '.claude-plugin'), { recursive: true });
   fs.writeFileSync(path.join(pluginRoot, '.claude-plugin', 'plugin.json'), JSON.stringify({ version: '1.0.0' }));
-  fs.writeFileSync(registryFile, JSON.stringify({ plugins: { 'quartermaster@eigenwise-toolshed': [{ scope: 'user', version: '2.0.0' }] } }));
+  fs.writeFileSync(registryFile, JSON.stringify({ plugins: { 'quartermaster@loadout': [{ scope: 'user', version: '2.0.0' }] } }));
   return {
     registryFile,
     pluginRoot,
@@ -81,15 +81,15 @@ test('loaded quartermaster older than the installed registry permits the prompt 
   assert.equal(decide({ prompt: 'continue', cwd: project, session_id: 'session-reloaded' }, options), '');
 });
 
-test('warns for a newer installed version reported by another Toolshed plugin', () => {
+test('warns for a newer installed version reported by another Loadout plugin', () => {
   const directory = tempDirectory();
   const registryFile = path.join(directory, 'installed_plugins.json');
   const stateDirectory = path.join(directory, 'loaded-plugin-versions');
   const input = { prompt: 'dispatch SQ-1', cwd: path.join(directory, 'project'), session_id: 'reported-sidequest' };
   fs.writeFileSync(registryFile, JSON.stringify({ plugins: {
-    'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath: input.cwd, version: '2.0.0' }],
+    'sidequest@loadout': [{ scope: 'project', projectPath: input.cwd, version: '2.0.0' }],
   } }));
-  reportLoadedPluginVersion(input, 'sidequest@eigenwise-toolshed', '1.0.0', { directory: stateDirectory });
+  reportLoadedPluginVersion(input, 'sidequest@loadout', '1.0.0', { directory: stateDirectory });
 
   const output = JSON.parse(decide(input, {
     registryFile,
@@ -108,9 +108,9 @@ test('ignores absent or malformed reported versions', () => {
   const stateDirectory = path.join(directory, 'loaded-plugin-versions');
   const input = { prompt: 'dispatch SQ-1', cwd: path.join(directory, 'project'), session_id: 'malformed-sidequest' };
   fs.writeFileSync(registryFile, JSON.stringify({ plugins: {
-    'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath: input.cwd, version: '2.0.0' }],
+    'sidequest@loadout': [{ scope: 'project', projectPath: input.cwd, version: '2.0.0' }],
   } }));
-  reportLoadedPluginVersion(input, 'sidequest@eigenwise-toolshed', 'not-semver', { directory: stateDirectory });
+  reportLoadedPluginVersion(input, 'sidequest@loadout', 'not-semver', { directory: stateDirectory });
 
   assert.doesNotThrow(() => assert.equal(decide(input, {
     registryFile,
@@ -141,8 +141,8 @@ test('the bypass env var disables the guard entirely', () => {
 });
 
 test('only exact maintenance prompts bypass the guard', () => {
-  for (const prompt of ['/update-toolshed', '/update-toolshed --dry-run', '/quartermaster:update-toolshed', '/quartermaster:update-toolshed --check', '/toolshed-doctor', '/quartermaster:toolshed-doctor', '/reload-plugins', '/reload-plugins --force', '/plugin', '/plugin update sidequest@eigenwise-toolshed', '/plugin marketplace update eigenwise-toolshed', 'claude plugin marketplace update eigenwise-toolshed', 'claude plugin update sidequest@eigenwise-toolshed --scope user']) assert.equal(isMaintenancePrompt(prompt), true, prompt);
-  for (const prompt of ['please run /update-toolshed', '/update-toolshed; work on this', '/quartermaster:update-toolshed; work on this', '/quartermaster:toolshed-doctor now', '/quartermaster-doctor', '/quartermaster:quartermaster-doctor', '/workbench:update-toolshed', '/workbench:toolshed-doctor', '/reload-plugins and fix it', 'claude plugin update sidequest@eigenwise-toolshed --scope user && rm -rf x', 'I said /plugin update']) assert.equal(isMaintenancePrompt(prompt), false, prompt);
+  for (const prompt of ['/update-toolshed', '/update-toolshed --dry-run', '/quartermaster:update-toolshed', '/quartermaster:update-toolshed --check', '/toolshed-doctor', '/quartermaster:toolshed-doctor', '/reload-plugins', '/reload-plugins --force', '/plugin', '/plugin update sidequest@loadout', '/plugin marketplace update loadout', 'claude plugin marketplace update loadout', 'claude plugin update sidequest@loadout --scope user']) assert.equal(isMaintenancePrompt(prompt), true, prompt);
+  for (const prompt of ['please run /update-toolshed', '/update-toolshed; work on this', '/quartermaster:update-toolshed; work on this', '/quartermaster:toolshed-doctor now', '/quartermaster-doctor', '/quartermaster:quartermaster-doctor', '/workbench:update-toolshed', '/workbench:toolshed-doctor', '/reload-plugins and fix it', 'claude plugin update sidequest@loadout --scope user && rm -rf x', 'I said /plugin update']) assert.equal(isMaintenancePrompt(prompt), false, prompt);
 });
 
 test('all prompts pass through and report a newer installed version in the same session', () => {
@@ -150,7 +150,7 @@ test('all prompts pass through and report a newer installed version in the same 
   const first = JSON.parse(decide({ prompt: 'keep working', cwd: project, session_id: 'session-warning' }, options));
   assert.equal(first.decision, undefined);
   assert.match(first.hookSpecificOutput.additionalContext, /This prompt is proceeding\./);
-  fs.writeFileSync(registryFile, JSON.stringify({ plugins: { 'quartermaster@eigenwise-toolshed': [{ scope: 'user', version: '3.0.0' }] } }));
+  fs.writeFileSync(registryFile, JSON.stringify({ plugins: { 'quartermaster@loadout': [{ scope: 'user', version: '3.0.0' }] } }));
   const newer = JSON.parse(decide({ prompt: 'continue', cwd: project, session_id: 'session-warning' }, options));
   assert.match(newer.hookSpecificOutput.additionalContext, /Quartermaster 3\.0\.0 is installed/);
 
@@ -162,7 +162,7 @@ test('compares installed plugins to the cached remote manifest rather than the l
   const directory = tempDirectory();
   const registryFile = path.join(directory, 'installed_plugins.json');
   fs.writeFileSync(registryFile, JSON.stringify({ plugins: {
-    'sidequest@eigenwise-toolshed': [{ scope: 'user', version: '4.34.0' }],
+    'sidequest@loadout': [{ scope: 'user', version: '4.34.0' }],
   } }));
   const output = JSON.parse(decide({ prompt: 'continue', cwd: path.join(directory, 'project'), session_id: 'remote-behind' }, {
     registryFile,
@@ -182,9 +182,9 @@ test('reports every remotely outdated plugin in one compact warning', () => {
   const directory = tempDirectory();
   const registryFile = path.join(directory, 'installed_plugins.json');
   fs.writeFileSync(registryFile, JSON.stringify({ plugins: {
-    'sidequest@eigenwise-toolshed': [{ scope: 'user', version: '4.34.0' }],
-    'quartermaster@eigenwise-toolshed': [{ scope: 'user', version: '0.80.0' }],
-    'model-gateway@eigenwise-toolshed': [{ scope: 'user', version: '0.47.0' }],
+    'sidequest@loadout': [{ scope: 'user', version: '4.34.0' }],
+    'quartermaster@loadout': [{ scope: 'user', version: '0.80.0' }],
+    'model-gateway@loadout': [{ scope: 'user', version: '0.47.0' }],
   } }));
   const output = JSON.parse(decide({ prompt: 'continue', cwd: path.join(directory, 'project'), session_id: 'multiple-remote-updates' }, {
     registryFile,
@@ -203,14 +203,14 @@ test('reports every remotely outdated plugin in one compact warning', () => {
   assert.match(message, /model-gateway 0\.47\.0 → 0\.48\.0/);
   assert.match(message, /sidequest 4\.34\.0 → 4\.35\.0/);
   assert.match(message, /quartermaster 0\.80\.0 → 0\.81\.0/);
-  assert.equal((message.match(/Toolshed updates available/g) || []).length, 1);
+  assert.equal((message.match(/Loadout updates available/g) || []).length, 1);
 });
 
 test('treats an unavailable remote manifest as unknown without claiming an update', () => {
   const directory = tempDirectory();
   const registryFile = path.join(directory, 'installed_plugins.json');
   fs.writeFileSync(registryFile, JSON.stringify({ plugins: {
-    'sidequest@eigenwise-toolshed': [{ scope: 'user', version: '4.34.0' }],
+    'sidequest@loadout': [{ scope: 'user', version: '4.34.0' }],
   } }));
   const output = JSON.parse(decide({ prompt: 'continue', cwd: path.join(directory, 'project'), session_id: 'remote-unavailable' }, {
     registryFile,
@@ -224,7 +224,7 @@ test('treats an unavailable remote manifest as unknown without claiming an updat
 });
 
 test('selects user and overlapping project installs, excluding unrelated marketplaces', () => {
-  const selected = activeInstances(registry([{ scope: 'user', version: '1.0.0' }, { scope: 'project', projectPath: 'C:\\DEV\\repo', version: '1.1.0' }, { scope: 'local', projectPath: 'C:\\dev\\elsewhere', version: '1.2.0' }]), 'c:/dev/repo/.claude/worktrees/check', 'eigenwise-toolshed', 'win32');
+  const selected = activeInstances(registry([{ scope: 'user', version: '1.0.0' }, { scope: 'project', projectPath: 'C:\\DEV\\repo', version: '1.1.0' }, { scope: 'local', projectPath: 'C:\\dev\\elsewhere', version: '1.2.0' }]), 'c:/dev/repo/.claude/worktrees/check', 'loadout', 'win32');
   assert.deepEqual(selected.map((entry) => entry.version).sort(), ['1.0.0', '1.1.0']);
 });
 
@@ -236,7 +236,7 @@ test('selects project installs through an existing project alias', (t) => {
   fs.symlinkSync(project, alias, 'junction');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
-  const selected = activeInstances(registry([{ scope: 'project', projectPath: project, version: '1.1.0' }]), path.join(alias, '.claude', 'worktrees', 'check'), 'eigenwise-toolshed');
+  const selected = activeInstances(registry([{ scope: 'project', projectPath: project, version: '1.1.0' }]), path.join(alias, '.claude', 'worktrees', 'check'), 'loadout');
   assert.deepEqual(selected.map((entry) => entry.version), ['1.1.0']);
 });
 
@@ -258,7 +258,7 @@ test('reports a new remote version after earlier unknown freshness and version w
     warnedStates: new Set(),
   };
   fs.writeFileSync(registryFile, JSON.stringify({ plugins: {
-    'sidequest@eigenwise-toolshed': [{ scope: 'user', version: '4.34.0' }],
+    'sidequest@loadout': [{ scope: 'user', version: '4.34.0' }],
   } }));
 
   const unknown = JSON.parse(decide(input, { ...options, cache: { checkedAt: new Date().toISOString(), unavailable: true } }));

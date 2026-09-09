@@ -1,11 +1,11 @@
 ---
 title: Architecture
-description: Maintainer overview of how the Toolshed plugins fit together.
+description: Maintainer overview of how the Loadout plugins fit together.
 ---
 
 ## Maintainer overview
 
-Eigenwise Toolshed is a marketplace of independent Claude Code plugins. Each plugin owns its setup, hooks, skills, and local state. The plugins cooperate through small, explicit boundaries rather than importing one another's implementation.
+Loadout is a marketplace of independent Claude Code plugins. Each plugin owns its setup, hooks, skills, and local state. The plugins cooperate through small, explicit boundaries rather than importing one another's implementation.
 
 ```mermaid
 flowchart LR
@@ -20,10 +20,10 @@ flowchart LR
   P --> API[Claude or Codex backend]
 ```
 
-- Quartermaster owns the cross-plugin setup plan for new and existing projects, updates Toolshed plugins, and checks workspace health.
+- Quartermaster owns the cross-plugin setup plan for new and existing projects, updates Loadout plugins, and checks workspace health.
 - Codebase Mapper and Live Rules add project context without requiring the other plugins.
 - Observability records selected metadata locally. Its observer, collector, and dashboard stay on loopback.
 - Sidequest owns tickets, stories, routing, dispatch, and executor evidence.
 - Model Gateway owns the optional model-proxy boundary. Claude models can keep their normal API path.
 
-See [modular Toolshed architecture](./modular-architecture/) for the registry and routing boundaries. User-facing installation and daily use belong in the [plugin guides](../getting-started/), not here.
+See [modular Loadout architecture](./modular-architecture/) for the registry and routing boundaries. User-facing installation and daily use belong in the [plugin guides](../getting-started/), not here.

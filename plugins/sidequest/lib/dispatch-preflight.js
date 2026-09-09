@@ -72,8 +72,8 @@ function localAheadOfUpstreamWarning(projectPath, branch, worktreeFork) {
     return null;
   }
 }
-const PLUGIN_ID = "sidequest@eigenwise-toolshed";
-const REPAIR_COMMAND = "claude plugin install sidequest@eigenwise-toolshed --scope project";
+const PLUGIN_ID = "sidequest@loadout";
+const REPAIR_COMMAND = "claude plugin install sidequest@loadout --scope project";
 const FILE_READ_RETRY_DELAYS_MS = [20, 60, 140, 300];
 const RETRYABLE_FILE_READ_CODES = /* @__PURE__ */ new Set(["ENOENT", "EPERM", "EACCES", "EBUSY"]);
 function isRetryableFileReadError(error) {
@@ -225,15 +225,15 @@ function repairGuidance() {
 }
 function installRefusalMessage(check, projectPath) {
   if (check.reason === "registry_unreadable") {
-    return `Dispatch refused: could not read Claude Code's plugin registry at ${check.registryPath} (${check.detail}). Fix or remove the corrupt registry, confirm sidequest@eigenwise-toolshed is installed for ${projectPath}, then dispatch again.`;
+    return `Dispatch refused: could not read Claude Code's plugin registry at ${check.registryPath} (${check.detail}). Fix or remove the corrupt registry, confirm sidequest@loadout is installed for ${projectPath}, then dispatch again.`;
   }
   if (check.reason === "runtime_unreadable") {
     return `Dispatch refused: could not compute the lifecycle-compatible Sidequest install identity for ${check.installPath || projectPath} (${check.detail}). Prepared dispatch compatibility requires the registry plugin version, .mcp.json, and hooks/hooks.json. ${repairGuidance()}`;
   }
   if (check.reason === "stale") {
-    return `Dispatch refused: the sidequest@eigenwise-toolshed install registered for ${projectPath} (checked ${check.registryPath}) does not declare a board MCP server, so prepared dispatch compatibility cannot be proven. ${repairGuidance()}`;
+    return `Dispatch refused: the sidequest@loadout install registered for ${projectPath} (checked ${check.registryPath}) does not declare a board MCP server, so prepared dispatch compatibility cannot be proven. ${repairGuidance()}`;
   }
-  return `Dispatch refused: sidequest@eigenwise-toolshed has no install with a lifecycle-compatible runtime registered for ${projectPath} in ${check.registryPath}. A \`.claude/settings.json\` enabledPlugins entry is not proof of an install. ${repairGuidance()}`;
+  return `Dispatch refused: sidequest@loadout has no install with a lifecycle-compatible runtime registered for ${projectPath} in ${check.registryPath}. A \`.claude/settings.json\` enabledPlugins entry is not proof of an install. ${repairGuidance()}`;
 }
 function assertSidequestInstall(projectPath, opts = {}) {
   const check = checkSidequestInstall(projectPath, opts);

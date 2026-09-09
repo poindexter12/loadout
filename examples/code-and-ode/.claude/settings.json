@@ -1,12 +1,12 @@
 {
   "enabledPlugins": {
-    "live-rules@eigenwise-toolshed": true
+    "live-rules@loadout": true
   },
   "extraKnownMarketplaces": {
-    "eigenwise-toolshed": {
+    "loadout": {
       "source": {
         "source": "directory",
-        "path": "C:\\dev\\eigenwise-public\\eigenwise-toolshed"
+        "path": "C:\\dev\\eigenwise-public\\loadout"
       }
     }
   }

@@ -1,24 +1,24 @@
 ---
 title: Getting started
-description: Install Quartermaster, prepare a project, and choose the Toolshed plugin that fits the job.
+description: Install Quartermaster, prepare a project, and choose the Loadout plugin that fits the job.
 ---
 
-Eigenwise Toolshed is six independent Claude Code plugins. Start with Quartermaster when you want a guided project setup. Install a different plugin directly when you already know what you need.
+Loadout is six independent Claude Code plugins. Start with Quartermaster when you want a guided project setup. Install a different plugin directly when you already know what you need.
 
 ## Install Quartermaster
 
 Run these in Claude Code from the project you want to prepare:
 
 ```text
-/plugin marketplace add poindexter12/eigenwise-toolshed
-/plugin install quartermaster@eigenwise-toolshed --scope project
+/plugin marketplace add poindexter12/loadout
+/plugin install quartermaster@loadout --scope project
 ```
 
 This example uses project scope, which keeps the activation in the repository's settings. After the install, activate the plugin with `/reload-plugins` or by starting a new Claude Code session.
 
 ## Choose a scope
 
-Every Toolshed plugin works at user, project, or local scope. Use `--scope project` when the plugin belongs to one repository, `--scope user` when you want it in every project, or `--scope local` when it should stay out of shared settings. The setup examples use project scope, but the choice is yours.
+Every Loadout plugin works at user, project, or local scope. Use `--scope project` when the plugin belongs to one repository, `--scope user` when you want it in every project, or `--scope local` when it should stay out of shared settings. The setup examples use project scope, but the choice is yours.
 
 ## Prepare your first project
 
@@ -26,7 +26,7 @@ From the project directory, run:
 
 > /quartermaster:setup
 
-Quartermaster reads the project, mines a bounded history summary, asks a few setup questions, and proposes Toolshed plugins, stack plugins, starter rules, and permission entries. It shows the change list and waits for approval before installing or writing anything.
+Quartermaster reads the project, mines a bounded history summary, asks a few setup questions, and proposes Loadout plugins, stack plugins, starter rules, and permission entries. It shows the change list and waits for approval before installing or writing anything.
 
 After setup installs the approved plugins and writes the approved files, it pauses. Run `/reload-plugins` to activate the new plugin code. Restart Claude Code instead when setup changed the process environment or wiring that a reload cannot replace. Tell Claude `continue`, then let setup verify each selected workflow after the boundary.
 
@@ -47,8 +47,8 @@ The marketplace publishes these six plugins:
 - [Load project rules when they apply](./live-rules/)
 - [View selected local usage](../observability/)
 
-Quartermaster's updater covers every active Eigenwise Toolshed install in Claude Code's registry, at its recorded user, project, or local scope and project path. It can update an install in another project even when you invoke it from here. Third-party marketplaces are left alone.
+Quartermaster's updater covers every active Loadout install in Claude Code's registry, at its recorded user, project, or local scope and project path. It can update an install in another project even when you invoke it from here. Third-party marketplaces are left alone.
 
-Freshness hooks report cached availability and loaded-version mismatches. They do not install plugins or restart Claude Code. Marketplace auto-update is optional and must be enabled for the Eigenwise Toolshed marketplace. After any plugin update, reload affected open sessions. Restart Claude Code when process-level gateway wiring or model discovery changed.
+Freshness hooks report cached availability and loaded-version mismatches. They do not install plugins or restart Claude Code. Marketplace auto-update is optional and must be enabled for the Loadout marketplace. After any plugin update, reload affected open sessions. Restart Claude Code when process-level gateway wiring or model discovery changed.
 
-The [generated plugin reference](../reference/) lists the agent-facing skills, hooks, and commands. Maintainer material lives under [contributing](../contributing/), and the separate [support page](https://poindexter12.github.io/eigenwise-toolshed/support/) covers ways to help.
+The [generated plugin reference](../reference/) lists the agent-facing skills, hooks, and commands. Maintainer material lives under [contributing](../contributing/), and the separate [support page](https://poindexter12.github.io/loadout/support/) covers ways to help.

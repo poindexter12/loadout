@@ -311,11 +311,11 @@ test('resolves a gateway session transcript into an OTLP project resource', (t) 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-project-'));
   const projectsDirectory = path.join(directory, 'projects');
   const sessionId = 'session-project';
-  const projectDirectory = path.join(directory, 'eigenwise-toolshed');
-  fs.mkdirSync(path.join(projectsDirectory, 'C--dev-eigenwise-public-eigenwise-toolshed'), { recursive: true });
+  const projectDirectory = path.join(directory, 'loadout');
+  fs.mkdirSync(path.join(projectsDirectory, 'C--dev-eigenwise-public-loadout'), { recursive: true });
   fs.mkdirSync(projectDirectory);
   fs.writeFileSync(
-    path.join(projectsDirectory, 'C--dev-eigenwise-public-eigenwise-toolshed', `${sessionId}.jsonl`),
+    path.join(projectsDirectory, 'C--dev-eigenwise-public-loadout', `${sessionId}.jsonl`),
     JSON.stringify({ cwd: projectDirectory }) + '\n',
   );
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -329,11 +329,11 @@ test('resolves a gateway session transcript into an OTLP project resource', (t) 
   const record = finishEmitterRequest(emitter, { tools: [{ name: 'mcp__sidequest__claim' }], messages: [] }, 10, sessionId, 'agent-project');
   const resource = resourceAttributeMap(buildOtlpLogPayload(record));
 
-  assert.equal(record.projectId, 'eigenwise-toolshed');
-  assert.equal(resource['project.id'], 'eigenwise-toolshed');
+  assert.equal(record.projectId, 'loadout');
+  assert.equal(resource['project.id'], 'loadout');
   assert.equal(JSON.stringify(buildOtlpLogPayload(record)).includes(projectDirectory), false);
-  assert.ok(emitted.every((emittedRecord) => emittedRecord.projectId === 'eigenwise-toolshed'));
-  assert.ok(emitted.every((emittedRecord) => resourceAttributeMap(buildOtlpLogPayload(emittedRecord))['project.id'] === 'eigenwise-toolshed'));
+  assert.ok(emitted.every((emittedRecord) => emittedRecord.projectId === 'loadout'));
+  assert.ok(emitted.every((emittedRecord) => resourceAttributeMap(buildOtlpLogPayload(emittedRecord))['project.id'] === 'loadout'));
 });
 
 test('JSON capture emits exact identities, resolved route, measurements, and no content', () => {

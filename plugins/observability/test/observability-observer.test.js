@@ -442,7 +442,7 @@ test('keeps an observer serving when the newest installed registry path is missi
   const registryFile = path.join(registryDirectory, 'installed_plugins.json');
   fs.writeFileSync(registryFile, JSON.stringify({
     plugins: {
-      'observability@eigenwise-toolshed': [{ version: '0.5.2' }],
+      'observability@loadout': [{ version: '0.5.2' }],
     },
   }));
   assert.equal(installedPluginVersion(home), '0.5.2');
@@ -462,7 +462,7 @@ test('keeps an observer serving when the newest installed registry path is missi
   const address = await observer.start();
   fs.writeFileSync(registryFile, JSON.stringify({
     plugins: {
-      'observability@eigenwise-toolshed': [
+      'observability@loadout': [
         { version: '0.5.2' },
         { version: '0.5.3', installPath: path.join(home, 'missing-observability-install') },
       ],
@@ -573,7 +573,7 @@ test('SessionStart restores an unbound observer port after an old observer retir
   await oldObserver.start();
   fs.writeFileSync(path.join(home, '.claude', 'plugins', 'installed_plugins.json'), JSON.stringify({
     plugins: {
-      'observability@eigenwise-toolshed': [
+      'observability@loadout': [
         { version: '0.0.0', installPath: successorRoot },
         { version: successorVersion, installPath: successorRoot },
       ],
@@ -617,7 +617,7 @@ test('hands a retired observer to the newest installed observer', async (t) => {
     },
   });
   fs.writeFileSync(registryFile, JSON.stringify({
-    plugins: { 'observability@eigenwise-toolshed': [{ version: '0.0.0', installPath: successorRoot }] },
+    plugins: { 'observability@loadout': [{ version: '0.0.0', installPath: successorRoot }] },
   }));
   t.after(async () => {
     let pid = null;
@@ -646,7 +646,7 @@ test('hands a retired observer to the newest installed observer', async (t) => {
   await observer.start();
   fs.writeFileSync(registryFile, JSON.stringify({
     plugins: {
-      'observability@eigenwise-toolshed': [
+      'observability@loadout': [
         { version: '0.0.0', installPath: successorRoot },
         { version: successorVersion, installPath: successorRoot },
       ],

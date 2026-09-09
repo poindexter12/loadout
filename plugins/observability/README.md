@@ -2,7 +2,7 @@
 
 Local, metadata-only usage telemetry for Claude Code. Choose the repositories you want to track, keep reports on your machine, and optionally use a loopback dashboard or a remote sink.
 
-[Observability guide](https://poindexter12.github.io/eigenwise-toolshed/observability/) · [Generated reference](https://poindexter12.github.io/eigenwise-toolshed/reference/observability/) · [Toolshed marketplace](../../README.md)
+[Observability guide](https://poindexter12.github.io/loadout/observability/) · [Generated reference](https://poindexter12.github.io/loadout/reference/observability/) · [Loadout marketplace](../../README.md)
 
 The intended policy is per-repository opt-in. A separate machine-level setup consent starts the shared local observer and Collector, and can add a dashboard or remote sink. The project command then opts the current repository into that shared service. Telemetry records are designed to contain metadata such as session IDs, prompt IDs, agent IDs, task IDs, tool-use IDs, and SendMessage recipient IDs, with no prompt or response text, code or file contents, tool inputs or results, credentials, or environment values. Sink configuration you provide stays in the private observability config file so the exporter can authenticate.
 
@@ -13,8 +13,8 @@ Known limitation: the current hook and ingest path does not enforce the per-repo
 Run these in Claude Code:
 
 ```text
-/plugin marketplace add poindexter12/eigenwise-toolshed
-/plugin install observability@eigenwise-toolshed --scope project
+/plugin marketplace add poindexter12/loadout
+/plugin install observability@loadout --scope project
 ```
 
 The plugin installs at user, project, or local scope. User scope covers every project at once; project or local scope keeps the plugin out of repositories that did not opt in.

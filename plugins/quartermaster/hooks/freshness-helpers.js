@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const TOOLSHED_MARKETPLACE = 'eigenwise-toolshed';
+const TOOLSHED_MARKETPLACE = 'loadout';
 
 function readJson(fileSystem, file) {
   try {
@@ -98,7 +98,7 @@ function activeInstances(registry, cwd, marketplace, platform = process.platform
   });
 }
 
-function loadedVersionStateFile(input, pluginId, directory = path.join(os.tmpdir(), 'eigenwise-toolshed', 'freshness-warnings', 'loaded-plugin-versions')) {
+function loadedVersionStateFile(input, pluginId, directory = path.join(os.tmpdir(), 'loadout', 'freshness-warnings', 'loaded-plugin-versions')) {
   const sessionId = input?.session_id || input?.sessionId;
   if (!sessionId || !pluginId) return null;
   const digest = crypto.createHash('sha256').update(`${sessionId}\0${pluginId}`).digest('hex');

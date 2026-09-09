@@ -9,7 +9,7 @@ function commandRunner(workflowResponses, overrides = {}) {
   let workflowCall = 0;
   return (command) => {
     if (command.command === 'gh' && command.args[0] === 'auth') return overrides.authentication ?? { status: 0, stdout: 'Logged in' };
-    if (command.command === 'gh' && command.args[0] === 'repo') return overrides.repository ?? { status: 0, stdout: '{"nameWithOwner":"poindexter12/eigenwise-toolshed"}' };
+    if (command.command === 'gh' && command.args[0] === 'repo') return overrides.repository ?? { status: 0, stdout: '{"nameWithOwner":"poindexter12/loadout"}' };
     if (command.command === 'git') return overrides.sha ?? { status: 0, stdout: 'abc123\n' };
     if (command.command === 'gh' && command.args[0] === 'run') {
       const response = workflowResponses[Math.min(workflowCall, workflowResponses.length - 1)];

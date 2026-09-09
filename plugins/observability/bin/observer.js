@@ -158,7 +158,7 @@ function installedPluginInstallation(home = os.homedir()) {
   try {
     const registryFile = path.join(home, '.claude', 'plugins', 'installed_plugins.json');
     const registry = JSON.parse(fs.readFileSync(registryFile, 'utf8'));
-    const installations = registry.plugins?.['observability@eigenwise-toolshed'];
+    const installations = registry.plugins?.['observability@loadout'];
     if (!Array.isArray(installations)) return null;
     return installations
       .filter((installation) => typeof installation?.version === 'string')

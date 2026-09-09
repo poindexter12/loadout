@@ -52,4 +52,4 @@ for (const name of plugins) {
 }
 const marketplace = readJson(path.join(root, '.claude-plugin/marketplace.json'));
 const rows = marketplace.plugins.map((p) => `| [${p.name}](../${p.name}/) | ${p.version} | ${p.description.replace(/\|/g, '\\|')} |`).join('\n');
-fs.writeFileSync(path.join(out, 'marketplace.md'), `---\ntitle: Marketplace versions\ndescription: Generated versions and descriptions from the Toolshed marketplace.\n---\n\n${header}**Marketplace:** \`${marketplace.name}\`  \n**Version:** \`${marketplace.version}\`\n\n| Plugin | Version | Description |\n| --- | --- | --- |\n${rows}\n`);
+fs.writeFileSync(path.join(out, 'marketplace.md'), `---\ntitle: Marketplace versions\ndescription: Generated versions and descriptions from the Loadout marketplace.\n---\n\n${header}**Marketplace:** \`${marketplace.name}\`  \n**Version:** \`${marketplace.version}\`\n\n| Plugin | Version | Description |\n| --- | --- | --- |\n${rows}\n`);

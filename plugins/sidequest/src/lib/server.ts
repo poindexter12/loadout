@@ -1293,7 +1293,7 @@ async function findNewerInstall(options?: any) {
     const registryPath = opts.registryPath || path.join(claudeHome, 'plugins', 'installed_plugins.json');
     let registry: any;
     try { registry = JSON.parse(await fsp.readFile(registryPath, 'utf8')); } catch (_: any) { registry = null; }
-    const installed = registry && registry.plugins && registry.plugins['sidequest@eigenwise-toolshed'];
+    const installed = registry && registry.plugins && registry.plugins['sidequest@loadout'];
     if (Array.isArray(installed)) {
       const entries = await Promise.all(installed.map(async (install?: any) => {
         const root = install && install.installPath;

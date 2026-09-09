@@ -843,7 +843,7 @@ test('renderDispatchStub keeps its briefing command alive after the dispatched c
   fs.mkdirSync(path.join(claudeHome, 'plugins'), { recursive: true });
   fs.writeFileSync(path.join(claudeHome, 'plugins', 'installed_plugins.json'), JSON.stringify({
     plugins: {
-      'sidequest@eigenwise-toolshed': [
+      'sidequest@loadout': [
         { installPath: staleInstall, version: '2.42.0', lastUpdated: '2026-07-19T00:00:00.000Z' },
         { installPath: currentInstall, version: '2.41.0', lastUpdated: '2026-07-20T00:00:00.000Z' },
       ],

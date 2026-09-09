@@ -10,8 +10,8 @@ Live Rules keeps project instructions in front of Claude Code when they apply to
 Run these in Claude Code from the project where the rules should live:
 
 ```text
-/plugin marketplace add poindexter12/eigenwise-toolshed
-/plugin install live-rules@eigenwise-toolshed --scope project
+/plugin marketplace add poindexter12/loadout
+/plugin install live-rules@loadout --scope project
 ```
 
 Reload plugins or start a new Claude Code session. If you use Quartermaster to set up a workspace, it can install and configure Live Rules as part of that setup.

@@ -39,7 +39,7 @@ if (command === 'marketplace list --json') {
   const source = args[2];
   state.events.push({ type: 'marketplace-add', source });
   state.marketplaces.push({
-    name: source === 'poindexter12/eigenwise-toolshed' ? 'eigenwise-toolshed' : 'cloudflare',
+    name: source === 'poindexter12/loadout' ? 'loadout' : 'cloudflare',
     source: 'github',
     repo: source,
   });
@@ -139,12 +139,12 @@ function selectedPlan(projectDir, overrides = {}) {
     version: 1,
     projectDir,
     marketplaces: [
-      { name: 'eigenwise-toolshed', source: 'poindexter12/eigenwise-toolshed' },
+      { name: 'loadout', source: 'poindexter12/loadout' },
       { name: 'cloudflare', source: 'cloudflare/skills' },
     ],
     plugins: [
-      { id: 'codebase-mapper@eigenwise-toolshed', scope: 'project', role: 'core' },
-      { id: 'live-rules@eigenwise-toolshed', scope: 'project', role: 'core' },
+      { id: 'codebase-mapper@loadout', scope: 'project', role: 'core' },
+      { id: 'live-rules@loadout', scope: 'project', role: 'core' },
       { id: 'cloudflare@cloudflare', scope: 'project', role: 'optional' },
       { id: 'frontend-design@claude-plugins-official', scope: 'project', role: 'optional' },
     ],
@@ -160,10 +160,10 @@ test('bootstraps the interviewed core and stack selection through a real fake Cl
   assert.equal(first.json.ok, true);
   assert.equal(first.json.reloadRequired, true);
   assert.deepEqual(readJson(fixture.stateFile).events, [
-    { type: 'marketplace-add', source: 'poindexter12/eigenwise-toolshed' },
+    { type: 'marketplace-add', source: 'poindexter12/loadout' },
     { type: 'marketplace-add', source: 'cloudflare/skills' },
-    { type: 'plugin-install', id: 'codebase-mapper@eigenwise-toolshed', scope: 'project' },
-    { type: 'plugin-install', id: 'live-rules@eigenwise-toolshed', scope: 'project' },
+    { type: 'plugin-install', id: 'codebase-mapper@loadout', scope: 'project' },
+    { type: 'plugin-install', id: 'live-rules@loadout', scope: 'project' },
     { type: 'plugin-install', id: 'cloudflare@cloudflare', scope: 'project' },
     { type: 'plugin-install', id: 'frontend-design@claude-plugins-official', scope: 'project' },
   ]);
@@ -171,8 +171,8 @@ test('bootstraps the interviewed core and stack selection through a real fake Cl
   assert.deepEqual(settings.permissions, { allow: ['Read(./src/**)'] });
   assert.equal(settings.customSetting, 'keep-me');
   assert.deepEqual(settings.enabledPlugins, {
-    'codebase-mapper@eigenwise-toolshed': true,
-    'live-rules@eigenwise-toolshed': true,
+    'codebase-mapper@loadout': true,
+    'live-rules@loadout': true,
     'cloudflare@cloudflare': true,
     'frontend-design@claude-plugins-official': true,
   });
@@ -208,8 +208,8 @@ test('stops before reload-ready success on partial failure and safely resumes on
   assert.equal(failed.json.failure.output, 'fake install failure');
   const partial = readJson(fixture.stateFile);
   assert.deepEqual(partial.plugins.map((plugin) => plugin.id), [
-    'codebase-mapper@eigenwise-toolshed',
-    'live-rules@eigenwise-toolshed',
+    'codebase-mapper@loadout',
+    'live-rules@loadout',
   ]);
 
   partial.failPlugin = null;
@@ -218,8 +218,8 @@ test('stops before reload-ready success on partial failure and safely resumes on
   assert.equal(resumed.status, 0, resumed.stderr);
   assert.equal(resumed.json.reloadRequired, true);
   assert.deepEqual(readJson(fixture.stateFile).plugins.map((plugin) => plugin.id), [
-    'codebase-mapper@eigenwise-toolshed',
-    'live-rules@eigenwise-toolshed',
+    'codebase-mapper@loadout',
+    'live-rules@loadout',
     'cloudflare@cloudflare',
     'frontend-design@claude-plugins-official',
   ]);
@@ -227,22 +227,22 @@ test('stops before reload-ready success on partial failure and safely resumes on
 
 test('honors a personal local scope only when it is explicit in the plan', () => withFixture((fixture) => {
   const plan = selectedPlan(fixture.projectDir, {
-    marketplaces: [{ name: 'eigenwise-toolshed', source: 'poindexter12/eigenwise-toolshed' }],
-    plugins: [{ id: 'personal-rules@eigenwise-toolshed', scope: 'local', role: 'optional' }],
+    marketplaces: [{ name: 'loadout', source: 'poindexter12/loadout' }],
+    plugins: [{ id: 'personal-rules@loadout', scope: 'local', role: 'optional' }],
   });
   const result = runInstaller(fixture, plan);
 
   assert.equal(result.status, 0, result.stderr);
   const state = readJson(fixture.stateFile);
   assert.deepEqual(state.events.filter((event) => event.type === 'plugin-install'), [
-    { type: 'plugin-install', id: 'personal-rules@eigenwise-toolshed', scope: 'local' },
+    { type: 'plugin-install', id: 'personal-rules@loadout', scope: 'local' },
   ]);
   assert.equal(state.plugins[0].scope, 'local');
 }));
 
 test('refuses a user-scoped plan before invoking Claude', () => withFixture((fixture) => {
   const plan = selectedPlan(fixture.projectDir, {
-    plugins: [{ id: 'codebase-mapper@eigenwise-toolshed', scope: 'user', role: 'core' }],
+    plugins: [{ id: 'codebase-mapper@loadout', scope: 'user', role: 'core' }],
   });
   const result = runInstaller(fixture, plan);
 

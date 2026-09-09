@@ -51,7 +51,7 @@ reused. A candidate verified against an ancestor of the current target can join 
 gate covers the newer target content. An assembly refusal leaves every submitted participant parked in
 `doing` with its candidate intact, including a refusal that reports an invalidated candidate.
 
-- `merge` is the default for release-pipeline repos such as Toolshed. It merges the submitted tip into
+- `merge` is the default for release-pipeline repos such as Loadout. It merges the submitted tip into
   the configured integration branch.
 - `replay` cherry-picks the submitted commits in order, keeping atomic history. A conflict aborts the
   cherry-pick and restores the prior HEAD.

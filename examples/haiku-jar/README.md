@@ -58,8 +58,8 @@ that apply.
 ### 1. Install the plugin (once)
 
 ```text
-/plugin marketplace add poindexter12/eigenwise-toolshed
-/plugin install codebase-mapper@eigenwise-toolshed
+/plugin marketplace add poindexter12/loadout
+/plugin install codebase-mapper@loadout
 ```
 
 Then `/reload-plugins` (or restart Claude Code).
@@ -148,4 +148,4 @@ file is git-ignored so running the tool never dirties the repo.
 
 ---
 
-*Part of the [eigenwise-toolshed](../../README.md), free and MIT. Original work by [Eigenwise](https://github.com/Eigenwise).*
+*Part of the [loadout](../../README.md), free and MIT. Original work by [Eigenwise](https://github.com/Eigenwise).*

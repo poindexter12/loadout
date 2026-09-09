@@ -145,7 +145,7 @@ test('untrusted Sidequest versions refuse MCP and CLI writes before creating a b
   fs.writeFileSync(path.join(pluginRoot, '.claude-plugin', 'plugin.json'), JSON.stringify({ version: '4.48.0' }));
   fs.mkdirSync(path.join(claudeHome, 'plugins'), { recursive: true });
   fs.writeFileSync(path.join(claudeHome, 'plugins', 'installed_plugins.json'), JSON.stringify({
-    plugins: { 'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath: project, version: 'not-semver' }] },
+    plugins: { 'sidequest@loadout': [{ scope: 'project', projectPath: project, version: 'not-semver' }] },
   }));
   const previousClaudeHome = process.env.SIDEQUEST_CLAUDE_HOME;
   const previousPluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
@@ -1675,7 +1675,7 @@ test('dispatch records a heal-capable loaded-version skew and returns its warnin
     fs.writeFileSync(path.join(installPath, '.mcp.json'), JSON.stringify({ mcpServers: { board: {} } }));
     fs.writeFileSync(path.join(installPath, 'hooks', 'hooks.json'), JSON.stringify({ hooks: {} }));
     fs.writeFileSync(registryPath, JSON.stringify({ plugins: {
-      'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath, installPath, version: '99.99.99' }],
+      'sidequest@loadout': [{ scope: 'project', projectPath, installPath, version: '99.99.99' }],
     } }));
     process.env.SIDEQUEST_CLAUDE_HOME = claudeHome;
     process.env.CLAUDE_PLUGIN_ROOT = loadedPluginRoot;
@@ -1721,7 +1721,7 @@ test('dispatch keeps freshness silent with an isolated matching install', async 
     fs.writeFileSync(path.join(installPath, '.mcp.json'), JSON.stringify({ mcpServers: { board: {} } }));
     fs.writeFileSync(path.join(installPath, 'hooks', 'hooks.json'), JSON.stringify({ hooks: {} }));
     fs.writeFileSync(registryPath, JSON.stringify({ plugins: {
-      'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath, installPath, version: loadedVersion }],
+      'sidequest@loadout': [{ scope: 'project', projectPath, installPath, version: loadedVersion }],
     } }));
     process.env.SIDEQUEST_CLAUDE_HOME = claudeHome;
     process.env.CLAUDE_PLUGIN_ROOT = stalePluginRoot;

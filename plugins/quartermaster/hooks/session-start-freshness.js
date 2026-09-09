@@ -266,7 +266,7 @@ function gatewayCheckFailure(check) {
 }
 
 function gatewayFreshness(instances, checkGateway) {
-  const gateway = instances.find((instance) => instance.id === 'model-gateway@eigenwise-toolshed');
+  const gateway = instances.find((instance) => instance.id === 'model-gateway@loadout');
   if (!gateway) return [];
   const check = checkGateway(gateway);
   if (!check?.available) return [gatewayCheckFailure(check)];
@@ -353,13 +353,13 @@ function withDeclaredAutoUpdate(marketplaces, projectPath, home) {
 }
 
 function boardMappings(boards, instances, home) {
-  const sidequestInstalls = instances.filter((instance) => instance.id === 'sidequest@eigenwise-toolshed');
+  const sidequestInstalls = instances.filter((instance) => instance.id === 'sidequest@loadout');
   const missing = [];
   const deadFlags = [];
   const mappings = boards.map((board) => {
     const boardPath = normalizedPath(board.path);
     const matching = sidequestInstalls.filter((instance) => instance.projectPath && normalizedPath(instance.projectPath) === boardPath);
-    const activation = settingsActivation('sidequest@eigenwise-toolshed', board.path, home);
+    const activation = settingsActivation('sidequest@loadout', board.path, home);
     const user = sidequestInstalls.some((instance) => instance.scope === 'user');
     const status = matching.length ? 'installed' : user ? 'user-only' : 'missing';
     if (!matching.length && activation && !activationHasInstall(sidequestInstalls, activation, board.path)) {
@@ -386,8 +386,8 @@ function boardMappings(boards, instances, home) {
 // distinction as the board check: a user-scope install is not the same as none.
 function mapMaintenance(currentProject, instances, home) {
   if (!currentProject || !fs.existsSync(path.join(currentProject, '.claude', '.codebase-info'))) return [];
-  const installs = instances.filter((instance) => instance.id === 'codebase-mapper@eigenwise-toolshed');
-  const activation = settingsActivation('codebase-mapper@eigenwise-toolshed', currentProject, home);
+  const installs = instances.filter((instance) => instance.id === 'codebase-mapper@loadout');
+  const activation = settingsActivation('codebase-mapper@loadout', currentProject, home);
   if (installs.some((instance) => isCurrentProjectPath(instance.projectPath, currentProject))) return [];
   if (activation && !activationHasInstall(installs, activation, currentProject)) {
     return [deadEnabledPluginFinding("this project's codebase map", 'codebase-mapper', activation, currentProject, home)];
@@ -462,7 +462,7 @@ function warning(problems) {
   if (!problems.length) return '';
   const shown = findingText(problems).slice(0, 5);
   const extra = problems.length > shown.length ? `; +${problems.length - shown.length} more` : '';
-  return `Toolshed local health: ${shown.join('; ')}${extra}. Cached version signals are advisory; the prompt guard decides release freshness. Run /update-toolshed for deliberate updates.`;
+  return `Loadout local health: ${shown.join('; ')}${extra}. Cached version signals are advisory; the prompt guard decides release freshness. Run /update-toolshed for deliberate updates.`;
 }
 
 function emitWarning(problems, debouncer = defaultDebouncer) {
@@ -480,7 +480,7 @@ function newerQuartermasterVersion(instances, loadedVersion) {
   return instances
     .filter((instance) => {
       const parts = pluginIdParts(instance.id);
-      return parts?.marketplace === 'eigenwise-toolshed' && parts.name === 'quartermaster';
+      return parts?.marketplace === 'loadout' && parts.name === 'quartermaster';
     })
     .find((instance) => compareVersions(loadedVersion, instance.version) === -1)?.version || null;
 }
@@ -498,17 +498,17 @@ function compressedUpdates(updates) {
 
 function systemMessage(result, loadedVersion) {
   const installedVersion = newerQuartermasterVersion(result.instances, loadedVersion);
-  if (installedVersion) return `Toolshed: quartermaster ${loadedVersion} loaded, ${installedVersion} installed — /reload-plugins to pick it up.`;
+  if (installedVersion) return `Loadout: quartermaster ${loadedVersion} loaded, ${installedVersion} installed — /reload-plugins to pick it up.`;
   const update = result.updates
-    .filter((candidate) => candidate.marketplace === 'eigenwise-toolshed')
+    .filter((candidate) => candidate.marketplace === 'loadout')
     .sort((left, right) => left.name.localeCompare(right.name))[0];
-  return update ? `Toolshed update available (cached): ${update.name} ${update.installed} → ${update.available} — /update-toolshed, then /reload-plugins.` : '';
+  return update ? `Loadout update available (cached): ${update.name} ${update.installed} → ${update.available} — /update-toolshed, then /reload-plugins.` : '';
 }
 
 function projectWarning(problems) {
   const shown = findingText(problems).slice(0, 3);
   const extra = problems.length > shown.length ? `; +${problems.length - shown.length} more` : '';
-  return shown.length ? `Toolshed project health: ${shown.join('; ')}${extra}.` : '';
+  return shown.length ? `Loadout project health: ${shown.join('; ')}${extra}.` : '';
 }
 
 // One line, on every session start, so noise discipline is part of the contract: the worst finding, the count
@@ -521,7 +521,7 @@ function userActionNotice(problems) {
     .slice()
     .sort((left, right) => USER_ACTION_SEVERITY.indexOf(left.userAction) - USER_ACTION_SEVERITY.indexOf(right.userAction))[0];
   const rest = actionable.length - 1;
-  return `Toolshed needs you: ${worst.notice || worst.text}${rest ? `, +${rest} more` : ''} — ask me for the Toolshed health report.`;
+  return `Loadout needs you: ${worst.notice || worst.text}${rest ? `, +${rest} more` : ''} — ask me for the Loadout health report.`;
 }
 
 function sessionInput() {
@@ -536,7 +536,7 @@ function main() {
   try {
     const input = sessionInput();
     const loadedVersion = loadedPluginVersion();
-    reportLoadedPluginVersion(input, 'quartermaster@eigenwise-toolshed', loadedVersion);
+    reportLoadedPluginVersion(input, 'quartermaster@loadout', loadedVersion);
     const result = audit({ currentProject: input.cwd });
     const context = [
       projectWarning(result.projectProblems),

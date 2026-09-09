@@ -33,7 +33,7 @@ const PROJ = path.join(os.tmpdir(), 'sq-claim-effort-fixtures', 'board');
 
 // SQ-1017: dispatch and native-agent now refuse before spawning unless
 // Claude Code's plugin registry has a runnable, board-MCP-capable
-// sidequest@eigenwise-toolshed install for the target project. This file
+// sidequest@loadout install for the target project. This file
 // dispatches PROJ throughout, so it needs its own isolated
 // SIDEQUEST_CLAUDE_HOME with an exact-project-scoped install registered for
 // PROJ — distinct from the other suites' shared 'user'-scope stub
@@ -46,7 +46,7 @@ const REGISTRY_PATH = path.join(CLAUDE_HOME, 'plugins', 'installed_plugins.json'
 
 function writeRegistry(installs?: any) {
   fs.mkdirSync(path.dirname(REGISTRY_PATH), { recursive: true });
-  fs.writeFileSync(REGISTRY_PATH, JSON.stringify({ plugins: { 'sidequest@eigenwise-toolshed': installs } }));
+  fs.writeFileSync(REGISTRY_PATH, JSON.stringify({ plugins: { 'sidequest@loadout': installs } }));
 }
 
 function fakeInstall(withBoardMcp = true) {
@@ -728,7 +728,7 @@ test('SQ-1017: dispatch refuses when the target project has no Sidequest install
       () => store.prepareDispatch(slug, ref, { allowUnscoped: true }),
       (err?: any) => {
         assert.match(err.message, /no install/i);
-        assert.match(err.message, /claude plugin install sidequest@eigenwise-toolshed --scope project/);
+        assert.match(err.message, /claude plugin install sidequest@loadout --scope project/);
         assert.match(err.message, /reload-plugins|start a new session/);
         return true;
       },
@@ -744,7 +744,7 @@ test('SQ-1017: dispatch succeeds once an exact-project install advertising the b
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-1017-ok-project-'));
   fs.mkdirSync(path.join(claudeHome, 'plugins'), { recursive: true });
   fs.writeFileSync(path.join(claudeHome, 'plugins', 'installed_plugins.json'), JSON.stringify({
-    plugins: { 'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath: project, installPath: fakeInstall(), version: '9.9.9' }] },
+    plugins: { 'sidequest@loadout': [{ scope: 'project', projectPath: project, installPath: fakeInstall(), version: '9.9.9' }] },
   }));
   process.env.SIDEQUEST_CLAUDE_HOME = claudeHome;
   try {
@@ -812,13 +812,13 @@ test('SQ-1017: dispatch refuses a stale registry entry whose install path no lon
   fs.rmSync(goneInstall, { recursive: true, force: true });
   fs.mkdirSync(path.join(claudeHome, 'plugins'), { recursive: true });
   fs.writeFileSync(path.join(claudeHome, 'plugins', 'installed_plugins.json'), JSON.stringify({
-    plugins: { 'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath: project, installPath: goneInstall, version: '9.9.9' }] },
+    plugins: { 'sidequest@loadout': [{ scope: 'project', projectPath: project, installPath: goneInstall, version: '9.9.9' }] },
   }));
   process.env.SIDEQUEST_CLAUDE_HOME = claudeHome;
   try {
     const slug = store.ensureProject(project).slug;
     const ref = cliJson(['add', '-t', 'stale install fixture', '-d', 'Where: SQ-1017 fixture. Contract: refuse a dangling install path. Verify: inspect the thrown message.', '--category', 'guard.claude', '--project', project]).ticket.ref;
-    assert.throws(() => store.prepareDispatch(slug, ref, { allowUnscoped: true }), /claude plugin install sidequest@eigenwise-toolshed --scope project/);
+    assert.throws(() => store.prepareDispatch(slug, ref, { allowUnscoped: true }), /claude plugin install sidequest@loadout --scope project/);
   } finally {
     process.env.SIDEQUEST_CLAUDE_HOME = CLAUDE_HOME;
   }
@@ -829,7 +829,7 @@ test('SQ-1017: dispatch refuses an install whose manifest no longer declares the
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-1017-nomcp-project-'));
   fs.mkdirSync(path.join(claudeHome, 'plugins'), { recursive: true });
   fs.writeFileSync(path.join(claudeHome, 'plugins', 'installed_plugins.json'), JSON.stringify({
-    plugins: { 'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath: project, installPath: fakeInstall(false), version: '9.9.9' }] },
+    plugins: { 'sidequest@loadout': [{ scope: 'project', projectPath: project, installPath: fakeInstall(false), version: '9.9.9' }] },
   }));
   process.env.SIDEQUEST_CLAUDE_HOME = claudeHome;
   try {
@@ -872,7 +872,7 @@ test('SQ-1017: native-agent refuses the same way dispatch does when the project 
     const env = Object.assign({}, process.env, { SIDEQUEST_HOME, SIDEQUEST_CLAUDE_HOME: claudeHome, CLAUDE_PROJECT_DIR: project });
     const result = spawnSync(process.execPath, [BIN, 'native-agent', ref, '--project', project], { encoding: 'utf8', env });
     assert.notEqual(result.status, 0);
-    assert.match(result.stdout + result.stderr, /claude plugin install sidequest@eigenwise-toolshed --scope project/);
+    assert.match(result.stdout + result.stderr, /claude plugin install sidequest@loadout --scope project/);
   } finally {
     process.env.SIDEQUEST_CLAUDE_HOME = CLAUDE_HOME;
   }
@@ -891,7 +891,7 @@ function goodTransportRegistry(project?: any) {
   const claudeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-1017-transport-claude-home-'));
   fs.mkdirSync(path.join(claudeHome, 'plugins'), { recursive: true });
   fs.writeFileSync(path.join(claudeHome, 'plugins', 'installed_plugins.json'), JSON.stringify({
-    plugins: { 'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath: project, installPath: fakeInstall(), version: '9.9.9' }] },
+    plugins: { 'sidequest@loadout': [{ scope: 'project', projectPath: project, installPath: fakeInstall(), version: '9.9.9' }] },
   }));
   return claudeHome;
 }
@@ -973,7 +973,7 @@ test('checkSidequestInstall is directly usable for a pure ok:true/false check wi
   const installPath = fakeInstall();
   fs.mkdirSync(path.join(claudeHome, 'plugins'), { recursive: true });
   fs.writeFileSync(path.join(claudeHome, 'plugins', 'installed_plugins.json'), JSON.stringify({
-    plugins: { 'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath: '/nowhere/at/all', installPath, version: '1.0.0' }] },
+    plugins: { 'sidequest@loadout': [{ scope: 'project', projectPath: '/nowhere/at/all', installPath, version: '1.0.0' }] },
   }));
   const found = dispatchPreflight.checkSidequestInstall('/nowhere/at/all', { claudeHome });
   assert.equal(found.ok, true);

@@ -2,15 +2,15 @@
 
 Model Gateway adds ChatGPT/Codex and Grok subscription models to Claude Code. Claude Code v2.1.129+ can show those gateway models in its `/model` picker. It keeps normal Claude models on Anthropic and routes only the selected gateway models through your subscription.
 
-[Setup guide](https://poindexter12.github.io/eigenwise-toolshed/getting-started/model-gateway/) · [Generated reference](https://poindexter12.github.io/eigenwise-toolshed/reference/model-gateway/) · [Toolshed marketplace](../../README.md)
+[Setup guide](https://poindexter12.github.io/loadout/getting-started/model-gateway/) · [Generated reference](https://poindexter12.github.io/loadout/reference/model-gateway/) · [Loadout marketplace](../../README.md)
 
 ## Install
 
 Run these in Claude Code:
 
 ```text
-/plugin marketplace add poindexter12/eigenwise-toolshed
-/plugin install model-gateway@eigenwise-toolshed --scope project
+/plugin marketplace add poindexter12/loadout
+/plugin install model-gateway@loadout --scope project
 ```
 
 Any install scope works: user, project, or local. User scope makes the plugin available in every project, while project and local scopes keep it out of repositories that did not opt in.

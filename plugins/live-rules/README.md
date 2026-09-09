@@ -2,15 +2,15 @@
 
 Live Rules keeps project instructions in front of Claude Code when they apply to a prompt or edit. Use it for conventions, guardrails, and reminders that should follow the project instead of relying on memory.
 
-[Setup guide](https://poindexter12.github.io/eigenwise-toolshed/getting-started/live-rules/) · [Generated reference](https://poindexter12.github.io/eigenwise-toolshed/reference/live-rules/) · [Toolshed marketplace](../../README.md)
+[Setup guide](https://poindexter12.github.io/loadout/getting-started/live-rules/) · [Generated reference](https://poindexter12.github.io/loadout/reference/live-rules/) · [Loadout marketplace](../../README.md)
 
 ## Install
 
 Run these in Claude Code from the project where the rules should live:
 
 ```text
-/plugin marketplace add poindexter12/eigenwise-toolshed
-/plugin install live-rules@eigenwise-toolshed --scope project
+/plugin marketplace add poindexter12/loadout
+/plugin install live-rules@loadout --scope project
 ```
 
 Reload plugins or start a new Claude Code session. The workspace setup flow can also install and configure Live Rules.

@@ -7,7 +7,7 @@ export const DEFAULT_DATE = '2026-07-25';
 
 export function marketplaceJson({ version, plugins }) {
   return `${JSON.stringify({
-    name: 'eigenwise-toolshed',
+    name: 'loadout',
     owner: { name: 'Eigenwise', email: 'kenny@eigenwise.io' },
     description: "Eigenwise's toolshed of Claude Code plugins.",
     version,

@@ -1,11 +1,11 @@
 ---
 title: Release process
-description: Maintainer workflow for moving verified Toolshed changes to the marketplace.
+description: Maintainer workflow for moving verified Loadout changes to the marketplace.
 ---
 
 ## Maintainer overview
 
-Toolshed publishes from `main`. A release cut creates a marketplace tag, `v<marketplace-version>`, and a tag for each released plugin, `<plugin>-v<plugin-version>`. The `Publish GitHub Release` workflow runs for pushes of `v*` tags, on its daily schedule, and when manually dispatched. It creates GitHub Releases only for marketplace tags, so per-plugin tags do not create GitHub Releases.
+Loadout publishes from `main`. A release cut creates a marketplace tag, `v<marketplace-version>`, and a tag for each released plugin, `<plugin>-v<plugin-version>`. The `Publish GitHub Release` workflow runs for pushes of `v*` tags, on its daily schedule, and when manually dispatched. It creates GitHub Releases only for marketplace tags, so per-plugin tags do not create GitHub Releases.
 
 ## Prepare a release
 
@@ -43,4 +43,4 @@ GitHub Releases publish at most once per UTC day. When several marketplace tags 
 
 Executors stop at a verified commit. Integration, release cutting, manifest versioning, and publishing happen after their submission.
 
-See [`scripts/release/README.md`](https://github.com/poindexter12/eigenwise-toolshed/blob/main/scripts/release/README.md), [`.release/README.md`](https://github.com/poindexter12/eigenwise-toolshed/blob/main/.release/README.md), and the [workflow docs](https://github.com/poindexter12/eigenwise-toolshed/tree/main/.github/workflows) for current safeguards.
+See [`scripts/release/README.md`](https://github.com/poindexter12/loadout/blob/main/scripts/release/README.md), [`.release/README.md`](https://github.com/poindexter12/loadout/blob/main/.release/README.md), and the [workflow docs](https://github.com/poindexter12/loadout/tree/main/.github/workflows) for current safeguards.

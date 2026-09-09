@@ -508,7 +508,7 @@ var import_node_crypto3 = __toESM(require("node:crypto"));
 var import_node_fs6 = __toESM(require("node:fs"));
 var import_node_os4 = __toESM(require("node:os"));
 var import_node_path6 = __toESM(require("node:path"));
-var SIDEQUEST_PLUGIN_ID = "sidequest@eigenwise-toolshed";
+var SIDEQUEST_PLUGIN_ID = "sidequest@loadout";
 function claudeHome(options = {}) {
   return options.claudeHome || process.env.SIDEQUEST_CLAUDE_HOME || import_node_path6.default.join(import_node_os4.default.homedir(), ".claude");
 }
@@ -587,7 +587,7 @@ function sidequestReloadWarning(projectPath, options = {}) {
   return `Sidequest: loaded ${loadedVersion}, installed ${installedVersion}. Run /reload-plugins or restart Claude Code before dispatching work.`;
 }
 function stateDirectory3(options = {}) {
-  return options.stateDirectory || import_node_path6.default.join(import_node_os4.default.tmpdir(), "eigenwise-toolshed", "freshness-warnings", "loaded-plugin-versions");
+  return options.stateDirectory || import_node_path6.default.join(import_node_os4.default.tmpdir(), "loadout", "freshness-warnings", "loaded-plugin-versions");
 }
 function sessionId2(input) {
   const value = input.session_id ?? input.sessionId;
@@ -706,10 +706,10 @@ function upstreamDefectDestination() {
       const root = String(candidate.path || "").trim();
       return root && import_node_fs7.default.existsSync(import_node_path7.default.join(root, "plugins", "sidequest", ".claude-plugin", "plugin.json"));
     });
-    if (project) return `Offer to file it as a ticket on the ${project.name} board on this machine (the Toolshed working copy), not via the Anthropic feedback tool.`;
+    if (project) return `Offer to file it as a ticket on the ${project.name} board on this machine (the Loadout working copy), not via the Anthropic feedback tool.`;
   } catch (_) {
   }
-  return "Offer to file it as a GitHub issue on poindexter12/eigenwise-toolshed, not via the Anthropic feedback tool. Any GitHub body, comment, reply, or closure note you author must stand alone: summarize a sanitized reproduction, relevant findings, and version with public issue, PR, commit, or release links; omit local SQ-/US- IDs, board slugs, local-only paths, and board-only references. Preserve reporter text unless authorized to edit it; do not strip diagnostic error text or hand-edit historical changelogs or generated release history.";
+  return "Offer to file it as a GitHub issue on poindexter12/loadout, not via the Anthropic feedback tool. Any GitHub body, comment, reply, or closure note you author must stand alone: summarize a sanitized reproduction, relevant findings, and version with public issue, PR, commit, or release links; omit local SQ-/US- IDs, board slugs, local-only paths, and board-only references. Preserve reporter text unless authorized to edit it; do not strip diagnostic error text or hand-edit historical changelogs or generated release history.";
 }
 function hasMidWaveBoard(data) {
   if (process.env.SIDEQUEST_AGENT) return false;

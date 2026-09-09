@@ -2,15 +2,15 @@
 
 Codebase Mapper gives Claude a current map of your project, so future sessions can find the right files and understand the main flows without starting from zero.
 
-[Setup guide](https://poindexter12.github.io/eigenwise-toolshed/getting-started/codebase-mapper/) · [Generated reference](https://poindexter12.github.io/eigenwise-toolshed/reference/codebase-mapper/) · [Toolshed marketplace](../../README.md)
+[Setup guide](https://poindexter12.github.io/loadout/getting-started/codebase-mapper/) · [Generated reference](https://poindexter12.github.io/loadout/reference/codebase-mapper/) · [Loadout marketplace](../../README.md)
 
 ## Install
 
 Run these in Claude Code:
 
 ```text
-/plugin marketplace add poindexter12/eigenwise-toolshed
-/plugin install codebase-mapper@eigenwise-toolshed --scope project
+/plugin marketplace add poindexter12/loadout
+/plugin install codebase-mapper@loadout --scope project
 ```
 
 Then ask Claude:

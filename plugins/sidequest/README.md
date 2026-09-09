@@ -2,15 +2,15 @@
 
 Sidequest is a local board for planning, tracking, and delivering Claude Code work. It keeps a visible backlog across your projects, groups related tickets into stories, and gives Claude a consistent way to delegate, verify, review, and hand work back.
 
-[Setup guide](https://poindexter12.github.io/eigenwise-toolshed/getting-started/sidequest/) · [Generated reference](https://poindexter12.github.io/eigenwise-toolshed/reference/sidequest/) · [Toolshed marketplace](../../README.md)
+[Setup guide](https://poindexter12.github.io/loadout/getting-started/sidequest/) · [Generated reference](https://poindexter12.github.io/loadout/reference/sidequest/) · [Loadout marketplace](../../README.md)
 
 ## Install
 
 Install Sidequest at project scope:
 
 ```text
-/plugin marketplace add poindexter12/eigenwise-toolshed
-/plugin install sidequest@eigenwise-toolshed --scope project
+/plugin marketplace add poindexter12/loadout
+/plugin install sidequest@loadout --scope project
 ```
 
 Reload Claude Code or start a new session. You can also run `/quartermaster:setup` and let Quartermaster install and configure Sidequest for a project.
@@ -55,7 +55,7 @@ Tell Claude the symptom:
 
 Claude checks the local plugin connection, ticket state, dependencies, configured route, and delivery status, then gives you the next action. After an install or upgrade, start a new Claude Code session or reload plugins so the session picks up the current Sidequest connection and its bundled executors.
 
-For worktree storage, recovery, and command details, see the [generated reference](https://poindexter12.github.io/eigenwise-toolshed/reference/sidequest/). Ask Claude to inspect or clean up local worktrees rather than guessing at lifecycle commands.
+For worktree storage, recovery, and command details, see the [generated reference](https://poindexter12.github.io/loadout/reference/sidequest/). Ask Claude to inspect or clean up local worktrees rather than guessing at lifecycle commands.
 
 ## License
 

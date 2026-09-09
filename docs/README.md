@@ -1,6 +1,6 @@
-# Eigenwise Toolshed docs
+# Loadout docs
 
-This is the [Astro Starlight](https://starlight.astro.build/) documentation site for Eigenwise Toolshed.
+This is the [Astro Starlight](https://starlight.astro.build/) documentation site for Loadout.
 
 ```text
 npm ci

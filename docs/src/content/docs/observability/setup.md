@@ -14,8 +14,8 @@ Observability requires Claude Code 2.1.212 or newer.
 Run these in Claude Code:
 
 ```text
-/plugin marketplace add poindexter12/eigenwise-toolshed
-/plugin install observability@eigenwise-toolshed --scope project
+/plugin marketplace add poindexter12/loadout
+/plugin install observability@loadout --scope project
 ```
 
 Reload plugins or start a new Claude Code session. This example installs Observability at project scope, while one managed observer still runs per machine. When a session ensures Observability, it launches the newest installed plugin version. If an older session runs afterward, it leaves a newer live observer in place rather than replacing it. Plugin install scope does not decide project participation. The machine service choice and each repository opt-in remain separate.
@@ -52,6 +52,6 @@ The Docker probe has a 1500 ms budget. Local SQLite observability continues when
 
 Continue with [per-project opt-in](../project-opt-in/) to see how repository coverage and verification work.
 
-If setup or the dashboard stops working, tell Claude what you see and ask it to diagnose Observability. The bundled skill and the Toolshed doctor handle the checks and repairs.
+If setup or the dashboard stops working, tell Claude what you see and ask it to diagnose Observability. The bundled skill and the Loadout doctor handle the checks and repairs.
 
 See the generated [Observability reference](../../reference/observability/) for the agent-facing setup contract.

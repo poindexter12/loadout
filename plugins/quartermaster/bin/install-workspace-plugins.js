@@ -8,7 +8,7 @@ const path = require('node:path');
 const ALLOWED_SCOPES = new Set(['project', 'local']);
 const KNOWN_MARKETPLACES = new Map([
   ['claude-plugins-official', 'anthropics/claude-plugins-official'],
-  ['eigenwise-toolshed', 'poindexter12/eigenwise-toolshed'],
+  ['loadout', 'poindexter12/loadout'],
   ['cloudflare', 'cloudflare/skills'],
   ['svelte', 'sveltejs/ai-tools'],
   ['claude-community', 'anthropics/claude-plugins-community'],

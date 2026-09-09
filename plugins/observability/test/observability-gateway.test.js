@@ -445,7 +445,7 @@ test('gateway records inherit projects from post-tool hooks after an observer re
     event_name: 'hook.post_tool_use',
     project_id: projectId,
     session_id: 'session-with-project',
-    attributes: { project_name: 'eigenwise-toolshed', tool_name: 'Bash', tool_kind: 'native', is_mcp: false },
+    attributes: { project_name: 'loadout', tool_name: 'Bash', tool_kind: 'native', is_mcp: false },
   });
 
   const gatewayRecord = (id, sessionId) => ({
@@ -469,7 +469,7 @@ test('gateway records inherit projects from post-tool hooks after an observer re
   ).all();
   const byId = Object.fromEntries(rows.map((row) => [row.source_event_id, row]));
   assert.equal(byId['gateway-project-known'].project_id, projectId);
-  assert.equal(JSON.parse(byId['gateway-project-known'].attributes_json).project_name, 'eigenwise-toolshed');
+  assert.equal(JSON.parse(byId['gateway-project-known'].attributes_json).project_name, 'loadout');
   assert.equal(byId['gateway-project-unknown'].project_id, null);
   assert.equal(JSON.parse(byId['gateway-project-unknown'].attributes_json).project_name, undefined);
 });
@@ -487,7 +487,7 @@ test('store warms session projects from stored hook observations', (t) => {
     event_name: 'hook.post_tool_use',
     project_id: projectId,
     session_id: 'session-warm-project',
-    attributes: { project_name: 'eigenwise-toolshed', tool_name: 'Bash', tool_kind: 'native', is_mcp: false },
+    attributes: { project_name: 'loadout', tool_name: 'Bash', tool_kind: 'native', is_mcp: false },
   });
   first.close();
 
@@ -510,5 +510,5 @@ test('store warms session projects from stored hook observations', (t) => {
 
   const gateway = store.database.prepare("SELECT project_id, attributes_json FROM observation WHERE source_event_id = 'gateway-warm-project'").get();
   assert.equal(gateway.project_id, projectId);
-  assert.equal(JSON.parse(gateway.attributes_json).project_name, 'eigenwise-toolshed');
+  assert.equal(JSON.parse(gateway.attributes_json).project_name, 'loadout');
 });

@@ -19,12 +19,12 @@ const {
 const registry = {
   version: 1,
   plugins: {
-    'sidequest@eigenwise-toolshed': [
+    'sidequest@loadout': [
       { scope: 'user', version: '1.0.0', gitCommitSha: 'user-sha' },
       { scope: 'project', projectPath: os.tmpdir(), version: '1.0.0', installPath: 'C:/cache/sidequest', gitCommitSha: 'project-sha' },
       { scope: 'local', projectPath: process.cwd(), version: '1.0.0', installPath: 'C:/cache/sidequest', gitCommitSha: 'local-sha' },
     ],
-    'model-gateway@eigenwise-toolshed': [
+    'model-gateway@loadout': [
       { scope: 'user', installPath: 'C:/cache/model-gateway/0.2.0', lastUpdated: '2026-07-17T12:00:00Z', gitCommitSha: 'gateway-sha' },
     ],
     'other@another-marketplace': [{ scope: 'user', installPath: 'C:/cache/other', gitCommitSha: 'other-sha' }],
@@ -46,24 +46,24 @@ function withRegistry(value, callback) {
 test('enumerates every user, project, and local install across marketplaces', () => {
   const installs = installedPlugins(registry);
   assert.equal(installs.length, 5);
-  assert.deepEqual(marketplacesFor(registry), ['another-marketplace', 'eigenwise-toolshed', 'managed-marketplace']);
+  assert.deepEqual(marketplacesFor(registry), ['another-marketplace', 'loadout', 'managed-marketplace']);
   assert.deepEqual(installs.map((install) => install.id), [
     'other@another-marketplace',
-    'model-gateway@eigenwise-toolshed',
-    'sidequest@eigenwise-toolshed',
-    'sidequest@eigenwise-toolshed',
-    'sidequest@eigenwise-toolshed',
+    'model-gateway@loadout',
+    'sidequest@loadout',
+    'sidequest@loadout',
+    'sidequest@loadout',
   ]);
 });
 
 test('routes project and local updates through the recorded project directory', () => {
-  const project = updateCommand({ id: 'sidequest@eigenwise-toolshed', ...registry.plugins['sidequest@eigenwise-toolshed'][1] }, 'claude');
-  const local = updateCommand({ id: 'sidequest@eigenwise-toolshed', ...registry.plugins['sidequest@eigenwise-toolshed'][2] }, 'claude');
-  const user = updateCommand({ id: 'sidequest@eigenwise-toolshed', scope: 'user' }, 'claude');
+  const project = updateCommand({ id: 'sidequest@loadout', ...registry.plugins['sidequest@loadout'][1] }, 'claude');
+  const local = updateCommand({ id: 'sidequest@loadout', ...registry.plugins['sidequest@loadout'][2] }, 'claude');
+  const user = updateCommand({ id: 'sidequest@loadout', scope: 'user' }, 'claude');
 
-  assert.deepEqual(project.args, ['plugin', 'update', 'sidequest@eigenwise-toolshed', '--scope', 'project']);
-  assert.equal(project.cwd, registry.plugins['sidequest@eigenwise-toolshed'][1].projectPath);
-  assert.equal(local.cwd, registry.plugins['sidequest@eigenwise-toolshed'][2].projectPath);
+  assert.deepEqual(project.args, ['plugin', 'update', 'sidequest@loadout', '--scope', 'project']);
+  assert.equal(project.cwd, registry.plugins['sidequest@loadout'][1].projectPath);
+  assert.equal(local.cwd, registry.plugins['sidequest@loadout'][2].projectPath);
   assert.equal(user.cwd, undefined);
 });
 
@@ -76,7 +76,7 @@ test('uses the stable model-gateway updater for upgrades and the installed comma
   assert.equal(doctor.args.at(-1), 'doctor');
 });
 
-test('dry-run scopes the update plan to Toolshed and does not enumerate third-party plugins', () => withRegistry(registry, (registryFile) => {
+test('dry-run scopes the update plan to Loadout and does not enumerate third-party plugins', () => withRegistry(registry, (registryFile) => {
   const calls = [];
   const lines = [];
   const result = runUpdate({
@@ -91,14 +91,14 @@ test('dry-run scopes the update plan to Toolshed and does not enumerate third-pa
 
   assert.equal(result.ok, true);
   assert.equal(calls.length, 0);
-  assert.match(lines.join('\n'), /marketplace.*update.*eigenwise-toolshed/);
+  assert.match(lines.join('\n'), /marketplace.*update.*loadout/);
   assert.doesNotMatch(lines.join('\n'), /another-marketplace|managed-marketplace|other@another-marketplace/);
   assert.match(lines.join('\n'), /Other marketplaces are managed by Claude Code auto-update — not touched\./);
-  assert.ok(lines.some((line) => line.includes(`sidequest@eigenwise-toolshed (project, ${registry.plugins['sidequest@eigenwise-toolshed'][1].projectPath})`)));
+  assert.ok(lines.some((line) => line.includes(`sidequest@loadout (project, ${registry.plugins['sidequest@loadout'][1].projectPath})`)));
   assert.match(lines.join('\n'), /model-gateway update/);
 }));
 
-test('update and check modes touch only Toolshed installs', () => withRegistry(registry, (registryFile) => {
+test('update and check modes touch only Loadout installs', () => withRegistry(registry, (registryFile) => {
   const updateCalls = [];
   runUpdate({
     registryFile,
@@ -110,7 +110,7 @@ test('update and check modes touch only Toolshed installs', () => withRegistry(r
     report: () => {},
   });
 
-  assert.ok(updateCalls.some((command) => command.args.join(' ') === 'plugin marketplace update eigenwise-toolshed'));
+  assert.ok(updateCalls.some((command) => command.args.join(' ') === 'plugin marketplace update loadout'));
   assert.equal(updateCalls.some((command) => command.args.join(' ').includes('another-marketplace') || command.args.join(' ').includes('other@')), false);
 
   const checkCalls = [];
@@ -133,8 +133,8 @@ test('update and check modes touch only Toolshed installs', () => withRegistry(r
 
 test('legacy codex-gateway installs stop before stale updates, setup, or wiring', () => {
   const legacy = structuredClone(registry);
-  delete legacy.plugins['model-gateway@eigenwise-toolshed'];
-  legacy.plugins['codex-gateway@eigenwise-toolshed'] = [{
+  delete legacy.plugins['model-gateway@loadout'];
+  legacy.plugins['codex-gateway@loadout'] = [{
     scope: 'user',
     version: '0.37.0',
     installPath: 'C:/cache/codex-gateway/0.37.0',
@@ -165,8 +165,8 @@ test('legacy codex-gateway installs stop before stale updates, setup, or wiring'
 
 test('deferred migration installs model-gateway, moves owned state, verifies it, then retires codex-gateway', () => {
   const legacy = structuredClone(registry);
-  delete legacy.plugins['model-gateway@eigenwise-toolshed'];
-  legacy.plugins['codex-gateway@eigenwise-toolshed'] = [{
+  delete legacy.plugins['model-gateway@loadout'];
+  legacy.plugins['codex-gateway@loadout'] = [{
     scope: 'user',
     version: '0.37.0',
     installPath: 'C:/cache/codex-gateway/0.37.0',
@@ -185,9 +185,9 @@ test('deferred migration installs model-gateway, moves owned state, verifies it,
         options: { claude: 'claude', dryRun: false, check: false, confirmSessionsClosed: true },
         run: (command) => {
           calls.push(command);
-          if (command.args.join(' ') === 'plugin install model-gateway@eigenwise-toolshed --scope user') {
+          if (command.args.join(' ') === 'plugin install model-gateway@loadout --scope user') {
             const next = JSON.parse(fs.readFileSync(registryFile, 'utf8'));
-            next.plugins['model-gateway@eigenwise-toolshed'] = [{
+            next.plugins['model-gateway@loadout'] = [{
               scope: 'user',
               installPath: 'C:/cache/model-gateway/0.39.0',
               lastUpdated: '2026-07-29T00:00:00Z',
@@ -205,7 +205,7 @@ test('deferred migration installs model-gateway, moves owned state, verifies it,
       assert.deepEqual(calls.map((command) => command.args.at(-1)), [
         'user', 'setup', 'ensure', 'doctor', '--reconcile', '--reconcile', '--reconcile', 'user',
       ]);
-      assert.equal(calls.at(-1).args.join(' '), 'plugin uninstall codex-gateway@eigenwise-toolshed --scope user');
+      assert.equal(calls.at(-1).args.join(' '), 'plugin uninstall codex-gateway@loadout --scope user');
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
@@ -258,7 +258,7 @@ test('documents that the stable updater preserves recorded gateway wiring scope'
 test('skips stale project installs without blocking gateway wiring', () => {
   const stalePath = path.join(os.tmpdir(), `toolshed-stale-project-${process.pid}-${Date.now()}`);
   const configured = structuredClone(registry);
-  configured.plugins['sidequest@eigenwise-toolshed'].push({
+  configured.plugins['sidequest@loadout'].push({
     scope: 'local',
     projectPath: stalePath,
     version: '1.0.0',
@@ -291,7 +291,7 @@ test('skips stale project installs without blocking gateway wiring', () => {
       assert.match(lines.join('\n'), /The plugin registry was left unchanged/);
       assert.doesNotMatch(lines.join('\n'), /Completed with \d+ failure/);
       const saved = JSON.parse(fs.readFileSync(registryFile, 'utf8'));
-      assert.ok(saved.plugins['sidequest@eigenwise-toolshed'].some((install) => install.projectPath === stalePath));
+      assert.ok(saved.plugins['sidequest@loadout'].some((install) => install.projectPath === stalePath));
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
@@ -306,7 +306,7 @@ test('GCs only missing Sidequest agent worktree registry entries and preserves a
   fs.mkdirSync(liveAgentWorktree, { recursive: true });
 
   const configured = structuredClone(registry);
-  configured.plugins['sidequest@eigenwise-toolshed'].push(
+  configured.plugins['sidequest@loadout'].push(
     { scope: 'local', projectPath: missingAgentWorktree, version: '1.0.0' },
     { scope: 'local', projectPath: liveAgentWorktree, version: '1.0.0' },
     { scope: 'project', projectPath: missingProject, version: '1.0.0' },
@@ -324,7 +324,7 @@ test('GCs only missing Sidequest agent worktree registry entries and preserves a
       });
 
       const saved = JSON.parse(fs.readFileSync(registryFile, 'utf8'));
-      const paths = saved.plugins['sidequest@eigenwise-toolshed'].map((install) => install.projectPath);
+      const paths = saved.plugins['sidequest@loadout'].map((install) => install.projectPath);
       assert.equal(result.registryGc.cleaned, true);
       assert.equal(result.registryGc.entries.length, 1);
       assert.equal(paths.includes(missingAgentWorktree), false);
@@ -345,7 +345,7 @@ test('check mode reports stale Sidequest agent worktree entries without changing
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'toolshed-agent-worktree-check-'));
   const missingAgentWorktree = path.join(root, '.claude', 'worktrees', 'agent-gone');
   const configured = structuredClone(registry);
-  configured.plugins['sidequest@eigenwise-toolshed'].push({ scope: 'local', projectPath: missingAgentWorktree, version: '1.0.0' });
+  configured.plugins['sidequest@loadout'].push({ scope: 'local', projectPath: missingAgentWorktree, version: '1.0.0' });
 
   try {
     withRegistry(configured, (registryFile) => {
@@ -416,10 +416,10 @@ test('heals stale managed status-line shim pins after updating', () => {
     fs.mkdirSync(path.dirname(registryFile), { recursive: true });
     const observabilityRoot = path.resolve(__dirname, '..', '..', 'observability');
     const configuredRegistry = structuredClone(registry);
-    configuredRegistry.plugins['observability@eigenwise-toolshed'] = [{ scope: 'user', version: '0.30.0', installPath: observabilityRoot }];
+    configuredRegistry.plugins['observability@loadout'] = [{ scope: 'user', version: '0.30.0', installPath: observabilityRoot }];
     fs.writeFileSync(registryFile, JSON.stringify(configuredRegistry));
     fs.writeFileSync(settingsFile, JSON.stringify({
-      statusLine: { type: 'command', command: 'node "C:/Users/example/.claude/plugins/cache/eigenwise-toolshed/workbench/0.20.0/bin/workbench-statusline.js"' },
+      statusLine: { type: 'command', command: 'node "C:/Users/example/.claude/plugins/cache/loadout/workbench/0.20.0/bin/workbench-statusline.js"' },
     }));
 
     const result = runUpdate({
@@ -450,23 +450,23 @@ test('continues after failures and returns every failed operation', () => withRe
 
   assert.equal(failed.ok, false);
   assert.equal(failed.failures.length, 6);
-  assert.match(failed.failures.join('\n'), /eigenwise-toolshed marketplace/);
+  assert.match(failed.failures.join('\n'), /loadout marketplace/);
   assert.doesNotMatch(failed.failures.join('\n'), /another-marketplace|other@another-marketplace/);
   assert.match(failed.failures.join('\n'), /model-gateway update/);
 }));
 
 test('reports version transitions and gateway interruption before setup', () => withRegistry(registry, (registryFile) => {
   const configured = structuredClone(registry);
-  configured.plugins['model-gateway@eigenwise-toolshed'][0].version = '0.2.0';
+  configured.plugins['model-gateway@loadout'][0].version = '0.2.0';
   fs.writeFileSync(registryFile, JSON.stringify(configured));
   const lines = [];
   runUpdate({
     registryFile,
     options: { claude: 'claude', dryRun: false, check: false },
     run: (command) => {
-      if (command.args.join(' ') === 'plugin update model-gateway@eigenwise-toolshed --scope user') {
+      if (command.args.join(' ') === 'plugin update model-gateway@loadout --scope user') {
         const next = JSON.parse(fs.readFileSync(registryFile, 'utf8'));
-        next.plugins['model-gateway@eigenwise-toolshed'][0].version = '0.3.0';
+        next.plugins['model-gateway@loadout'][0].version = '0.3.0';
         fs.writeFileSync(registryFile, JSON.stringify(next));
       }
       return { ok: true };
@@ -474,7 +474,7 @@ test('reports version transitions and gateway interruption before setup', () => 
     report: (line) => lines.push(line),
   });
 
-  assert.match(lines.join('\n'), /model-gateway@eigenwise-toolshed 0\.2\.0 -> 0\.3\.0/);
+  assert.match(lines.join('\n'), /model-gateway@loadout 0\.2\.0 -> 0\.3\.0/);
   assert.match(lines.join('\n'), /stable updater swaps the proxy by rename/);
   assert.match(lines.join('\n'), /cannot reliably list commit subjects/);
 }));
@@ -502,7 +502,7 @@ test('skips statusline healing when the observability plugin is not installed', 
     const settingsFile = path.join(home, '.claude', 'settings.json');
     fs.mkdirSync(path.dirname(registryFile), { recursive: true });
     fs.writeFileSync(registryFile, JSON.stringify(registry));
-    const stale = 'node "C:/Users/example/.claude/plugins/cache/eigenwise-toolshed/workbench/0.20.0/bin/workbench-statusline.js"';
+    const stale = 'node "C:/Users/example/.claude/plugins/cache/loadout/workbench/0.20.0/bin/workbench-statusline.js"';
     fs.writeFileSync(settingsFile, JSON.stringify({ statusLine: { type: 'command', command: stale } }));
 
     const result = runUpdate({

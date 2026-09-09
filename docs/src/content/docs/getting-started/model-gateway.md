@@ -10,8 +10,8 @@ Model Gateway adds subscription-backed GPT and Grok models to Claude Code. Claud
 Run these in Claude Code:
 
 ```text
-/plugin marketplace add poindexter12/eigenwise-toolshed
-/plugin install model-gateway@eigenwise-toolshed --scope project
+/plugin marketplace add poindexter12/loadout
+/plugin install model-gateway@loadout --scope project
 ```
 
 Reload the plugin, then start the Model Gateway skill:

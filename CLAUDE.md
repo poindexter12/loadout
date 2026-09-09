@@ -1,4 +1,4 @@
-# Eigenwise Toolshed — project rules
+# Loadout — project rules
 
 ## Documentation stays current, and an agent owns that
 

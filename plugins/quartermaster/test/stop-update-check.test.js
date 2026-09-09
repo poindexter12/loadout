@@ -27,7 +27,7 @@ function writeRegistry(home, version = '1.0.0') {
   const registryFile = path.join(home, '.claude', 'plugins', 'installed_plugins.json');
   fs.mkdirSync(path.dirname(registryFile), { recursive: true });
   fs.writeFileSync(registryFile, JSON.stringify({ plugins: {
-    'quartermaster@eigenwise-toolshed': [{ scope: 'user', version }],
+    'quartermaster@loadout': [{ scope: 'user', version }],
   } }));
 }
 
@@ -39,7 +39,7 @@ function writeLoadedQuartermaster(home, version) {
 }
 
 function writeCache(home, cache) {
-  const destination = path.join(home, '.claude', 'eigenwise-toolshed', 'marketplace-freshness.json');
+  const destination = path.join(home, '.claude', 'loadout', 'marketplace-freshness.json');
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   fs.writeFileSync(destination, JSON.stringify(cache));
 }
@@ -148,17 +148,17 @@ test('reports newer installed Quartermaster versions once without blocking', asy
   assert.equal(await decide(input('loaded-version-current'), sharedOptions), '');
 });
 
-test('reports newer installed versions reported by other Toolshed plugins', async (testContext) => {
+test('reports newer installed versions reported by other Loadout plugins', async (testContext) => {
   const home = tempDirectory();
   testContext.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const registryFile = path.join(home, '.claude', 'plugins', 'installed_plugins.json');
   fs.mkdirSync(path.dirname(registryFile), { recursive: true });
   fs.writeFileSync(registryFile, JSON.stringify({ plugins: {
-    'sidequest@eigenwise-toolshed': [{ scope: 'user', version: '2.0.0' }],
+    'sidequest@loadout': [{ scope: 'user', version: '2.0.0' }],
   } }));
   const sessionInput = input('reported-reload-version-change');
   const loadedVersionStateDirectory = path.join(home, 'loaded-plugin-versions');
-  reportLoadedPluginVersion(sessionInput, 'sidequest@eigenwise-toolshed', '1.0.0', { directory: loadedVersionStateDirectory });
+  reportLoadedPluginVersion(sessionInput, 'sidequest@loadout', '1.0.0', { directory: loadedVersionStateDirectory });
   const sharedOptions = options(home, {
     cache: { checkedAt: new Date(NOW).toISOString(), manifest: { plugins: [{ name: 'sidequest', version: '2.0.0' }] } },
     loadedVersionStateDirectory,
@@ -169,7 +169,7 @@ test('reports newer installed versions reported by other Toolshed plugins', asyn
   assert.equal(await decide(sessionInput, sharedOptions), '');
 
   fs.writeFileSync(registryFile, JSON.stringify({ plugins: {
-    'sidequest@eigenwise-toolshed': [{ scope: 'user', version: '3.0.0' }],
+    'sidequest@loadout': [{ scope: 'user', version: '3.0.0' }],
   } }));
   const newer = JSON.parse(await decide(sessionInput, sharedOptions));
   assert.match(newer.systemMessage, /sidequest: loaded 1\.0\.0, installed 3\.0\.0/);

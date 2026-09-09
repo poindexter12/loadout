@@ -141,7 +141,7 @@ function statuslineCommand(home = os.homedir()) {
 
 function managedStatuslineCommand(command, home = os.homedir()) {
   return String(command || '') === statuslineCommand(home)
-    || /[\\/]plugins[\\/]cache[\\/]eigenwise-toolshed[\\/](?:observability[\\/][^\\/]+[\\/]bin[\\/]statusline|workbench[\\/][^\\/]+[\\/]bin[\\/]workbench-statusline)\.js/i.test(String(command || ''));
+    || /[\\/]plugins[\\/]cache[\\/]loadout[\\/](?:observability[\\/][^\\/]+[\\/]bin[\\/]statusline|workbench[\\/][^\\/]+[\\/]bin[\\/]workbench-statusline)\.js/i.test(String(command || ''));
 }
 
 function statuslineShim() {
@@ -168,8 +168,8 @@ function resolveStatusline() {
   // The workbench entry is the pre-split fallback: a user mid-upgrade may still
   // have only that install, and a dead statusline is a silent failure.
   const sources = [
-    ['observability@eigenwise-toolshed', 'statusline.js'],
-    ['workbench@eigenwise-toolshed', 'workbench-statusline.js'],
+    ['observability@loadout', 'statusline.js'],
+    ['workbench@loadout', 'workbench-statusline.js'],
   ];
   for (const [plugin, binName] of sources) {
     const candidates = (registry.plugins?.[plugin] || [])

@@ -10,8 +10,8 @@ Sidequest gives Claude Code a local board for planned work. It groups tickets in
 Install Sidequest for the project you are working in:
 
 ```text
-/plugin marketplace add poindexter12/eigenwise-toolshed
-/plugin install sidequest@eigenwise-toolshed --scope project
+/plugin marketplace add poindexter12/loadout
+/plugin install sidequest@loadout --scope project
 ```
 
 Reload Claude Code or start a new session after installing. Sidequest packages its executor roster with the plugin, so Claude discovers every routed executor when it loads the plugin, before SessionStart maintenance. You can also run `/quartermaster:setup` and let Quartermaster install and configure Sidequest for the project.
@@ -144,4 +144,4 @@ Sidequest keeps ticket activity visible in the board. Ask Claude to check active
 
 **A submission sat so long it can no longer be integrated.** Ask Claude to check whether the requested behavior already reached the intended branch. If it did, Claude records that evidence; if it did not, the work needs a fresh ticket against current source.
 
-See the [generated Sidequest reference](../../reference/sidequest/) for agent-facing tool and configuration details, or the [Sidequest plugin README](https://github.com/poindexter12/eigenwise-toolshed/tree/main/plugins/sidequest) for the project landing page.
+See the [generated Sidequest reference](../../reference/sidequest/) for agent-facing tool and configuration details, or the [Sidequest plugin README](https://github.com/poindexter12/loadout/tree/main/plugins/sidequest) for the project landing page.

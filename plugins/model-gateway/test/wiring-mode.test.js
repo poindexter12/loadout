@@ -442,7 +442,7 @@ test('SessionStart leaves a recorded project\'s unwired committed settings byte-
   wireProject(project);
   writeJson(projectRegistry(home), { projects: [project] });
   const original = JSON.stringify({
-    enabledPlugins: { 'model-gateway@eigenwise-toolshed': true },
+    enabledPlugins: { 'model-gateway@loadout': true },
     env: { ENABLE_TOOL_SEARCH: 'true' },
   }, null, 2) + '\n';
   fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
@@ -458,7 +458,7 @@ test('SessionStart migrates a gateway-owned committed settings file', (t) => {
   const { home, project } = fixture(t);
   const legacyFile = path.join(project, '.claude', 'settings.json');
   writeJson(legacyFile, {
-    enabledPlugins: { 'model-gateway@eigenwise-toolshed': true },
+    enabledPlugins: { 'model-gateway@loadout': true },
     env: {
       ANTHROPIC_BASE_URL: DEFAULT_BASE_URL,
       CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1',
@@ -471,7 +471,7 @@ test('SessionStart migrates a gateway-owned committed settings file', (t) => {
 
   assert.equal(runHook(home, project).code, 0);
   assert.deepEqual(JSON.parse(fs.readFileSync(legacyFile, 'utf8')), {
-    enabledPlugins: { 'model-gateway@eigenwise-toolshed': true },
+    enabledPlugins: { 'model-gateway@loadout': true },
   });
 });
 

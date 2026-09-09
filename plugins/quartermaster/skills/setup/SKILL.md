@@ -2,11 +2,11 @@
 name: setup
 description: >-
   Set up a Claude Code workspace for a new or existing project, informed by hindsight from the
-  user's whole session history. Installs and wires whichever Toolshed pieces the project actually
+  user's whole session history. Installs and wires whichever Loadout pieces the project actually
   wants (codebase-mapper, live-rules, sidequest's routing and executors, observability,
   model-gateway are each independent and opt-in) plus stack plugins, seeds rules and permissions
   from what the history shows the user actually needs. Use for workspace setup, .claude
-  configuration, project bootstrap, or Toolshed installation.
+  configuration, project bootstrap, or Loadout installation.
 ---
 
 # Quartermaster setup
@@ -65,7 +65,7 @@ matters.
 
 One visible plan, then per-item approval. Draw from three sources, in this order:
 
-- **Toolshed core**, from the eigenwise-toolshed marketplace. Every piece is independent and
+- **Loadout core**, from the loadout marketplace. Every piece is independent and
   opt-in: they compose, but none of them requires another, and a project that wants one of them
   is not signing up for the rest. You will have to explain each one you propose, so lead with
   what it does for this user before the reason it fits, and ground that reason in the project
@@ -167,7 +167,7 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/quartermaster.js" decisions add --project "${CLA
 
 Close with what they got, a short next-actions list using only what was installed and verified,
 a reminder to commit `.claude/`, and a pointer to
-https://poindexter12.github.io/eigenwise-toolshed/getting-started/ naming the page for each plugin
+https://poindexter12.github.io/loadout/getting-started/ naming the page for each plugin
 just installed. `/quartermaster:resupply` picks it up from here: once real sessions exist, it asks
 what would make the user's current work easier and whether this setup is earning its place.
 

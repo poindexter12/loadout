@@ -8,7 +8,7 @@ import { checkSidequestInstall, installRefusalMessage } from '../src/lib/dispatc
 import { writeInstalledPluginsAtomically } from '../src/lib/installed-plugins.js';
 
 const pluginRegistryModulePath = path.join(__dirname, '..', 'src', 'lib', 'installed-plugins.ts');
-const pluginId = 'sidequest@eigenwise-toolshed';
+const pluginId = 'sidequest@loadout';
 
 function writeRegistry(registryPath: string, installPath: string): void {
   writeInstalledPluginsAtomically(registryPath, JSON.stringify({
@@ -47,7 +47,7 @@ function runRegistryWriter(registryPath: string, installPath: string, injectWind
     for (let index = 0; index < 80; index += 1) {
       writeInstalledPluginsAtomically(registryPath, JSON.stringify({
         plugins: {
-          'sidequest@eigenwise-toolshed': [{ scope: 'user', installPath, version: String(index) }],
+          'sidequest@loadout': [{ scope: 'user', installPath, version: String(index) }],
         },
         padding: 'x'.repeat(131072),
       }));

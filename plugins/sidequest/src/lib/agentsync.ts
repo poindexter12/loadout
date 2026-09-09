@@ -1066,7 +1066,7 @@ function currentSidequestCli() {
   const claudeHome = process.env.SIDEQUEST_CLAUDE_HOME || path.join(os.homedir(), '.claude');
   const registryPath = path.join(claudeHome, 'plugins', 'installed_plugins.json');
   const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
-  const installs = registry.plugins?.['sidequest@eigenwise-toolshed'] || [];
+  const installs = registry.plugins?.['sidequest@loadout'] || [];
   const candidates = installs
     .filter((install) => install?.installPath)
     .map((install) => ({ ...install, script: path.join(install.installPath, 'bin', 'sidequest.js') }))

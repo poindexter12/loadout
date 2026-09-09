@@ -266,7 +266,7 @@ function installScope() {
   try {
     const file = path.join(CLAUDE_CONFIG_DIR, 'plugins', 'installed_plugins.json');
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const entries = (data.plugins && data.plugins['model-gateway@eigenwise-toolshed']) || [];
+    const entries = (data.plugins && data.plugins['model-gateway@loadout']) || [];
     if (!entries.length) return 'unknown';
     return entries.some((e) => e.scope === 'user') ? 'user' : 'project-only';
   } catch { return 'unknown'; }

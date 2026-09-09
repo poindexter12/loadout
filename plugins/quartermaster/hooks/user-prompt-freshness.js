@@ -15,7 +15,7 @@ const {
 } = require('./freshness-helpers.js');
 const { cacheIsCurrent, readCache } = require('./marketplace-freshness-cache.js');
 
-const MARKETPLACE = 'eigenwise-toolshed';
+const MARKETPLACE = 'loadout';
 const warnedStates = new Set();
 
 function isMaintenancePrompt(prompt) {
@@ -26,8 +26,8 @@ function isMaintenancePrompt(prompt) {
   if (/^\/plugin$/i.test(value)) return true;
   if (/^\/plugin\s+(?:install|update|enable|disable|remove|uninstall)(?:\s+[^\s]+){0,4}$/i.test(value)) return true;
   if (/^\/plugin\s+marketplace\s+(?:add|update|remove)(?:\s+[^\s]+){0,3}$/i.test(value)) return true;
-  if (/^claude\s+plugin\s+marketplace\s+update\s+eigenwise-toolshed$/i.test(value)) return true;
-  return /^claude\s+plugin\s+update\s+[\w.-]+@eigenwise-toolshed(?:\s+--scope\s+(?:user|project|local))?$/i.test(value);
+  if (/^claude\s+plugin\s+marketplace\s+update\s+loadout$/i.test(value)) return true;
+  return /^claude\s+plugin\s+update\s+[\w.-]+@loadout(?:\s+--scope\s+(?:user|project|local))?$/i.test(value);
 }
 
 function newerInstalledVersion(instances, loadedVersion) {
@@ -64,7 +64,7 @@ function reportedReloads(instances, input, options) {
 }
 
 function reportedReloadWarning(updates) {
-  return `Toolshed plugins need reload: ${updates.map((update) => `${update.name}: loaded ${update.loadedVersion}, installed ${update.installedVersion}`).join('; ')}. This prompt is proceeding. Reload with /reload-plugins or restart Claude Code before relying on the updated plugin code.`;
+  return `Loadout plugins need reload: ${updates.map((update) => `${update.name}: loaded ${update.loadedVersion}, installed ${update.installedVersion}`).join('; ')}. This prompt is proceeding. Reload with /reload-plugins or restart Claude Code before relying on the updated plugin code.`;
 }
 
 function warningKey(input, kind, versionSet = '') {
@@ -83,7 +83,7 @@ function warnOnce(input, kind, options = {}, versionSet = '') {
   const warned = options.warnedStates || warnedStates;
   if (warned.has(key)) return false;
   warned.add(key);
-  const stateFile = warningStateFile(input, kind, options.warningStateDirectory || path.join(os.tmpdir(), 'eigenwise-toolshed', 'freshness-warnings'), versionSet);
+  const stateFile = warningStateFile(input, kind, options.warningStateDirectory || path.join(os.tmpdir(), 'loadout', 'freshness-warnings'), versionSet);
   if (!stateFile) return true;
   try {
     (options.fileSystem || fs).mkdirSync(path.dirname(stateFile), { recursive: true });
@@ -123,10 +123,10 @@ function installedVersionsKey(updates) {
 
 function remoteWarning(instances, cache, now) {
   if (!instances.length) return '';
-  if (!cacheIsCurrent(cache, now) || !cache?.manifest) return 'Toolshed release freshness could not be determined. This prompt is proceeding. Run /update-toolshed to refresh the marketplace.';
+  if (!cacheIsCurrent(cache, now) || !cache?.manifest) return 'Loadout release freshness could not be determined. This prompt is proceeding. Run /update-toolshed to refresh the marketplace.';
   const updates = remoteUpdates(instances, cache.manifest);
   if (!updates.length) return '';
-  return `Toolshed updates available: ${updates.map((update) => `${update.name} ${update.installed} → ${update.available}`).join(', ')}. Run /update-toolshed to install them; /reload-plugins cannot fetch new versions.`;
+  return `Loadout updates available: ${updates.map((update) => `${update.name} ${update.installed} → ${update.available}`).join(', ')}. Run /update-toolshed to install them; /reload-plugins cannot fetch new versions.`;
 }
 
 function decide(input, options = {}) {

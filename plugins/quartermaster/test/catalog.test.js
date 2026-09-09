@@ -19,7 +19,7 @@ beforeEach(() => {
   fs.writeFileSync(path.join(pluginsDir, 'installed_plugins.json'), JSON.stringify({
     version: 2,
     plugins: {
-      'live-rules@eigenwise-toolshed': [{ scope: 'user' }],
+      'live-rules@loadout': [{ scope: 'user' }],
       'context7@claude-plugins-official': [{ scope: 'user' }],
     },
   }));
@@ -57,7 +57,7 @@ beforeEach(() => {
 test('readInstalled splits id into name and marketplace', () => {
   const installed = readInstalled(environment);
   const liveRules = installed.find((plugin) => plugin.name === 'live-rules');
-  assert.equal(liveRules.marketplace, 'eigenwise-toolshed');
+  assert.equal(liveRules.marketplace, 'loadout');
   assert.deepEqual(liveRules.scopes, ['user']);
 });
 

@@ -25,7 +25,7 @@ function writePluginVersion(pluginRoot: string, version: string): void {
 function writeRegistry(claudeHome: string, installs: unknown[]): void {
   const registryPath = path.join(claudeHome, 'plugins', 'installed_plugins.json');
   fs.mkdirSync(path.dirname(registryPath), { recursive: true });
-  fs.writeFileSync(registryPath, JSON.stringify({ plugins: { 'sidequest@eigenwise-toolshed': installs } }));
+  fs.writeFileSync(registryPath, JSON.stringify({ plugins: { 'sidequest@loadout': installs } }));
 }
 
 test('uses the Sidequest install registered for this project', () => {

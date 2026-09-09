@@ -6,8 +6,8 @@
     "name": "Eigenwise",
     "email": "kenny@eigenwise.io"
   },
-  "homepage": "https://github.com/poindexter12/eigenwise-toolshed/tree/main/plugins/model-gateway",
-  "repository": "https://github.com/poindexter12/eigenwise-toolshed",
+  "homepage": "https://github.com/poindexter12/loadout/tree/main/plugins/model-gateway",
+  "repository": "https://github.com/poindexter12/loadout",
   "license": "MIT",
   "suiteTimeout": 300000,
   "keywords": [

@@ -152,7 +152,7 @@ function seedGatewayHome(t: { after(fn: () => void): void }, stored: unknown, re
   });
   fs.mkdirSync(path.join(home, '.claude', 'plugins'), { recursive: true });
   fs.writeFileSync(path.join(home, '.claude', 'plugins', 'installed_plugins.json'), JSON.stringify({
-    plugins: { 'model-gateway@eigenwise-toolshed': installs },
+    plugins: { 'model-gateway@loadout': installs },
   }));
   fs.mkdirSync(path.dirname(catalogPath), { recursive: true });
   fs.writeFileSync(catalogPath, JSON.stringify(stored));

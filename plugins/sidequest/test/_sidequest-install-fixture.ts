@@ -72,9 +72,9 @@ export function stubSidequestInstall(): void {
     if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
   }
   if (!registry.plugins || typeof registry.plugins !== 'object') registry.plugins = {};
-  const existing = Array.isArray(registry.plugins['sidequest@eigenwise-toolshed']) ? registry.plugins['sidequest@eigenwise-toolshed'] : [];
+  const existing = Array.isArray(registry.plugins['sidequest@loadout']) ? registry.plugins['sidequest@loadout'] : [];
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '.claude-plugin', 'plugin.json'), 'utf8')) as { version: string };
-  registry.plugins['sidequest@eigenwise-toolshed'] = [
+  registry.plugins['sidequest@loadout'] = [
     ...existing.filter((entry: unknown) => !(entry && typeof entry === 'object' && 'installPath' in entry && entry.installPath === installPath)),
     { scope: 'user', installPath, version: manifest.version },
   ];

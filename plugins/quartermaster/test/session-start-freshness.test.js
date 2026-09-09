@@ -37,16 +37,16 @@ function fixture(overrides = {}) {
     now,
     registry: {
       plugins: {
-        'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:/work/one', version: '1.0.0' }],
+        'sidequest@loadout': [{ scope: 'project', projectPath: 'C:/work/one', version: '1.0.0' }],
         'plugin@other-marketplace': [{ scope: 'user', version: '1.0.0' }],
       },
     },
     marketplaces: {
-      'eigenwise-toolshed': { autoUpdate: true, lastUpdated: new Date(now).toISOString() },
+      'loadout': { autoUpdate: true, lastUpdated: new Date(now).toISOString() },
       'other-marketplace': { autoUpdate: true, lastUpdated: new Date(now).toISOString() },
     },
     manifestFor: (name) => ({
-      plugins: name === 'eigenwise-toolshed'
+      plugins: name === 'loadout'
         ? [{ name: 'sidequest', version: '1.0.0' }]
         : [{ name: 'plugin', version: '1.0.0' }],
     }),
@@ -81,7 +81,7 @@ test('maps a Sidequest board through an existing project alias', (t) => {
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
   const result = audit(fixture({
-    registry: { plugins: { 'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath: project, version: '1.0.0' }] } },
+    registry: { plugins: { 'sidequest@loadout': [{ scope: 'project', projectPath: project, version: '1.0.0' }] } },
     boards: [{ name: 'Alias', path: alias }],
   }));
 
@@ -125,50 +125,50 @@ test('reports freshness problems for the current project', () => {
   const result = audit(fixture({
     currentProject: 'C:/work/one',
     manifestFor: (name) => ({
-      plugins: name === 'eigenwise-toolshed'
+      plugins: name === 'loadout'
         ? [{ name: 'sidequest', version: '1.1.0' }]
         : [{ name: 'plugin', version: '1.0.0' }],
     }),
   }));
 
-  assert.deepEqual(result.projectProblems, [finding('sidequest@eigenwise-toolshed 1.0.0 is behind cached 1.1.0')]);
+  assert.deepEqual(result.projectProblems, [finding('sidequest@loadout 1.0.0 is behind cached 1.1.0')]);
 });
-test('reports Toolshed freshness while ignoring foreign installs', () => {
+test('reports Loadout freshness while ignoring foreign installs', () => {
   const input = fixture({
     registry: {
       plugins: {
-        'sidequest@eigenwise-toolshed': [{ scope: 'user', version: '1.0.0' }],
+        'sidequest@loadout': [{ scope: 'user', version: '1.0.0' }],
         'missing@other-marketplace': [{ scope: 'user', version: '1.0.0' }],
       },
     },
     manifestFor: (name) => ({
-      plugins: name === 'eigenwise-toolshed'
+      plugins: name === 'loadout'
         ? [{ name: 'sidequest', version: '1.1.0' }]
         : [{ name: 'different', version: '1.0.0' }],
     }),
   });
 
   const result = audit(input);
-  assert.match(findingText(result.problems).join('\n'), /sidequest@eigenwise-toolshed 1.0.0 is behind cached 1.1.0/);
+  assert.match(findingText(result.problems).join('\n'), /sidequest@loadout 1.0.0 is behind cached 1.1.0/);
   assert.doesNotMatch(findingText(result.problems).join('\n'), /other-marketplace/);
 });
 
-test('ignores stale foreign marketplaces while reporting stale Toolshed freshness', () => {
+test('ignores stale foreign marketplaces while reporting stale Loadout freshness', () => {
   const result = audit(fixture({
     registry: {
       plugins: {
-        'sidequest@eigenwise-toolshed': [{ scope: 'user', version: '1.0.0' }],
+        'sidequest@loadout': [{ scope: 'user', version: '1.0.0' }],
         'foo@contractify': [{ scope: 'user', version: '1.0.0' }],
       },
     },
     marketplaces: {
-      'eigenwise-toolshed': { autoUpdate: true, lastUpdated: new Date(now - CACHE_MAX_AGE_MS - 1).toISOString() },
+      'loadout': { autoUpdate: true, lastUpdated: new Date(now - CACHE_MAX_AGE_MS - 1).toISOString() },
       contractify: { autoUpdate: false, lastUpdated: new Date(now - CACHE_MAX_AGE_MS - 1).toISOString() },
     },
   }));
 
   const problems = findingText(result.problems).join('\n');
-  assert.match(problems, /eigenwise-toolshed marketplace cache is stale, installed freshness is unknown/);
+  assert.match(problems, /loadout marketplace cache is stale, installed freshness is unknown/);
   assert.doesNotMatch(problems, /contractify/);
 });
 
@@ -202,11 +202,11 @@ test('does not call an unrelated cached git history stale', () => {
   assert.equal(freshness, 'unknown');
 });
 
-test('does not flag rolling Toolshed plugins that match their cached source', () => {
+test('does not flag rolling Loadout plugins that match their cached source', () => {
   const result = audit(fixture({
     registry: {
       plugins: {
-        'rolling@eigenwise-toolshed': [{ scope: 'user', gitCommitSha: 'installed-sha' }],
+        'rolling@loadout': [{ scope: 'user', gitCommitSha: 'installed-sha' }],
       },
     },
     manifestFor: () => ({ plugins: [{ name: 'rolling', source: './plugins/rolling' }] }),
@@ -220,34 +220,34 @@ test('reports rolling plugin freshness as unknown when local git cannot prove it
   const result = audit(fixture({
     registry: {
       plugins: {
-        'rolling@eigenwise-toolshed': [{ scope: 'user', gitCommitSha: 'installed-sha' }],
+        'rolling@loadout': [{ scope: 'user', gitCommitSha: 'installed-sha' }],
       },
     },
     manifestFor: () => ({ plugins: [{ name: 'rolling', source: './plugins/rolling' }] }),
     gitFreshness: () => 'unknown',
   }));
 
-  assert.match(findingText(result.problems).join('\n'), /rolling@eigenwise-toolshed freshness is unknown/);
+  assert.match(findingText(result.problems).join('\n'), /rolling@loadout freshness is unknown/);
 });
 
 test('reports stale marketplace caches without claiming remote freshness', () => {
   const result = audit(fixture({
     marketplaces: {
-      'eigenwise-toolshed': { autoUpdate: true, lastUpdated: new Date(now - CACHE_MAX_AGE_MS - 1).toISOString() },
+      'loadout': { autoUpdate: true, lastUpdated: new Date(now - CACHE_MAX_AGE_MS - 1).toISOString() },
       'other-marketplace': { autoUpdate: true, lastUpdated: new Date(now).toISOString() },
     },
-    manifestFor: (name) => ({ plugins: [{ name: name === 'eigenwise-toolshed' ? 'sidequest' : 'plugin', version: '9.0.0' }] }),
+    manifestFor: (name) => ({ plugins: [{ name: name === 'loadout' ? 'sidequest' : 'plugin', version: '9.0.0' }] }),
   }));
 
-  assert.match(findingText(result.problems).join('\n'), /eigenwise-toolshed marketplace cache is stale, installed freshness is unknown/);
-  assert.doesNotMatch(findingText(result.problems).join('\n'), /sidequest@eigenwise-toolshed.*behind/);
+  assert.match(findingText(result.problems).join('\n'), /loadout marketplace cache is stale, installed freshness is unknown/);
+  assert.doesNotMatch(findingText(result.problems).join('\n'), /sidequest@loadout.*behind/);
 });
 
 test('flags a codex proxy version below its bundled floor', () => {
   const result = audit(fixture({
     registry: {
       plugins: {
-        'model-gateway@eigenwise-toolshed': [{ scope: 'user', version: '1.0.0', installPath: 'C:/gateway' }],
+        'model-gateway@loadout': [{ scope: 'user', version: '1.0.0', installPath: 'C:/gateway' }],
       },
     },
     manifestFor: () => ({ plugins: [{ name: 'model-gateway', version: '1.0.0' }] }),
@@ -275,7 +275,7 @@ test('collapses multiple problems into one actionable warning', () => {
     'one', 'two', 'three', 'four', 'five', 'six',
   ].map((text) => finding(text)), createDebouncer(new Set()));
 
-  assert.match(message, /^Toolshed local health: /);
+  assert.match(message, /^Loadout local health: /);
   assert.match(message, /\+1 more/);
   assert.match(message, /Run \/update-toolshed/);
   assert.equal(message.split('\n').length, 1);
@@ -313,7 +313,7 @@ function hookOutput({ registry, manifest, loadedVersion, marketplaces = {}, inpu
     fs.mkdirSync(path.join(pluginRoot, '.claude-plugin'), { recursive: true });
     fs.writeFileSync(path.join(home, '.claude', 'plugins', 'installed_plugins.json'), registry);
     fs.writeFileSync(path.join(home, '.claude', 'plugins', 'known_marketplaces.json'), JSON.stringify({
-      'eigenwise-toolshed': {
+      'loadout': {
         autoUpdate: true,
         lastUpdated: new Date().toISOString(),
         installLocation: cache,
@@ -346,20 +346,20 @@ function hookFixture(plugins, versions) {
 test('writes a reload notice to SessionStart hook stdout for the current project', () => {
   const output = hookOutput({
     ...hookFixture({
-      'quartermaster@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:/work/current', version: '0.49.0' }],
+      'quartermaster@loadout': [{ scope: 'project', projectPath: 'C:/work/current', version: '0.49.0' }],
     }, { quartermaster: '0.49.0' }),
     loadedVersion: '0.48.0',
     input: { cwd: 'C:/work/current' },
   });
 
-  assert.equal(output.systemMessage, 'Toolshed: quartermaster 0.48.0 loaded, 0.49.0 installed — /reload-plugins to pick it up.');
+  assert.equal(output.systemMessage, 'Loadout: quartermaster 0.48.0 loaded, 0.49.0 installed — /reload-plugins to pick it up.');
   assert.equal(output.hookSpecificOutput, undefined);
 });
 
 test('SQ-1900: a finding the user has to fix reaches the user, not only the model', () => {
   const output = hookOutput({
     ...hookFixture({
-      'quartermaster@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:/work/current', version: '0.49.0' }],
+      'quartermaster@loadout': [{ scope: 'project', projectPath: 'C:/work/current', version: '0.49.0' }],
     }, { quartermaster: '0.49.0' }),
     loadedVersion: '0.49.0',
     input: { cwd: 'C:/work/current' },
@@ -368,7 +368,7 @@ test('SQ-1900: a finding the user has to fix reaches the user, not only the mode
 
   assert.equal(
     output.systemMessage,
-    'Toolshed needs you: Sidequest board current has no Sidequest install — ask me for the Toolshed health report.',
+    'Loadout needs you: Sidequest board current has no Sidequest install — ask me for the Loadout health report.',
   );
   assert.match(output.hookSpecificOutput.additionalContext, /Sidequest board current has no Sidequest install/);
 });
@@ -376,8 +376,8 @@ test('SQ-1900: a finding the user has to fix reaches the user, not only the mode
 test('SQ-1900: a healthy project says nothing to the user at all', () => {
   const output = hookOutput({
     ...hookFixture({
-      'quartermaster@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:/work/current', version: '0.49.0' }],
-      'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:/work/current', version: '2.42.0' }],
+      'quartermaster@loadout': [{ scope: 'project', projectPath: 'C:/work/current', version: '0.49.0' }],
+      'sidequest@loadout': [{ scope: 'project', projectPath: 'C:/work/current', version: '2.42.0' }],
     }, { quartermaster: '0.49.0', sidequest: '2.42.0' }),
     loadedVersion: '0.49.0',
     input: { cwd: 'C:/work/current' },
@@ -390,14 +390,14 @@ test('SQ-1900: a healthy project says nothing to the user at all', () => {
 test('writes cached update availability to SessionStart hook stdout for the current project', () => {
   const output = hookOutput({
     ...hookFixture({
-      'quartermaster@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:/work/current', version: '0.49.0' }],
-      'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:/work/current', version: '2.41.0' }],
+      'quartermaster@loadout': [{ scope: 'project', projectPath: 'C:/work/current', version: '0.49.0' }],
+      'sidequest@loadout': [{ scope: 'project', projectPath: 'C:/work/current', version: '2.41.0' }],
     }, { quartermaster: '0.50.0', sidequest: '2.42.0' }),
     loadedVersion: '0.49.0',
     input: { cwd: 'C:/work/current' },
   });
 
-  assert.equal(output.systemMessage, 'Toolshed update available (cached): quartermaster 0.49.0 → 0.50.0 — /update-toolshed, then /reload-plugins.');
+  assert.equal(output.systemMessage, 'Loadout update available (cached): quartermaster 0.49.0 → 0.50.0 — /update-toolshed, then /reload-plugins.');
 });
 
 test('keeps third-party freshness and other projects out of SessionStart output', () => {
@@ -424,7 +424,7 @@ test('keeps third-party freshness and other projects out of SessionStart output'
 test('keeps another project cached update out of every SessionStart output', () => {
   const output = hookOutput({
     ...hookFixture({
-      'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:/work/other', version: '1.0.0' }],
+      'sidequest@loadout': [{ scope: 'project', projectPath: 'C:/work/other', version: '1.0.0' }],
     }, { sidequest: '1.1.0' }),
     loadedVersion: '0.49.0',
     input: { cwd: 'C:/work/current' },
@@ -436,7 +436,7 @@ test('keeps another project cached update out of every SessionStart output', () 
 test('keeps another project reload notice out of every SessionStart output', () => {
   const output = hookOutput({
     ...hookFixture({
-      'quartermaster@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:/work/other', version: '0.50.0' }],
+      'quartermaster@loadout': [{ scope: 'project', projectPath: 'C:/work/other', version: '0.50.0' }],
     }, { quartermaster: '0.50.0' }),
     loadedVersion: '0.49.0',
     input: { cwd: 'C:/work/current' },
@@ -448,8 +448,8 @@ test('keeps another project reload notice out of every SessionStart output', () 
 test('emits no SessionStart output without a usable current project', () => {
   const output = hookOutput({
     ...hookFixture({
-      'quartermaster@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:/work/current', version: '0.50.0' }],
-      'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:/work/current', version: '1.0.0' }],
+      'quartermaster@loadout': [{ scope: 'project', projectPath: 'C:/work/current', version: '0.50.0' }],
+      'sidequest@loadout': [{ scope: 'project', projectPath: 'C:/work/current', version: '1.0.0' }],
     }, { quartermaster: '0.50.0', sidequest: '1.1.0' }),
     loadedVersion: '0.49.0',
   });
@@ -460,19 +460,19 @@ test('emits no SessionStart output without a usable current project', () => {
 test('writes a project-scoped health warning to SessionStart context', () => {
   const output = hookOutput({
     ...hookFixture({
-      'sidequest@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:/work/current', version: '1.0.0' }],
+      'sidequest@loadout': [{ scope: 'project', projectPath: 'C:/work/current', version: '1.0.0' }],
     }, { sidequest: '1.1.0' }),
     loadedVersion: '0.49.0',
     input: { cwd: 'C:/work/current/subdirectory' },
   });
 
-  assert.equal(output.hookSpecificOutput.additionalContext, 'Toolshed project health: sidequest@eigenwise-toolshed 1.0.0 is behind cached 1.1.0.');
-  assert.equal(output.systemMessage, 'Toolshed update available (cached): sidequest 1.0.0 → 1.1.0 — /update-toolshed, then /reload-plugins.');
+  assert.equal(output.hookSpecificOutput.additionalContext, 'Loadout project health: sidequest@loadout 1.0.0 is behind cached 1.1.0.');
+  assert.equal(output.systemMessage, 'Loadout update available (cached): sidequest 1.0.0 → 1.1.0 — /update-toolshed, then /reload-plugins.');
 });
 
 test('emits no SessionStart message when every version is current', () => {
   const output = hookOutput({
-    ...hookFixture({ 'quartermaster@eigenwise-toolshed': [{ scope: 'user', version: '0.49.0' }] }, { quartermaster: '0.49.0' }),
+    ...hookFixture({ 'quartermaster@loadout': [{ scope: 'user', version: '0.49.0' }] }, { quartermaster: '0.49.0' }),
     loadedVersion: '0.49.0',
   });
 
@@ -492,16 +492,16 @@ test('fails open without a SessionStart message for malformed local state', () =
 test('limits update notices to one plugin', () => {
   const output = hookOutput({
     ...hookFixture({
-      'alpha@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:/work/current', version: '1.0.0' }],
-      'beta@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:/work/current', version: '1.0.0' }],
-      'gamma@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:/work/current', version: '1.0.0' }],
-      'omega@eigenwise-toolshed': [{ scope: 'project', projectPath: 'C:/work/current', version: '1.0.0' }],
+      'alpha@loadout': [{ scope: 'project', projectPath: 'C:/work/current', version: '1.0.0' }],
+      'beta@loadout': [{ scope: 'project', projectPath: 'C:/work/current', version: '1.0.0' }],
+      'gamma@loadout': [{ scope: 'project', projectPath: 'C:/work/current', version: '1.0.0' }],
+      'omega@loadout': [{ scope: 'project', projectPath: 'C:/work/current', version: '1.0.0' }],
     }, { alpha: '1.1.0', beta: '1.1.0', gamma: '1.1.0', omega: '1.1.0' }),
     loadedVersion: '0.49.0',
     input: { cwd: 'C:/work/current' },
   });
 
-  assert.equal(output.systemMessage, 'Toolshed update available (cached): alpha 1.0.0 → 1.1.0 — /update-toolshed, then /reload-plugins.');
+  assert.equal(output.systemMessage, 'Loadout update available (cached): alpha 1.0.0 → 1.1.0 — /update-toolshed, then /reload-plugins.');
 });
 
 test('hooks.json registers the freshness hooks and nothing observability owns', () => {
@@ -565,7 +565,7 @@ test('a healthy doctor report produces no gateway problems from the audit', () =
   const result = audit(fixture({
     registry: {
       plugins: {
-        'model-gateway@eigenwise-toolshed': [{ scope: 'user', version: '1.0.0', installPath: 'C:/gateway' }],
+        'model-gateway@loadout': [{ scope: 'user', version: '1.0.0', installPath: 'C:/gateway' }],
       },
     },
     manifestFor: () => ({ plugins: [{ name: 'model-gateway', version: '1.0.0' }] }),
@@ -623,7 +623,7 @@ test('preserves gateway checker failure causes with bounded diagnostics', () => 
   assert.match(nonzero.diagnostic, /^exited with status 1: model-gateway: ERROR: proxy startup failed/);
   assert.ok(nonzero.diagnostic.length <= `exited with status 1: `.length + MAX_DIAGNOSTIC_LENGTH);
 
-  const problems = gatewayFreshness([{ id: 'model-gateway@eigenwise-toolshed', ...gateway }], () => nonzero);
+  const problems = gatewayFreshness([{ id: 'model-gateway@loadout', ...gateway }], () => nonzero);
   assert.match(findingText(problems).join('\n'), /model-gateway doctor exited with status 1: model-gateway: ERROR: proxy startup failed/);
   assert.match(userActionNotice(problems), /model-gateway doctor exited with status 1: model-gateway: ERROR: proxy startup failed/);
   assert.doesNotMatch(findingText(problems).join('\n'), /local health check is unavailable/);
@@ -655,7 +655,7 @@ test('SQ-2209: a codebase map with no codebase-mapper install reaches the user',
   const project = mappedProject(t);
   const output = hookOutput({
     ...hookFixture({
-      'quartermaster@eigenwise-toolshed': [{ scope: 'project', projectPath: project, version: '0.49.0' }],
+      'quartermaster@loadout': [{ scope: 'project', projectPath: project, version: '0.49.0' }],
     }, { quartermaster: '0.49.0' }),
     loadedVersion: '0.49.0',
     input: { cwd: project },
@@ -669,8 +669,8 @@ test('SQ-2209: a user-scope codebase-mapper is named as such, and a project inst
   const project = mappedProject(t);
   const fixture = (instances) => hookOutput({
     ...hookFixture({
-      'quartermaster@eigenwise-toolshed': [{ scope: 'project', projectPath: project, version: '0.49.0' }],
-      'codebase-mapper@eigenwise-toolshed': instances,
+      'quartermaster@loadout': [{ scope: 'project', projectPath: project, version: '0.49.0' }],
+      'codebase-mapper@loadout': instances,
     }, { quartermaster: '0.49.0', 'codebase-mapper': '2.15.5' }),
     loadedVersion: '0.49.0',
     input: { cwd: project },
@@ -690,11 +690,11 @@ function enablePlugins(directory, file, enabledPlugins) {
 
 test('SQ-2237: project settings without a codebase-mapper install report a dead flag', (t) => {
   const project = mappedProject(t);
-  enablePlugins(project, 'settings.json', { 'codebase-mapper@eigenwise-toolshed': true });
+  enablePlugins(project, 'settings.json', { 'codebase-mapper@loadout': true });
   const output = (mapperInstances = []) => hookOutput({
     ...hookFixture({
-      'quartermaster@eigenwise-toolshed': [{ scope: 'project', projectPath: project, version: '0.49.0' }],
-      'codebase-mapper@eigenwise-toolshed': mapperInstances,
+      'quartermaster@loadout': [{ scope: 'project', projectPath: project, version: '0.49.0' }],
+      'codebase-mapper@loadout': mapperInstances,
     }, { quartermaster: '0.49.0', 'codebase-mapper': '2.15.5' }),
     loadedVersion: '0.49.0',
     input: { cwd: project },
@@ -705,7 +705,7 @@ test('SQ-2237: project settings without a codebase-mapper install report a dead 
   assert.match(output().hookSpecificOutput.additionalContext, /install codebase-mapper at project scope or remove the dead enabledPlugins entry/);
   assert.equal(output([{ scope: 'project', projectPath: project, version: '2.15.5' }]), null);
 
-  enablePlugins(project, 'settings.local.json', { 'codebase-mapper@eigenwise-toolshed': false });
+  enablePlugins(project, 'settings.local.json', { 'codebase-mapper@loadout': false });
   assert.match(output().systemMessage, /this project has a codebase map but no codebase-mapper install/);
   assert.doesNotMatch(output().systemMessage, /hooks are not running/);
 });
@@ -714,11 +714,11 @@ test('SQ-2237: user settings without a user codebase-mapper install report a dea
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'quartermaster-settings-home-'));
   const project = mappedProject(t);
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  enablePlugins(home, 'settings.json', { 'codebase-mapper@eigenwise-toolshed': true });
+  enablePlugins(home, 'settings.json', { 'codebase-mapper@loadout': true });
   const result = (mapperInstances) => audit(fixture({
     home,
     currentProject: project,
-    registry: { plugins: { 'codebase-mapper@eigenwise-toolshed': mapperInstances } },
+    registry: { plugins: { 'codebase-mapper@loadout': mapperInstances } },
   }));
 
   assert.match(findingText(result([]).projectProblems).join('\n'), /enabled in ~\/\.claude\/settings.json but no matching user install/);
@@ -727,28 +727,28 @@ test('SQ-2237: user settings without a user codebase-mapper install report a dea
   assert.match(findingText(result([{ scope: 'user', version: '2.15.5' }]).projectProblems).join('\n'), /no project\/local codebase-mapper install/);
 });
 
-test('SQ-2211: a Toolshed marketplace declaration with auto-update on is not reported as off', (t) => {
+test('SQ-2211: a Loadout marketplace declaration with auto-update on is not reported as off', (t) => {
   const project = mappedProject(t, { withMap: false });
   const output = () => hookOutput({
     ...hookFixture({
-      'quartermaster@eigenwise-toolshed': [{ scope: 'project', projectPath: project, version: '0.49.0' }],
+      'quartermaster@loadout': [{ scope: 'project', projectPath: project, version: '0.49.0' }],
     }, { quartermaster: '0.49.0' }),
-    marketplaces: { 'eigenwise-toolshed': { lastUpdated: new Date().toISOString() } },
+    marketplaces: { 'loadout': { lastUpdated: new Date().toISOString() } },
     loadedVersion: '0.49.0',
     input: { cwd: project },
   });
 
-  assert.match(output().systemMessage, /eigenwise-toolshed auto-update is off/);
+  assert.match(output().systemMessage, /loadout auto-update is off/);
 
   fs.mkdirSync(path.join(project, '.claude'), { recursive: true });
   fs.writeFileSync(path.join(project, '.claude', 'settings.json'), JSON.stringify({
-    extraKnownMarketplaces: { 'eigenwise-toolshed': { autoUpdate: true } },
+    extraKnownMarketplaces: { 'loadout': { autoUpdate: true } },
   }));
   // A later layer that names the marketplace without a flag must not read as a disable.
   fs.writeFileSync(path.join(project, '.claude', 'settings.local.json'), JSON.stringify({
-    extraKnownMarketplaces: { 'eigenwise-toolshed': { source: { source: 'github', repo: 'eigenwise/eigenwise-toolshed' } } },
+    extraKnownMarketplaces: { 'loadout': { source: { source: 'github', repo: 'eigenwise/loadout' } } },
   }));
-  assert.doesNotMatch(output().systemMessage, /eigenwise-toolshed auto-update is off/);
+  assert.doesNotMatch(output().systemMessage, /loadout auto-update is off/);
 });
 
 test('SQ-2237: settings-only Sidequest enablement reports a board dead flag', (t) => {
@@ -756,7 +756,7 @@ test('SQ-2237: settings-only Sidequest enablement reports a board dead flag', (t
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'quartermaster-settings-board-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   t.after(() => fs.rmSync(project, { recursive: true, force: true }));
-  enablePlugins(project, 'settings.local.json', { 'sidequest@eigenwise-toolshed': true });
+  enablePlugins(project, 'settings.local.json', { 'sidequest@loadout': true });
 
   const board = { name: 'current', path: project };
   const enabledWithoutInstall = boardMappings([board], [], home);
@@ -765,17 +765,17 @@ test('SQ-2237: settings-only Sidequest enablement reports a board dead flag', (t
   assert.match(findingText(enabledWithoutInstall.problems).join('\n'), /hooks are not running/);
   assert.match(findingText(enabledWithoutInstall.problems).join('\n'), /install Sidequest at project scope or remove the dead enabledPlugins entry/);
 
-  const enabledAndInstalled = boardMappings([board], [{ id: 'sidequest@eigenwise-toolshed', scope: 'project', projectPath: project }], home);
+  const enabledAndInstalled = boardMappings([board], [{ id: 'sidequest@loadout', scope: 'project', projectPath: project }], home);
   assert.deepEqual(enabledAndInstalled.problems, []);
   assert.equal(enabledAndInstalled.mappings[0].status, 'installed');
 
-  enablePlugins(home, 'settings.json', { 'sidequest@eigenwise-toolshed': true });
+  enablePlugins(home, 'settings.json', { 'sidequest@loadout': true });
   const otherBoard = { name: 'other', path: path.join(home, 'board-without-settings') };
   const userEnabledWithoutInstall = boardMappings([otherBoard], [], home);
   assert.match(findingText(userEnabledWithoutInstall.problems).join('\n'), /enabled in ~\/\.claude\/settings.json but no matching user install/);
   assert.match(findingText(userEnabledWithoutInstall.problems).join('\n'), /hooks are not running/);
 
-  const userEnabledAndInstalled = boardMappings([otherBoard], [{ id: 'sidequest@eigenwise-toolshed', scope: 'user' }], home);
+  const userEnabledAndInstalled = boardMappings([otherBoard], [{ id: 'sidequest@loadout', scope: 'user' }], home);
   assert.equal(userEnabledAndInstalled.mappings[0].status, 'user-only');
   assert.deepEqual(findingText(userEnabledAndInstalled.problems), ['Sidequest board other has no project/local Sidequest install']);
 });
@@ -806,7 +806,7 @@ test('SQ-2209: a project without a codebase map is not asked to install a mapper
 
   assert.equal(hookOutput({
     ...hookFixture({
-      'quartermaster@eigenwise-toolshed': [{ scope: 'project', projectPath: project, version: '0.49.0' }],
+      'quartermaster@loadout': [{ scope: 'project', projectPath: project, version: '0.49.0' }],
     }, { quartermaster: '0.49.0' }),
     loadedVersion: '0.49.0',
     input: { cwd: project },
