@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { writeFileAtomically } = require('./atomic-file.js');
-const { COMPAT_BASE_URL, DEFAULT_BASE_URL, GATEWAY_MODELS_CACHE, LEGACY_ENV_BLOCK, PIN_ALIASES, PROJECT_WIRING_REGISTRY_PATH, STATIC_ENV_BLOCK, STATE, WIRING_CONFIG_PATH } = require('./runtime.js');
+const { CLAUDE_CONFIG_DIR, COMPAT_BASE_URL, DEFAULT_BASE_URL, GATEWAY_MODELS_CACHE, LEGACY_ENV_BLOCK, PIN_ALIASES, PROJECT_WIRING_REGISTRY_PATH, STATIC_ENV_BLOCK, STATE, WIRING_CONFIG_PATH } = require('./runtime.js');
 const { isGatewayModelId, ourBaseUrls } = require('./pins.js');
 
 // Project-local wiring is the default so each repository opts into the
@@ -29,7 +29,10 @@ function retireWiringModeConfig() {
 function settingsPath(scope) {
   if (scope === 'project') return path.join(process.cwd(), '.claude', 'settings.local.json');
   if (scope === 'legacy-project' || scope === 'project-shared') return path.join(process.cwd(), '.claude', 'settings.json');
-  return path.join(os.homedir(), '.claude', 'settings.json');
+  // User settings live in the ACTIVE config dir: with CLAUDE_CONFIG_DIR set,
+  // ~/.claude may be a different account's tree entirely, and writing there
+  // wires (and pollutes) the wrong account.
+  return path.join(CLAUDE_CONFIG_DIR, 'settings.json');
 }
 
 function effectiveBaseUrl() {

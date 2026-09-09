@@ -25,7 +25,7 @@ All commands: `node "${CLAUDE_PLUGIN_ROOT}/bin/model-gateway.js" <command>`
 
 Project-local wiring is the standard setup. `env --write-project` writes the current project's `.claude/settings.local.json`, so the gateway stays configured for this project's sessions and executor worktrees without putting a machine-local endpoint in a committed file. `setup` uses the same project-local target by default.
 
-`env --write-user` remains an opt-in shared fallback for people who deliberately want one gateway URL in `~/.claude/settings.json` across every project. Claude Code gives a current project's `settings.local.json` higher precedence, so `doctor` marks the winner `[effective]`, names both files, and says that project-local wiring wins when their gateway modes disagree.
+`env --write-user` remains an opt-in shared fallback for people who deliberately want one gateway URL in the active config dir's `settings.json` (`$CLAUDE_CONFIG_DIR/settings.json`, defaulting to `~/.claude/settings.json`) across every project. Claude Code gives a current project's `settings.local.json` higher precedence, so `doctor` marks the winner `[effective]`, names both files, and says that project-local wiring wins when their gateway modes disagree.
 
 The first-run order matters:
 
@@ -59,8 +59,8 @@ and fails when their gateway modes differ. All wiring changes apply to new Claud
 so restart after the write. The Codex rows appear in `/model` labeled "From gateway".
 
 The winning `ANTHROPIC_BASE_URL` source follows Claude Code's precedence: process environment,
-current-project `.claude/settings.local.json`, project `.claude/settings.json`, then user
-`~/.claude/settings.json`. A process export always wins, so settings writes cannot replace it.
+current-project `.claude/settings.local.json`, project `.claude/settings.json`, then the
+user `settings.json` in the active config dir (`$CLAUDE_CONFIG_DIR`, default `~/.claude`). A process export always wins, so settings writes cannot replace it.
 
 `env --write-user --reconcile` is confirmation-gated. Plain `env --write-user` writes the shared
 user fallback, then lists recorded projects whose local URL differs without changing their files.

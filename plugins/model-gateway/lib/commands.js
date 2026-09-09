@@ -41,7 +41,7 @@ const { writeFileAtomically } = require('./atomic-file.js');
 const { createGatewayUsageEmitter, recordRequestBodyHighWater } = require('./usage-observability.js');
 const grokBackend = require('./grok-backend.js');
 const {
-  canReplaceInstalledCliPath, CLI_PATH, GATEWAY_MODELS_CACHE, MODEL_WINDOW_POLICY,
+  canReplaceInstalledCliPath, CLAUDE_CONFIG_DIR, CLI_PATH, GATEWAY_MODELS_CACHE, MODEL_WINDOW_POLICY,
   gatewayAdvertisedWindow, gatewayClientModelId, gatewayDiscoveryModels, readGatewayDiscoveryCache,
   resolveGatewayModelPolicy, sameGatewayDiscoveryModels, SOCKET_PATH, resolveNewestInstalledCliPath,
   syncGatewayDiscoveryCache,
@@ -264,7 +264,7 @@ configureRemoteControl({ args, flag, log, die, doctor, fetchShimHealth, startAll
 // absent (for example, a --plugin-dir development checkout).
 function installScope() {
   try {
-    const file = path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json');
+    const file = path.join(CLAUDE_CONFIG_DIR, 'plugins', 'installed_plugins.json');
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     const entries = (data.plugins && data.plugins['model-gateway@eigenwise-toolshed']) || [];
     if (!entries.length) return 'unknown';

@@ -28,7 +28,7 @@ function compareVersions(left, right) {
 }
 
 function currentModelGatewayCli() {
-  const claudeHome = process.env.MODEL_GATEWAY_CLAUDE_HOME || path.join(os.homedir(), '.claude');
+  const claudeHome = process.env.MODEL_GATEWAY_CLAUDE_HOME || process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
   const registry = JSON.parse(fs.readFileSync(path.join(claudeHome, 'plugins', 'installed_plugins.json'), 'utf8'));
   const candidates = (registry.plugins?.['model-gateway@eigenwise-toolshed'] || [])
     .filter((install) => install?.installPath)
