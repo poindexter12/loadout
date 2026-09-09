@@ -4,7 +4,7 @@
     "name": "poindexter12"
   },
   "description": "Loadout: a kit of Claude Code plugins. Independently maintained fork of the Eigenwise Toolshed; original work by Eigenwise.",
-  "version": "3.534.0",
+  "version": "3.536.0",
   "plugins": [
     {
       "name": "observability",
@@ -56,7 +56,7 @@
       "name": "sidequest",
       "source": "./plugins/sidequest",
       "description": "The Loadout's core work board and orchestration loop for Claude Code. Tickets are classified into categories that route each one to a concrete model and effort, then dispatched to token-gated executors; side issues you mention mid-task get captured on the spot, and a live, self-hosted Kanban dashboard spans every project you work in.",
-      "version": "5.0.39",
+      "version": "5.0.41",
       "author": {
         "name": "Eigenwise"
       },
