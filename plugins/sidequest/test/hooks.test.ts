@@ -3152,7 +3152,7 @@ test('session-start: names the upstream-defect filing destination for the local 
     CLAUDE_PROJECT_DIR: toolshed,
   });
   assert.match(maintainerContext, /Offer to file it as a ticket on the loadout board on this machine \(the Loadout working copy\), not via the Anthropic feedback tool\./);
-  assert.doesNotMatch(maintainerContext, /Offer to file it as a GitHub issue on Eigenwise\/loadout/);
+  assert.doesNotMatch(maintainerContext, /Offer to file it as a GitHub issue on poindexter12\/loadout/);
   assert.match(maintainerContext, commonClause);
 
   const nonMaintainerHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-hooks-toolshed-non-maintainer-'));
@@ -3160,7 +3160,7 @@ test('session-start: names the upstream-defect filing destination for the local 
     SIDEQUEST_HOME: nonMaintainerHome,
     SIDEQUEST_SWEEP_DEADLINE_MS: '60000',
   });
-  assert.match(nonMaintainerContext, /Offer to file it as a GitHub issue on Eigenwise\/loadout, not via the Anthropic feedback tool\./);
+  assert.match(nonMaintainerContext, /Offer to file it as a GitHub issue on poindexter12\/loadout, not via the Anthropic feedback tool\./);
   assert.match(nonMaintainerContext, /Any GitHub body, comment, reply, or closure note you author must stand alone/);
   assert.match(nonMaintainerContext, /omit local SQ-\/US- IDs, board slugs, local-only paths, and board-only references/);
   assert.match(nonMaintainerContext, /Preserve reporter text unless authorized to edit it/);
