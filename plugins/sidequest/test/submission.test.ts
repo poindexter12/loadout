@@ -35,7 +35,9 @@ afterEach(() => db.openDb(SIDEQUEST_HOME).exec('DELETE FROM tickets'));
 const { createLocks } = require('../src/lib/store/locks.ts');
 const { makeCliRunner } = require('./_helpers.js');
 
-const PROJECT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-submission-project-'));
+// realpath so the worktree-bound verify check sees the same root the CLI's
+// process.cwd() reports (macOS tmpdir lives behind the /var -> /private/var symlink)
+const PROJECT_DIR = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sq-submission-project-')));
 const REMOTE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-submission-remote-'));
 function git(args?: any) {
   return execFileSync('git', args, { cwd: PROJECT_DIR, encoding: 'utf8', windowsHide: true }).trim();
