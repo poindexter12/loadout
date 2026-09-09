@@ -10,11 +10,14 @@ description: >-
 Two local processes give Claude Code native access to the user's ChatGPT subscription models:
 `claude-code-proxy` (does OpenAI OAuth and translates Anthropic Messages API to the Codex
 backend) and a shim router this plugin owns. `ANTHROPIC_BASE_URL` points at the shim: requests
-for `claude-gpt-*` models are un-prefixed and go to the proxy, everything else passes through
+for `claude-gpt-*` models are un-prefixed and go to the proxy, `claude-gemini-*` models are
+un-prefixed and go to a local antigravity-claude-proxy (default http://127.0.0.1:18766, override
+with `CODEX_GATEWAY_ANTIGRAVITY_ENDPOINT`; it needs its own `antigravity-claude-proxy accounts
+add` Google login and is advertised only while its `/v1/models` answers), everything else passes through
 to api.anthropic.com with the user's normal claude.ai login. The shim's `/v1/models` advertises
 Codex models with a `claude-` prefix because Claude Code's model discovery drops ids that don't
 start with `claude`/`anthropic`. That prefix is shared with the real Anthropic ids, so the route
-is decided by the backend family segment (`claude-gpt-*`, `claude-grok-*`), never by the prefix.
+is decided by the backend family segment (`claude-gpt-*`, `claude-grok-*`, `claude-gemini-*`), never by the prefix.
 
 All commands: `node "${CLAUDE_PLUGIN_ROOT}/bin/model-gateway.js" <command>`
 

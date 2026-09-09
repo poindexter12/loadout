@@ -21,10 +21,14 @@ const SHIM_PORT = Number(process.env.CODEX_GATEWAY_WORKER_PORT || PUBLIC_SHIM_PO
 const PROXY_PORT = Number(process.env.CODEX_GATEWAY_PROXY_PORT || 18765);
 const PREFIX = 'claude-';
 const GROK_PREFIX = 'claude-grok-';
+const GEMINI_PREFIX = 'claude-gemini-';
 const CODEX_FAMILY_RE = /^gpt-/;
 const LEGACY_CODEX_PREFIX = 'claude-codex-';
 const DISPATCH_MODEL_ID = 'claude-codex-auto';
 const GROK_ENDPOINT = process.env.CODEX_GATEWAY_GROK_ENDPOINT || grokBackend.GROK_ENDPOINT;
+// Local antigravity-claude-proxy (Anthropic Messages-native; Google OAuth is
+// its own concern). 18766 keeps it off Docker's common 8080 default.
+const ANTIGRAVITY_ENDPOINT = process.env.CODEX_GATEWAY_ANTIGRAVITY_ENDPOINT || 'http://127.0.0.1:18766';
 const REPO = 'raine/claude-code-proxy';
 const MIN_PROXY_VERSION = '0.1.14';
 const ANTHROPIC_UPSTREAM = process.env.CODEX_GATEWAY_ANTHROPIC_UPSTREAM || 'https://api.anthropic.com';
@@ -103,6 +107,15 @@ const MODEL_WINDOW_POLICY = Object.freeze({
     advertisedWindow: 500000,
     sentry: 'none',
   }),
+  geminiDefault: Object.freeze({
+    backend: 'antigravity',
+    backendId: 'geminiDefault',
+    backendWindow: 200000,
+    measurement: 'unmeasured default for Antigravity gemini rows absent from this table',
+    pickerAliasTemplate: 'claude-{backendId}',
+    advertisedWindow: 200000,
+    sentry: 'none',
+  }),
   anthropic: Object.freeze({
     backend: 'anthropic',
     backendId: 'anthropic',
@@ -130,6 +143,7 @@ function resolveGatewayModelPolicy(id) {
   const policyId = backendId.startsWith('gpt-') ? backendId.replace(/-fast$/, '') : backendId;
   const policy = MODEL_WINDOW_POLICY[policyId]
     || (backendId.startsWith('gpt-') ? MODEL_WINDOW_POLICY.default : null)
+    || (backendId.startsWith('gemini-') ? MODEL_WINDOW_POLICY.geminiDefault : null)
     || (typeof id === 'string' && id.startsWith(PREFIX) && !id.startsWith(LEGACY_CODEX_PREFIX)
       ? MODEL_WINDOW_POLICY.anthropic
       : null);
@@ -288,7 +302,7 @@ module.exports = {
   ANTHROPIC_UPSTREAM, AUTH_HEADERS, BIN_DIR, CLAUDE_BIN, CLAUDE_BIN_IS_BATCH, CODEX_CONTEXT_WINDOWS,
   CODEX_FAMILY_RE, CODEX_UNKNOWN_MODEL_WINDOW, CODEX_UPSTREAM_BLOCK_PATH, COMPAT_BASE_URL, COMPAT_HOST, COMPAT_PORT,
   DEFAULT_BASE_URL, MODEL_WINDOW_POLICY,
-  DISPATCH_MODEL_ID, DISPATCH_ROUTE_CACHE_PATH, GATEWAY_MODELS_CACHE, GROK_ENDPOINT, GROK_PREFIX,
+  ANTIGRAVITY_ENDPOINT, DISPATCH_MODEL_ID, DISPATCH_ROUTE_CACHE_PATH, GATEWAY_MODELS_CACHE, GEMINI_PREFIX, GROK_ENDPOINT, GROK_PREFIX,
   HOSTS_BLOCK_END, HOSTS_BLOCK_LINE, HOSTS_BLOCK_START, KNOWN_GOOD_PINS, LEGACY_CODEX_PREFIX,
   LEGACY_ENV_BLOCK, LIST_DISPATCH_MODEL, LOGS, MIN_PROXY_VERSION, PIN_ALIASES, PIN_CACHE_PATH,
   PIN_CACHE_TTL_MS, PIN_OVERRIDE_PATH, PIN_PROBE_TIMEOUT_MS, PLUGIN_VERSION, PREFIX, PROXY_BIN,

@@ -18,8 +18,8 @@ const { effectiveBaseUrl, wiredMode } = require('./settings-wiring.js');
 const { detectHostsCompat } = require('./remote-control.js');
 const { codexBaseFromId, ourBaseUrls } = require('./pins.js');
 const {
-  ANTHROPIC_UPSTREAM, AUTH_HEADERS, CODEX_FAMILY_RE, CODEX_UPSTREAM_BLOCK_PATH, COMPAT_HOST,
-  COMPAT_PORT, DISPATCH_MODEL_ID, DISPATCH_ROUTE_CACHE_PATH, GROK_ENDPOINT, GROK_PREFIX, LIST_DISPATCH_MODEL,
+  ANTHROPIC_UPSTREAM, ANTIGRAVITY_ENDPOINT, AUTH_HEADERS, CODEX_FAMILY_RE, CODEX_UPSTREAM_BLOCK_PATH, COMPAT_HOST,
+  COMPAT_PORT, DISPATCH_MODEL_ID, DISPATCH_ROUTE_CACHE_PATH, GEMINI_PREFIX, GROK_ENDPOINT, GROK_PREFIX, LIST_DISPATCH_MODEL,
   LOGS, PLUGIN_VERSION, PREFIX, PROXY_BIN, PROXY_PORT, REQUEST_ROUTE_LOG,
   REQUEST_ROUTE_LOG_PATH, ROUTE_TELEMETRY_ENABLED, ROUTE_TELEMETRY_TIMEOUT_MS, SHIM_PORT, SOCKET_PATH,
   MODEL_WINDOW_POLICY, STATE, syncGatewayDiscoveryCache, TRACE_HEADERS, codexClientModelId,
@@ -181,6 +181,7 @@ function servingVersionIsCurrentOrNewer(servingVersion, installedVersion) {
 
 function displayName(id, backend = 'codex') {
   if (backend === 'grok') return id.replace(/^grok-/, 'Grok ').replace(/-/g, ' ');
+  if (backend === 'antigravity') return id.replace(/^gemini-/, 'Gemini ').replace(/\[1m\]$/, '') + ' (Antigravity)';
   return id.replace(/^gpt-/, 'GPT-').replace(/\[1m\]$/, '') + ' (Codex)';
 }
 
@@ -552,6 +553,10 @@ function modelCatalogDetails(id) {
     const base = id.slice(PREFIX.length).replace(/\[1m\]$/, '');
     return { provider: 'grok', base, label: displayName(base, 'grok') };
   }
+  if (typeof id === 'string' && id.startsWith(GEMINI_PREFIX)) {
+    const base = id.slice(PREFIX.length).replace(/\[1m\]$/, '');
+    return { provider: 'antigravity', base, label: displayName(base, 'antigravity') };
+  }
   return null;
 }
 
@@ -585,6 +590,13 @@ function providerCatalogReadiness(provider, readiness) {
   const source = readiness?.[provider] ?? (provider === 'codex' ? readiness : null);
   if (source) return providerReadiness(source);
   if (provider === 'grok') return getGrokReadiness();
+  if (provider === 'antigravity') {
+    return {
+      ready: true,
+      state: 'ready',
+      message: 'Antigravity proxy readiness is checked per-request; run it with an added Google account.',
+    };
+  }
   return unavailableProviderReadiness(provider);
 }
 
@@ -924,7 +936,7 @@ function runWorker() {
     at: 0,
     data: [...DEFAULT_MODELS, ...(LIST_DISPATCH_MODEL ? ['auto'] : [])].map(gatewayModel),
   };
-  const counters = { models: 0, codex: 0, grok: 0, anthropic: 0 };
+  const counters = { models: 0, codex: 0, grok: 0, gemini: 0, anthropic: 0 };
   const dispatchRoutes = new DispatchSessionRouteCache({ cachePath: DISPATCH_ROUTE_CACHE_PATH });
   const usageEmitter = createGatewayUsageEmitter();
   const settingsWiring = wiredMode();
@@ -1130,6 +1142,18 @@ function runWorker() {
     if (!Array.isArray(ids) || !ids.length) ids = DEFAULT_MODELS;
     const grokModels = grokBackend.grokModelsFromCache();
     const advertisedGrokModels = grokModels.length ? grokModels : DEFAULT_GROK_MODELS;
+    // Antigravity rows come from its live catalog only: advertising a gemini id
+    // while its proxy is down would 502 every request for it, and there is no
+    // useful static default because its roster tracks the Antigravity app.
+    let geminiIds = [];
+    try {
+      const r = await fetchUrl(`${ANTIGRAVITY_ENDPOINT}/v1/models`, { timeout: 2000 });
+      if (r.status === 200) {
+        geminiIds = (JSON.parse(r.body.toString()).data || [])
+          .map((m) => m.id)
+          .filter((id) => typeof id === 'string' && /^gemini-/.test(id));
+      }
+    } catch { /* antigravity proxy down; advertise none */ }
     modelCache = {
       at: Date.now(),
       data: [
@@ -1139,6 +1163,9 @@ function runWorker() {
         ...advertisedGrokModels
           .filter((model) => resolveGatewayModelPolicy(model.id)?.backend === 'grok')
           .map((model) => gatewayModel(model.id, 'grok')),
+        ...geminiIds
+          .map((id) => gatewayModel(id, 'antigravity'))
+          .filter(Boolean),
       ],
     };
     if (logSentryPolicies) logAdvertisedSentryPolicies();
@@ -1196,7 +1223,7 @@ function runWorker() {
       return value;
     }
     for (const [key, item] of Object.entries(value)) {
-      if (key === 'model' && typeof item === 'string' && item.startsWith('gpt-')) value[key] = advertisedModel;
+      if (key === 'model' && typeof item === 'string' && (item.startsWith('gpt-') || item.startsWith('gemini-'))) value[key] = advertisedModel;
       else rewriteResponseModel(item, advertisedModel);
     }
     return value;
@@ -2024,6 +2051,47 @@ function runWorker() {
               })
               : null;
             return forwardGrok(req, res, parsed, model, advertisedModel, routeTelemetry, usageCapture);
+          }
+        } catch { /* not JSON; fall through to passthrough */ }
+      }
+      if (raw && pathOnly.startsWith('/v1/messages')) {
+        try {
+          const parsed = JSON.parse(raw.toString());
+          if (typeof parsed.model === 'string' && parsed.model.startsWith(GEMINI_PREFIX)) {
+            const advertisedModel = parsed.model;
+            // antigravity-claude-proxy speaks Anthropic Messages natively, so
+            // this is the Codex forwarding shape (un-prefix, strip claude.ai
+            // auth headers) with no translation layer.
+            parsed.model = parsed.model.slice(PREFIX.length).replace(/\[1m\]$/, '');
+            const keepPlanTools = process.env.CODEX_GATEWAY_KEEP_PLAN_TOOLS === '1';
+            if (Array.isArray(parsed.tools) && !keepPlanTools) {
+              parsed.tools = parsed.tools.filter((t) => !PLAN_TOOLS.includes(t && t.name));
+            }
+            const effort = typeof parsed.output_config?.effort === 'string' ? parsed.output_config.effort : null;
+            counters.gemini = (counters.gemini || 0) + 1;
+            requestRouteLog(req, 'antigravity', parsed.model, pathOnly, 'direct', effort);
+            routeTelemetry.setRoute({
+              selectedModel: advertisedModel,
+              effectiveModel: parsed.model,
+              backend: 'antigravity',
+              effort,
+              fallback: false,
+              via: 'direct',
+            });
+            const forwardedBody = JSON.stringify(parsed);
+            recordRequestBodyHighWater(requestSessionId(req), Buffer.byteLength(forwardedBody));
+            const usageCapture = usageEmitter.enabled
+              ? usageEmitter.start({
+                payload: parsed,
+                requestBodyBytes: Buffer.byteLength(forwardedBody),
+                requestHeaders: req.headers,
+                route: { requestedModel: advertisedModel, effectiveModel: parsed.model, backend: 'antigravity', effort, via: 'direct' },
+              })
+              : null;
+            // claude.ai credentials never leave this machine toward the proxy
+            return forward(req, res, ANTIGRAVITY_ENDPOINT,
+              forwardedBody, AUTH_HEADERS, false, !keepPlanTools, null, advertisedModel, parsed.model, routeTelemetry,
+              usageCapture, 0, null);
           }
         } catch { /* not JSON; fall through to passthrough */ }
       }
