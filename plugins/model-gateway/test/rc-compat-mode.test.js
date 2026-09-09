@@ -80,11 +80,33 @@ function spawnShim(t, { shimPort, proxyPort, compatPort, hostsFile, home, anthro
   });
 }
 
-function loadGatewayWithCurrentHome() {
-  const cachedGateway = require.cache[CLI];
-  delete require.cache[CLI];
-  const isolatedGateway = require(CLI);
-  if (cachedGateway) require.cache[CLI] = cachedGateway;
+function loadGatewayWithCurrentHome(home) {
+  // bin/model-gateway.js is a one-line re-export of lib/commands.js, so
+  // evicting only the CLI entry hands back the same module graph with every
+  // path constant frozen at first-load values — the whole lib/ tree has to go.
+  // The fresh copy reads the fixture HOME/CLAUDE_CONFIG_DIR; the shared graph
+  // is restored afterward so module-scope bindings in other tests keep state.
+  const libDir = path.join(__dirname, '..', 'lib') + path.sep;
+  const evicted = new Map();
+  for (const key of Object.keys(require.cache)) {
+    if (key === CLI || key.startsWith(libDir)) {
+      evicted.set(key, require.cache[key]);
+      delete require.cache[key];
+    }
+  }
+  let isolatedGateway;
+  try {
+    isolatedGateway = require(CLI);
+  } finally {
+    for (const key of Object.keys(require.cache)) {
+      if (key === CLI || key.startsWith(libDir)) delete require.cache[key];
+    }
+    for (const [key, value] of evicted) require.cache[key] = value;
+  }
+  // Tripwire: fail before any test write can reach a real config file.
+  const userSettings = isolatedGateway.settingsPath('user');
+  assert.ok(userSettings.startsWith(home + path.sep),
+    `isolated gateway resolves user settings to ${userSettings}, outside fixture home ${home}`);
   return isolatedGateway;
 }
 
@@ -335,6 +357,9 @@ test('writeEnv removes retired socket wiring while preserving unrelated settings
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-writeenv-'));
   const prevUserProfile = process.env.USERPROFILE;
   const prevHome = process.env.HOME;
+  // settingsPath('user') resolves through CLAUDE_CONFIG_DIR before HOME, so an
+  // inherited value points the "isolated" copy at the real user settings file.
+  const prevConfigDir = process.env.CLAUDE_CONFIG_DIR;
   // wiredMode() reads the environment too, and this suite runs inside a wired
   // Claude Code session, so the ambient base URL has to go or the file under
   // test is not what is being measured.
@@ -342,13 +367,15 @@ test('writeEnv removes retired socket wiring while preserving unrelated settings
   t.after(() => {
     if (prevUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevUserProfile;
     if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+    if (prevConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prevConfigDir;
     if (prevBaseUrl === undefined) delete process.env.ANTHROPIC_BASE_URL; else process.env.ANTHROPIC_BASE_URL = prevBaseUrl;
     fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
   process.env.USERPROFILE = home;
   process.env.HOME = home;
+  process.env.CLAUDE_CONFIG_DIR = path.join(home, '.claude');
   delete process.env.ANTHROPIC_BASE_URL;
-  const isolatedGateway = loadGatewayWithCurrentHome();
+  const isolatedGateway = loadGatewayWithCurrentHome(home);
 
   const file = isolatedGateway.settingsPath('user');
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -389,6 +416,7 @@ test('wiredMode agrees with isWired for environment-only and project-local wirin
   const previous = {
     USERPROFILE: process.env.USERPROFILE,
     HOME: process.env.HOME,
+    CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
     ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
   };
   const previousCwd = process.cwd();
@@ -401,8 +429,9 @@ test('wiredMode agrees with isWired for environment-only and project-local wirin
   });
   process.env.USERPROFILE = home;
   process.env.HOME = home;
+  process.env.CLAUDE_CONFIG_DIR = path.join(home, '.claude');
   process.chdir(project);
-  const isolatedGateway = loadGatewayWithCurrentHome();
+  const isolatedGateway = loadGatewayWithCurrentHome(home);
 
   delete process.env.ANTHROPIC_BASE_URL;
   assert.equal(isolatedGateway.isWired(), false);
@@ -423,7 +452,11 @@ test('wiredMode agrees with isWired for environment-only and project-local wirin
 // owns, and claiming them by key wiped a working configuration.
 test('env --remove keeps alias pins the gateway did not write', (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-pins-'));
-  const previous = { USERPROFILE: process.env.USERPROFILE, HOME: process.env.HOME };
+  const previous = {
+    USERPROFILE: process.env.USERPROFILE,
+    HOME: process.env.HOME,
+    CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
+  };
   t.after(() => {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
@@ -432,7 +465,8 @@ test('env --remove keeps alias pins the gateway did not write', (t) => {
   });
   process.env.USERPROFILE = home;
   process.env.HOME = home;
-  const isolatedGateway = loadGatewayWithCurrentHome();
+  process.env.CLAUDE_CONFIG_DIR = path.join(home, '.claude');
+  const isolatedGateway = loadGatewayWithCurrentHome(home);
 
   const file = isolatedGateway.settingsPath('user');
   fs.mkdirSync(path.dirname(file), { recursive: true });
