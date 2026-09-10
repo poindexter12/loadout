@@ -168,9 +168,9 @@ test('real statusline invocation appends subscription burn and ledgers both wind
   const result = await runStatusline(payload, {
     ...process.env,
     LOCALAPPDATA: directory,
-    WORKBENCH_HOOK_SPOOL: spoolPath,
-    WORKBENCH_OBSERVER_HEALTH_URL: healthUrl,
-    WORKBENCH_STATUSLINE_RENDER: `"${process.execPath}" "${rendererPath}"`,
+    OBSERVABILITY_HOOK_SPOOL: spoolPath,
+    OBSERVABILITY_OBSERVER_HEALTH_URL: healthUrl,
+    OBSERVABILITY_STATUSLINE_RENDER: `"${process.execPath}" "${rendererPath}"`,
   });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'custom | 5h: 62% 7d: 34%');
@@ -216,9 +216,9 @@ test('real statusline invocation appends a stalled outbox health suffix', async 
   const result = await runStatusline(payload, {
     ...process.env,
     LOCALAPPDATA: directory,
-    WORKBENCH_HOOK_SPOOL: spoolPath,
-    WORKBENCH_OBSERVER_HEALTH_URL: healthUrl,
-    WORKBENCH_STATUSLINE_RENDER: `"${process.execPath}" "${rendererPath}"`,
+    OBSERVABILITY_HOOK_SPOOL: spoolPath,
+    OBSERVABILITY_OBSERVER_HEALTH_URL: healthUrl,
+    OBSERVABILITY_STATUSLINE_RENDER: `"${process.execPath}" "${rendererPath}"`,
   });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'custom | 5h: 62% 7d: 34% | obs: outbox_stalled');

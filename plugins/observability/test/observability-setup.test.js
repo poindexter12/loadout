@@ -122,7 +122,7 @@ test('merges safe local OTLP settings without replacing an existing status line'
   }, { workbenchRoot: 'C:/Workbench' });
 
   assert.equal(settings.env.KEEP_ME, 'yes');
-  assert.equal(settings.env.WORKBENCH_STATUSLINE_RENDER, undefined);
+  assert.equal(settings.env.OBSERVABILITY_STATUSLINE_RENDER, undefined);
   assert.deepEqual(Object.fromEntries(Object.entries(settings.env).filter(([key]) => key in OBSERVABILITY_ENV)), OBSERVABILITY_ENV);
   assert.equal(settings.statusLine.command, 'node custom-statusline.js');
   assert.deepEqual(settings.hooks, { SessionEnd: [{ hooks: [{ type: 'command', command: 'existing-hook' }] }] });
@@ -130,12 +130,12 @@ test('merges safe local OTLP settings without replacing an existing status line'
 
 test('does not replace an existing status line on repeat setup', () => {
   const settings = mergeObservabilitySettings({
-    env: { WORKBENCH_STATUSLINE_RENDER: 'existing renderer' },
+    env: { OBSERVABILITY_STATUSLINE_RENDER: 'existing renderer' },
     statusLine: { type: 'command', command: 'node workbench-statusline.js', padding: 3 },
   });
 
   assert.equal(settings.statusLine.padding, 3);
-  assert.equal(settings.env.WORKBENCH_STATUSLINE_RENDER, 'existing renderer');
+  assert.equal(settings.env.OBSERVABILITY_STATUSLINE_RENDER, 'existing renderer');
 });
 
 test('preserves existing project settings when applying the setup', () => {
@@ -153,7 +153,7 @@ test('preserves existing project settings when applying the setup', () => {
     assert.equal(projectSettings.statusLine.command, 'node inherited-statusline.js');
     assert.match(result.settingsPath, /settings\.local\.json$/);
     assert.equal(result.settings.statusLine, undefined);
-    assert.equal(result.settings.env.WORKBENCH_STATUSLINE_RENDER, undefined);
+    assert.equal(result.settings.env.OBSERVABILITY_STATUSLINE_RENDER, undefined);
     removeSettings(directory);
     const cleanedLocal = JSON.parse(fs.readFileSync(result.settingsPath, 'utf8'));
     assert.equal(cleanedLocal.statusLine, undefined);
@@ -395,7 +395,7 @@ test('setup mounts generated Grafana dashboards only for active opted-in project
     dockerAvailable: true,
     activeProjectNames: ['atlas'],
     claudeVersion: MIN_CLAUDE_VERSION,
-    environment: { WORKBENCH_OTELCOL_CONTRIB: process.execPath },
+    environment: { OBSERVABILITY_OTELCOL_CONTRIB: process.execPath },
     applyProjectSettings: false,
     ensure: async () => ({ enabled: true, started: [] }),
     spawnSync(command, args) {
@@ -445,7 +445,7 @@ test('continues setup when the dashboard activity probe fails', async (t) => {
     },
     dockerAvailable: true,
     claudeVersion: MIN_CLAUDE_VERSION,
-    environment: { WORKBENCH_OTELCOL_CONTRIB: process.execPath },
+    environment: { OBSERVABILITY_OTELCOL_CONTRIB: process.execPath },
     applyProjectSettings: false,
     ensure: async () => { ensured = true; return { enabled: true, started: ['observer', 'collector'] }; },
     spawnSync(command, args) {
@@ -500,7 +500,7 @@ test('does not generate project dashboards from configured project paths', async
     },
     dockerAvailable: true,
     claudeVersion: MIN_CLAUDE_VERSION,
-    environment: { WORKBENCH_OTELCOL_CONTRIB: process.execPath },
+    environment: { OBSERVABILITY_OTELCOL_CONTRIB: process.execPath },
     applyProjectSettings: false,
     ensure: async () => ({ enabled: true, started: [] }),
     spawnSync(command, args) {
@@ -529,7 +529,7 @@ test('stores sink selection separately from project settings', async (t) => {
     dataDir,
     sink: 'none',
     claudeVersion: MIN_CLAUDE_VERSION,
-    environment: { WORKBENCH_OTELCOL_CONTRIB: process.execPath },
+    environment: { OBSERVABILITY_OTELCOL_CONTRIB: process.execPath },
     spawnSync: () => ({ status: 0, stdout: process.version }),
     ensure: async () => ({ enabled: true, started: [] }),
   });
@@ -539,7 +539,7 @@ test('stores sink selection separately from project settings', async (t) => {
   assert.equal(result.sink.id, 'none');
   assert.equal(result.sink.outbox.enabled, false);
   assert.doesNotMatch(fs.readFileSync(result.collectorConfig, 'utf8'), /otlphttp\/sink/);
-  assert.equal(Object.hasOwn(result.settings.settings.env, 'WORKBENCH_OBSERVABILITY_SINK'), false);
+  assert.equal(Object.hasOwn(result.settings.settings.env, 'OBSERVABILITY_SINK'), false);
 });
 
 test('configures generic OTLP from the private sink config and parses explicit CLI selection', () => {

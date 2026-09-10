@@ -105,7 +105,7 @@ test('runs the disposable demo through setup, local OTLP, hooks, SDK, tools, rou
     sink: 'none',
     dockerAvailable: false,
     claudeVersion: '2.1.212',
-    environment: { WORKBENCH_OTELCOL_CONTRIB: process.execPath },
+    environment: { OBSERVABILITY_OTELCOL_CONTRIB: process.execPath },
     ensure: async () => ({ enabled: true, started: [] }),
   });
   const observerStore = openObservabilityStore(setup.databaseFile);

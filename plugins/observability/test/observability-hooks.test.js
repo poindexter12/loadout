@@ -342,7 +342,7 @@ test('Stop hook flushes once, stays silent on re-entry, and fails open', (t) => 
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const hook = path.join(__dirname, '..', 'hooks', 'observability.js');
   const spoolPath = path.join(dir, 'hook-spool.jsonl');
-  const env = { ...process.env, WORKBENCH_HOOK_SPOOL: spoolPath };
+  const env = { ...process.env, OBSERVABILITY_HOOK_SPOOL: spoolPath };
   const input = { hook_event_name: 'Stop', session_id: 'stop-session', cwd: dir, stop_hook_active: false };
 
   assert.equal(childProcess.execFileSync(process.execPath, [hook], {
@@ -359,7 +359,7 @@ test('Stop hook flushes once, stays silent on re-entry, and fails open', (t) => 
   assert.equal(childProcess.execFileSync(process.execPath, [hook], {
     input: JSON.stringify({ ...input, session_id: 'failed-stop' }),
     encoding: 'utf8',
-    env: { ...env, WORKBENCH_HOOK_SPOOL: path.join(blocker, 'child.jsonl') },
+    env: { ...env, OBSERVABILITY_HOOK_SPOOL: path.join(blocker, 'child.jsonl') },
   }), '');
   const manifest = require('../hooks/hooks.json');
   assert.match(manifest.description, /without emitting model context/);

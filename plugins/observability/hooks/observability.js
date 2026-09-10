@@ -271,7 +271,7 @@ async function main() {
     const payload = JSON.parse(raw);
     if (payload.hook_event_name === 'Stop' && payload.stop_hook_active === true) return;
     const observation = buildObservation(payload, new Date());
-    if (observation) spool(process.env.WORKBENCH_HOOK_SPOOL || defaultSpoolPath(), observation);
+    if (observation) spool(process.env.OBSERVABILITY_HOOK_SPOOL || defaultSpoolPath(), observation);
   } catch {
     // Fail open: observability must never block Claude work.
   }

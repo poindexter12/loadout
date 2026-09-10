@@ -124,7 +124,7 @@ function buildStatuslineObservations(payload, now, suppliedRequestBodyEstimate) 
 // Preserve whatever statusline the user configured: run it with the same stdin and
 // pass its output straight through. The observability tee never changes the render.
 function renderPassthrough(raw) {
-  const command = process.env.WORKBENCH_STATUSLINE_RENDER;
+  const command = process.env.OBSERVABILITY_STATUSLINE_RENDER;
   if (!command) return '';
   try {
     const result = spawnSync(command, { input: raw, shell: true, encoding: 'utf8', timeout: 2000, windowsHide: true });
@@ -154,7 +154,7 @@ function formatObserverHealthStatus(health) {
 async function readObserverHealth(fetch = globalThis.fetch, environment = process.env) {
   if (typeof fetch !== 'function') return null;
   try {
-    const healthUrl = environment.WORKBENCH_OBSERVER_HEALTH_URL || OBSERVER_HEALTH_URL;
+    const healthUrl = environment.OBSERVABILITY_OBSERVER_HEALTH_URL || OBSERVER_HEALTH_URL;
     const response = await fetch(healthUrl, { signal: AbortSignal.timeout(OBSERVER_HEALTH_TIMEOUT_MS) });
     const health = await response.json();
     return health && typeof health === 'object' ? health : null;
@@ -188,7 +188,7 @@ async function main() {
     const observerHealth = await readObserverHealth();
     process.stdout.write(renderStatusline(raw, requestBodyEstimate, payload, observerHealth));
     for (const observation of buildStatuslineObservations(payload, new Date(), requestBodyEstimate)) {
-      spool(process.env.WORKBENCH_HOOK_SPOOL || defaultSpoolPath(), observation);
+      spool(process.env.OBSERVABILITY_HOOK_SPOOL || defaultSpoolPath(), observation);
     }
   } catch {
     process.stdout.write(renderPassthrough(raw));

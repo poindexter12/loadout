@@ -212,8 +212,8 @@ function mergeObservabilitySettings(settings, options = {}) {
 function removeObservabilitySettings(settings, options = {}) {
   const next = structuredClone(settings || {});
   const environment = { ...(next.env || {}) };
-  const previousStatusline = environment.WORKBENCH_STATUSLINE_RENDER;
-  for (const name of [...Object.keys(OBSERVABILITY_ENV), 'WORKBENCH_STATUSLINE_RENDER']) delete environment[name];
+  const previousStatusline = environment.OBSERVABILITY_STATUSLINE_RENDER;
+  for (const name of [...Object.keys(OBSERVABILITY_ENV), 'OBSERVABILITY_STATUSLINE_RENDER']) delete environment[name];
 
   if (managedStatuslineCommand(next.statusLine?.command, options.home)) {
     if (previousStatusline && previousStatusline !== options.inheritedStatuslineCommand) {
@@ -303,7 +303,7 @@ function collectorBinaryName(platform = process.platform) {
 }
 
 function resolveCollectorBinary(dataDir, environment = process.env, platform = process.platform) {
-  return environment.WORKBENCH_OTELCOL_CONTRIB || path.join(dataDir, 'collector', collectorBinaryName(platform));
+  return environment.OBSERVABILITY_OTELCOL_CONTRIB || path.join(dataDir, 'collector', collectorBinaryName(platform));
 }
 
 function parseChecksum(text, archiveName) {

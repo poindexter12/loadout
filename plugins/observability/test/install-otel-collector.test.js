@@ -16,7 +16,7 @@ const {
 } = require('../bin/install-otel-collector.js');
 const { downloadCollector } = require('../bin/setup-observability.js');
 
-const configuredBinary = process.env.WORKBENCH_OTELCOL_CONTRIB;
+const configuredBinary = process.env.OBSERVABILITY_OTELCOL_CONTRIB;
 const runRealCollectorTest = Boolean(configuredBinary);
 
 test('the Collector config uses supported redaction and creates its queue directory', () => {
@@ -33,7 +33,7 @@ test('the Collector config uses supported redaction and creates its queue direct
 });
 
 test('the pinned real Collector accepts the generated config', {
-  skip: runRealCollectorTest ? false : 'set WORKBENCH_OTELCOL_CONTRIB to validate with a real Collector',
+  skip: runRealCollectorTest ? false : 'set OBSERVABILITY_OTELCOL_CONTRIB to validate with a real Collector',
   timeout: 180_000,
 }, async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-real-collector-'));
@@ -94,7 +94,7 @@ function waitForChildClose(child) {
 }
 
 test('the real Collector converts delta sums and forwards gateway usage logs', {
-  skip: runRealCollectorTest ? false : 'set WORKBENCH_OTELCOL_CONTRIB to run the Collector transport test',
+  skip: runRealCollectorTest ? false : 'set OBSERVABILITY_OTELCOL_CONTRIB to run the Collector transport test',
   timeout: 60_000,
 }, async (t) => {
   const received = [];

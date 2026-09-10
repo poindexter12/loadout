@@ -584,7 +584,7 @@ test('SessionStart restores an unbound observer port after an old observer retir
 
   assert.equal(await launchEnsure({
     dataDir,
-    environment: { OBSERVABILITY_HOME: dataDir, WORKBENCH_OTELCOL_CONTRIB: process.execPath },
+    environment: { OBSERVABILITY_HOME: dataDir, OBSERVABILITY_OTELCOL_CONTRIB: process.execPath },
   }), true);
   const successorHealth = await waitForHealth(observerPort, successorVersion);
   assert.equal(successorHealth.ok, true);
@@ -639,7 +639,7 @@ test('hands a retired observer to the newest installed observer', async (t) => {
     host: '127.0.0.1',
     port: observerPort,
     pluginVersion: '0.0.0',
-    environment: { WORKBENCH_OTELCOL_CONTRIB: process.execPath },
+    environment: { OBSERVABILITY_OTELCOL_CONTRIB: process.execPath },
     logger: { info(message) { handoffLogs.push(message); } },
     sink: { id: 'none', egress: 'loopback', outbox: { enabled: false } },
   });

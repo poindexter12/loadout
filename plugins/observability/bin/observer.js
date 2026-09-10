@@ -398,7 +398,7 @@ function createObserver(options = {}) {
   let maintaining = false;
   let retiring = false;
   let drainingSpool = false;
-  const spoolPath = options.hookSpoolFile || process.env.WORKBENCH_HOOK_SPOOL || defaultSpoolPath();
+  const spoolPath = options.hookSpoolFile || process.env.OBSERVABILITY_HOOK_SPOOL || defaultSpoolPath();
   const drainSpool = async () => {
     if (drainingSpool) return null;
     drainingSpool = true;
