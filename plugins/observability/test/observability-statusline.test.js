@@ -92,7 +92,7 @@ async function startTemporaryObserver(directory, databasePath, seedOutbox) {
 }
 
 test('request-body high water uses the gateway record instead of the transcript', (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-body-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-body-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const sessionId = 'session-1';
   fs.writeFileSync(requestBodyHighWaterPath(sessionId, directory), JSON.stringify({ value: 1234567 }));
@@ -144,7 +144,7 @@ test('statusline health lookup sends a bounded request and fails silent', async 
 });
 
 test('real statusline invocation appends subscription burn and ledgers both windows', async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-statusline-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-statusline-'));
   const spoolPath = path.join(directory, 'spool.jsonl');
   const rendererPath = path.join(directory, 'renderer.js');
   const databasePath = path.join(directory, 'observability.db');
@@ -192,7 +192,7 @@ test('real statusline invocation appends subscription burn and ledgers both wind
 });
 
 test('real statusline invocation appends a stalled outbox health suffix', async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-statusline-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-statusline-'));
   const spoolPath = path.join(directory, 'spool.jsonl');
   const rendererPath = path.join(directory, 'renderer.js');
   const databasePath = path.join(directory, 'observability.db');
@@ -226,7 +226,7 @@ test('real statusline invocation appends a stalled outbox health suffix', async 
 });
 
 test('gateway records stay readable after a transcript exceeds the former limit', (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-body-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-body-'));
   const transcript = path.join(directory, 'transcript.jsonl');
   const sessionId = 'large-session';
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -237,7 +237,7 @@ test('gateway records stay readable after a transcript exceeds the former limit'
 });
 
 test('missing gateway records fail open', (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-body-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-body-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   assert.equal(estimateRequestBodyBytes('missing-session', directory), null);
 });

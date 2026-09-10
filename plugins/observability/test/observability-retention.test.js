@@ -40,7 +40,7 @@ function waitForWriterLock(writer) {
 }
 
 function temporaryStore(t, file = null) {
-  const directory = file ? null : fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-retention-'));
+  const directory = file ? null : fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-retention-'));
   const databaseFile = file || path.join(directory, 'ledger.db');
   const store = openObservabilityStore(databaseFile, { now: () => NOW });
   if (directory) {
@@ -131,7 +131,7 @@ test('retention checkpoints the WAL and reports current storage limits', (t) => 
 });
 
 test('a second observer can write after retention pruning', (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-retention-writer-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-retention-writer-'));
   const databaseFile = path.join(directory, 'ledger.db');
   const first = openObservabilityStore(databaseFile, { now: () => NOW });
   const second = openObservabilityStore(databaseFile, { now: () => NOW });

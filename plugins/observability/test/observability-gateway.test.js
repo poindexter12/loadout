@@ -76,7 +76,7 @@ function gatewayPayload() {
 }
 
 test('gateway OTLP becomes authoritative first-class usage across observer views and reports', async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-gateway-observer-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-gateway-observer-'));
   const store = openObservabilityStore(path.join(directory, 'observability.db'));
   const receiver = await startFakeOtlpReceiver();
   const observer = createObserver({
@@ -220,7 +220,7 @@ test('gateway OTLP becomes authoritative first-class usage across observer views
 // this stream per block would inflate a request 4x; keeping the message_start
 // zeros would erase it. The stored row has to be the final merged truth, once.
 test('a multi-block Codex stream stores one request row with the merged counts', async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-gateway-blocks-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-gateway-blocks-'));
   const store = openObservabilityStore(path.join(directory, 'observability.db'));
   const receiver = await startFakeOtlpReceiver();
   const observer = createObserver({
@@ -293,7 +293,7 @@ test('a multi-block Codex stream stores one request row with the merged counts',
 });
 
 test('gateway tool-result usage records land with their declared quality and no schema drops', async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-gateway-toolresult-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-gateway-toolresult-'));
   const store = openObservabilityStore(path.join(directory, 'observability.db'));
   const receiver = await startFakeOtlpReceiver();
   const observer = createObserver({
@@ -367,7 +367,7 @@ test('gateway tool-result usage records land with their declared quality and no 
 });
 
 test('gateway mcp-footprint records keep their server label and drop nothing', async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-gateway-footprint-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-gateway-footprint-'));
   const store = openObservabilityStore(path.join(directory, 'observability.db'));
   const receiver = await startFakeOtlpReceiver();
   const observer = createObserver({
@@ -429,7 +429,7 @@ test('gateway mcp-footprint records keep their server label and drop nothing', a
 });
 
 test('gateway records inherit projects from post-tool hooks after an observer restart', (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-gateway-project-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-gateway-project-'));
   const store = openObservabilityStore(path.join(directory, 'observability.db'));
   t.after(() => {
     store.close();
@@ -475,7 +475,7 @@ test('gateway records inherit projects from post-tool hooks after an observer re
 });
 
 test('store warms session projects from stored hook observations', (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-gateway-warm-project-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-gateway-warm-project-'));
   const databaseFile = path.join(directory, 'observability.db');
   const projectId = 'c'.repeat(64);
   const first = openObservabilityStore(databaseFile, { outboxEnabled: false });

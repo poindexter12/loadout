@@ -43,7 +43,7 @@ test('every mapped hook event yields an acceptable canonical observation', () =>
 });
 
 test('every mapped hook event ingests without schema drops', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-hook-schema-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-hook-schema-'));
   const store = openObservabilityStore(path.join(dir, 'observability.db'), { outboxEnabled: false });
   t.after(() => {
     store.close();
@@ -93,7 +93,7 @@ test('post-tool observations re-announce their project after an observer restart
 });
 
 function temporaryTree(t, name) {
-  const directory = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-repo-identity-')));
+  const directory = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-repo-identity-')));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   return path.join(directory, name);
 }
@@ -225,7 +225,7 @@ test('PostToolUse measures serialized input and result sizes without retaining c
 });
 
 test('session end records exact recharge-weighted result bytes by tool', (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-recharge-rollup-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-recharge-rollup-'));
   const store = openObservabilityStore(path.join(directory, 'observability.db'), { outboxEnabled: false });
   t.after(() => {
     store.close();
@@ -270,7 +270,7 @@ test('session end records exact recharge-weighted result bytes by tool', (t) => 
 });
 
 test('recharge rollup searches later turns through the session event index', (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-recharge-query-plan-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-recharge-query-plan-'));
   const store = openObservabilityStore(path.join(directory, 'observability.db'), { outboxEnabled: false });
   t.after(() => {
     store.close();
@@ -322,7 +322,7 @@ test('unknown hook events are ignored', () => {
 });
 
 test('spool appends JSON lines and truncates rather than growing unbounded', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-hooks-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-hooks-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const spoolPath = path.join(dir, 'nested', 'spool.jsonl');
   const observation = buildObservation({ hook_event_name: 'Stop', session_id: 's', reason: 'end_turn' }, NOW);
@@ -338,7 +338,7 @@ test('spool appends JSON lines and truncates rather than growing unbounded', (t)
 });
 
 test('Stop hook flushes once, stays silent on re-entry, and fails open', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-stop-hook-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-stop-hook-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const hook = path.join(__dirname, '..', 'hooks', 'observability.js');
   const spoolPath = path.join(dir, 'hook-spool.jsonl');
@@ -368,7 +368,7 @@ test('Stop hook flushes once, stays silent on re-entry, and fails open', (t) => 
 });
 
 test('hook spool drains into the observer store and replays idempotently', async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-hook-drain-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-hook-drain-'));
   const spoolPath = path.join(dir, 'hook-spool.jsonl');
   const store = openObservabilityStore(path.join(dir, 'observability.db'), { outboxEnabled: false });
   t.after(() => {
@@ -395,7 +395,7 @@ test('hook spool drains into the observer store and replays idempotently', async
 });
 
 test('hook wake signals annotate only the first subsequent orchestrator request', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-wake-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-wake-'));
   const store = openObservabilityStore(path.join(dir, 'observability.db'), { outboxEnabled: false });
   t.after(() => {
     store.close();

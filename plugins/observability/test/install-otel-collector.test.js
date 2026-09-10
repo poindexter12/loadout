@@ -36,7 +36,7 @@ test('the pinned real Collector accepts the generated config', {
   skip: runRealCollectorTest ? false : 'set WORKBENCH_OTELCOL_CONTRIB to validate with a real Collector',
   timeout: 180_000,
 }, async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-real-collector-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-real-collector-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
   const binary = configuredBinary || await downloadCollector({ dataDir: directory });
@@ -108,7 +108,7 @@ test('the real Collector converts delta sums and forwards gateway usage logs', {
     });
   });
   const observerPort = await listen(receiver);
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-collector-runtime-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-collector-runtime-'));
   const collectorPort = await new Promise((resolve) => {
     const portProbe = net.createServer();
     portProbe.listen(0, '127.0.0.1', () => {

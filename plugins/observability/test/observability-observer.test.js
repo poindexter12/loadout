@@ -22,7 +22,7 @@ const PROJECT_ID = 'a'.repeat(64);
 const FIXTURE_NOW = new Date('2026-08-07T12:00:00.000Z');
 
 function temporaryStore(t) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-observer-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-observer-'));
   const file = path.join(directory, 'ledger.db');
   const store = openObservabilityStore(file, { now: () => FIXTURE_NOW });
   t.after(() => {
@@ -387,7 +387,7 @@ test('requeues exhausted outbox records through the observer', async (t) => {
     maxAttempts: 1,
     fetch: async () => { throw new Error('sink unavailable'); },
   });
-  const spoolDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-observer-spool-'));
+  const spoolDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-observer-spool-'));
   t.after(() => fs.rmSync(spoolDirectory, { recursive: true, force: true }));
   const observer = createObserver({
     store,
@@ -436,7 +436,7 @@ test('outbox transport deadlines release the drainer for the next tick', async (
 });
 
 test('keeps an observer serving when the newest installed registry path is missing', async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-observer-home-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-observer-home-'));
   const registryDirectory = path.join(home, '.claude', 'plugins');
   fs.mkdirSync(registryDirectory, { recursive: true });
   const registryFile = path.join(registryDirectory, 'installed_plugins.json');
@@ -528,7 +528,7 @@ test('SessionStart restores an unbound observer port after an old observer retir
   const { launchEnsure } = require('../lib/observability/ensure.js');
   const setup = require('../bin/setup-observability.js');
   const { writeObservabilityConfig } = require('../observability/sinks/index.js');
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-observer-arrival-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-observer-arrival-'));
   const dataDir = path.join(home, '.claude', 'observability');
   const configFile = path.join(dataDir, 'observability.json');
   const databaseFile = path.join(dataDir, 'observability.db');
@@ -593,7 +593,7 @@ test('SessionStart restores an unbound observer port after an old observer retir
 test('hands a retired observer to the newest installed observer', async (t) => {
   const setup = require('../bin/setup-observability.js');
   const { writeObservabilityConfig } = require('../observability/sinks/index.js');
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-observer-handoff-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-observer-handoff-'));
   const dataDir = path.join(home, 'data');
   const configFile = path.join(dataDir, 'observability.json');
   const databaseFile = path.join(dataDir, 'observability.db');
@@ -778,7 +778,7 @@ test('health stays healthy while a recent outbox has pending records', async (t)
 });
 
 test('quarantines repeatedly failing hook spools, logs their error, and keeps health answering', async (t) => {
-  const spoolDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-observer-poison-spool-'));
+  const spoolDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-observer-poison-spool-'));
   t.after(() => fs.rmSync(spoolDirectory, { recursive: true, force: true }));
   const spoolPath = path.join(spoolDirectory, 'hook-spool.jsonl');
   fs.writeFileSync(spoolPath, '{"event":"one"}\n');
@@ -824,7 +824,7 @@ test('quarantines repeatedly failing hook spools, logs their error, and keeps he
 });
 
 test('hook spool drain keeps committed rows out of the next attempt after its budget expires', async (t) => {
-  const spoolDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-observer-budget-spool-'));
+  const spoolDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-observer-budget-spool-'));
   t.after(() => fs.rmSync(spoolDirectory, { recursive: true, force: true }));
   const spoolPath = path.join(spoolDirectory, 'hook-spool.jsonl');
   fs.writeFileSync(spoolPath, '{"event":"one"}\n{"event":"two"}\n');
@@ -861,7 +861,7 @@ test('hook spool drain keeps committed rows out of the next attempt after its bu
 });
 
 test('hook spool drain finishes late final batches and records success', async (t) => {
-  const spoolDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-observer-late-final-batch-'));
+  const spoolDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-observer-late-final-batch-'));
   t.after(() => fs.rmSync(spoolDirectory, { recursive: true, force: true }));
   const spoolPath = path.join(spoolDirectory, 'hook-spool.jsonl');
   fs.writeFileSync(spoolPath, '{"event":"one"}\n');
@@ -884,7 +884,7 @@ test('hook spool drain finishes late final batches and records success', async (
 });
 
 test('health reports a hook spool drain that remains in flight past its deadline', async (t) => {
-  const spoolDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-observer-stalled-spool-'));
+  const spoolDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-observer-stalled-spool-'));
   t.after(() => fs.rmSync(spoolDirectory, { recursive: true, force: true }));
   const spoolPath = path.join(spoolDirectory, 'hook-spool.jsonl');
   fs.writeFileSync(spoolPath, '{"event":"one"}\n');
@@ -912,7 +912,7 @@ test('health reports a hook spool drain that remains in flight past its deadline
 });
 
 test('observer reports unrecoverable storage pressure without dropping the triggering ingestion', async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-observer-pressure-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-observer-pressure-'));
   const store = openObservabilityStore(path.join(directory, 'ledger.db'), {
     maxDatabaseBytes: 1,
     storageReserveBytes: 0,

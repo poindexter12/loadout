@@ -259,7 +259,7 @@ test('observer accepts OTLP JSON on /v1/logs and rejects protobuf with 415', asy
 });
 
 test('Collector transport gets an OTLP acknowledgement after the observer commits', async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-otlp-ack-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-otlp-ack-'));
   const store = openObservabilityStore(path.join(directory, 'ledger.db'));
   const receiver = await startFakeOtlpReceiver();
   const observer = createObserver({ port: 0, store, projectId: 'a'.repeat(64), sink: testSink(receiver.endpoint), hookSpoolFile: path.join(directory, 'hook-spool.jsonl') });

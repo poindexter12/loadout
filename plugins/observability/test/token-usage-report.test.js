@@ -16,7 +16,7 @@ const { DatabaseSync } = require('node:sqlite');
 const PROJECT_ID = 'a'.repeat(64);
 
 function temporaryStore(t) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-token-report-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-token-report-'));
   const store = openObservabilityStore(path.join(directory, 'ledger.db'));
   t.after(() => {
     store.close();
@@ -52,8 +52,8 @@ function ingestGatewayUsage(store, id, agentId, contextTokens, outputTokens, cos
 }
 
 function seedSidequestBoard(t) {
-  const sidequestHome = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-board-cost-'));
-  const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-board-project-'));
+  const sidequestHome = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-board-cost-'));
+  const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-board-project-'));
   t.after(() => {
     fs.rmSync(sidequestHome, { recursive: true, force: true });
     fs.rmSync(projectPath, { recursive: true, force: true });

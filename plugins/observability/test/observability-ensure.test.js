@@ -17,7 +17,7 @@ const {
 const { readObservabilityConfig, writeObservabilityConfig } = require('../observability/sinks/index.js');
 
 function temporaryDirectory(t) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-ensure-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-ensure-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   return directory;
 }

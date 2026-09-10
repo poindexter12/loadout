@@ -20,7 +20,7 @@ const {
 const PROJECT_ID = 'a'.repeat(64);
 
 function temporaryDirectory(t) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-adapters-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-adapters-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   return directory;
 }

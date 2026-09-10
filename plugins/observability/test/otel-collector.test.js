@@ -180,7 +180,7 @@ test('renderCollectorYaml emits parseable-looking YAML with the right markers an
 });
 
 test('writeCollectorConfig writes a config file', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-collector-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-collector-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const target = path.join(dir, 'nested', 'config.yaml');
   const written = writeCollectorConfig(target);

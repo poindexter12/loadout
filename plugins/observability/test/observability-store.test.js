@@ -32,7 +32,7 @@ function observation(identifier, observedAt = '2026-08-07T12:00:00.000Z') {
 }
 
 function temporaryStore(t, options = {}) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-storage-pressure-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-storage-pressure-'));
   const store = openObservabilityStore(path.join(directory, 'ledger.db'), { now: () => NOW, ...options });
   t.after(() => {
     store.close();

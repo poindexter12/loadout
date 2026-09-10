@@ -21,7 +21,7 @@ const {
 const { auditProjectTelemetry, formatAudit, verifyProjectTelemetry } = require('../bin/verify-project-telemetry.js');
 
 function temporaryProject(t, name = 'telemetry-project') {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-project-telemetry-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-project-telemetry-'));
   const projectDir = path.join(directory, name);
   fs.mkdirSync(projectDir, { recursive: true });
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -29,7 +29,7 @@ function temporaryProject(t, name = 'telemetry-project') {
 }
 
 function temporaryRepository(t, name = 'sample-repo') {
-  const directory = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-repo-telemetry-')));
+  const directory = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-repo-telemetry-')));
   const root = path.join(directory, name);
   fs.mkdirSync(path.join(root, '.git'), { recursive: true });
   const projects = path.join(directory, 'claude-projects');

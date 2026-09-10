@@ -9,7 +9,7 @@ const test = require('node:test');
 const { legacyDataDir, resolveDefaultDataDir } = require('../lib/observability/data-dir.js');
 
 function temporaryHome(t) {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-data-dir-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-data-dir-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   return home;
 }

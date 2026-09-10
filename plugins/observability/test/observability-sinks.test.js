@@ -74,7 +74,7 @@ function observation(sourceEventId = 'sink-test-event') {
 }
 
 function temporaryDirectory() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-sinks-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-sinks-'));
 }
 
 test('prices every active model label and token type from one table', () => {
@@ -286,7 +286,7 @@ test('Grafana adopts the managed live container and honors configured loopback p
     '3000/tcp': [{ HostIp: '127.0.0.1', HostPort: '13000' }],
     '4318/tcp': [{ HostIp: '127.0.0.1', HostPort: '14300' }],
   });
-  const dashboardDir = path.join(os.tmpdir(), 'workbench-grafana-dashboards');
+  const dashboardDir = path.join(os.tmpdir(), 'loadout-grafana-dashboards');
   const mounts = JSON.stringify([{
     Source: dashboardDir,
     Destination: '/otel-lgtm/grafana/conf/provisioning/workbench-dashboards',
@@ -361,7 +361,7 @@ test('Grafana replaces a container with an outdated dashboard mount', () => {
     '3000/tcp': [{ HostIp: '127.0.0.1', HostPort: '13000' }],
     '4318/tcp': [{ HostIp: '127.0.0.1', HostPort: '14300' }],
   });
-  const dashboardDir = path.join(os.tmpdir(), 'workbench-grafana-dashboards');
+  const dashboardDir = path.join(os.tmpdir(), 'loadout-grafana-dashboards');
   const mounts = JSON.stringify([{
     Source: path.join(os.tmpdir(), 'stale-grafana-dashboards'),
     Destination: '/otel-lgtm/grafana/conf/provisioning/workbench-dashboards',

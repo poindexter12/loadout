@@ -100,7 +100,7 @@ test('reports an unknown Docker state when the probe exceeds its budget', () => 
 test('check results preserve a successful Docker probe', async () => {
   const result = await setupObservability({
     check: true,
-    dataDir: path.join(os.tmpdir(), 'workbench-observability-check-result'),
+    dataDir: path.join(os.tmpdir(), 'loadout-observability-check-result'),
     dockerAvailable: true,
     config: {
       observability: { enabled: true, sink: 'grafana-lgtm', dashboard: true, projects: [] },
@@ -139,7 +139,7 @@ test('does not replace an existing status line on repeat setup', () => {
 });
 
 test('preserves existing project settings when applying the setup', () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-observability-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-observability-'));
   try {
     const claudeDir = path.join(directory, '.claude');
     fs.mkdirSync(claudeDir, { recursive: true });
@@ -164,7 +164,7 @@ test('preserves existing project settings when applying the setup', () => {
 });
 
 test('installs a stable status line shim when none is configured', () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-statusline-shim-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-statusline-shim-'));
   try {
     const result = applySettings(path.join(directory, 'project'), { home: directory });
     const shimPath = path.join(directory, '.claude', 'workbench-statusline.js');
@@ -178,7 +178,7 @@ test('installs a stable status line shim when none is configured', () => {
 });
 
 test('leaves an existing user status line untouched', () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-user-statusline-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-user-statusline-'));
   try {
     const projectDir = path.join(directory, 'project');
     const userSettings = path.join(directory, '.claude', 'settings.json');
@@ -205,7 +205,7 @@ test('uses a pinned platform collector archive and verifies release checksums', 
 });
 
 test('downloads the pinned archive with the release checksums manifest and Windows-local tar paths', async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-collector-download-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-collector-download-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const archive = Buffer.from('verified collector archive');
   const checksum = require('node:crypto').createHash('sha256').update(archive).digest('hex');
@@ -237,7 +237,7 @@ test('downloads the pinned archive with the release checksums manifest and Windo
 });
 
 test('plans current-user application data and only starts LGTM on request', (t) => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-lgtm-start-'));
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-lgtm-start-'));
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
   const plan = setupPlan({ dataDir, projectDir: '.' });
   assert.equal(plan.dataDir, dataDir);
@@ -296,7 +296,7 @@ test('repairs a created dashboard container before reporting setup success', () 
     '3000/tcp': [{ HostIp: '127.0.0.1', HostPort: '3000' }],
     '4318/tcp': [{ HostIp: '127.0.0.1', HostPort: '14318' }],
   });
-  const dashboardDir = path.join(os.tmpdir(), 'workbench-grafana-created-container');
+  const dashboardDir = path.join(os.tmpdir(), 'loadout-grafana-created-container');
   const mounts = JSON.stringify([{
     Source: dashboardDir,
     Destination: '/otel-lgtm/grafana/conf/provisioning/workbench-dashboards',
@@ -368,7 +368,7 @@ test('reports created dashboard containers distinctly from stopped ones', () => 
 });
 
 test('setup mounts generated Grafana dashboards only for active opted-in projects', async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-lgtm-setup-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-lgtm-setup-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const dataDir = path.join(directory, 'data');
   const projectDir = path.join(directory, 'project');
@@ -420,7 +420,7 @@ test('setup mounts generated Grafana dashboards only for active opted-in project
 });
 
 test('continues setup when the dashboard activity probe fails', async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-lgtm-probe-failure-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-lgtm-probe-failure-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const dataDir = path.join(directory, 'data');
   const projectDir = path.join(directory, 'project');
@@ -479,7 +479,7 @@ test('continues setup when the dashboard activity probe fails', async (t) => {
 });
 
 test('does not generate project dashboards from configured project paths', async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-lgtm-setup-empty-registry-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-lgtm-setup-empty-registry-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const dataDir = path.join(directory, 'data');
   const projectDir = path.join(directory, 'project');
@@ -518,7 +518,7 @@ test('does not generate project dashboards from configured project paths', async
 });
 
 test('stores sink selection separately from project settings', async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-sink-config-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-sink-config-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const projectDir = path.join(directory, 'project');
   const dataDir = path.join(directory, 'application-data');
@@ -599,7 +599,7 @@ test('removes only Observability settings without changing a status line', () =>
 });
 
 test('disable tears down managed runtime and keeps the consent record reconfigurable', async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-disable-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-disable-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const projectDir = path.join(directory, 'project');
   const otherProjectDir = path.join(directory, 'other-project');

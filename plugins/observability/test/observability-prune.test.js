@@ -26,7 +26,7 @@ function oldObservation(identifier) {
 }
 
 test('storage pressure uses retention first and records its exact removal window', (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-pressure-prune-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-pressure-prune-'));
   const store = openObservabilityStore(path.join(directory, 'ledger.db'), {
     now: () => new Date('2026-08-07T12:00:00.000Z'),
     maxDatabaseBytes: 256 * 1024,
