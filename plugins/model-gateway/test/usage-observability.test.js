@@ -312,10 +312,10 @@ test('resolves a gateway session transcript into an OTLP project resource', (t) 
   const projectsDirectory = path.join(directory, 'projects');
   const sessionId = 'session-project';
   const projectDirectory = path.join(directory, 'loadout');
-  fs.mkdirSync(path.join(projectsDirectory, 'C--dev-eigenwise-public-loadout'), { recursive: true });
+  fs.mkdirSync(path.join(projectsDirectory, 'C--dev-poindexter12-loadout'), { recursive: true });
   fs.mkdirSync(projectDirectory);
   fs.writeFileSync(
-    path.join(projectsDirectory, 'C--dev-eigenwise-public-loadout', `${sessionId}.jsonl`),
+    path.join(projectsDirectory, 'C--dev-poindexter12-loadout', `${sessionId}.jsonl`),
     JSON.stringify({ cwd: projectDirectory }) + '\n',
   );
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

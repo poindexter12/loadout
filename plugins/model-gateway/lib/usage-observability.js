@@ -602,7 +602,7 @@ function buildOtlpLogPayload(record) {
     resourceLogs: [{
       resource: { attributes: resourceAttributes },
       scopeLogs: [{
-        scope: { name: 'eigenwise.codex-gateway.usage', version: '1' },
+        scope: { name: 'loadout.codex-gateway.usage', version: '1' },
         logRecords: [logRecord],
       }],
     }],

@@ -1796,7 +1796,7 @@ function postRouteSpan(endpoint, span) {
       resourceSpans: [{
         resource: { attributes: [otlpAttribute('service.name', 'model-gateway')] },
         scopeSpans: [{
-          scope: { name: 'eigenwise.codex-gateway' },
+          scope: { name: 'loadout.codex-gateway' },
           spans: [span],
         }],
       }],
