@@ -10,7 +10,7 @@ function readSkill(name) {
 }
 
 test('documents namespaced Quartermaster commands and Live Rules deduplication', () => {
-  const doctor = readSkill('toolshed-doctor');
+  const doctor = readSkill('loadout-doctor');
   const setup = readSkill('setup');
 
   assert.match(doctor, /`\/quartermaster:update-loadout`, then `\/reload-plugins`/);

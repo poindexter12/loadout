@@ -37,7 +37,7 @@ function readStdin(fileSystem = fs) {
   }
 }
 
-function activeToolshedInstances(input, options) {
+function activeLoadoutInstances(input, options) {
   const fileSystem = options.fileSystem || fs;
   const home = options.home || os.homedir();
   const registryFile = options.registryFile || path.join(home, '.claude', 'plugins', 'installed_plugins.json');
@@ -67,7 +67,7 @@ async function decide(input, options = {}) {
     }
   }
 
-  const instances = activeToolshedInstances(input, options);
+  const instances = activeLoadoutInstances(input, options);
   const messages = [];
   const updates = remoteUpdates(instances, cache?.manifest);
   if (updates.length && warnOnce(input, 'stop-remote', options, availableVersionsKey(updates))) {
@@ -97,7 +97,7 @@ if (require.main === module) main().catch(() => {});
 
 module.exports = {
   REFRESH_TIMEOUT_MS,
-  activeToolshedInstances,
+  activeLoadoutInstances,
   decide,
   readStdin,
   refreshManifest,

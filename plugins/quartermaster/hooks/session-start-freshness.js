@@ -249,7 +249,7 @@ function installedFreshness(instances, marketplaces, now, manifestFor, gitFreshn
 
 function gatewayCheckFailure(check) {
   const diagnostic = typeof check?.diagnostic === 'string' ? check.diagnostic : '';
-  const guidance = 'Run /quartermaster:toolshed-doctor for the full health report.';
+  const guidance = 'Run /quartermaster:loadout-doctor for the full health report.';
   const details = {
     'missing-checker': `model-gateway health checker is missing${diagnostic ? ` (${diagnostic})` : ''}; run /update-loadout, then /reload-plugins.`,
     'spawn-error': `model-gateway health checker could not start${diagnostic ? ` (${diagnostic})` : ''}. ${guidance}`,

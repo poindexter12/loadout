@@ -58,7 +58,7 @@ test('a session with no reload pending permits with empty output and never fetch
 
 test('installed behind the central marketplace is no longer blocked (regression: SQ-495)', () => {
   // quartermaster installed at 1.0.0 while the marketplace has since moved far ahead. Previously
-  // this hard-blocked EVERY prompt (and trapped unrelated projects on each toolshed release).
+  // this hard-blocked EVERY prompt (and trapped unrelated projects on each Loadout release).
   // Being behind is not a corruption risk, so it must permit — and must not reach the network.
   const directory = tempDirectory();
   const registryFile = path.join(directory, 'installed_plugins.json');
@@ -141,8 +141,8 @@ test('the bypass env var disables the guard entirely', () => {
 });
 
 test('only exact maintenance prompts bypass the guard', () => {
-  for (const prompt of ['/update-loadout', '/update-loadout --dry-run', '/quartermaster:update-loadout', '/quartermaster:update-loadout --check', '/toolshed-doctor', '/quartermaster:toolshed-doctor', '/reload-plugins', '/reload-plugins --force', '/plugin', '/plugin update sidequest@loadout', '/plugin marketplace update loadout', 'claude plugin marketplace update loadout', 'claude plugin update sidequest@loadout --scope user']) assert.equal(isMaintenancePrompt(prompt), true, prompt);
-  for (const prompt of ['please run /update-loadout', '/update-loadout; work on this', '/quartermaster:update-loadout; work on this', '/quartermaster:toolshed-doctor now', '/quartermaster-doctor', '/quartermaster:quartermaster-doctor', '/workbench:update-loadout', '/workbench:toolshed-doctor', '/reload-plugins and fix it', 'claude plugin update sidequest@loadout --scope user && rm -rf x', 'I said /plugin update']) assert.equal(isMaintenancePrompt(prompt), false, prompt);
+  for (const prompt of ['/update-loadout', '/update-loadout --dry-run', '/quartermaster:update-loadout', '/quartermaster:update-loadout --check', '/loadout-doctor', '/quartermaster:loadout-doctor', '/reload-plugins', '/reload-plugins --force', '/plugin', '/plugin update sidequest@loadout', '/plugin marketplace update loadout', 'claude plugin marketplace update loadout', 'claude plugin update sidequest@loadout --scope user']) assert.equal(isMaintenancePrompt(prompt), true, prompt);
+  for (const prompt of ['please run /update-loadout', '/update-loadout; work on this', '/quartermaster:update-loadout; work on this', '/quartermaster:loadout-doctor now', '/quartermaster-doctor', '/quartermaster:quartermaster-doctor', '/workbench:update-loadout', '/workbench:loadout-doctor', '/reload-plugins and fix it', 'claude plugin update sidequest@loadout --scope user && rm -rf x', 'I said /plugin update']) assert.equal(isMaintenancePrompt(prompt), false, prompt);
 });
 
 test('all prompts pass through and report a newer installed version in the same session', () => {

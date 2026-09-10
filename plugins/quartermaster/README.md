@@ -21,7 +21,7 @@ After installing, run `/reload-plugins` or start a new Claude Code session. Then
 
 ## How it works
 
-Quartermaster has hooks for setup hints, local tallies, freshness notices, and resupply offers. The hooks do not call a model for the mining pass. The plugin also ships skills for `setup`, `resupply`, `update-loadout`, and `toolshed-doctor`.
+Quartermaster has hooks for setup hints, local tallies, freshness notices, and resupply offers. The hooks do not call a model for the mining pass. The plugin also ships skills for `setup`, `resupply`, `update-loadout`, and `loadout-doctor`.
 
 - **Setup** assesses one project, mines a cross-project history summary, asks a short interview, and proposes a project baseline. The Loadout pieces remain independent and opt in separately.
 - **Resupply** mines the current project by default after you approve a round. It ranks missing measurements, manual work, re-derived knowledge, underperforming capabilities, and setup friction, then asks for approval for each finding.

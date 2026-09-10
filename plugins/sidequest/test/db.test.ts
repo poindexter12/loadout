@@ -110,7 +110,7 @@ test('schema v7 stores project category provenance by project and id', () => {
 
 test('putRow and getRow round-trip ticket data', () => {
   const { db } = makeDb();
-  const row = ticket('tk_1', 'toolshed', 'todo', 1);
+  const row = ticket('tk_1', 'loadout', 'todo', 1);
 
   putRow(db, 'tickets', row);
 
@@ -120,39 +120,39 @@ test('putRow and getRow round-trip ticket data', () => {
 
 test('listRows filters ticket data by project and status', () => {
   const { db } = makeDb();
-  const expected = ticket('tk_1', 'toolshed', 'todo', 1);
+  const expected = ticket('tk_1', 'loadout', 'todo', 1);
   putRow(db, 'tickets', expected);
-  putRow(db, 'tickets', ticket('tk_2', 'toolshed', 'doing', 2));
+  putRow(db, 'tickets', ticket('tk_2', 'loadout', 'doing', 2));
   putRow(db, 'tickets', ticket('tk_3', 'other', 'todo', 3));
 
-  assert.deepStrictEqual(listRows(db, 'tickets', { project: 'toolshed', status: 'todo' }), [expected.data]);
+  assert.deepStrictEqual(listRows(db, 'tickets', { project: 'loadout', status: 'todo' }), [expected.data]);
   db.close();
 });
 
 test('targeted row helpers cache statements, count filters, page in order, and project compact columns', () => {
   const { db } = makeDb();
-  putRow(db, 'tickets', ticket('tk_1', 'toolshed', 'todo', 2));
-  putRow(db, 'tickets', ticket('tk_2', 'toolshed', 'todo', 1));
+  putRow(db, 'tickets', ticket('tk_1', 'loadout', 'todo', 2));
+  putRow(db, 'tickets', ticket('tk_2', 'loadout', 'todo', 1));
   putRow(db, 'tickets', ticket('tk_3', 'other', 'todo', 3));
 
   assert.strictEqual(prepareCached(db, 'SELECT id FROM tickets'), prepareCached(db, 'SELECT id FROM tickets'));
-  assert.strictEqual(countRows(db, 'tickets', { project: 'toolshed', status: 'todo' }), 2);
-  assert.deepStrictEqual(listRowsPage<TicketData>(db, 'tickets', { project: 'toolshed' }, { limit: 1 }), [ticket('tk_2', 'toolshed', 'todo', 1).data]);
+  assert.strictEqual(countRows(db, 'tickets', { project: 'loadout', status: 'todo' }), 2);
+  assert.deepStrictEqual(listRowsPage<TicketData>(db, 'tickets', { project: 'loadout' }, { limit: 1 }), [ticket('tk_2', 'loadout', 'todo', 1).data]);
   const compactRows = selectRows<{ id: string; project: string }>(
     db,
     'SELECT id, project FROM tickets WHERE project = ? ORDER BY ord',
-    ['toolshed'],
+    ['loadout'],
   );
   assert.deepStrictEqual(
     compactRows.map((row) => ({ ...row })),
-    [{ id: 'tk_2', project: 'toolshed' }, { id: 'tk_1', project: 'toolshed' }],
+    [{ id: 'tk_2', project: 'loadout' }, { id: 'tk_1', project: 'loadout' }],
   );
   db.close();
 });
 
 test('deleteRow removes a row', () => {
   const { db } = makeDb();
-  putRow(db, 'tickets', ticket('tk_1', 'toolshed', 'todo', 1));
+  putRow(db, 'tickets', ticket('tk_1', 'loadout', 'todo', 1));
 
   assert.strictEqual(deleteRow(db, 'tickets', 'tk_1'), true);
   assert.strictEqual(getRow(db, 'tickets', 'tk_1'), null);
@@ -163,7 +163,7 @@ test('txn rolls back when its callback throws', () => {
   const { db } = makeDb();
 
   assert.throws(() => txn(db, () => {
-    putRow(db, 'tickets', ticket('tk_1', 'toolshed', 'todo', 1));
+    putRow(db, 'tickets', ticket('tk_1', 'loadout', 'todo', 1));
     throw new Error('stop');
   }), /stop/);
 
@@ -175,7 +175,7 @@ test('txn refuses Promise-returning callbacks and rolls back their synchronous w
   const { db } = makeDb();
 
   assert.throws(() => txn(db, async () => {
-    putRow(db, 'tickets', ticket('tk_1', 'toolshed', 'todo', 1));
+    putRow(db, 'tickets', ticket('tk_1', 'loadout', 'todo', 1));
   }), /must be synchronous/);
 
   assert.strictEqual(getRow(db, 'tickets', 'tk_1'), null);

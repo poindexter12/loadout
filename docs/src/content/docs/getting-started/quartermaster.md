@@ -42,7 +42,7 @@ Or run the maintenance skills directly:
 
 > /quartermaster:update-loadout
 
-> /quartermaster:toolshed-doctor
+> /quartermaster:loadout-doctor
 
 The requested updater reads Claude Code's installed-plugin registry and updates every active Loadout install at its recorded user, project, or local scope and project path. It can update installs in other recorded projects, not only the project where you invoked it. Third-party plugins and marketplaces are left alone.
 

@@ -33,7 +33,7 @@ const registry = {
 };
 
 function withRegistry(value, callback) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'toolshed-updater-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-updater-'));
   const file = path.join(directory, 'installed_plugins.json');
   fs.writeFileSync(file, JSON.stringify(value));
   try {
@@ -173,7 +173,7 @@ test('deferred migration installs model-gateway, moves owned state, verifies it,
   }];
 
   return withRegistry(legacy, (registryFile) => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'toolshed-gateway-rename-'));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-gateway-rename-'));
     try {
       const legacyState = path.join(home, '.claude', 'codex-gateway');
       fs.mkdirSync(legacyState, { recursive: true });
@@ -229,7 +229,7 @@ test('deferred migration leaves an already-migrated install alone', () => withRe
 }));
 
 test('leaves gateway wiring to the stable updater', () => withRegistry(registry, (registryFile) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'toolshed-gateway-update-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-gateway-update-'));
   try {
     const calls = [];
     const result = runUpdate({
@@ -256,7 +256,7 @@ test('documents that the stable updater preserves recorded gateway wiring scope'
 });
 
 test('skips stale project installs without blocking gateway wiring', () => {
-  const stalePath = path.join(os.tmpdir(), `toolshed-stale-project-${process.pid}-${Date.now()}`);
+  const stalePath = path.join(os.tmpdir(), `loadout-stale-project-${process.pid}-${Date.now()}`);
   const configured = structuredClone(registry);
   configured.plugins['sidequest@loadout'].push({
     scope: 'local',
@@ -267,7 +267,7 @@ test('skips stale project installs without blocking gateway wiring', () => {
   });
 
   return withRegistry(configured, (registryFile) => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'toolshed-stale-wiring-'));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-stale-wiring-'));
     try {
       const calls = [];
       const lines = [];
@@ -299,7 +299,7 @@ test('skips stale project installs without blocking gateway wiring', () => {
 });
 
 test('GCs only missing Sidequest agent worktree registry entries and preserves a backup', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'toolshed-agent-worktree-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-agent-worktree-'));
   const missingAgentWorktree = path.join(root, '.claude', 'worktrees', 'agent-gone');
   const liveAgentWorktree = path.join(root, '.claude', 'worktrees', 'agent-live');
   const missingProject = path.join(root, 'deleted-project');
@@ -342,7 +342,7 @@ test('GCs only missing Sidequest agent worktree registry entries and preserves a
 });
 
 test('check mode reports stale Sidequest agent worktree entries without changing the registry', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'toolshed-agent-worktree-check-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-agent-worktree-check-'));
   const missingAgentWorktree = path.join(root, '.claude', 'worktrees', 'agent-gone');
   const configured = structuredClone(registry);
   configured.plugins['sidequest@loadout'].push({ scope: 'local', projectPath: missingAgentWorktree, version: '1.0.0' });
@@ -370,7 +370,7 @@ test('check mode reports stale Sidequest agent worktree entries without changing
 });
 
 test('reports invalid plugin registries and leaves them untouched', () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'toolshed-invalid-registry-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-invalid-registry-'));
   const registryFile = path.join(directory, 'installed_plugins.json');
   fs.writeFileSync(registryFile, '{ not valid JSON');
   const lines = [];
@@ -390,7 +390,7 @@ test('reports invalid plugin registries and leaves them untouched', () => {
 });
 
 test('reports a stable gateway updater failure', () => withRegistry(registry, (registryFile) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'toolshed-gateway-update-failure-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-gateway-update-failure-'));
   try {
     const result = runUpdate({
       home,
@@ -408,7 +408,7 @@ test('reports a stable gateway updater failure', () => withRegistry(registry, (r
 }));
 
 test('heals stale managed status-line shim pins after updating', () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'toolshed-statusline-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-statusline-'));
   const lines = [];
   try {
     const registryFile = path.join(home, '.claude', 'plugins', 'installed_plugins.json');
@@ -496,7 +496,7 @@ test('parses check and dry-run options and rejects the retired wiring-mode flag'
 });
 
 test('skips statusline healing when the observability plugin is not installed', () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'toolshed-no-observability-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-no-observability-'));
   try {
     const registryFile = path.join(home, '.claude', 'plugins', 'installed_plugins.json');
     const settingsFile = path.join(home, '.claude', 'settings.json');

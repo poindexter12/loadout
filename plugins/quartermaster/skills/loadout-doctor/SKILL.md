@@ -1,5 +1,5 @@
 ---
-name: toolshed-doctor
+name: loadout-doctor
 description: >-
   Run a read-only health check for Quartermaster and installed Loadout plugins. Use to diagnose Loadout,
   check workspace health, or troubleshoot stale plugins.

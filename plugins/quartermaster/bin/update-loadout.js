@@ -228,7 +228,7 @@ function installedPlugins(registry) {
   });
 }
 
-function toolshedPlugins(registry) {
+function loadoutPlugins(registry) {
   return installedPlugins(registry).filter((instance) => pluginIdParts(instance.id)?.marketplace === GATEWAY_MARKETPLACE);
 }
 
@@ -470,7 +470,7 @@ function runModelGatewayMigration({ registryFile = registryPath(), home = os.hom
 
   const registry = readRegistry(registryFile);
   registryInstallEntries(registry);
-  const legacy = activeProjectInstances(legacyGatewayInstances(toolshedPlugins(registry)));
+  const legacy = activeProjectInstances(legacyGatewayInstances(loadoutPlugins(registry)));
   if (legacy.length === 0) {
     report('model-gateway migration is not needed: no active codex-gateway install remains.');
     return { ok: true, failures: [] };
@@ -490,7 +490,7 @@ function runModelGatewayMigration({ registryFile = registryPath(), home = os.hom
     return { ok: true, failures: [] };
   }
 
-  const updated = toolshedPlugins(readRegistry(registryFile));
+  const updated = loadoutPlugins(readRegistry(registryFile));
   const gateways = modelGatewayInstances(updated);
   const missing = legacy.filter((instance) => !matchingInstall(instance, gateways));
   if (missing.length > 0) {
@@ -541,12 +541,12 @@ function runUpdate({ registryFile = registryPath(), home = os.homedir(), options
     report(`Registry GC skipped: ${error.message}. Registry was left unchanged.`);
     throw error;
   }
-  const legacyGateways = legacyGatewayInstances(toolshedPlugins(registry));
+  const legacyGateways = legacyGatewayInstances(loadoutPlugins(registry));
   if (legacyGateways.length > 0) {
     report(gatewayMigrationInstruction());
     return {
       ok: false,
-      instances: toolshedPlugins(registry),
+      instances: loadoutPlugins(registry),
       staleInstances: [],
       registryGc: { entries: [], backupPath: null, cleaned: false },
       failures: ['model-gateway migration required'],
@@ -554,7 +554,7 @@ function runUpdate({ registryFile = registryPath(), home = os.homedir(), options
     };
   }
   const registryGc = cleanStaleAgentWorktreeInstalls(registryFile, registry, options, report);
-  let instances = toolshedPlugins(registry);
+  let instances = loadoutPlugins(registry);
   const staleInstances = staleProjectInstances(instances).filter((instance) => !isStaleAgentWorktreeInstall(instance));
   instances = activeProjectInstances(instances);
   const beforeUpdate = instances;
@@ -583,7 +583,7 @@ function runUpdate({ registryFile = registryPath(), home = os.homedir(), options
     }
 
     if (!options.dryRun) {
-      instances = activeProjectInstances(toolshedPlugins(readRegistry(registryFile)));
+      instances = activeProjectInstances(loadoutPlugins(readRegistry(registryFile)));
       reportVersionTransitions(versionTransitions(beforeUpdate, instances), report);
     } else {
       report('Dry run cannot know version targets until Claude Code refreshes the marketplace. It will print the gateway restart warning before it would run setup.');
@@ -676,7 +676,7 @@ module.exports = {
   registryPath,
   runModelGatewayMigration,
   runUpdate,
-  toolshedPlugins,
+  loadoutPlugins,
   updateCommand,
   workbenchStatuslinePin,
 };

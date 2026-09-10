@@ -11,7 +11,7 @@ describe('board surface interactions', () => {
   });
 
   it('uses the ticket project slug and strips markdown previews', () => {
-    expect(projectFor({ id: '1', ref: 'SQ-1', title: 'Ticket', status: 'todo', projectSlug: 'toolshed' })).toBe('toolshed');
+    expect(projectFor({ id: '1', ref: 'SQ-1', title: 'Ticket', status: 'todo', projectSlug: 'loadout' })).toBe('loadout');
     expect(plainText('## **Ship** [it](https://example.com)')).toBe('Ship it');
   });
 

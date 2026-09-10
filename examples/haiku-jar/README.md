@@ -65,7 +65,7 @@ that apply.
 Then `/reload-plugins` (or restart Claude Code).
 
 > This folder ships a `.claude/settings.json` that enables `codebase-mapper`. If you
-> cloned the toolshed and want it to use your **local** checkout instead of the
+> cloned the Loadout repo and want it to use your **local** checkout instead of the
 > published marketplace, edit the `path` in that file to point at your clone's root.
 
 #### Prefer not to install a second plugin? Load the same map with live-rules
@@ -101,7 +101,7 @@ cd examples/haiku-jar
 claude
 ```
 
-This matters: from the toolshed root you'd map the marketplace, not haiku-jar.
+This matters: from the Loadout repo root you'd map the marketplace, not haiku-jar.
 
 ### 3. Watch the map already work
 

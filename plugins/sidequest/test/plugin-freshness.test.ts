@@ -111,7 +111,7 @@ test('dispatch refuses a version skew that predates claim self-heal', () => {
   assert.match(sidequestDispatchRefusal(project, { claudeHome, pluginRoot }), /reload-plugins or restart Claude Code/);
 });
 
-test('records this session loaded version for the Workbench prompt guard', () => {
+test('records this session loaded version for the Loadout prompt guard', () => {
   const directory = temporaryDirectory();
   const pluginRoot = path.join(directory, 'loaded-sidequest');
   const stateDirectory = path.join(directory, 'state');

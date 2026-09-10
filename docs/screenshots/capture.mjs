@@ -401,7 +401,7 @@ function groupedLogs(records) {
   return {
     resourceLogs: [...byService].map(([serviceName, logRecords]) => ({
       resource: { attributes: [{ key: 'service.name', value: { stringValue: serviceName } }] },
-      scopeLogs: [{ scope: { name: 'toolshed-docs-fixture' }, logRecords }],
+      scopeLogs: [{ scope: { name: 'loadout-docs-fixture' }, logRecords }],
     })),
   };
 }
@@ -675,7 +675,7 @@ async function seedGrafana(otlpPort, grafanaPort) {
         ],
       },
       scopeMetrics: [{
-        scope: { name: 'toolshed-docs-fixture' },
+        scope: { name: 'loadout-docs-fixture' },
         metrics: [{
           name: 'claude_code.token.usage',
           unit: 'tokens',
@@ -859,7 +859,7 @@ async function maskGeneratedBoardText(page) {
   await page.evaluate((fixed) => {
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     const pathLike = /^[A-Za-z]:[\\/]|^\/(home|Users|tmp)\//;
-    const generatedWorkspace = /toolshed-docs-screenshots-[^ /]+/g;
+    const generatedWorkspace = /loadout-docs-screenshots-[^ /]+/g;
     const generatedTimestamp = /\d{1,2}\/\d{1,2}\/\d{4}, \d{1,2}:\d{2}:\d{2} [AP]M/g;
     while (walker.nextNode()) {
       const node = walker.currentNode;
@@ -1058,7 +1058,7 @@ async function main() {
     'observability-who-is-burning.png',
     'observability-board-costs.png',
   ]) await rm(path.join(outputDir, file), { force: true });
-  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'toolshed-docs-screenshots-'));
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'loadout-docs-screenshots-'));
   const tempHome = path.join(tempRoot, 'sidequest-home');
   const fakeProject = path.join(tempRoot, FIXTURE.project);
   const dashboardDirectory = await writeGrafanaDashboards(tempRoot);
@@ -1066,7 +1066,7 @@ async function main() {
   const sidequestPort = await freePort();
   const grafanaPort = await freePort();
   const otlpPort = await freePort();
-  const container = `toolshed-docs-${process.pid}`;
+  const container = `loadout-docs-${process.pid}`;
   const volume = `${container}-data`;
   let server;
   let browser;

@@ -14,7 +14,7 @@ Select these for every codebase:
 | `live-rules@loadout` | `poindexter12/loadout` | Scoped, live workspace rules |
 | `sidequest@loadout` | `poindexter12/loadout` | Local work board and board-first orchestration loop: routes category-classified tickets to the right model and effort, then dispatches token-gated executors |
 
-The helper installs the toolshed marketplace at project scope. Preserve its portable
+The helper installs the Loadout marketplace at project scope. Preserve its portable
 `extraKnownMarketplaces` declaration only when the plugin CLI did not already make it visible in
 `.claude/settings.json`:
 

@@ -21,7 +21,7 @@ function stateRoot(env = process.env) {
 
 /**
  * Claude Code names a transcript directory after the project path with every character that is not
- * alphanumeric replaced one-for-one by a dash, so `C:\dev\toolshed` becomes `C--dev-toolshed`.
+ * alphanumeric replaced one-for-one by a dash, so `C:\dev\loadout` becomes `C--dev-loadout`.
  */
 function slugForProject(projectPath) {
   return String(projectPath).replace(/[^a-zA-Z0-9]/g, '-');

@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const TOOLSHED_MARKETPLACE = 'loadout';
+const LOADOUT_MARKETPLACE = 'loadout';
 
 function readJson(fileSystem, file) {
   try {
@@ -51,7 +51,7 @@ function compareSemver(left, right) {
 function pluginInstances(registry) {
   const instances = [];
   for (const [id, installs] of Object.entries(registry?.plugins || {})) {
-    if (!id.endsWith(`@${TOOLSHED_MARKETPLACE}`) || !Array.isArray(installs)) continue;
+    if (!id.endsWith(`@${LOADOUT_MARKETPLACE}`) || !Array.isArray(installs)) continue;
     for (const install of installs) instances.push({ id, ...install });
   }
   return instances;
