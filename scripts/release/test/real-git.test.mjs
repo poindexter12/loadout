@@ -41,7 +41,7 @@ async function withEnvironment(entries, action) {
 test('a real push atomically lands main and the marketplace tag before plugin tags', async (t) => {
   const repo = setup(t);
   repo.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'minor' });
-  repo.writeFragment('SQ-2', { plugins: ['workbench'], bump: 'patch' });
+  repo.writeFragment('SQ-2', { plugins: ['toolbelt'], bump: 'patch' });
   repo.commit('integrate');
   const before = repo.remoteRefs();
 
@@ -56,7 +56,7 @@ test('a real push atomically lands main and the marketplace tag before plugin ta
     `${result.commit}:refs/heads/main`,
     'refs/tags/v3.208.0:refs/tags/v3.208.0',
     'refs/tags/sidequest-v3.7.0:refs/tags/sidequest-v3.7.0',
-    'refs/tags/workbench-v0.63.7:refs/tags/workbench-v0.63.7',
+    'refs/tags/toolbelt-v0.63.7:refs/tags/toolbelt-v0.63.7',
   ]);
 
   const after = repo.remoteRefs();
@@ -224,7 +224,7 @@ test('--sha plans the pinned commit, not the checkout it runs from', async (t) =
 
   repo.onBranch('dev');
   repo.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'minor' });
-  repo.writeFragment('SQ-9', { title: 'Shipped already', plugins: ['workbench'], bump: 'major' });
+  repo.writeFragment('SQ-9', { title: 'Shipped already', plugins: ['toolbelt'], bump: 'major' });
   const devSha = repo.commit('integrate on dev');
 
   repo.onBranch('main');
@@ -389,7 +389,7 @@ test('a forged changelog line cannot be smuggled through a fragment', async (t) 
   assert.match(changelog, /^ {2}- forged \(SQ-999\)$/m, 'the body stays indented');
   assert.deepEqual([...result.plan.selected.map((fragment) => fragment.ref)], ['SQ-1']);
 
-  repo.writeFragment('SQ-999', { plugins: ['workbench'], bump: 'patch' });
+  repo.writeFragment('SQ-999', { plugins: ['toolbelt'], bump: 'patch' });
   repo.commit('queue the ticket the body tried to bury');
   const next = await cut({ repoRoot: repo.root, skipTests: true, log: () => {} });
   assert.deepEqual(next.plan.selected.map((fragment) => fragment.ref), ['SQ-999'], 'SQ-999 still ships');
@@ -406,7 +406,7 @@ const HISTORICAL_WINDOWS = [
       sidequest: ['SQ-783', 'SQ-784', 'SQ-785', 'SQ-786', 'SQ-787', 'SQ-789', 'SQ-790', 'SQ-791', 'SQ-793', 'SQ-796', 'SQ-797', 'SQ-798', 'SQ-799'],
       'codex-gateway': ['SQ-794', 'SQ-795'],
       'codebase-mapper': ['SQ-792'],
-      workbench: ['SQ-788'],
+      toolbelt: ['SQ-788'],
     },
   },
   {
@@ -416,7 +416,7 @@ const HISTORICAL_WINDOWS = [
     tickets: {
       sidequest: ['SQ-800', 'SQ-801', 'SQ-802', 'SQ-804', 'SQ-805', 'SQ-806', 'SQ-807', 'SQ-812', 'SQ-814', 'SQ-815', 'SQ-817', 'SQ-818', 'SQ-820', 'SQ-825'],
       'codex-gateway': ['SQ-810', 'SQ-811', 'SQ-813'],
-      workbench: ['SQ-803', 'SQ-819', 'SQ-823'],
+      toolbelt: ['SQ-803', 'SQ-819', 'SQ-823'],
     },
   },
   {
@@ -425,13 +425,13 @@ const HISTORICAL_WINDOWS = [
     tag: 'v3.210.0',
     // The live-rules commit that morning carried no board ref, which is the churn this model
     // removes; under it that work needs a fragment, so the fixture gives it a stand-in.
-    tickets: { sidequest: ['SQ-826', 'SQ-834'], workbench: ['SQ-827'], 'live-rules': ['SQ-999'] },
+    tickets: { sidequest: ['SQ-826', 'SQ-834'], toolbelt: ['SQ-827'], 'live-rules': ['SQ-999'] },
   },
 ];
 
 test('the three real windows publish three tags and ten plugin bumps to a real remote', async (t) => {
   const repo = setup(t, {
-    plugins: { 'codebase-mapper': '2.11.1', 'codex-gateway': '0.33.4', 'live-rules': '2.7.1', sidequest: '3.6.17', workbench: '0.63.6' },
+    plugins: { 'codebase-mapper': '2.11.1', 'codex-gateway': '0.33.4', 'live-rules': '2.7.1', sidequest: '3.6.17', toolbelt: '0.63.6' },
   });
 
   const bumps = [];
@@ -458,13 +458,13 @@ test('the three real windows publish three tags and ten plugin bumps to a real r
     'codebase-mapper 2.11.1 -> 2.11.2',
     'codex-gateway 0.33.4 -> 0.33.5',
     'sidequest 3.6.17 -> 3.6.18',
-    'workbench 0.63.6 -> 0.63.7',
+    'toolbelt 0.63.6 -> 0.63.7',
     'codex-gateway 0.33.5 -> 0.33.6',
     'sidequest 3.6.18 -> 3.6.19',
-    'workbench 0.63.7 -> 0.63.8',
+    'toolbelt 0.63.7 -> 0.63.8',
     'live-rules 2.7.1 -> 2.7.2',
     'sidequest 3.6.19 -> 3.6.20',
-    'workbench 0.63.8 -> 0.63.9',
+    'toolbelt 0.63.8 -> 0.63.9',
   ]);
   assert.equal(version(repo, 'codebase-mapper'), '2.11.2', 'thirteen sidequest tickets moved sidequest once, and a one-window plugin once');
 
@@ -477,7 +477,7 @@ test('the three real windows publish three tags and ten plugin bumps to a real r
   for (const ref of HISTORICAL_WINDOWS.flatMap((window) => Object.values(window.tickets).flat())) {
     assert.match(changelog, new RegExp(`\\(${ref}\\)`), `${ref} is in the changelog`);
   }
-  assert.doesNotMatch(readFileSync(path.join(repo.root, 'plugins/sidequest/CHANGELOG.md'), 'utf8'), /SQ-788/, 'a workbench ticket stays out of the sidequest changelog');
+  assert.doesNotMatch(readFileSync(path.join(repo.root, 'plugins/sidequest/CHANGELOG.md'), 'utf8'), /SQ-788/, 'a toolbelt ticket stays out of the sidequest changelog');
 
   const rerun = await cut({ repoRoot: repo.root, push: true, skipTests: true, log: () => {} });
   assert.equal(rerun.status, 'nothing-to-release');

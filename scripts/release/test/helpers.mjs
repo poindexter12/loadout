@@ -8,15 +8,15 @@ export const DEFAULT_DATE = '2026-07-25';
 export function marketplaceJson({ version, plugins }) {
   return `${JSON.stringify({
     name: 'loadout',
-    owner: { name: 'Eigenwise', email: 'kenny@eigenwise.io' },
-    description: "Eigenwise's toolshed of Claude Code plugins.",
+    owner: { name: 'poindexter12', email: 'dev@example.com' },
+    description: "Loadout: a kit of Claude Code plugins.",
     version,
     plugins: Object.entries(plugins).map(([name, pluginVersion]) => ({
       name,
       source: `./plugins/${name}`,
       description: `${name} plugin`,
       version: pluginVersion,
-      repository: 'https://github.com/Eigenwise/eigenwise-toolshed',
+      repository: 'https://github.com/poindexter12/loadout',
       license: 'MIT',
     })),
   }, null, 2)}\n`;

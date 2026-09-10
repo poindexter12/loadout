@@ -9,7 +9,7 @@ import { readManifest } from '../lib/manifests.mjs';
 import { diskSource } from '../lib/treesource.mjs';
 import { makeRepo } from './helpers.mjs';
 
-const PLUGINS = { 'codex-gateway': '0.33.4', sidequest: '3.6.49', workbench: '0.63.11' };
+const PLUGINS = { 'codex-gateway': '0.33.4', sidequest: '3.6.49', toolbelt: '0.63.11' };
 
 function setup(t, options = {}) {
   const repo = makeRepo({ plugins: PLUGINS, ...options });
@@ -44,24 +44,24 @@ test('plugins are inferred from the paths a ticket changed', (t) => {
       changed: [
         'plugins/sidequest/src/lib/board.ts',
         'plugins/sidequest/test/board.test.ts',
-        'plugins\\workbench\\hooks\\freshness.js',
+        'plugins\\toolbelt\\hooks\\freshness.js',
         'plugins/test-support/index.js',
         'docs/src/content/docs/x.md',
       ],
     },
   });
-  assert.deepEqual(fragment.plugins.map((entry) => entry.name), ['sidequest', 'workbench'], 'unpublished plugins are not released');
+  assert.deepEqual(fragment.plugins.map((entry) => entry.name), ['sidequest', 'toolbelt'], 'unpublished plugins are not released');
 });
 
 test('a per-plugin level beats the fragment default', (t) => {
   const { manifest } = setup(t);
   const { fragment } = buildFragment({
     manifest,
-    input: { ref: 'SQ-1', title: 't', plugins: ['sidequest', 'workbench'], bump: 'patch', levels: { sidequest: 'minor' } },
+    input: { ref: 'SQ-1', title: 't', plugins: ['sidequest', 'toolbelt'], bump: 'patch', levels: { sidequest: 'minor' } },
   });
   assert.deepEqual(fragment.plugins, [
     { name: 'sidequest', level: 'minor' },
-    { name: 'workbench', level: 'patch' },
+    { name: 'toolbelt', level: 'patch' },
   ]);
 });
 
@@ -114,7 +114,7 @@ test('a dry run prints the fragment and writes nothing', async (t) => {
   const printed = [];
   t.mock.method(console, 'log', (line) => printed.push(line));
 
-  await main(['SQ-9', '--title', 'A title', '--plugins', 'workbench', '--bump', 'patch', '--dry-run', '--repo', context.root]);
+  await main(['SQ-9', '--title', 'A title', '--plugins', 'toolbelt', '--bump', 'patch', '--dry-run', '--repo', context.root]);
 
   assert.equal(existsSync(path.join(context.root, '.release/unreleased/SQ-9.md')), false);
   assert.match(printed.join('\n'), /^ref: SQ-9$/m);

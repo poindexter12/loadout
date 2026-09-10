@@ -7,13 +7,13 @@ import { cut } from '../cut.mjs';
 import { createGit, mutatesRemote, spawnRunner } from '../lib/git.mjs';
 import { makeGitRepo } from './realrepo.mjs';
 
-const PLUGINS = { sidequest: '3.6.17', workbench: '0.63.6' };
+const PLUGINS = { sidequest: '3.6.17', toolbelt: '0.63.6' };
 
 function setup(t) {
   const repo = makeGitRepo({ plugins: PLUGINS });
   t.after(repo.cleanup);
   repo.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'minor' });
-  repo.writeFragment('SQ-2', { plugins: ['workbench'], bump: 'patch' });
+  repo.writeFragment('SQ-2', { plugins: ['toolbelt'], bump: 'patch' });
   repo.commit('integrate');
   return repo;
 }
@@ -99,9 +99,9 @@ test('every remote-changing command happens after the whole release is built', a
   }
   assert.match(mutations[0], /refs\/heads\/main/);
   assert.match(mutations[0], /refs\/tags\/v3\.208\.0:refs\/tags\/v3\.208\.0/);
-  assert.doesNotMatch(mutations[0], /sidequest-v3\.7\.0|workbench-v0\.63\.7/);
+  assert.doesNotMatch(mutations[0], /sidequest-v3\.7\.0|toolbelt-v0\.63\.7/);
   assert.match(mutations[1], /sidequest-v3\.7\.0/);
-  assert.match(mutations[1], /workbench-v0\.63\.7/);
+  assert.match(mutations[1], /toolbelt-v0\.63\.7/);
   assert.equal(repo.remoteRefs()['refs/heads/main'], result.commit);
 });
 
@@ -117,7 +117,7 @@ test('the marketplace tag shares an atomic push with main while plugin tags foll
   ]);
   assert.deepEqual(result.pluginPush, [
     'refs/tags/sidequest-v3.7.0:refs/tags/sidequest-v3.7.0',
-    'refs/tags/workbench-v0.63.7:refs/tags/workbench-v0.63.7',
+    'refs/tags/toolbelt-v0.63.7:refs/tags/toolbelt-v0.63.7',
   ]);
   assert.equal(result.refspecs[0], `${result.commit}:refs/heads/main`, 'the branch moves to the verified commit, not to whatever HEAD is');
   assert.equal(result.refspecs.length, result.plan.tags.length + 1);
@@ -130,11 +130,11 @@ test('the marketplace tag shares an atomic push with main while plugin tags foll
 });
 
 test('a three-plugin release puts only the marketplace tag in the workflow-triggering push', async (t) => {
-  const repo = makeGitRepo({ plugins: { 'codex-gateway': '0.33.4', sidequest: '3.6.17', workbench: '0.63.6' } });
+  const repo = makeGitRepo({ plugins: { 'codex-gateway': '0.33.4', sidequest: '3.6.17', toolbelt: '0.63.6' } });
   t.after(repo.cleanup);
   repo.writeFragment('SQ-1', { plugins: ['codex-gateway'], bump: 'patch' });
   repo.writeFragment('SQ-2', { plugins: ['sidequest'], bump: 'patch' });
-  repo.writeFragment('SQ-3', { plugins: ['workbench'], bump: 'patch' });
+  repo.writeFragment('SQ-3', { plugins: ['toolbelt'], bump: 'patch' });
   repo.commit('integrate');
   const calls = [];
   const git = createGit({ cwd: repo.root, onCommand: (entry) => calls.push(entry.args.join(' ')) });
@@ -145,8 +145,8 @@ test('a three-plugin release puts only the marketplace tag in the workflow-trigg
   assert.equal(result.pluginPush.length, 3);
   assert.equal(mutations.length, 2);
   assert.match(mutations[0], /refs\/tags\/v3\.208\.0:refs\/tags\/v3\.208\.0/);
-  assert.doesNotMatch(mutations[0], /codex-gateway-v|sidequest-v|workbench-v/);
-  assert.match(mutations[1], /codex-gateway-v.*sidequest-v.*workbench-v/);
+  assert.doesNotMatch(mutations[0], /codex-gateway-v|sidequest-v|toolbelt-v/);
+  assert.match(mutations[1], /codex-gateway-v.*sidequest-v.*toolbelt-v/);
 });
 
 test('a rejected ref rejects the whole push, so the remote never half-publishes', async (t) => {
@@ -186,7 +186,7 @@ test('a failing suite leaves every remote ref untouched', async (t) => {
       repoRoot: repo.root,
       push: true,
       log: () => {},
-      runSuite: (suite) => ({ code: suite.plugin === 'workbench' ? 1 : 0, command: suite.command }),
+      runSuite: (suite) => ({ code: suite.plugin === 'toolbelt' ? 1 : 0, command: suite.command }),
     }),
     /release suites failed, nothing was published/,
   );

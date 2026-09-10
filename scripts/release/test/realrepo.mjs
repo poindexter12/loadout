@@ -9,7 +9,7 @@ import { fragmentText, marketplaceJson } from './helpers.mjs';
  * A real repository with a real `origin`, both on local disk. The atomicity and refspec claims are
  * about what git actually does with a push, which no recorder can answer.
  */
-export function makeGitRepo({ plugins = { sidequest: '3.6.17', workbench: '0.63.6' }, marketplaceVersion = '3.207.0', changelog = null } = {}) {
+export function makeGitRepo({ plugins = { sidequest: '3.6.17', toolbelt: '0.63.6' }, marketplaceVersion = '3.207.0', changelog = null } = {}) {
   const base = mkdtempSync(path.join(tmpdir(), 'release-real-'));
   const origin = path.join(base, 'origin.git');
   const root = path.join(base, 'work');

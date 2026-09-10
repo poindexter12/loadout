@@ -5,27 +5,27 @@ import { FragmentError, parseFragment, readFragments, renderFragment, writeFragm
 import { diskSource } from '../lib/treesource.mjs';
 import { fragmentText, makeRepo } from './helpers.mjs';
 
-const KNOWN = new Map([['sidequest', {}], ['workbench', {}], ['live-rules', {}]]);
+const KNOWN = new Map([['sidequest', {}], ['toolbelt', {}], ['live-rules', {}]]);
 
 function parse(ref, options) {
   return parseFragment(`.release/unreleased/${ref}.md`, fragmentText(ref, options), { knownPlugins: KNOWN });
 }
 
 test('a list of plugins inherits the fragment bump', () => {
-  const fragment = parse('SQ-843', { plugins: ['sidequest', 'workbench'], bump: 'minor', commit: 'c7b2702' });
+  const fragment = parse('SQ-843', { plugins: ['sidequest', 'toolbelt'], bump: 'minor', commit: 'c7b2702' });
   assert.deepEqual(fragment.plugins, [
     { name: 'sidequest', level: 'minor' },
-    { name: 'workbench', level: 'minor' },
+    { name: 'toolbelt', level: 'minor' },
   ]);
   assert.equal(fragment.hold, false);
   assert.equal(fragment.commit, 'c7b2702');
 });
 
 test('a map gives each plugin its own level', () => {
-  const fragment = parse('SQ-843', { plugins: { sidequest: 'minor', workbench: 'patch' } });
+  const fragment = parse('SQ-843', { plugins: { sidequest: 'minor', toolbelt: 'patch' } });
   assert.deepEqual(fragment.plugins, [
     { name: 'sidequest', level: 'minor' },
-    { name: 'workbench', level: 'patch' },
+    { name: 'toolbelt', level: 'patch' },
   ]);
 });
 
@@ -76,7 +76,7 @@ test('missing required fields name themselves', () => {
 
 test('reading a directory collects every failure instead of stopping at the first', (t) => {
   const repo = makeRepo({
-    plugins: { sidequest: '3.6.49', workbench: '0.63.11' },
+    plugins: { sidequest: '3.6.49', toolbelt: '0.63.11' },
     fragments: { 'SQ-1': { plugins: ['sidequest'], bump: 'patch' } },
     rawFragments: {
       'SQ-2.md': '---\nref: SQ-2\ntitle: t\nplugins: [ghost]\nbump: patch\n---\n',
@@ -86,7 +86,7 @@ test('reading a directory collects every failure instead of stopping at the firs
   });
   t.after(repo.cleanup);
 
-  const { fragments, errors } = readFragments(diskSource(repo.root), { knownPlugins: new Map([['sidequest', {}], ['workbench', {}]]) });
+  const { fragments, errors } = readFragments(diskSource(repo.root), { knownPlugins: new Map([['sidequest', {}], ['toolbelt', {}]]) });
   assert.deepEqual(fragments.map((fragment) => fragment.ref), ['SQ-1']);
   assert.equal(errors.length, 3);
   assert.ok(errors.every((error) => error instanceof FragmentError));
@@ -122,11 +122,11 @@ test('fragments sort by ref number, not by string', (t) => {
 });
 
 test('what note.mjs writes is exactly what the reader accepts', (t) => {
-  const repo = makeRepo({ plugins: { sidequest: '3.6.49', workbench: '0.63.11' } });
+  const repo = makeRepo({ plugins: { sidequest: '3.6.49', toolbelt: '0.63.11' } });
   t.after(repo.cleanup);
 
   const source = parse('SQ-843', {
-    plugins: { sidequest: 'minor', workbench: 'patch' },
+    plugins: { sidequest: 'minor', toolbelt: 'patch' },
     commit: 'c7b2702b2e2f041dff7fe513710de83d89198c55',
     hold: true,
     body: 'A detail line.',

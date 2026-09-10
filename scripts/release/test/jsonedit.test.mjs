@@ -6,13 +6,13 @@ import { JsonEditError, readValue, replaceValue } from '../lib/jsonedit.mjs';
 const MANIFEST = `{
   "name": "loadout",
   "owner": {
-    "name": "Eigenwise",
+    "name": "poindexter12",
     "version": "not the top level one"
   },
   "version": "3.207.0",
   "plugins": [
     {
-      "name": "workbench",
+      "name": "toolbelt",
       "version": "0.63.11",
       "keywords": ["a", "b"]
     },
@@ -29,7 +29,7 @@ test('reads values by path without confusing nested keys', () => {
   assert.equal(readValue(MANIFEST, ['version']), '3.207.0');
   assert.equal(readValue(MANIFEST, ['owner', 'version']), 'not the top level one');
   assert.equal(readValue(MANIFEST, ['plugins', 1, 'version']), '3.6.49');
-  assert.equal(readValue(MANIFEST, ['plugins', 0, 'name']), 'workbench');
+  assert.equal(readValue(MANIFEST, ['plugins', 0, 'name']), 'toolbelt');
 });
 
 test('a replacement changes only the value bytes', () => {

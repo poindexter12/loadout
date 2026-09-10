@@ -8,7 +8,7 @@ import { createGit } from '../lib/git.mjs';
 import { DEFAULT_SCHEMA, load, Type } from '../vendor/js-yaml.mjs';
 import { fileGit, makeRepo, marketplaceJson } from './helpers.mjs';
 
-const PLUGINS = { sidequest: '3.6.49', workbench: '0.63.11' };
+const PLUGINS = { sidequest: '3.6.49', toolbelt: '0.63.11' };
 
 function setup(t, { published = null, ...repoOptions } = {}) {
   const repo = makeRepo({ plugins: PLUGINS, ...repoOptions });
@@ -129,12 +129,12 @@ test('a clean tree passes', (t) => {
 
 test('a plugin whose two version fields disagree fails', (t) => {
   const context = setup(t);
-  const manifestPath = path.join(context.root, 'plugins/workbench/.claude-plugin/plugin.json');
+  const manifestPath = path.join(context.root, 'plugins/toolbelt/.claude-plugin/plugin.json');
   writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace('0.63.11', '0.63.5'));
 
   const result = runGuard(context.root, { git: context.git });
   assert.equal(result.ok, false);
-  assert.match(reasons(result), /"workbench" version mismatch/);
+  assert.match(reasons(result), /"toolbelt" version mismatch/);
 });
 
 test('a malformed fragment fails with its own reason', (t) => {
@@ -170,7 +170,7 @@ test('the marketplace has to serve the default branch', (t) => {
 });
 
 test('versions may not move on the integration branch', (t) => {
-  const context = setup(t, { published: { version: '3.207.0', plugins: { sidequest: '3.6.48', workbench: '0.63.11' } } });
+  const context = setup(t, { published: { version: '3.207.0', plugins: { sidequest: '3.6.48', toolbelt: '0.63.11' } } });
   const result = runGuard(context.root, { git: context.git, mode: 'dev', publishRef: 'origin/main' });
   assert.equal(result.ok, false);
   assert.match(reasons(result), /"sidequest" is 3\.6\.49 here but 3\.6\.48 on origin\/main/);
@@ -204,10 +204,10 @@ test('changed plugin source needs a fragment naming that plugin', (t) => {
 
   const uncovered = runGuard(context.root, {
     git: context.git,
-    changed: ['plugins/sidequest/src/lib/board.ts', 'plugins/workbench/hooks/freshness.js'],
+    changed: ['plugins/sidequest/src/lib/board.ts', 'plugins/toolbelt/hooks/freshness.js'],
   });
-  assert.match(reasons(uncovered), /"workbench" changed with no fragment naming it/);
-  assert.match(reasons(uncovered), /note\.mjs <REF> --plugins workbench/);
+  assert.match(reasons(uncovered), /"toolbelt" changed with no fragment naming it/);
+  assert.match(reasons(uncovered), /note\.mjs <REF> --plugins toolbelt/);
 });
 
 test('generated changelogs and unpublished plugins never demand a fragment', (t) => {
@@ -220,15 +220,15 @@ test('generated changelogs and unpublished plugins never demand a fragment', (t)
 });
 
 test('on the publish branch a changed plugin must carry its bump and changelog', (t) => {
-  const context = setup(t, { published: { version: '3.206.0', plugins: { sidequest: '3.6.48', workbench: '0.63.11' } } });
+  const context = setup(t, { published: { version: '3.206.0', plugins: { sidequest: '3.6.48', toolbelt: '0.63.11' } } });
 
   const missingBump = runGuard(context.root, {
     git: context.git,
     mode: 'main',
     publishRef: 'origin/main',
-    changed: ['plugins/sidequest/src/a.ts', 'plugins/workbench/hooks/b.js'],
+    changed: ['plugins/sidequest/src/a.ts', 'plugins/toolbelt/hooks/b.js'],
   });
-  assert.match(reasons(missingBump), /"workbench" changed on main without a version bump/);
+  assert.match(reasons(missingBump), /"toolbelt" changed on main without a version bump/);
   assert.match(reasons(missingBump), /versions moved \(sidequest\) without touching CHANGELOG\.md/);
 
   const complete = runGuard(context.root, {

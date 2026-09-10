@@ -8,7 +8,7 @@ test('parses the documented subset', () => {
     'ref: SQ-843',
     'title: Build the engine',
     'bump: minor',
-    'plugins: [sidequest, workbench]',
+    'plugins: [sidequest, toolbelt]',
     'hold: false',
     'commit: c7b2702',
   ].join('\n'));
@@ -17,18 +17,18 @@ test('parses the documented subset', () => {
     ref: 'SQ-843',
     title: 'Build the engine',
     bump: 'minor',
-    plugins: ['sidequest', 'workbench'],
+    plugins: ['sidequest', 'toolbelt'],
     hold: false,
     commit: 'c7b2702',
   });
 });
 
 test('parses a nested map and a block list', () => {
-  assert.deepEqual(parseYaml('plugins:\n  sidequest: minor\n  workbench: patch').plugins, {
+  assert.deepEqual(parseYaml('plugins:\n  sidequest: minor\n  toolbelt: patch').plugins, {
     sidequest: 'minor',
-    workbench: 'patch',
+    toolbelt: 'patch',
   });
-  assert.deepEqual(parseYaml('plugins:\n  - sidequest\n  - workbench').plugins, ['sidequest', 'workbench']);
+  assert.deepEqual(parseYaml('plugins:\n  - sidequest\n  - toolbelt').plugins, ['sidequest', 'toolbelt']);
 });
 
 test('keeps colons and quoting inside values', () => {

@@ -17,7 +17,7 @@ same push as the ticket's code, so the release cut can see what shipped.
   --title <text>       Ticket title (defaults to the board export's title)
   --plugins <a,b>      Plugins this ticket releases; omit to infer from --changed
   --bump <level>       ${LEVELS.join(' | ')} (applies to every named plugin)
-  --level <p=level>    Per-plugin override, repeatable (e.g. --level workbench=patch)
+  --level <p=level>    Per-plugin override, repeatable (e.g. --level observability=patch)
   --commit <sha>       Integration commit, linked from the changelog
   --changed <paths>    Changed paths used to infer --plugins
   --body <text>        Extra detail rendered under the changelog entry

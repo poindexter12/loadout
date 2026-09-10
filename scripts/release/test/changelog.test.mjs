@@ -17,7 +17,7 @@ const PLAN = {
   date: '2026-07-25',
   tag: 'v3.208.0',
   publishBranch: 'main',
-  repository: 'https://github.com/Eigenwise/eigenwise-toolshed',
+  repository: 'https://github.com/poindexter12/loadout',
   marketplace: { from: '3.207.0', to: '3.208.0', level: 'minor' },
   plugins: [
     {
@@ -32,7 +32,7 @@ const PLAN = {
       ],
     },
     {
-      name: 'workbench',
+      name: 'toolbelt',
       from: '0.63.11',
       to: '0.63.12',
       level: 'patch',
@@ -45,13 +45,13 @@ test('entries group by what the change was, in a fixed order', () => {
   const section = renderRepoSection(PLAN);
   assert.match(section, /^## v3\.208\.0 \(2026-07-25\)$/m);
   assert.match(section, /^### sidequest 3\.6\.49 → 3\.7\.0$/m);
-  assert.match(section, /^### workbench 0\.63\.11 → 0\.63\.12$/m);
+  assert.match(section, /^### toolbelt 0\.63\.11 → 0\.63\.12$/m);
 
   const order = [...section.matchAll(/^#### (.+)$/gm)].map((match) => match[1]);
   assert.deepEqual(order, ['Breaking changes', 'Features', 'Fixes', 'Fixes']);
 
   assert.match(section, /- Drop the old claim API \(SQ-834\)/);
-  assert.match(section, /- Lean default board reads \(SQ-800\) \[`c7b2702`\]\(https:\/\/github\.com\/Eigenwise\/eigenwise-toolshed\/commit\/c7b2702b2e2f041dff7fe513710de83d89198c55\)/);
+  assert.match(section, /- Lean default board reads \(SQ-800\) \[`c7b2702`\]\(https:\/\/github\.com\/poindexter12\/loadout\/commit\/c7b2702b2e2f041dff7fe513710de83d89198c55\)/);
   assert.match(section, /^ {2}Heredocs stopped tripping it\.$/m);
 });
 

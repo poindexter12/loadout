@@ -10,7 +10,7 @@ import { createGit } from '../lib/git.mjs';
 import { readValue } from '../lib/jsonedit.mjs';
 import { makeGitRepo } from './realrepo.mjs';
 
-const PLUGINS = { 'codex-gateway': '0.33.4', sidequest: '3.6.17', workbench: '0.63.6' };
+const PLUGINS = { 'codex-gateway': '0.33.4', sidequest: '3.6.17', toolbelt: '0.63.6' };
 
 function setup(t, options = {}) {
   const repo = makeGitRepo({ plugins: PLUGINS, ...options });
@@ -36,7 +36,7 @@ test('a normal cut moves three version fields and nothing else', async (t) => {
   const context = setup(t);
   context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
   context.writeFragment('SQ-2', { plugins: ['sidequest'], bump: 'minor' });
-  context.writeFragment('SQ-3', { plugins: ['workbench'], bump: 'patch' });
+  context.writeFragment('SQ-3', { plugins: ['toolbelt'], bump: 'patch' });
   context.commit('integrate');
 
   const result = await cut({ repoRoot: context.root, runSuite: context.runSuite, log: () => {} });
@@ -44,23 +44,23 @@ test('a normal cut moves three version fields and nothing else', async (t) => {
   assert.equal(result.status, 'cut');
   assert.equal(context.version('sidequest'), '3.7.0', 'the highest level wins');
   assert.equal(context.entryVersion('sidequest'), '3.7.0');
-  assert.equal(context.version('workbench'), '0.63.7');
-  assert.equal(context.entryVersion('workbench'), '0.63.7');
+  assert.equal(context.version('toolbelt'), '0.63.7');
+  assert.equal(context.entryVersion('toolbelt'), '0.63.7');
   assert.equal(context.marketplaceVersion(), '3.208.0');
   assert.equal(context.version('codex-gateway'), '0.33.4', 'an untouched plugin never moves');
   assert.equal(context.entryVersion('codex-gateway'), '0.33.4');
-  assert.deepEqual(context.suites, ['sidequest', 'workbench'], 'only the changed plugins are verified');
+  assert.deepEqual(context.suites, ['sidequest', 'toolbelt'], 'only the changed plugins are verified');
 });
 
 test('the release commit contains exactly what the cut generated', async (t) => {
   const context = setup(t);
   context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'minor' });
-  context.writeFragment('SQ-2', { plugins: ['workbench'], bump: 'patch' });
+  context.writeFragment('SQ-2', { plugins: ['toolbelt'], bump: 'patch' });
   context.commit('integrate');
 
   const result = await cut({ repoRoot: context.root, skipTests: true, log: () => {} });
 
-  assert.equal(result.message, 'release v3.208.0: sidequest 3.7.0, workbench 0.63.7 (SQ-1, SQ-2)');
+  assert.equal(result.message, 'release v3.208.0: sidequest 3.7.0, toolbelt 0.63.7 (SQ-1, SQ-2)');
   assert.deepEqual(context.git('show', '--name-only', '--format=', 'HEAD').split('\n').filter(Boolean).sort(), [
     '.claude-plugin/marketplace.json',
     '.release/unreleased/SQ-1.md',
@@ -68,10 +68,10 @@ test('the release commit contains exactly what the cut generated', async (t) => 
     'CHANGELOG.md',
     'plugins/sidequest/.claude-plugin/plugin.json',
     'plugins/sidequest/CHANGELOG.md',
-    'plugins/workbench/.claude-plugin/plugin.json',
-    'plugins/workbench/CHANGELOG.md',
+    'plugins/toolbelt/.claude-plugin/plugin.json',
+    'plugins/toolbelt/CHANGELOG.md',
   ]);
-  assert.deepEqual(context.git('tag', '--list').split('\n').sort(), ['sidequest-v3.7.0', 'v3.208.0', 'workbench-v0.63.7']);
+  assert.deepEqual(context.git('tag', '--list').split('\n').sort(), ['sidequest-v3.7.0', 'toolbelt-v0.63.7', 'v3.208.0']);
   for (const tag of result.plan.tags) {
     assert.equal(context.git('rev-list', '-n', '1', `refs/tags/${tag}`), result.commit);
   }
@@ -80,7 +80,7 @@ test('the release commit contains exactly what the cut generated', async (t) => 
 test('a cut generates the changelogs and consumes the fragments it used', async (t) => {
   const context = setup(t);
   context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'minor' });
-  context.writeFragment('SQ-2', { plugins: ['workbench'], bump: 'patch', hold: true });
+  context.writeFragment('SQ-2', { plugins: ['toolbelt'], bump: 'patch', hold: true });
   context.commit('integrate');
 
   const result = await cut({ repoRoot: context.root, skipTests: true, log: () => {} });
@@ -90,7 +90,7 @@ test('a cut generates the changelogs and consumes the fragments it used', async 
   assert.match(changelog, /### sidequest 3\.6\.17 → 3\.7\.0/);
   assert.doesNotMatch(changelog, /SQ-2/, 'a held fragment is not in the changelog');
   assert.match(context.read('plugins/sidequest/CHANGELOG.md'), /^## 3\.7\.0 \(\d{4}-\d{2}-\d{2}\)$/m);
-  assert.equal(context.exists('plugins/workbench/CHANGELOG.md'), false, 'untouched plugins get no changelog');
+  assert.equal(context.exists('plugins/toolbelt/CHANGELOG.md'), false, 'untouched plugins get no changelog');
 
   assert.equal(context.exists('.release/unreleased/SQ-1.md'), false, 'consumed');
   assert.equal(context.exists('.release/unreleased/SQ-2.md'), true, 'held fragments survive the cut');
@@ -186,10 +186,10 @@ test('a plugin whose manifest and marketplace entry disagree blocks the cut', as
 test('a hotfix releases only its tickets and leaves the rest unreleased', async (t) => {
   const context = setup(t);
   context.onBranch('dev');
-  context.write('plugins/workbench/urgent.js', '// urgent\n');
+  context.write('plugins/toolbelt/urgent.js', '// urgent\n');
   const fixSha = context.commit('the urgent fix');
   context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'minor', commit: fixSha });
-  context.writeFragment('SQ-2', { plugins: ['workbench'], bump: 'minor', commit: fixSha });
+  context.writeFragment('SQ-2', { plugins: ['toolbelt'], bump: 'minor', commit: fixSha });
   const devSha = context.commit('note both tickets');
   context.onBranch('main');
 
@@ -203,28 +203,28 @@ test('a hotfix releases only its tickets and leaves the rest unreleased', async 
   });
 
   assert.equal(result.status, 'cut');
-  assert.equal(context.version('workbench'), '0.64.0');
+  assert.equal(context.version('toolbelt'), '0.64.0');
   assert.equal(context.version('sidequest'), '3.6.17', 'the unreleased ticket stays unreleased');
   assert.equal(context.marketplaceVersion(), '3.207.1', 'a hotfix patches the counter');
-  assert.deepEqual(result.plan.tags, ['v3.207.1', 'workbench-v0.64.0']);
+  assert.deepEqual(result.plan.tags, ['v3.207.1', 'toolbelt-v0.64.0']);
   assert.match(context.read('CHANGELOG.md'), /Hotfix release cut from `main`/);
-  assert.equal(context.exists('plugins/workbench/urgent.js'), true, 'the fix was cherry-picked');
+  assert.equal(context.exists('plugins/toolbelt/urgent.js'), true, 'the fix was cherry-picked');
 });
 
 test('a hotfix skips a cherry-pick that the publish branch already contains', async (t) => {
   const context = setup(t);
-  context.write('plugins/workbench/already.js', '// already on main\n');
+  context.write('plugins/toolbelt/already.js', '// already on main\n');
   const fixSha = context.commit('a fix that is already on main');
   context.onBranch('dev');
   context.git('merge', '-q', 'main');
-  context.writeFragment('SQ-2', { plugins: ['workbench'], bump: 'patch', commit: fixSha });
+  context.writeFragment('SQ-2', { plugins: ['toolbelt'], bump: 'patch', commit: fixSha });
   const devSha = context.commit('note it');
   context.onBranch('main');
 
   const result = await cut({ repoRoot: context.root, mode: 'hotfix', tickets: ['SQ-2'], sha: devSha, skipTests: true, log: () => {} });
 
   assert.equal(result.status, 'cut');
-  assert.equal(context.version('workbench'), '0.63.7');
+  assert.equal(context.version('toolbelt'), '0.63.7');
   assert.equal(
     context.git('log', '--format=%s', '-n', '2').split('\n')[1],
     'a fix that is already on main',
@@ -374,7 +374,7 @@ test('a cut succeeds and reports a deferred GitHub Release', async (t) => {
   const logs = [];
   const git = {
     ...createGit({ cwd: context.root }),
-    remoteUrl: () => 'git@github.com:Eigenwise/eigenwise-toolshed.git',
+    remoteUrl: () => 'git@github.com:poindexter12/loadout.git',
   };
   const deferredRelease = {
     tag: 'v3.208.0',
@@ -454,7 +454,7 @@ test('a missing Test workflow run offers a committed container baseline and ever
   const parent = context.originGit('rev-parse', 'main');
   const suites = [
     { plugin: 'sidequest', cwd: 'plugins/sidequest', setup: 'npm ci', command: 'npm run test:full' },
-    { plugin: 'workbench', cwd: 'plugins/workbench', setup: 'npm ci', command: 'npm test' },
+    { plugin: 'toolbelt', cwd: 'plugins/toolbelt', setup: 'npm ci', command: 'npm test' },
   ];
   let failure;
 
@@ -470,7 +470,7 @@ test('a missing Test workflow run offers a committed container baseline and ever
   const baseline = failure.message.indexOf('git -c user.email=ci@local -c user.name=ci commit -q -m baseline');
   const suitesStart = failure.message.indexOf('(cd "plugins/sidequest"; npm ci; npm run test:full)');
   assert.ok(initialized < baseline && baseline < suitesStart);
-  assert.match(failure.message, /\(cd "plugins\/workbench"; npm ci; npm test\)/);
+  assert.match(failure.message, /\(cd "plugins\/toolbelt"; npm ci; npm test\)/);
 });
 
 test('a failing default suite writes its output and names the log', async (t) => {
