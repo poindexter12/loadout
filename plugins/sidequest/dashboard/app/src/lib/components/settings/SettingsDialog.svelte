@@ -365,7 +365,7 @@
         <section class="notifications-section">
           <p class="eyebrow">Appearance</p>
           <h3>Theme</h3>
-          <label class="switch"><input type="checkbox" checked={theme === 'dark'} onchange={(event) => setTheme(checkboxValue(event) ? 'dark' : 'light')} /><span><strong>Dark theme</strong><small>Use the Eigenwise dark palette.</small></span></label>
+          <label class="switch"><input type="checkbox" checked={theme === 'dark'} onchange={(event) => setTheme(checkboxValue(event) ? 'dark' : 'light')} /><span><strong>Dark theme</strong><small>Use the Loadout dark palette.</small></span></label>
           <div class="tour-control">
             <p class="eyebrow">Tour</p>
             <h3>Guided tour</h3>

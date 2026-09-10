@@ -49,7 +49,7 @@ function ciProvider(remoteHead: string, runs: Record<string, unknown>[]) {
   return createGitHubCiRunsProvider('/project', (_program: string, arguments_: string[]) => {
     const command = arguments_.join(' ');
     if (command === 'rev-parse --abbrev-ref --symbolic-full-name @{u}') return 'origin/main';
-    if (command === 'remote get-url origin') return 'git@github.com:eigenwise/toolshed.git';
+    if (command === 'remote get-url origin') return 'git@github.com:poindexter12/loadout.git';
     if (command === 'auth status') return '';
     if (command === 'ls-remote origin refs/heads/main') return `${remoteHead}\trefs/heads/main`;
     if (command === 'run list --branch main --limit 100 --json databaseId,headSha,status,conclusion,name') return JSON.stringify(runs);

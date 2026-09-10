@@ -2188,8 +2188,8 @@ test('Bash Windows-path guard: denies a double-quoted path whose backslash escap
 test('Bash Windows-path guard: allows writing a scratch script through a heredoc', () => {
   const command = [
     'cat > "C:\\Users\\kenny\\AppData\\Local\\Temp\\claude\\scratch\\probe.js" <<\'EOF\'',
-    'const root = "C:\\dev\\eigenwise\\toolshed";',
-    'const raw = C:\\dev\\eigenwise\\toolshed;',
+    'const root = "C:\\dev\\poindexter12\\loadout";',
+    'const raw = C:\\dev\\poindexter12\\loadout;',
     'console.log(root, raw);',
     'EOF',
   ].join('\n');

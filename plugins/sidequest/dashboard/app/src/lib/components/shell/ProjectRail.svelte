@@ -89,7 +89,7 @@
 </script>
 
 <aside class="rail" aria-label="Boards" data-tour="project-rail">
-  <div class="brand"><img class="brand-mark" src="/eigenwise-e.svg" alt="" /><strong>Sidequest</strong><span>work queue</span></div>
+  <div class="brand"><img class="brand-mark" src="/loadout-l.svg" alt="" /><strong>Sidequest</strong><span>work queue</span></div>
   <nav>
     <button class:active={board.selectedProject === 'all' && board.view === 'board'} onclick={() => board.selectProject('all')}>
       <span class="project-row"><b>All boards</b><small>{openCount()}</small></span>

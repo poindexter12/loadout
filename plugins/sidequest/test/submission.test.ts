@@ -1805,9 +1805,9 @@ test('SQ-1008: scope-gated submission is refused and legacy partial records stay
   const unscopedPaths = [
     'plugins/model-gateway/bin/model-gateway.js',
     'plugins/model-gateway/test/context-window.test.js',
-    'plugins/workbench/skills/enable-project-telemetry/SKILL.md',
-    'plugins/workbench/skills/init-workspace/SKILL.md',
-    'plugins/workbench/test/init-workspace-skill.test.js',
+    'plugins/observability/skills/enable-project-telemetry/SKILL.md',
+    'plugins/observability/skills/init-workspace/SKILL.md',
+    'plugins/observability/test/init-workspace-skill.test.js',
   ];
   const changedPaths = ['docs/src/content/docs/getting-started/codex-gateway.md'];
   const t = addTicket('SQ-1003 partial submission fixture', { files: ['docs/'] });

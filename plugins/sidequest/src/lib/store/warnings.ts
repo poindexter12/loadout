@@ -681,7 +681,7 @@ function verifyCommandIssue(ticket?: any, projectPath?: any) {
   let changedDirectory = Boolean(match);
   for (const command of commands) {
     // A `cd` is not always the leading segment: recorded commands walk between packages partway through with
-    // `cd ../workbench` and `cd ../..`, and everything after one belongs to the directory it moved to, not to
+    // `cd ../server` and `cd ../..`, and everything after one belongs to the directory it moved to, not to
     // the first one (SQ-2200).
     const step = /^cd\s+(?:["']([^"']+)["']|([^&;|\s]+))\s*$/.exec(command);
     if (step) {
@@ -751,7 +751,7 @@ function verifyPathWarning(ticket?: any, projectPath?: any) {
   let directory = String(projectPath);
   for (const segment of splitVerifyCommands(verify).segments) {
     // A `cd` moves the base for everything after it, and it is not always the first segment: real recorded
-    // commands walk between packages with `cd ../workbench` and `cd ../..` partway through.
+    // commands walk between packages with `cd ../server` and `cd ../..` partway through.
     const changeDirectory = /^cd\s+(?:["']([^"']+)["']|([^&;|\s]+))\s*$/.exec(segment);
     if (changeDirectory) {
       directory = path.resolve(directory, changeDirectory[1] || changeDirectory[2]);
