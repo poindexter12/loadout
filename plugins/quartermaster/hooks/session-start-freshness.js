@@ -251,7 +251,7 @@ function gatewayCheckFailure(check) {
   const diagnostic = typeof check?.diagnostic === 'string' ? check.diagnostic : '';
   const guidance = 'Run /quartermaster:toolshed-doctor for the full health report.';
   const details = {
-    'missing-checker': `model-gateway health checker is missing${diagnostic ? ` (${diagnostic})` : ''}; run /update-toolshed, then /reload-plugins.`,
+    'missing-checker': `model-gateway health checker is missing${diagnostic ? ` (${diagnostic})` : ''}; run /update-loadout, then /reload-plugins.`,
     'spawn-error': `model-gateway health checker could not start${diagnostic ? ` (${diagnostic})` : ''}. ${guidance}`,
     timeout: `model-gateway health check ${diagnostic || 'timed out'}. ${guidance}`,
     'doctor-exit': `model-gateway doctor ${diagnostic || 'exited with a nonzero status'}. ${guidance}`,
@@ -462,7 +462,7 @@ function warning(problems) {
   if (!problems.length) return '';
   const shown = findingText(problems).slice(0, 5);
   const extra = problems.length > shown.length ? `; +${problems.length - shown.length} more` : '';
-  return `Loadout local health: ${shown.join('; ')}${extra}. Cached version signals are advisory; the prompt guard decides release freshness. Run /update-toolshed for deliberate updates.`;
+  return `Loadout local health: ${shown.join('; ')}${extra}. Cached version signals are advisory; the prompt guard decides release freshness. Run /update-loadout for deliberate updates.`;
 }
 
 function emitWarning(problems, debouncer = defaultDebouncer) {
@@ -502,7 +502,7 @@ function systemMessage(result, loadedVersion) {
   const update = result.updates
     .filter((candidate) => candidate.marketplace === 'loadout')
     .sort((left, right) => left.name.localeCompare(right.name))[0];
-  return update ? `Loadout update available (cached): ${update.name} ${update.installed} → ${update.available} — /update-toolshed, then /reload-plugins.` : '';
+  return update ? `Loadout update available (cached): ${update.name} ${update.installed} → ${update.available} — /update-loadout, then /reload-plugins.` : '';
 }
 
 function projectWarning(problems) {

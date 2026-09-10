@@ -21,14 +21,14 @@ After installing, run `/reload-plugins` or start a new Claude Code session. Then
 
 ## How it works
 
-Quartermaster has hooks for setup hints, local tallies, freshness notices, and resupply offers. The hooks do not call a model for the mining pass. The plugin also ships skills for `setup`, `resupply`, `update-toolshed`, and `toolshed-doctor`.
+Quartermaster has hooks for setup hints, local tallies, freshness notices, and resupply offers. The hooks do not call a model for the mining pass. The plugin also ships skills for `setup`, `resupply`, `update-loadout`, and `toolshed-doctor`.
 
 - **Setup** assesses one project, mines a cross-project history summary, asks a short interview, and proposes a project baseline. The Loadout pieces remain independent and opt in separately.
 - **Resupply** mines the current project by default after you approve a round. It ranks missing measurements, manual work, re-derived knowledge, underperforming capabilities, and setup friction, then asks for approval for each finding.
 - **Update** runs the requested updater for active Loadout registry installs, at their recorded user, project, or local scope and project path. It does not update third-party marketplaces.
 - **Doctor** is read-only. It checks installed versions, freshness, workspace wiring, and any installed Observability or Model Gateway health it can inspect.
 
-The updater and the freshness hooks have different jobs. `/quartermaster:update-toolshed` changes installs when you request it. Freshness hooks report cached availability or loaded-version mismatches and point to the updater; they do not install or restart anything. Marketplace auto-update is optional and must be enabled for the Loadout marketplace in Claude Code. An open session still needs `/reload-plugins` after plugin code changes. Process-level gateway wiring or model discovery may need a new Claude Code process.
+The updater and the freshness hooks have different jobs. `/quartermaster:update-loadout` changes installs when you request it. Freshness hooks report cached availability or loaded-version mismatches and point to the updater; they do not install or restart anything. Marketplace auto-update is optional and must be enabled for the Loadout marketplace in Claude Code. An open session still needs `/reload-plugins` after plugin code changes. Process-level gateway wiring or model discovery may need a new Claude Code process.
 
 ## Privacy and the history summary
 

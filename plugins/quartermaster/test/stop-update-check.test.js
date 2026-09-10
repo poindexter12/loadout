@@ -195,7 +195,7 @@ test('is silent for stop-hook re-entry and a freshness bypass', async (testConte
 
   assert.equal(await decide({ ...input(), stop_hook_active: true }, options(home, { requestManifest })), '');
   assert.equal(await decide(input(), options(home, {
-    environment: { EIGENWISE_TOOLSHED_FRESHNESS_BYPASS: '1' },
+    environment: { LOADOUT_FRESHNESS_BYPASS: '1' },
     requestManifest,
   })), '');
   assert.equal(requests, 0);

@@ -277,7 +277,7 @@ test('collapses multiple problems into one actionable warning', () => {
 
   assert.match(message, /^Loadout local health: /);
   assert.match(message, /\+1 more/);
-  assert.match(message, /Run \/update-toolshed/);
+  assert.match(message, /Run \/update-loadout/);
   assert.equal(message.split('\n').length, 1);
 });
 
@@ -397,7 +397,7 @@ test('writes cached update availability to SessionStart hook stdout for the curr
     input: { cwd: 'C:/work/current' },
   });
 
-  assert.equal(output.systemMessage, 'Loadout update available (cached): quartermaster 0.49.0 → 0.50.0 — /update-toolshed, then /reload-plugins.');
+  assert.equal(output.systemMessage, 'Loadout update available (cached): quartermaster 0.49.0 → 0.50.0 — /update-loadout, then /reload-plugins.');
 });
 
 test('keeps third-party freshness and other projects out of SessionStart output', () => {
@@ -467,7 +467,7 @@ test('writes a project-scoped health warning to SessionStart context', () => {
   });
 
   assert.equal(output.hookSpecificOutput.additionalContext, 'Loadout project health: sidequest@loadout 1.0.0 is behind cached 1.1.0.');
-  assert.equal(output.systemMessage, 'Loadout update available (cached): sidequest 1.0.0 → 1.1.0 — /update-toolshed, then /reload-plugins.');
+  assert.equal(output.systemMessage, 'Loadout update available (cached): sidequest 1.0.0 → 1.1.0 — /update-loadout, then /reload-plugins.');
 });
 
 test('emits no SessionStart message when every version is current', () => {
@@ -501,7 +501,7 @@ test('limits update notices to one plugin', () => {
     input: { cwd: 'C:/work/current' },
   });
 
-  assert.equal(output.systemMessage, 'Loadout update available (cached): alpha 1.0.0 → 1.1.0 — /update-toolshed, then /reload-plugins.');
+  assert.equal(output.systemMessage, 'Loadout update available (cached): alpha 1.0.0 → 1.1.0 — /update-loadout, then /reload-plugins.');
 });
 
 test('hooks.json registers the freshness hooks and nothing observability owns', () => {
@@ -746,7 +746,7 @@ test('SQ-2211: a Loadout marketplace declaration with auto-update on is not repo
   }));
   // A later layer that names the marketplace without a flag must not read as a disable.
   fs.writeFileSync(path.join(project, '.claude', 'settings.local.json'), JSON.stringify({
-    extraKnownMarketplaces: { 'loadout': { source: { source: 'github', repo: 'eigenwise/loadout' } } },
+    extraKnownMarketplaces: { 'loadout': { source: { source: 'github', repo: 'poindexter12/loadout' } } },
   }));
   assert.doesNotMatch(output().systemMessage, /loadout auto-update is off/);
 });

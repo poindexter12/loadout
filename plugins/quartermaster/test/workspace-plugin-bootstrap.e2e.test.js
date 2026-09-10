@@ -85,7 +85,7 @@ function readJson(file) {
 }
 
 function withFixture(callback) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-bootstrap-e2e-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-bootstrap-e2e-'));
   const projectDir = path.join(directory, 'project');
   const homeDir = path.join(directory, 'home');
   const stateFile = path.join(directory, 'claude-state.json');

@@ -14,7 +14,7 @@ const {
 } = require('../lib/project-settings.js');
 
 function temporaryProject(t, name = 'settings-project') {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-project-settings-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-project-settings-'));
   const projectDir = path.join(directory, name);
   fs.mkdirSync(projectDir, { recursive: true });
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -89,8 +89,8 @@ test('configures a global compaction window without replacing either settings fi
   fs.mkdirSync(path.dirname(projectSettingsPath), { recursive: true });
   fs.writeFileSync(globalSettingsPath, JSON.stringify({
     env: { KEEP_GLOBAL_ENV: 'yes' },
-    enabledPlugins: { workbench: true },
-    marketplaces: { eigenwise: { source: 'github' } },
+    enabledPlugins: { sidequest: true },
+    marketplaces: { loadout: { source: 'github' } },
   }));
   fs.writeFileSync(projectSettingsPath, JSON.stringify({
     unknownSetting: { preserved: true },
@@ -117,8 +117,8 @@ test('configures a global compaction window without replacing either settings fi
   assert.equal(second.changed, false);
   assert.equal(globalSettings.autoCompactWindow, 350_000);
   assert.deepEqual(globalSettings.env, { KEEP_GLOBAL_ENV: 'yes' });
-  assert.deepEqual(globalSettings.enabledPlugins, { workbench: true });
-  assert.deepEqual(globalSettings.marketplaces, { eigenwise: { source: 'github' } });
+  assert.deepEqual(globalSettings.enabledPlugins, { sidequest: true });
+  assert.deepEqual(globalSettings.marketplaces, { loadout: { source: 'github' } });
   assert.deepEqual(projectSettings.unknownSetting, { preserved: true });
   assert.equal(Object.hasOwn(projectSettings, 'autoCompactWindow'), false);
   assert.deepEqual(projectSettings.env, {

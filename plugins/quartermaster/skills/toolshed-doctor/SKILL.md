@@ -11,7 +11,7 @@ Run the updater in check mode first. It only reads the installed-plugin registry
 health check when that plugin is installed:
 
 ```sh
-node "${CLAUDE_PLUGIN_ROOT}/bin/update-toolshed.js" --check
+node "${CLAUDE_PLUGIN_ROOT}/bin/update-loadout.js" --check
 ```
 
 Then run the same read-only session health audit used at startup:
@@ -98,4 +98,4 @@ instead of a model-dependent compaction point. Do not write or offer to fix it f
 
 Report all results together. Explain each concrete problem and give the smallest next step. This skill does
 not update, install, uninstall, reload, or edit anything. If freshness is proven stale, tell the user to run
-`/quartermaster:update-toolshed`, then `/reload-plugins` or restart before retrying the blocked work.
+`/quartermaster:update-loadout`, then `/reload-plugins` or restart before retrying the blocked work.

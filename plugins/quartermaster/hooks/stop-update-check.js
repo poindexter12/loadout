@@ -51,7 +51,7 @@ function refreshManifest(options) {
 
 async function decide(input, options = {}) {
   const environment = options.environment || process.env;
-  if (input?.stop_hook_active || !input?.session_id || environment.EIGENWISE_TOOLSHED_FRESHNESS_BYPASS === '1') return '';
+  if (input?.stop_hook_active || !input?.session_id || environment.LOADOUT_FRESHNESS_BYPASS === '1') return '';
 
   const fileSystem = options.fileSystem || fs;
   const home = options.home || os.homedir();

@@ -9,7 +9,7 @@ const test = require('node:test');
 const { buildWarning, detectBillingPath, parseAuthStatus } = require('../hooks/billing-path-check.js');
 
 function temporaryDirectory() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-billing-path-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-billing-path-'));
 }
 
 function authStatusResult(status) {

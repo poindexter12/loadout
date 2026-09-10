@@ -15,7 +15,7 @@ const {
 } = require('../bin/install-workspace-plugins.js');
 
 function withWorkspace(callback) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-plugin-install-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-plugin-install-'));
   try {
     return callback(directory);
   } finally {

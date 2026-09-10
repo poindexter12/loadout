@@ -20,7 +20,7 @@ const warnedStates = new Set();
 
 function isMaintenancePrompt(prompt) {
   const value = String(prompt || '').trim();
-  if (/^\/(?:quartermaster:)?update-toolshed(?:\s+[\w.-]+)*$/i.test(value)) return true;
+  if (/^\/(?:quartermaster:)?update-loadout(?:\s+[\w.-]+)*$/i.test(value)) return true;
   if (/^\/(?:quartermaster:)?toolshed-doctor$/i.test(value)) return true;
   if (/^\/reload-plugins(?:\s+--force)?$/i.test(value)) return true;
   if (/^\/plugin$/i.test(value)) return true;
@@ -123,14 +123,14 @@ function installedVersionsKey(updates) {
 
 function remoteWarning(instances, cache, now) {
   if (!instances.length) return '';
-  if (!cacheIsCurrent(cache, now) || !cache?.manifest) return 'Loadout release freshness could not be determined. This prompt is proceeding. Run /update-toolshed to refresh the marketplace.';
+  if (!cacheIsCurrent(cache, now) || !cache?.manifest) return 'Loadout release freshness could not be determined. This prompt is proceeding. Run /update-loadout to refresh the marketplace.';
   const updates = remoteUpdates(instances, cache.manifest);
   if (!updates.length) return '';
-  return `Loadout updates available: ${updates.map((update) => `${update.name} ${update.installed} → ${update.available}`).join(', ')}. Run /update-toolshed to install them; /reload-plugins cannot fetch new versions.`;
+  return `Loadout updates available: ${updates.map((update) => `${update.name} ${update.installed} → ${update.available}`).join(', ')}. Run /update-loadout to install them; /reload-plugins cannot fetch new versions.`;
 }
 
 function decide(input, options = {}) {
-  if (process.env.EIGENWISE_TOOLSHED_FRESHNESS_BYPASS === '1' || isMaintenancePrompt(input?.prompt)) return '';
+  if (process.env.LOADOUT_FRESHNESS_BYPASS === '1' || isMaintenancePrompt(input?.prompt)) return '';
   const fileSystem = options.fileSystem || fs;
   const home = options.home || os.homedir();
   const registryFile = options.registryFile || path.join(home, '.claude', 'plugins', 'installed_plugins.json');

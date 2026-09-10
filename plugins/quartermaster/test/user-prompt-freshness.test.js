@@ -123,26 +123,26 @@ test('ignores absent or malformed reported versions', () => {
 
 test('maintenance and reload prompts are always allowed, even inside the reload window', () => {
   const { project, options } = reloadPending(tempDirectory());
-  for (const prompt of ['/reload-plugins', '/reload-plugins --force', '/update-toolshed', '/plugin']) {
+  for (const prompt of ['/reload-plugins', '/reload-plugins --force', '/update-loadout', '/plugin']) {
     assert.equal(decide({ prompt, cwd: project }, options), '', prompt);
   }
 });
 
 test('the bypass env var disables the guard entirely', () => {
   const { project, options } = reloadPending(tempDirectory());
-  const previous = process.env.EIGENWISE_TOOLSHED_FRESHNESS_BYPASS;
-  process.env.EIGENWISE_TOOLSHED_FRESHNESS_BYPASS = '1';
+  const previous = process.env.LOADOUT_FRESHNESS_BYPASS;
+  process.env.LOADOUT_FRESHNESS_BYPASS = '1';
   try {
     assert.equal(decide({ prompt: 'continue', cwd: project }, options), '');
   } finally {
-    if (previous === undefined) delete process.env.EIGENWISE_TOOLSHED_FRESHNESS_BYPASS;
-    else process.env.EIGENWISE_TOOLSHED_FRESHNESS_BYPASS = previous;
+    if (previous === undefined) delete process.env.LOADOUT_FRESHNESS_BYPASS;
+    else process.env.LOADOUT_FRESHNESS_BYPASS = previous;
   }
 });
 
 test('only exact maintenance prompts bypass the guard', () => {
-  for (const prompt of ['/update-toolshed', '/update-toolshed --dry-run', '/quartermaster:update-toolshed', '/quartermaster:update-toolshed --check', '/toolshed-doctor', '/quartermaster:toolshed-doctor', '/reload-plugins', '/reload-plugins --force', '/plugin', '/plugin update sidequest@loadout', '/plugin marketplace update loadout', 'claude plugin marketplace update loadout', 'claude plugin update sidequest@loadout --scope user']) assert.equal(isMaintenancePrompt(prompt), true, prompt);
-  for (const prompt of ['please run /update-toolshed', '/update-toolshed; work on this', '/quartermaster:update-toolshed; work on this', '/quartermaster:toolshed-doctor now', '/quartermaster-doctor', '/quartermaster:quartermaster-doctor', '/workbench:update-toolshed', '/workbench:toolshed-doctor', '/reload-plugins and fix it', 'claude plugin update sidequest@loadout --scope user && rm -rf x', 'I said /plugin update']) assert.equal(isMaintenancePrompt(prompt), false, prompt);
+  for (const prompt of ['/update-loadout', '/update-loadout --dry-run', '/quartermaster:update-loadout', '/quartermaster:update-loadout --check', '/toolshed-doctor', '/quartermaster:toolshed-doctor', '/reload-plugins', '/reload-plugins --force', '/plugin', '/plugin update sidequest@loadout', '/plugin marketplace update loadout', 'claude plugin marketplace update loadout', 'claude plugin update sidequest@loadout --scope user']) assert.equal(isMaintenancePrompt(prompt), true, prompt);
+  for (const prompt of ['please run /update-loadout', '/update-loadout; work on this', '/quartermaster:update-loadout; work on this', '/quartermaster:toolshed-doctor now', '/quartermaster-doctor', '/quartermaster:quartermaster-doctor', '/workbench:update-loadout', '/workbench:toolshed-doctor', '/reload-plugins and fix it', 'claude plugin update sidequest@loadout --scope user && rm -rf x', 'I said /plugin update']) assert.equal(isMaintenancePrompt(prompt), false, prompt);
 });
 
 test('all prompts pass through and report a newer installed version in the same session', () => {
@@ -174,7 +174,7 @@ test('compares installed plugins to the cached remote manifest rather than the l
     warnedStates: new Set(),
   }));
   assert.match(output.hookSpecificOutput.additionalContext, /sidequest 4\.34\.0 → 4\.35\.0/);
-  assert.match(output.hookSpecificOutput.additionalContext, /\/update-toolshed/);
+  assert.match(output.hookSpecificOutput.additionalContext, /\/update-loadout/);
   assert.match(output.hookSpecificOutput.additionalContext, /\/reload-plugins cannot fetch new versions/);
 });
 

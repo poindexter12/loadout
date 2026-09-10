@@ -61,7 +61,7 @@ Replace `<plugin-name>` with `sidequest`, `model-gateway`, `observability`, `cod
 
 ## Updates and reloads
 
-`/quartermaster:update-toolshed` is the requested updater. It refreshes the Loadout marketplace and updates all active Loadout registry installs at their recorded user, project, or local scope and project path. It does not modify third-party marketplaces. Freshness hooks report cached availability or loaded-version mismatches and point to the updater; they do not install or restart anything.
+`/quartermaster:update-loadout` is the requested updater. It refreshes the Loadout marketplace and updates all active Loadout registry installs at their recorded user, project, or local scope and project path. It does not modify third-party marketplaces. Freshness hooks report cached availability or loaded-version mismatches and point to the updater; they do not install or restart anything.
 
 Marketplace auto-update is optional. Enable it for the Loadout marketplace in Claude Code if you want marketplace checks after session start. An open session still needs `/reload-plugins` after plugin code changes. Changes to process-level gateway wiring or model discovery may require a new Claude Code process instead of a reload.
 

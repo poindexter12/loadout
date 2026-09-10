@@ -40,13 +40,13 @@ Tell Claude what you want to do:
 
 Or run the maintenance skills directly:
 
-> /quartermaster:update-toolshed
+> /quartermaster:update-loadout
 
 > /quartermaster:toolshed-doctor
 
 The requested updater reads Claude Code's installed-plugin registry and updates every active Loadout install at its recorded user, project, or local scope and project path. It can update installs in other recorded projects, not only the project where you invoked it. Third-party plugins and marketplaces are left alone.
 
-Freshness hooks are advisory. They report cached availability and loaded-version mismatches, and they point to `/quartermaster:update-toolshed`; they do not install, restart, or replace the requested updater. Marketplace auto-update is optional and must be enabled for the Loadout marketplace in Claude Code. An open session still needs `/reload-plugins` after plugin code changes. Restart Claude Code when process-level gateway wiring or model discovery changed.
+Freshness hooks are advisory. They report cached availability and loaded-version mismatches, and they point to `/quartermaster:update-loadout`; they do not install, restart, or replace the requested updater. Marketplace auto-update is optional and must be enabled for the Loadout marketplace in Claude Code. An open session still needs `/reload-plugins` after plugin code changes. Restart Claude Code when process-level gateway wiring or model discovery changed.
 
 The health check is read-only. It identifies stale installs, dead `enabledPlugins` entries, and Model Gateway startup-check results when that plugin is present. It also reports managed Observability storage limits without running a repair. Run the updater when you want installs changed.
 
