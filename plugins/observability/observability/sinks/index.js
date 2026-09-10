@@ -1,8 +1,8 @@
 'use strict';
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { defaultDataDir } = require('../../lib/observability/data-dir.js');
 const grafanaLgtm = require('./grafana/index.js');
 const none = require('./none/index.js');
 const otlp = require('./otlp/index.js');
@@ -19,11 +19,6 @@ const SINK_IDS = Object.freeze(Object.keys(PROVIDERS));
 
 function record(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function defaultDataDir(environment = process.env) {
-  const base = environment.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share');
-  return path.join(base, 'Eigenwise', 'Workbench');
 }
 
 function defaultConfigPath(dataDir = defaultDataDir()) {

@@ -16,6 +16,7 @@ const { otlpToObservations } = require('../lib/observability/otlp.js');
 const {
   DEFAULT_SINK,
   defaultConfigPath,
+  defaultDataDir,
   readObservabilityConfig,
   resolveSink,
 } = require('../observability/sinks/index.js');
@@ -574,7 +575,7 @@ function parseArgs(argv) {
 }
 
 function defaultDatabaseFile() {
-  return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share'), 'Eigenwise', 'Workbench', 'observability.db');
+  return path.join(defaultDataDir(), 'observability.db');
 }
 
 function loadConfiguredSink(databaseFile, configFile) {

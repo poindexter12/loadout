@@ -1,10 +1,10 @@
 'use strict';
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { canonicalPath, resolvedPath } = require('../lib/observability/path-identity.js');
+const { defaultDataDir } = require('../lib/observability/data-dir.js');
 
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,255}$/;
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
@@ -249,8 +249,7 @@ function spool(spoolPath, observation) {
 }
 
 function defaultSpoolPath() {
-  const base = process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share');
-  return path.join(base, 'Eigenwise', 'Workbench', 'hook-spool.jsonl');
+  return path.join(defaultDataDir(), 'hook-spool.jsonl');
 }
 
 function readStdin() {

@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { renderCollectorYaml } = require('./install-otel-collector.js');
+const { defaultDataDir } = require('../lib/observability/data-dir.js');
 const grafanaLgtm = require('../observability/sinks/grafana/index.js');
 const {
   dashboardActivityStart,
@@ -93,11 +94,6 @@ function observabilityEnvironment(ports = DEFAULT_PORTS) {
 }
 
 const OBSERVABILITY_ENV = Object.freeze(observabilityEnvironment());
-
-function defaultDataDir(environment = process.env) {
-  const base = environment.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share');
-  return path.join(base, 'Eigenwise', 'Workbench');
-}
 
 function compareVersions(actual, required) {
   const parse = (version) => String(version).match(/\d+/g)?.slice(0, 3).map(Number) || [];

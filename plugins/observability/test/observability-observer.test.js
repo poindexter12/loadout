@@ -529,7 +529,7 @@ test('SessionStart restores an unbound observer port after an old observer retir
   const setup = require('../bin/setup-observability.js');
   const { writeObservabilityConfig } = require('../observability/sinks/index.js');
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-observer-arrival-'));
-  const dataDir = path.join(home, 'Eigenwise', 'Workbench');
+  const dataDir = path.join(home, '.claude', 'observability');
   const configFile = path.join(dataDir, 'observability.json');
   const databaseFile = path.join(dataDir, 'observability.db');
   const observerPort = await availableLoopbackPort();
@@ -584,7 +584,7 @@ test('SessionStart restores an unbound observer port after an old observer retir
 
   assert.equal(await launchEnsure({
     dataDir,
-    environment: { LOCALAPPDATA: home, WORKBENCH_OTELCOL_CONTRIB: process.execPath },
+    environment: { OBSERVABILITY_HOME: dataDir, WORKBENCH_OTELCOL_CONTRIB: process.execPath },
   }), true);
   const successorHealth = await waitForHealth(observerPort, successorVersion);
   assert.equal(successorHealth.ok, true);

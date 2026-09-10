@@ -6,10 +6,11 @@ Collector, and dashboard container are machine-shared regardless of the install 
 session. Machine service consent and repository opt-in are separate choices: consenting to the shared service
 does not mean every repository should send telemetry.
 
-The state directory (`%LOCALAPPDATA%\Eigenwise\Workbench` on Windows), the OpenTelemetry service name
-`workbench-observer`, and the `workbench_` attribute prefix all kept their names when this plugin split out
-of Workbench. They are on-disk and on-the-wire identifiers baked into shipped Grafana queries and existing
-data. Renaming them orphans it.
+The state directory is `~/.claude/observability` (`OBSERVABILITY_HOME` overrides it); a pre-existing
+`Eigenwise/Workbench` directory from older installs is migrated there automatically on first use. The
+OpenTelemetry service name `workbench-observer` and the `workbench_` attribute prefix kept their names when
+this plugin split out of Workbench: they are on-the-wire identifiers baked into shipped Grafana queries and
+existing data, and renaming them orphans it.
 
 ## Ask two compact questions
 
@@ -21,7 +22,7 @@ Then ask separately:
 
 > Should this repository opt in to the shared service's metadata telemetry?
 
-Never install the shared service without a clear yes, and never treat service consent as approval for every repository. If `%LOCALAPPDATA%\Eigenwise\Workbench\observability.json` already exists, run the check pass first and show its current enabled state, sink, dashboard choice, and ports. Let the user keep it, switch sink, toggle the dashboard, change ports, or disable it. Disabling must ask whether to keep or delete observability data.
+Never install the shared service without a clear yes, and never treat service consent as approval for every repository. If `~/.claude/observability/observability.json` already exists, run the check pass first and show its current enabled state, sink, dashboard choice, and ports. Let the user keep it, switch sink, toggle the dashboard, change ports, or disable it. Disabling must ask whether to keep or delete observability data.
 
 Do not ask for content-capture settings, Docker credentials, tokens, or remote endpoints during the normal interview. Docker is optional. SQLite capture and reports work without it. The intended repository opt-in policy currently has a bounded enforcement limitation: hook events can enter the shared spool and ingest path before the opt-in check. State that limitation plainly and do not claim this setup fixes it.
 
@@ -63,7 +64,7 @@ After consent, every startup/resume launches a fail-open background ensure pass.
 
 The helper enables only local OTLP/HTTP and the pseudonymous telemetry path. Leave these content settings unset: `OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_ASSISTANT_RESPONSES`, `OTEL_LOG_TOOL_DETAILS`, `OTEL_LOG_TOOL_CONTENT`, and `OTEL_LOG_RAW_API_BODIES`.
 
-It stores the SQLite database, queues, cursors, salts, logs, and pid files in user application data (`%LOCALAPPDATA%\Eigenwise\Workbench` on Windows) with current-user-only permissions. Never print secret values or add plugin-registry entries yourself.
+It stores the SQLite database, queues, cursors, salts, logs, and pid files in `~/.claude/observability` with current-user-only permissions. Never print secret values or add plugin-registry entries yourself.
 
 ## Reload and verify
 
