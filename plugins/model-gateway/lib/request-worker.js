@@ -190,6 +190,41 @@ function displayName(id, backend = 'codex') {
 // its README documents. A future proxy /v1/models takes precedence over both.
 const PLAN_TOOLS = ['EnterPlanMode', 'ExitPlanMode'];
 
+// OpenAI validates function-schema `pattern` values against JSON Schema
+// format: regex (ECMA-262) and rejects Unicode property escapes and lookbehind.
+// One tool carrying `\p{Cc}` 400s the entire request before it reaches the
+// model, and Claude Code's Artifact tool does exactly that. `pattern` is an
+// advisory hint rather than semantics, so dropping an unsupported one costs a
+// malformed argument caught at the tool instead of at the API, while keeping it
+// costs every request. Patterns the backend can parse are left intact.
+const UNSUPPORTED_PATTERN_SYNTAX = /\\[pP]\{|\(\?<[=!]/;
+
+function sanitizeCodexToolSchemas(tools) {
+  if (!Array.isArray(tools)) return tools;
+  let stripped = 0;
+  const scrub = (node) => {
+    if (Array.isArray(node)) return node.map(scrub);
+    if (!node || typeof node !== 'object') return node;
+    const out = {};
+    for (const [key, value] of Object.entries(node)) {
+      // A property literally named "pattern" carries a schema object, not a
+      // regex string, so the string check keeps it out of the strip path.
+      if (key === 'pattern' && typeof value === 'string' && UNSUPPORTED_PATTERN_SYNTAX.test(value)) {
+        stripped++;
+        continue;
+      }
+      out[key] = scrub(value);
+    }
+    return out;
+  };
+  const sanitized = tools.map((tool) => (
+    tool && typeof tool === 'object' && tool.input_schema
+      ? { ...tool, input_schema: scrub(tool.input_schema) }
+      : tool
+  ));
+  return stripped ? sanitized : tools;
+}
+
 const DEFAULT_MODELS = [
   'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra',
 ];
@@ -1980,6 +2015,7 @@ function runWorker() {
             if (Array.isArray(parsed.tools) && !keepPlanTools) {
               parsed.tools = parsed.tools.filter((t) => !PLAN_TOOLS.includes(t && t.name));
             }
+            parsed.tools = sanitizeCodexToolSchemas(parsed.tools);
             counters.codex++;
             const effectiveEffort = typeof parsed.output_config?.effort === 'string' ? parsed.output_config.effort : requestedEffort;
             requestRouteLog(req, 'codex', parsed.model, pathOnly, dispatchVia, effectiveEffort,
@@ -2180,4 +2216,4 @@ function runWorker() {
   }
 }
 
-module.exports = { createHostsBypassResolver, effectiveCodexSentryPolicy, gatewayModel, runWorker };
+module.exports = { createHostsBypassResolver, effectiveCodexSentryPolicy, gatewayModel, runWorker, sanitizeCodexToolSchemas };
