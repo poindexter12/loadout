@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { writeFileAtomically } = require('./atomic-file.js');
+const { sanitizeToolSchemas } = require('./tool-schema.js');
 
 const GROK_ENDPOINT = 'https://cli-chat-proxy.grok.com/v1/responses';
 const GROK_TOKEN_ENDPOINT = 'https://auth.x.ai/oauth/token';
@@ -193,7 +194,10 @@ function isWebSearchTool(tool) {
 
 function translateTools(tools) {
   if (!Array.isArray(tools)) return undefined;
-  return tools.flatMap((tool) => {
+  // Grok's /v1/responses is OpenAI-shaped, so it rejects the same unparseable
+  // `pattern` values Codex does — and input_schema goes straight out as
+  // `parameters` below.
+  return sanitizeToolSchemas(tools).flatMap((tool) => {
     if (isWebSearchTool(tool)) return [{ type: 'web_search' }];
     if (!tool?.name) return [];
     return [{

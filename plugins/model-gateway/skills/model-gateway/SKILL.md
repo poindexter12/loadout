@@ -229,3 +229,12 @@ agree).
   Codex-bound requests since 0.2.1, so this shouldn't recur; if it does, make sure the shim was
   restarted (`stop` + `start`). Shift+Tab restores the mode in an affected session. Escape
   hatch to re-enable plan tools: `CODEX_GATEWAY_KEEP_PLAN_TOOLS=1`.
+- **Codex or Grok requests fail with `400 Invalid schema for function '<Tool>'`**: OpenAI-shaped
+  backends validate every tool's JSON Schema `pattern` against ECMA-262 and refuse Unicode property
+  escapes (`\p{...}`) and lookbehind. A single offending tool fails the whole request before it
+  reaches the model, and Claude Code's Artifact tool carries such a pattern on its `field`
+  parameter. The shim strips only the unsupported `pattern` values from Codex- and Grok-bound tool
+  schemas, leaving parseable ones intact so the model still sees the useful constraints; a
+  malformed argument then fails at the tool instead of at the API. Claude-bound requests are never
+  touched. If it recurs, read the tool name out of the error and confirm the shim actually
+  restarted (`stop` + `start`).

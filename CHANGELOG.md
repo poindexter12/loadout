@@ -8,6 +8,85 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v3.537.0 (2026-09-10)
+
+### codebase-mapper 2.15.8 → 2.16.0
+
+#### Features
+
+- Rename the marketplace to Loadout: installs read <plugin>@loadout from poindexter12/loadout (SQ-2540) [`39033d5`](https://github.com/poindexter12/loadout/commit/39033d5cd47f1718072dd186303c6a0f56b21085)
+
+#### Fixes
+
+- Rebrand plugin author from Eigenwise to poindexter12 in manifests (SQ-1) [`71c1995`](https://github.com/poindexter12/loadout/commit/71c19953d7b6d6dbaf42918a325c48aedb1ce946)
+- Repoint docs, install specs, and support links at the poindexter12 fork with attribution to Eigenwise (SQ-2539) [`e1a8f37`](https://github.com/poindexter12/loadout/commit/e1a8f37a7872ef770c9279271b497e75f972abcd)
+
+### live-rules 2.10.5 → 2.11.0
+
+#### Features
+
+- Rename the marketplace to Loadout: installs read <plugin>@loadout from poindexter12/loadout (SQ-2540) [`39033d5`](https://github.com/poindexter12/loadout/commit/39033d5cd47f1718072dd186303c6a0f56b21085)
+
+#### Fixes
+
+- Rebrand plugin author from Eigenwise to poindexter12 in manifests (SQ-1) [`71c1995`](https://github.com/poindexter12/loadout/commit/71c19953d7b6d6dbaf42918a325c48aedb1ce946)
+- Repoint docs, install specs, and support links at the poindexter12 fork with attribution to Eigenwise (SQ-2539) [`e1a8f37`](https://github.com/poindexter12/loadout/commit/e1a8f37a7872ef770c9279271b497e75f972abcd)
+
+### model-gateway 0.50.5 → 0.51.0
+
+#### Features
+
+- Rename model-gateway OTel instrumentation scopes to loadout.codex-gateway (SQ-7) [`0559636`](https://github.com/poindexter12/loadout/commit/0559636a2110401217ebd6a0496c0a8e173aa9d7)
+- Rename the marketplace to Loadout: installs read <plugin>@loadout from poindexter12/loadout (SQ-2540) [`39033d5`](https://github.com/poindexter12/loadout/commit/39033d5cd47f1718072dd186303c6a0f56b21085)
+
+#### Fixes
+
+- Rebrand plugin author from Eigenwise to poindexter12 in manifests (SQ-1) [`71c1995`](https://github.com/poindexter12/loadout/commit/71c19953d7b6d6dbaf42918a325c48aedb1ce946)
+- Repoint docs, install specs, and support links at the poindexter12 fork with attribution to Eigenwise (SQ-2539) [`e1a8f37`](https://github.com/poindexter12/loadout/commit/e1a8f37a7872ef770c9279271b497e75f972abcd)
+- doctor no longer flags gemini rows and the gateway stops advertising a null boot catalog (SQ-2541) [`d2ad379`](https://github.com/poindexter12/loadout/commit/d2ad379e81f24faf8ea42d42f548e677f1ea8f85)
+- rc-compat in-process tests can no longer write through to the real user settings.json (SQ-2542) [`0cee455`](https://github.com/poindexter12/loadout/commit/0cee455dc9e791c11fb70e4d1cab1251a727180e)
+
+### observability 0.7.29 → 0.8.0
+
+#### Features
+
+- Observability data moves to ~/.claude/observability with automatic migration (SQ-2) [`4966e3e`](https://github.com/poindexter12/loadout/commit/4966e3e0e9b15ec59f8099b627e03a14c3dd524f)
+  New default data directory ~/.claude/observability (override: OBSERVABILITY_HOME). An existing Eigenwise/Workbench directory is migrated automatically on first use; on failure the legacy directory stays in use.
+- Rename WORKBENCH_* environment variables to the OBSERVABILITY_* namespace (SQ-9) [`4a0eff3`](https://github.com/poindexter12/loadout/commit/4a0eff36bc604637886ecb962f667049a7c4c417)
+- Rename the marketplace to Loadout: installs read <plugin>@loadout from poindexter12/loadout (SQ-2540) [`39033d5`](https://github.com/poindexter12/loadout/commit/39033d5cd47f1718072dd186303c6a0f56b21085)
+
+#### Fixes
+
+- Rebrand plugin author from Eigenwise to poindexter12 in manifests (SQ-1) [`71c1995`](https://github.com/poindexter12/loadout/commit/71c19953d7b6d6dbaf42918a325c48aedb1ce946)
+- Rename observability test tmpdir prefixes from workbench-* to loadout-* (SQ-8) [`33646cf`](https://github.com/poindexter12/loadout/commit/33646cfc264a89d36618ab0d906de0f3a7078aa2)
+- Repoint docs, install specs, and support links at the poindexter12 fork with attribution to Eigenwise (SQ-2539) [`e1a8f37`](https://github.com/poindexter12/loadout/commit/e1a8f37a7872ef770c9279271b497e75f972abcd)
+
+### quartermaster 0.7.7 → 0.8.0
+
+#### Features
+
+- Rename update-toolshed to update-loadout and the freshness bypass env var to LOADOUT_FRESHNESS_BYPASS (SQ-6) [`9dbf6d8`](https://github.com/poindexter12/loadout/commit/9dbf6d824575fb6c305d938fba7edbaad4a25a17)
+- Rename toolshed-doctor to loadout-doctor and sweep internal toolshed identifiers (SQ-10) [`ed5ef1c`](https://github.com/poindexter12/loadout/commit/ed5ef1c7138c3af0c7da33ab502b153a910e2e6a)
+- Rename the marketplace to Loadout: installs read <plugin>@loadout from poindexter12/loadout (SQ-2540) [`39033d5`](https://github.com/poindexter12/loadout/commit/39033d5cd47f1718072dd186303c6a0f56b21085)
+
+#### Fixes
+
+- Rebrand plugin author from Eigenwise to poindexter12 in manifests (SQ-1) [`71c1995`](https://github.com/poindexter12/loadout/commit/71c19953d7b6d6dbaf42918a325c48aedb1ce946)
+- Repoint docs, install specs, and support links at the poindexter12 fork with attribution to Eigenwise (SQ-2539) [`e1a8f37`](https://github.com/poindexter12/loadout/commit/e1a8f37a7872ef770c9279271b497e75f972abcd)
+
+### sidequest 5.0.41 → 5.1.0
+
+#### Features
+
+- Rebrand sidequest packages and dashboard to Loadout (SQ-5) [`1ba3827`](https://github.com/poindexter12/loadout/commit/1ba3827cff88da9e8ea1d57ea2c4b5b82d85c453)
+- Rename the marketplace to Loadout: installs read <plugin>@loadout from poindexter12/loadout (SQ-2540) [`39033d5`](https://github.com/poindexter12/loadout/commit/39033d5cd47f1718072dd186303c6a0f56b21085)
+
+#### Fixes
+
+- Rebrand plugin author from Eigenwise to poindexter12 in manifests (SQ-1) [`71c1995`](https://github.com/poindexter12/loadout/commit/71c19953d7b6d6dbaf42918a325c48aedb1ce946)
+- Rename toolshed-doctor to loadout-doctor and sweep internal toolshed identifiers (SQ-10) [`ed5ef1c`](https://github.com/poindexter12/loadout/commit/ed5ef1c7138c3af0c7da33ab502b153a910e2e6a)
+- Repoint docs, install specs, and support links at the poindexter12 fork with attribution to Eigenwise (SQ-2539) [`e1a8f37`](https://github.com/poindexter12/loadout/commit/e1a8f37a7872ef770c9279271b497e75f972abcd)
+
 ## v3.536.0 (2026-09-09)
 
 ### sidequest 5.0.40 → 5.0.41

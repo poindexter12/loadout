@@ -13,6 +13,7 @@ const zlib = require('node:zlib');
 const { writeFileAtomically } = require('./atomic-file.js');
 const { createGatewayUsageEmitter, recordRequestBodyHighWater } = require('./usage-observability.js');
 const grokBackend = require('./grok-backend.js');
+const { sanitizeToolSchemas } = require('./tool-schema.js');
 const { fetchUrl } = require('./process-supervision.js');
 const { effectiveBaseUrl, wiredMode } = require('./settings-wiring.js');
 const { detectHostsCompat } = require('./remote-control.js');
@@ -1980,6 +1981,7 @@ function runWorker() {
             if (Array.isArray(parsed.tools) && !keepPlanTools) {
               parsed.tools = parsed.tools.filter((t) => !PLAN_TOOLS.includes(t && t.name));
             }
+            parsed.tools = sanitizeToolSchemas(parsed.tools);
             counters.codex++;
             const effectiveEffort = typeof parsed.output_config?.effort === 'string' ? parsed.output_config.effort : requestedEffort;
             requestRouteLog(req, 'codex', parsed.model, pathOnly, dispatchVia, effectiveEffort,

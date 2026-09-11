@@ -4,13 +4,13 @@
     "name": "poindexter12"
   },
   "description": "Loadout: a kit of Claude Code plugins. Independently maintained fork of the Eigenwise Toolshed; original work by Eigenwise.",
-  "version": "3.536.0",
+  "version": "3.537.0",
   "plugins": [
     {
       "name": "observability",
       "source": "./plugins/observability",
       "description": "Local, metadata-only telemetry for Claude Code. A bundled observer records session, tool, and subagent lifecycle events into SQLite on your machine, an optional statusline shows live context and usage, and an OpenTelemetry Collector can forward redacted signals to Grafana, generic OTLP, or PostHog. Prompts, responses, code, tool inputs and results, credentials, and environment values are never stored. Every sink beyond local SQLite is opt-in.",
-      "version": "0.7.29",
+      "version": "0.8.0",
       "author": {
         "name": "poindexter12"
       },
@@ -33,7 +33,7 @@
       "name": "model-gateway",
       "source": "./plugins/model-gateway",
       "description": "Your ChatGPT/Codex and Grok subscription models in Claude Code's /model picker. A local gateway routes claude-gpt-* models to OpenAI's Codex backend, claude-grok-* models to Grok, and everything else to api.anthropic.com, so you switch between Claude, GPT-5.x, and Grok mid-session like any other model. No API keys.",
-      "version": "0.50.5",
+      "version": "0.51.0",
       "author": {
         "name": "poindexter12"
       },
@@ -56,7 +56,7 @@
       "name": "sidequest",
       "source": "./plugins/sidequest",
       "description": "The Loadout's core work board and orchestration loop for Claude Code. Tickets are classified into categories that route each one to a concrete model and effort, then dispatched to token-gated executors; side issues you mention mid-task get captured on the spot, and a live, self-hosted Kanban dashboard spans every project you work in.",
-      "version": "5.0.41",
+      "version": "5.1.0",
       "author": {
         "name": "poindexter12"
       },
@@ -79,7 +79,7 @@
       "name": "codebase-mapper",
       "source": "./plugins/codebase-mapper",
       "description": "A self-maintaining codebase map: atomic docs Claude loads at the start of each session and keeps in sync as the code changes. Any stack; greenfield or existing.",
-      "version": "2.15.8",
+      "version": "2.16.0",
       "author": {
         "name": "poindexter12"
       },
@@ -102,7 +102,7 @@
       "name": "quartermaster",
       "source": "./plugins/quartermaster",
       "description": "Set up a project from your existing Claude Code habits, keep Loadout installs healthy, and find missing capabilities after real work accumulates. Local scripts reduce session history to a bounded summary before the active model sees it; setup, resupply, updates, and config changes happen only with your approval.",
-      "version": "0.7.7",
+      "version": "0.8.0",
       "author": {
         "name": "poindexter12"
       },
@@ -127,7 +127,7 @@
       "name": "live-rules",
       "source": "./plugins/live-rules",
       "description": "Atomic project rules in .claude/live-rules/rules/ with a generated manifest. Claude injects applicable rules at SessionStart, then only new or changed unseen rules as prompts and edits match; legacy single-file storage is for migration or explicit overrides.",
-      "version": "2.10.5",
+      "version": "2.11.0",
       "author": {
         "name": "poindexter12"
       },

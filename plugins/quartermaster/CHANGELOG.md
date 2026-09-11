@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.0 (2026-09-10)
+
+Released in v3.537.0, up from 0.7.7.
+
+### Features
+
+- Rename update-toolshed to update-loadout and the freshness bypass env var to LOADOUT_FRESHNESS_BYPASS (SQ-6) [`9dbf6d8`](https://github.com/poindexter12/loadout/commit/9dbf6d824575fb6c305d938fba7edbaad4a25a17)
+- Rename toolshed-doctor to loadout-doctor and sweep internal toolshed identifiers (SQ-10) [`ed5ef1c`](https://github.com/poindexter12/loadout/commit/ed5ef1c7138c3af0c7da33ab502b153a910e2e6a)
+- Rename the marketplace to Loadout: installs read <plugin>@loadout from poindexter12/loadout (SQ-2540) [`39033d5`](https://github.com/poindexter12/loadout/commit/39033d5cd47f1718072dd186303c6a0f56b21085)
+
+### Fixes
+
+- Rebrand plugin author from Eigenwise to poindexter12 in manifests (SQ-1) [`71c1995`](https://github.com/poindexter12/loadout/commit/71c19953d7b6d6dbaf42918a325c48aedb1ce946)
+- Repoint docs, install specs, and support links at the poindexter12 fork with attribution to Eigenwise (SQ-2539) [`e1a8f37`](https://github.com/poindexter12/loadout/commit/e1a8f37a7872ef770c9279271b497e75f972abcd)
+
 ## 0.7.7 (2026-09-09)
 
 Released in v3.534.0, up from 0.7.6.

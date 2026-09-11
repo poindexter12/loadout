@@ -951,12 +951,22 @@ test('setup disable runs without a circular dependency warning', (t) => {
   const root = temporaryDirectory(t);
   const projectDir = path.join(root, 'project');
   fs.mkdirSync(projectDir);
+  // LOCALAPPDATA only moves the legacy directory. OBSERVABILITY_HOME is the
+  // one override resolveDefaultDataDir honors outright, so without it this
+  // child resolves the developer's real ~/.claude/observability and --disable
+  // writes its config there (SQ-3).
+  const observabilityHome = path.join(root, 'observability');
   const result = spawnSync(process.execPath, [path.join(__dirname, '..', 'bin', 'setup-observability.js'), '--disable'], {
     cwd: projectDir,
-    env: { ...process.env, LOCALAPPDATA: root },
+    env: { ...process.env, LOCALAPPDATA: root, OBSERVABILITY_HOME: observabilityHome },
     encoding: 'utf8',
   });
 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stderr, '');
+  // Tripwire: --disable always writes observability.json somewhere. Proving it
+  // landed in the fixture fails loudly if the pin above is ever dropped,
+  // instead of silently writing to the real home again.
+  assert.ok(fs.existsSync(path.join(observabilityHome, 'observability.json')),
+    `setup --disable wrote outside the fixture data dir ${observabilityHome}`);
 });
