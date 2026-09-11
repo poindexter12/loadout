@@ -702,12 +702,14 @@ function createProxyRecovery({
   recordLifecycle = () => {},
   initialBackoffMs = 1000,
   maximumBackoffMs = 30000,
+  probeFailureThreshold = 3,
 } = {}) {
   let recovery = null;
   let halted = false;
   let supervisedProxy = null;
   let restartAttempt = 0;
   let nextRestartAt = 0;
+  let probeFailures = 0;
 
   function log(message) {
     report(`${new Date(now()).toISOString()} model-gateway: ${message}`);
@@ -720,11 +722,22 @@ function createProxyRecovery({
       if (await probe()) {
         restartAttempt = 0;
         nextRestartAt = 0;
+        probeFailures = 0;
         return { ok: true, state: 'healthy' };
       }
       if (halted) return { ok: false, state: 'stopped' };
       if (now() < nextRestartAt) return { ok: false, state: 'backing-off', nextRestartAt };
 
+      // A proxy that still holds the port is alive but busy until proven otherwise: one
+      // slow /v1/models answer must not cost it a SIGTERM mid-request. Only a run of
+      // consecutive silent checks earns a restart. A released port needs no such patience.
+      probeFailures += 1;
+      const portBound = await listening(proxyPort);
+      if (portBound && probeFailures < probeFailureThreshold) {
+        log(`proxy /v1/models did not answer (${probeFailures} of ${probeFailureThreshold} consecutive checks) while :${proxyPort} is still bound; leaving it running`);
+        return { ok: false, state: 'probe-unconfirmed', probeFailures, probeFailureThreshold };
+      }
+      probeFailures = 0;
       restartAttempt += 1;
       const backoffMs = Math.min(maximumBackoffMs, initialBackoffMs * (2 ** (restartAttempt - 1)));
       nextRestartAt = now() + backoffMs;
@@ -739,7 +752,7 @@ function createProxyRecovery({
         recordLifecycle('proxy-recovery-finished', { component: 'supervisor', pid: process.pid, outcome: 'binary-missing' });
         return { ok: false, state: 'binary-missing', retryAt: nextRestartAt };
       }
-      if (await listening(proxyPort)) {
+      if (portBound) {
         const pid = await owner(proxyPort);
         if (pid === undefined) {
           log(`proxy restart deferred because the ownership probe for :${proxyPort} timed out; refusing to stop an unknown owner`);
@@ -804,6 +817,7 @@ function createProxyRecovery({
       if (await probe()) {
         restartAttempt = 0;
         nextRestartAt = 0;
+        probeFailures = 0;
         log('proxy recovered and /v1/models is ready');
         recordLifecycle('proxy-recovery-finished', { component: 'supervisor', pid: process.pid, outcome: 'recovered' });
         return { ok: true, state: 'recovered' };

@@ -672,6 +672,7 @@ test('proxy recovery replaces a shared proxy binary descended from its superviso
     binaryExists: () => true,
     now: () => 0,
     report: () => {},
+    probeFailureThreshold: 1,
   });
 
   assert.equal((await recovery.recover()).state, 'recovered');
@@ -701,6 +702,7 @@ test('proxy recovery preserves a foreign install proxy using the shared binary',
     binaryExists: () => true,
     now: () => 0,
     report: () => {},
+    probeFailureThreshold: 1,
   });
 
   assert.equal((await recovery.recover()).state, 'foreign-port-owner');
@@ -803,6 +805,7 @@ test('supervisor health remains responsive while a timed-out ownership probe def
     recordLifecycle: (event, details) => lifecycle.push({ event, details }),
     now: () => Date.now(),
     report: () => {},
+    probeFailureThreshold: 1,
   });
   const recoveryAttempt = recovery.recover();
   const startedAt = Date.now();
@@ -836,6 +839,7 @@ test('supervisor shutdown reaps a timed probe child before fixture cleanup', asy
       },
       binaryExists: () => true,
       report: () => {},
+      probeFailureThreshold: 1,
     });
     async function stop() { await recovery.stop(); process.exit(0); }
     process.once('SIGTERM', stop);
