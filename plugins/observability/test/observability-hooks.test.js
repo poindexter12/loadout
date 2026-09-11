@@ -342,7 +342,9 @@ test('Stop hook flushes once, stays silent on re-entry, and fails open', (t) => 
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const hook = path.join(__dirname, '..', 'hooks', 'observability.js');
   const spoolPath = path.join(dir, 'hook-spool.jsonl');
-  const env = { ...process.env, OBSERVABILITY_HOOK_SPOOL: spoolPath };
+  // The spool is pinned below, but the hook still resolves a default data dir
+  // for everything else it touches; pin that at the fixture too (SQ-3).
+  const env = { ...process.env, OBSERVABILITY_HOOK_SPOOL: spoolPath, OBSERVABILITY_HOME: path.join(dir, 'observability') };
   const input = { hook_event_name: 'Stop', session_id: 'stop-session', cwd: dir, stop_hook_active: false };
 
   assert.equal(childProcess.execFileSync(process.execPath, [hook], {

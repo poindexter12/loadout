@@ -27,7 +27,14 @@ const FIXTURE = path.join(__dirname, 'fixtures', 'request-body-transcript.jsonl'
 const NOW = new Date('2026-07-19T10:00:00.000Z');
 
 function runStatusline(payload, environment) {
-  const child = spawn(process.execPath, [path.join(__dirname, '..', 'bin', 'statusline.js')], { env: environment });
+  // LOCALAPPDATA only moves the legacy directory. OBSERVABILITY_HOME is the one
+  // override resolveDefaultDataDir honors outright, so pin it here or the child
+  // resolves the developer's real ~/.claude/observability and writes there (SQ-3).
+  const dataDir = environment.OBSERVABILITY_HOME
+    ?? (environment.LOCALAPPDATA && path.join(environment.LOCALAPPDATA, 'observability'));
+  if (!dataDir) throw new Error('runStatusline needs OBSERVABILITY_HOME or LOCALAPPDATA pinned at a fixture dir');
+  const env = { ...environment, OBSERVABILITY_HOME: dataDir };
+  const child = spawn(process.execPath, [path.join(__dirname, '..', 'bin', 'statusline.js')], { env });
   return new Promise((resolve, reject) => {
     let stdout = '';
     let stderr = '';
