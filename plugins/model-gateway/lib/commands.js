@@ -777,7 +777,7 @@ async function statusReport({ readiness = null } = {}) {
   if (checks.shimRunning) {
     log(`models advertised to Claude Code: ${health?.models ?? 'unavailable'}`);
     log(health?.proxyRecovery
-      ? 'proxy recovery: shim supervisor probes /v1/models and restarts an unavailable proxy with bounded backoff'
+      ? 'proxy recovery: shim supervisor probes /v1/models and restarts a proxy that stays unavailable across consecutive checks, with bounded backoff'
       : 'proxy recovery: unavailable until the shim supervisor is refreshed');
   }
   log(`shim (model router) on :${SHIM_PORT}: ${checks.shimRunning ? `running${checks.servingVersion ? ` (serving ${checks.servingVersion})` : ' (serving version unavailable)'}` : 'DOWN'}`);

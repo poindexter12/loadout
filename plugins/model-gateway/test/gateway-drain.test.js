@@ -641,11 +641,71 @@ test('supervisor replaces an unresponsive bound proxy only after its owner relea
     start: () => { modelsAvailable = true; },
     now: () => 0,
     report: () => {},
+    probeFailureThreshold: 1,
   });
 
   assert.equal((await recovery.recover()).state, 'recovered');
   assert.deepEqual(stopped, [4242]);
   assert.equal(releaseChecks, 1);
+});
+
+test('supervisor leaves a bound proxy running until consecutive probes confirm it is silent', async () => {
+  let modelsAvailable = false;
+  const stopped = [];
+  let starts = 0;
+  const logs = [];
+  const recovery = createProxyRecovery({
+    proxyBinary: 'fake-proxy',
+    probe: async () => modelsAvailable,
+    listening: async () => true,
+    owner: () => 4242,
+    ownsProxy: () => true,
+    stop: (pid) => stopped.push(pid),
+    waitForRelease: async () => true,
+    binaryExists: () => true,
+    start: () => { starts += 1; modelsAvailable = true; },
+    now: () => 0,
+    report: (message) => logs.push(message),
+  });
+
+  const first = await recovery.recover();
+  assert.equal(first.state, 'probe-unconfirmed');
+  assert.equal(first.probeFailures, 1);
+  assert.deepEqual(stopped, [], 'a single silent probe never stops a proxy that still holds the port');
+  assert.equal((await recovery.recover()).state, 'probe-unconfirmed');
+  assert.deepEqual(stopped, [], 'a second silent probe still leaves the proxy running');
+  assert.equal((await recovery.recover()).state, 'recovered');
+  assert.deepEqual(stopped, [4242], 'the third consecutive silent probe earns the restart');
+  assert.equal(starts, 1);
+  assert.match(logs.join('\n'), /did not answer \(1 of 3 consecutive checks\) while :\d+ is still bound/);
+});
+
+test('a bound proxy that answers again clears its silent-probe streak', async () => {
+  let modelsAvailable = false;
+  const stopped = [];
+  const recovery = createProxyRecovery({
+    proxyBinary: 'fake-proxy',
+    probe: async () => modelsAvailable,
+    listening: async () => true,
+    owner: () => 4242,
+    ownsProxy: () => true,
+    stop: (pid) => stopped.push(pid),
+    waitForRelease: async () => true,
+    binaryExists: () => true,
+    start: () => { modelsAvailable = true; },
+    now: () => 0,
+    report: () => {},
+  });
+
+  assert.equal((await recovery.recover()).state, 'probe-unconfirmed');
+  assert.equal((await recovery.recover()).state, 'probe-unconfirmed');
+  modelsAvailable = true;
+  assert.equal((await recovery.recover()).state, 'healthy');
+  modelsAvailable = false;
+  const afterRecovery = await recovery.recover();
+  assert.equal(afterRecovery.state, 'probe-unconfirmed');
+  assert.equal(afterRecovery.probeFailures, 1, 'the streak restarts from zero once the proxy answers');
+  assert.deepEqual(stopped, []);
 });
 
 test('concurrent supervisor checks share one proxy recovery attempt', async () => {

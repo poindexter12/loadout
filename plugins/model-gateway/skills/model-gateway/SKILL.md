@@ -76,8 +76,9 @@ Restart remains necessary to surface new rows in `/model`: Claude Code reads the
 session start. `/reload-plugins` does not reload it. Restoring or refreshing auth on an already-wired
 install needs no restart of the current Claude Code process: the proxy is a separate process, so once `login` + `setup` re-authenticate it,
 the next request routes through cleanly. Settings, discovery-cache, plugin, or model-row changes do need a full restart of the affected project process. Keep these two recovery paths separate. The shim supervisor also probes the proxy's `/v1/models` endpoint
-while it runs, restarting an unavailable proxy with single-flight bounded backoff. It leaves a healthy proxy
-alone. Recovery output remains in `~/.claude/model-gateway/logs/guardian.log`; bounded lifecycle records in
+while it runs, restarting a proxy that stays unavailable across consecutive checks with single-flight bounded
+backoff. A proxy that misses a single probe while it still holds its port is left alone, so a slow answer never
+costs a live request. It leaves a healthy proxy alone. Recovery output remains in `~/.claude/model-gateway/logs/guardian.log`; bounded lifecycle records in
 `~/.claude/model-gateway/logs/lifecycle.jsonl` identify supervisor, worker, and proxy PIDs, orderly
 stop/restart requests, observed exits, and recovery outcomes. Use `doctor` to print the evidence path and
 the last observed exit. An OS termination or force-killed supervisor may leave no final record, so treat an
