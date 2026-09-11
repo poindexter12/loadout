@@ -225,6 +225,30 @@ test('window policy marks measured rows and advertises unmeasured Codex defaults
   assert.equal(gatewayModel('gpt-6-astra-fast', 'codex').max_input_tokens, 920000);
 });
 
+// Regression: gatewayClientModelId rewrote native Anthropic ids and dropped the
+// [1m] suffix from every one of them -- the anthropic row advertises null, and
+// `null > 200000` is false, so it fell through to the un-suffixed branch. Claude
+// Code sizes context off that suffix, so sessions compacted at 167k, not 967k.
+// The suffix is also load-bearing downward: a 200k native model must not gain
+// one, which is why these ids pass through rather than take the picker alias.
+test('native Anthropic model ids pass through with their window suffix intact', () => {
+  const { gatewayClientModelId, gatewayDiscoveryModels } = require(RUNTIME);
+
+  assert.equal(gatewayClientModelId('claude-opus-5[1m]'), 'claude-opus-5[1m]');
+  assert.equal(gatewayClientModelId('claude-sonnet-5[1m]'), 'claude-sonnet-5[1m]');
+  assert.equal(gatewayClientModelId('claude-haiku-4-5'), 'claude-haiku-4-5');
+  // Gateway-backed rows still resolve to their picker alias.
+  assert.equal(gatewayClientModelId('claude-gpt-6-astra[1m]'), 'claude-gpt-6-astra[1m]');
+
+  assert.deepEqual(
+    gatewayDiscoveryModels([
+      { id: 'claude-opus-5[1m]' },
+      { id: 'claude-haiku-4-5' },
+    ]).map(({ id }) => id),
+    ['claude-opus-5[1m]', 'claude-haiku-4-5'],
+  );
+});
+
 test('Codex sentry derives a headroom-preserving trigger for each policy row', () => {
   const { effectiveCodexSentryPolicy } = require(WORKER);
   const { resolveGatewayModelPolicy } = require(RUNTIME);

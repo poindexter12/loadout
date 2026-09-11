@@ -34,7 +34,6 @@ const fs = require('node:fs');
 const http = require('node:http');
 const https = require('node:https');
 const net = require('node:net');
-const os = require('node:os');
 const path = require('node:path');
 const zlib = require('node:zlib');
 const { writeFileAtomically } = require('./atomic-file.js');
@@ -49,7 +48,10 @@ const {
 const { latestHookWaitCutShort, latestObservedLifecycleExit, lifecycleLogPath, recordGatewayLifecycle } = require('./lifecycle-diagnostics.js');
 
 const WIN = process.platform === 'win32';
-const STATE = path.join(os.homedir(), '.claude', 'model-gateway');
+// Must stay in lockstep with runtime.js STATE: this module owns the proxy
+// binary, wiring config and logs, so a homedir join here would put two account
+// trees back on one binary and one wiring.json.
+const STATE = path.join(CLAUDE_CONFIG_DIR, 'model-gateway');
 const LOGS = path.join(STATE, 'logs');
 const BIN_DIR = path.join(STATE, 'bin');
 const WIRING_CONFIG_PATH = path.join(STATE, 'wiring.json');

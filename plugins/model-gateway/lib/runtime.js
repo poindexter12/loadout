@@ -7,8 +7,15 @@ const grokBackend = require('./grok-backend.js');
 const { writeFileAtomically } = require('./atomic-file.js');
 
 const WIN = process.platform === 'win32';
-const CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-const STATE = path.join(os.homedir(), '.claude', 'model-gateway');
+// Every gateway path hangs off the active config dir, never a hardcoded
+// ~/.claude. Account trees (a work tree and a personal tree) each run their own
+// gateway, so sharing one STATE dir would mean sharing one pid file, one unix
+// socket, one proxy binary, and one supervisor's view of the proxy port. This
+// precedence matches hooks/registry-writer.js and the installed update.js.
+const CLAUDE_CONFIG_DIR = process.env.MODEL_GATEWAY_CLAUDE_HOME
+  || process.env.CLAUDE_CONFIG_DIR
+  || path.join(os.homedir(), '.claude');
+const STATE = path.join(CLAUDE_CONFIG_DIR, 'model-gateway');
 const LOGS = path.join(STATE, 'logs');
 const BIN_DIR = path.join(STATE, 'bin');
 const WIRING_CONFIG_PATH = path.join(STATE, 'wiring.json');
@@ -167,6 +174,14 @@ function gatewayAdvertisedWindow(id) {
 function gatewayClientModelId(id) {
   const policy = resolveGatewayModelPolicy(id);
   if (!policy) return id;
+  // Native Anthropic ids pass through untouched. Upstream owns their window
+  // (advertisedWindow is null), and Claude Code sizes context off the [1m]
+  // suffix on the id itself -- so rewriting one here stripped the suffix from
+  // every pinned native model and compacted sessions at 167k instead of 967k.
+  // Routing them through pickerAlias is not the fix either: the fallback
+  // template appends [1m] unconditionally, which would claim a 1M window for
+  // 200k models such as claude-haiku-4-5.
+  if (policy.backend === 'anthropic') return id;
   return gatewayAdvertisedWindow(id) > CODEX_UNKNOWN_MODEL_WINDOW
     ? policy.pickerAlias
     : `${PREFIX}${policy.backendId}`;
