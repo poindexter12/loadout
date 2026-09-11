@@ -7,8 +7,15 @@ const grokBackend = require('./grok-backend.js');
 const { writeFileAtomically } = require('./atomic-file.js');
 
 const WIN = process.platform === 'win32';
-const CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-const STATE = path.join(os.homedir(), '.claude', 'model-gateway');
+// Every gateway path hangs off the active config dir, never a hardcoded
+// ~/.claude. Account trees (a work tree and a personal tree) each run their own
+// gateway, so sharing one STATE dir would mean sharing one pid file, one unix
+// socket, one proxy binary, and one supervisor's view of the proxy port. This
+// precedence matches hooks/registry-writer.js and the installed update.js.
+const CLAUDE_CONFIG_DIR = process.env.MODEL_GATEWAY_CLAUDE_HOME
+  || process.env.CLAUDE_CONFIG_DIR
+  || path.join(os.homedir(), '.claude');
+const STATE = path.join(CLAUDE_CONFIG_DIR, 'model-gateway');
 const LOGS = path.join(STATE, 'logs');
 const BIN_DIR = path.join(STATE, 'bin');
 const WIRING_CONFIG_PATH = path.join(STATE, 'wiring.json');
