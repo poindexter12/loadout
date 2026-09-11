@@ -174,6 +174,14 @@ function gatewayAdvertisedWindow(id) {
 function gatewayClientModelId(id) {
   const policy = resolveGatewayModelPolicy(id);
   if (!policy) return id;
+  // Native Anthropic ids pass through untouched. Upstream owns their window
+  // (advertisedWindow is null), and Claude Code sizes context off the [1m]
+  // suffix on the id itself -- so rewriting one here stripped the suffix from
+  // every pinned native model and compacted sessions at 167k instead of 967k.
+  // Routing them through pickerAlias is not the fix either: the fallback
+  // template appends [1m] unconditionally, which would claim a 1M window for
+  // 200k models such as claude-haiku-4-5.
+  if (policy.backend === 'anthropic') return id;
   return gatewayAdvertisedWindow(id) > CODEX_UNKNOWN_MODEL_WINDOW
     ? policy.pickerAlias
     : `${PREFIX}${policy.backendId}`;
