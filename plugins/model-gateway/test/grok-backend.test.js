@@ -8,6 +8,27 @@ const test = require('node:test');
 const { spawnGatewayProcess } = require('./support.js');
 const grok = require('../lib/grok-backend.js');
 
+test('strips patterns Grok cannot parse from forwarded tool parameters', () => {
+  // input_schema goes out verbatim as `parameters`, and Grok's /v1/responses
+  // rejects Unicode property escapes and lookbehind exactly like Codex does.
+  const request = grok.translateRequest({
+    tools: [{
+      name: 'Artifact',
+      input_schema: {
+        type: 'object',
+        properties: {
+          field: { type: 'string', pattern: '^[^\\p{Cc}]{1,200}$' },
+          runId: { type: 'string', pattern: '^wf_[a-z0-9-]{6,}$' },
+        },
+      },
+    }],
+  }, 'grok-4.5');
+
+  const { properties } = request.tools[0].parameters;
+  assert.equal('pattern' in properties.field, false, 'unicode property escape must be stripped');
+  assert.equal(properties.runId.pattern, '^wf_[a-z0-9-]{6,}$', 'parseable pattern must survive');
+});
+
 test('translates Anthropic messages, tools, and effort to Responses input', () => {
   const request = grok.translateRequest({
     system: [{ type: 'text', text: 'Be useful.' }],

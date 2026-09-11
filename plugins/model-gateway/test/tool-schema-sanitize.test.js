@@ -6,7 +6,7 @@ const net = require('node:net');
 const path = require('node:path');
 const test = require('node:test');
 const { spawnGatewayProcess } = require('./support.js');
-const { sanitizeCodexToolSchemas } = require('../lib/request-worker.js');
+const { sanitizeToolSchemas } = require('../lib/tool-schema.js');
 
 const CLI = path.join(__dirname, '..', 'bin', 'model-gateway.js');
 
@@ -85,8 +85,8 @@ const artifactTool = () => ({
   },
 });
 
-test('sanitizeCodexToolSchemas strips only patterns the backend cannot parse', () => {
-  const [tool] = sanitizeCodexToolSchemas([artifactTool()]);
+test('sanitizeToolSchemas strips only patterns the backend cannot parse', () => {
+  const [tool] = sanitizeToolSchemas([artifactTool()]);
   const { properties, propertyNames } = tool.input_schema;
 
   assert.equal('pattern' in properties.field, false, 'unicode property escape must be stripped');
@@ -98,10 +98,10 @@ test('sanitizeCodexToolSchemas strips only patterns the backend cannot parse', (
   assert.equal(properties.field.type, 'string', 'sibling keys are preserved');
 });
 
-test('sanitizeCodexToolSchemas leaves clean tool lists by reference', () => {
+test('sanitizeToolSchemas leaves clean tool lists by reference', () => {
   const tools = [{ name: 'Bash', input_schema: { type: 'object', properties: { cmd: { type: 'string', pattern: SUPPORTED_PATTERN } } } }];
-  assert.equal(sanitizeCodexToolSchemas(tools), tools);
-  assert.equal(sanitizeCodexToolSchemas(undefined), undefined);
+  assert.equal(sanitizeToolSchemas(tools), tools);
+  assert.equal(sanitizeToolSchemas(undefined), undefined);
 });
 
 test('Codex requests forward sanitized schemas while Anthropic passthrough stays byte-identical', async (t) => {
