@@ -640,3 +640,39 @@ test('the shim keeps Claude ids on the Anthropic path and claims both id forms f
   assert.deepEqual(toCodex, ['gpt-5.6-terra', 'gpt-5.6-terra']);
   assert.deepEqual(toAnthropic, ['claude-opus-5[1m]', 'claude-sonnet-4-5', 'claude-haiku-4-5']);
 });
+
+test('the boot catalog advertises Grok before the first model refresh lands', async (t) => {
+  const shimPort = await freePort();
+  const proxyPort = await freePort();
+  // A proxy that accepts and never answers keeps refreshModels() in flight for
+  // its full timeout, so /v1/models here can only be served from the boot
+  // catalog. Seeding that catalog with the Grok defaults is the fix under test.
+  const sockets = new Set();
+  const proxy = http.createServer(() => { /* never responds */ });
+  proxy.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  await new Promise((resolve) => proxy.listen(proxyPort, '127.0.0.1', resolve));
+  t.after(() => {
+    for (const socket of sockets) socket.destroy();
+    proxy.close();
+  });
+
+  const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
+    env: {
+      ...process.env,
+      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
+      CODEX_GATEWAY_REQUEST_LOG: '0',
+      CODEX_GATEWAY_SENTRY: '0',
+    },
+    stdio: 'ignore',
+  });
+  t.after(() => child.kill());
+  await waitForHealthz(shimPort);
+
+  const models = JSON.parse((await request(shimPort, '/v1/models')).body).data.map(({ id }) => id);
+  assert.ok(models.includes('claude-grok-4.5[1m]'), `advertised: ${models.join(', ')}`);
+  assert.ok(models.every((id) => id.startsWith('claude-')), 'boot catalog advertises a non-claude id');
+});
