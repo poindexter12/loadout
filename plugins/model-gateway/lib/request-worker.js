@@ -937,7 +937,15 @@ function runWorker() {
     at: 0,
     // gatewayModel takes (id, backend); a bare .map(gatewayModel) would pass
     // the array index as the backend and null out every boot-catalog row.
-    data: [...DEFAULT_MODELS, ...(LIST_DISPATCH_MODEL ? ['auto'] : [])].map((id) => gatewayModel(id)),
+    // refreshModels() is fired unawaited below while /healthz already answers
+    // ok, so this catalog is what a picker sees for the first seconds after a
+    // boot or restart. It carries every statically-known row for that reason:
+    // omitting the Grok defaults hid claude-grok-*[1m] from that window.
+    // Antigravity stays out — its roster is live-only (see refreshModels).
+    data: [
+      ...[...DEFAULT_MODELS, ...(LIST_DISPATCH_MODEL ? ['auto'] : [])].map((id) => gatewayModel(id)),
+      ...DEFAULT_GROK_MODELS.map((model) => gatewayModel(model.id, 'grok')),
+    ].filter(Boolean),
   };
   const counters = { models: 0, codex: 0, grok: 0, gemini: 0, anthropic: 0 };
   const dispatchRoutes = new DispatchSessionRouteCache({ cachePath: DISPATCH_ROUTE_CACHE_PATH });
