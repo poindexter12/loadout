@@ -34,7 +34,7 @@ new rows appear after a full Claude Code restart. `/reload-plugins` does not rel
 
 - `claude-gpt-*[1m]` uses your ChatGPT/Codex subscription. `MODEL_WINDOW_POLICY` in Model Gateway's runtime is the authority for every gateway picker row. GPT-5.6 Sol, Terra, Luna, and GPT-6 Astra are measured rows; other Codex proxy rows use its explicit unmeasured 920k default until measured.
 - A `[1m]` alias gives Claude Code a 1M client window, but a lower explicit `autoCompactWindow` still wins. The optional `325000` setting is a cap, and with that cap the client compacts around `292000`. The alias is removed before forwarding to the backend and does not promise a 1M backend input limit. Use `/context` to inspect the selected model and effective cap.
-- `claude-grok-4.5[1m]` uses your Grok subscription when the Grok CLI is installed and signed in. Its measured backend window is 500k. The alias is removed before requests reach the backend.
+- `claude-grok-4.5[1m]` uses your Grok subscription and is advertised only while the Grok CLI is installed and signed in. Without that sign-in the row is withheld from `/model` rather than shown as a row whose every request fails. Sign in with `grok`, then restart Claude Code to pick the row up. Its measured backend window is 500k. The alias is removed before requests reach the backend.
 - Claude models keep using Anthropic.
 
 Sidequest can select these models automatically when both plugins are installed.
