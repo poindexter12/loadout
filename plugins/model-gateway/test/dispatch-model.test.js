@@ -422,6 +422,47 @@ test('buildCatalog publishes the v4 provider-generic model contract', () => {
   ]);
 });
 
+// SQ-18: commands.js and request-worker.js each carried a private copy of the
+// catalog builder, and only the worker's copy had ever learned about
+// Antigravity. The CLI copy had no GEMINI_PREFIX branch at all, so every gemini
+// id the shim advertised was dropped from catalog.json without a trace, and no
+// test noticed because nothing exercised a gemini id through this path. Both
+// files now share catalog.js, so the CLI reports the backend it has been
+// serving all along — this test is the coverage that was missing.
+test('buildCatalog publishes Antigravity rows and readiness the CLI copy used to drop', () => {
+  const catalog = gw.buildCatalog(['claude-gpt-5.6-sol', 'claude-gemini-3-pro']);
+  assert.deepEqual(catalog.models, [
+    {
+      slug: 'codex-gpt-5-6-sol',
+      id: 'claude-gpt-5.6-sol[1m]',
+      label: 'GPT-5.6 Sol',
+      provider: 'codex',
+    },
+    {
+      slug: 'antigravity-gemini-3-pro',
+      id: 'claude-gemini-3-pro',
+      label: 'Gemini 3-pro (Antigravity)',
+      provider: 'antigravity',
+    },
+  ]);
+  // Antigravity authenticates per-request against the added Google account, so
+  // it has no local credential to probe and must NOT fall through to the
+  // generic "unavailable" readiness the CLI copy used to return.
+  assert.deepEqual(catalog.providers.antigravity, {
+    ready: true,
+    state: 'ready',
+    message: 'Antigravity proxy readiness is checked per-request; run it with an added Google account.',
+  });
+});
+
+// Supplied readiness still wins over the built-in Antigravity default, the same
+// way it does for codex and grok.
+test('buildCatalog lets supplied readiness override the Antigravity default', () => {
+  const antigravity = { ready: false, state: 'auth-missing', message: 'Add a Google account to the Antigravity proxy.' };
+  const catalog = gw.buildCatalog(['claude-gemini-3-pro'], { antigravity });
+  assert.deepEqual(catalog.providers, { antigravity });
+});
+
 test('writeCatalogFile preserves missing models from a same-schema subset write', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'catalog-subset-write-'));
   const file = path.join(dir, 'catalog.json');

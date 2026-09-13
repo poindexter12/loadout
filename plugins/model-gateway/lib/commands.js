@@ -46,6 +46,12 @@ const {
   syncGatewayDiscoveryCache,
 } = require('./runtime.js');
 const { latestHookWaitCutShort, latestObservedLifecycleExit, lifecycleLogPath, recordGatewayLifecycle } = require('./lifecycle-diagnostics.js');
+// Catalog row/readiness shape is shared with request-worker.js — see catalog.js
+// for why these live there and why the write/read shells below do not.
+const {
+  CATALOG_PATH, CATALOG_SCHEMA_VERSION, CATALOG_STALE_MS, buildCatalog, catalogReadiness, getGrokReadiness,
+  modelCatalogDetails, readJsonFile,
+} = require('./catalog.js');
 
 const WIN = process.platform === 'win32';
 // Must stay in lockstep with runtime.js STATE: this module owns the proxy
@@ -69,22 +75,16 @@ const QUIET_STARTUP_WAIT_MS = 12000;
 // gateway model discovery drops every id that doesn't start with claude/
 // anthropic, so an unprefixed id vanishes from /model.
 //
-// Real Anthropic ids share that prefix, so PREFIX alone can NEVER decide a
-// route — matching on it would send claude.ai traffic to the Codex proxy. The
-// backend family segment decides: `gpt-*` is Codex, `grok-*` is Grok, anything
-// else passes through untouched.
-const PREFIX = 'claude-';
-const GROK_PREFIX = 'claude-grok-';
+// Real Anthropic ids share that prefix, so the `claude-` prefix alone can NEVER
+// decide a route — matching on it would send claude.ai traffic to the Codex
+// proxy. The backend family segment decides: `gpt-*` is Codex, `grok-*` is
+// Grok, anything else passes through untouched. (runtime.js owns PREFIX and the
+// per-backend prefixes; catalog.js is the only consumer here.)
 const CODEX_FAMILY_RE = /^gpt-/;
 // Pre-3.x advertised the backend name too (`claude-codex-gpt-5.6-sol`). Claude
 // Code persists the selected model per project, so those ids outlive the
 // upgrade in every already-wired project; keep resolving them.
 const LEGACY_CODEX_PREFIX = 'claude-codex-';
-// Sidequest's virtual dispatch pin, resolved from the conversation's route
-// marker rather than from the id itself. It keeps the backend name because
-// `codex` here IS the backend (it owns the proxy's OAuth), and because the id
-// is persisted in generated agent defs and board dispatch records.
-const DISPATCH_MODEL_ID = 'claude-codex-auto';
 const GROK_ENDPOINT = process.env.CODEX_GATEWAY_GROK_ENDPOINT || grokBackend.GROK_ENDPOINT;
 const REPO = 'raine/claude-code-proxy';
 // Earliest claude-code-proxy release that maps a context overflow to HTTP 413
@@ -110,7 +110,6 @@ const AUTH_HEADERS = ['authorization', 'proxy-authorization', 'x-api-key', 'cook
 const {
   COMPAT_BASE_URL, COMPAT_HOST, COMPAT_PORT, DEFAULT_BASE_URL, HOSTS_BLOCK_END, HOSTS_BLOCK_LINE,
   HOSTS_BLOCK_START, PIN_ALIASES, PIN_OVERRIDE_PATH, STATIC_ENV_BLOCK, CODEX_UNKNOWN_MODEL_WINDOW,
-  codexContextWindow,
 } = require('./runtime.js');
 const {
   codexBaseFromId, detectedPinDefaults, effectivePins, envBlockFor, gatewayEnvBlock, isGatewayModelId,
@@ -365,24 +364,6 @@ async function getCodexReadiness({
     checks,
     upstreamBlocked,
     health,
-  };
-}
-
-function catalogReadiness(readiness) {
-  return {
-    ready: readiness.ready,
-    state: readiness.state,
-    message: readiness.message,
-    checks: readiness.checks,
-    upstreamBlocked: readiness.upstreamBlocked,
-  };
-}
-
-function providerReadiness(readiness) {
-  return {
-    ready: Boolean(readiness?.ready),
-    state: typeof readiness?.state === 'string' ? readiness.state : 'unavailable',
-    message: typeof readiness?.message === 'string' ? readiness.message : 'Readiness is unavailable.',
   };
 }
 
@@ -1188,23 +1169,6 @@ async function doctor({ readiness: suppliedReadiness = null } = {}) {
 
 // ---------------------------------------------------------------- the shim
 
-// display_name feeds the /model PICKER only (with gateway model discovery on,
-// for ids starting with claude-/anthropic-), where it shows correctly as e.g.
-// "GPT-5.6 Terra (Codex)". It does NOT reach the running-subagent CARD: that
-// surface resolves the model label internally and maps an unrecognized claude-*
-// id (like claude-gpt-5.6-terra) to a Claude family name — it renders
-// "Fable 5" for a Terra run. Nothing we return here overrides that (verified:
-// the response model field is "gpt-5.6-terra" and the model self-reports GPT-5,
-// so the RUN is correct — only the card label lies). Native subagent model
-// display isn't a supported feature (anthropics/claude-code#24094, not planned).
-// The sidequest agent NAME (sidequest-exec-codex-gpt-5-6-terra-*) carries the
-// true runtime, so don't chase the badge by editing display_name — it's a dead
-// end. See SQ-202.
-function displayName(id, backend = 'codex') {
-  if (backend === 'grok') return id.replace(/^grok-/, 'Grok ').replace(/-/g, ' ');
-  return id.replace(/^gpt-/, 'GPT-').replace(/\[1m\]$/, '') + ' (Codex)';
-}
-
 // claude-code-proxy v0.1.10 has no /v1/models route, so the shim owns the
 // catalog: $CLAUDE_CONFIG_DIR/model-gateway/models.json if present, else the Codex ids
 // its README documents. A future proxy /v1/models takes precedence over both.
@@ -1308,17 +1272,6 @@ function noteCompactEvent(attempt, event) {
   if (event.type !== 'error') return;
   attempt.sawError = true;
   if (COMPACT_FATAL_ERROR_TYPES.has(event.error?.type)) attempt.fatal = true;
-}
-
-function gatewayModel(id, backend = 'codex') {
-  const policy = id === 'auto' ? null : resolveGatewayModelPolicy(id);
-  if (id !== 'auto' && policy?.backend !== backend) return null;
-  return {
-    id: id === 'auto' ? DISPATCH_MODEL_ID : gatewayClientModelId(id),
-    display_name: id === 'auto' ? 'Sidequest Dispatch (Codex)' : displayName(id, backend),
-    type: 'model',
-    max_input_tokens: gatewayAdvertisedWindow(id) || codexContextWindow(id),
-  };
 }
 
 const ROUTE_MARKER_RE = /\[(sidequest-route) model=([a-z0-9][a-z0-9.-]{0,63})(?: effort=(low|medium|high|xhigh|max))?\]/g;
@@ -1492,128 +1445,6 @@ function dispatchRouteFromMessages(messages) {
 // sidequest (same marketplace) auto-discovers Codex models by reading this
 // file: $CLAUDE_CONFIG_DIR/model-gateway/catalog.json. Shape is a frozen contract
 // (see plugins/sidequest/lib/discovery.js) — don't change it casually.
-
-const CATALOG_PATH = path.join(STATE, 'catalog.json');
-const CATALOG_STALE_MS = 5 * 60 * 1000;
-const CATALOG_SCHEMA_VERSION = 4;
-
-// Slugs keep the `codex-` backend name and so survive the id rename byte for
-// byte: the board's route table pins slugs, and re-slugging would break every
-// persisted route at once.
-//
-// Provider + base, dots→dashes, kept inside ^[a-z0-9][a-z0-9-]{1,31}$; on
-// collision (or an over-length base) fall back to a short deterministic hash
-// so the slug stays unique without depending on iteration order.
-function slugFor(provider, base, used) {
-  const providerPrefix = `${provider}-`;
-  const providerBase = base.startsWith(providerPrefix) ? base.slice(providerPrefix.length) : base;
-  let s = (providerPrefix + providerBase).toLowerCase()
-    .replace(/\[1m\]$/, '')
-    .replace(/\./g, '-')
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  if (!/^[a-z0-9]/.test(s)) s = 'x' + s;
-  if (s.length > 32) {
-    const hash = crypto.createHash('sha1').update(s).digest('hex').slice(0, 6);
-    s = s.slice(0, 32 - 1 - hash.length) + '-' + hash;
-  }
-  let unique = s;
-  let n = 2;
-  while (used.has(unique)) {
-    const suffix = '-' + n;
-    unique = s.slice(0, Math.max(1, 32 - suffix.length)) + suffix;
-    n++;
-  }
-  used.add(unique);
-  return unique;
-}
-
-// "gpt-5.6-sol" -> "GPT-5.6 Sol", "gpt-5.3-codex-spark" -> "GPT-5.3 Codex Spark"
-function labelFor(base) {
-  const rest = base.replace(/^gpt-/, '');
-  const m = rest.match(/^(\d+(?:\.\d+)?)(?:-(.+))?$/);
-  if (!m) return 'GPT-' + rest.replace(/-/g, ' ');
-  const [, ver, suffix] = m;
-  const suffixLabel = suffix
-    ? ' ' + suffix.split('-').map((w) => w[0].toUpperCase() + w.slice(1)).join(' ')
-    : '';
-  return `GPT-${ver}${suffixLabel}`;
-}
-
-function modelCatalogDetails(id) {
-  const codexBase = codexBaseFromId(id);
-  if (codexBase && codexBase !== 'auto') {
-    return { provider: 'codex', base: codexBase, label: labelFor(codexBase) };
-  }
-  if (typeof id === 'string' && id.startsWith(GROK_PREFIX)) {
-    const base = id.slice(PREFIX.length).replace(/\[1m\]$/, '');
-    return { provider: 'grok', base, label: displayName(base, 'grok') };
-  }
-  return null;
-}
-
-function unavailableProviderReadiness(provider) {
-  return {
-    ready: false,
-    state: 'unavailable',
-    message: `${provider} readiness is unavailable.`,
-  };
-}
-
-function getGrokReadiness({ readAuth = grokBackend.readGrokAuth } = {}) {
-  try {
-    readAuth();
-    return {
-      ready: true,
-      state: 'ready',
-      message: 'Grok CLI auth is present.',
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Grok CLI auth is unavailable. Run `grok` and log in again.';
-    return {
-      ready: false,
-      state: /invalid/i.test(message) ? 'auth-invalid' : 'auth-missing',
-      message,
-    };
-  }
-}
-
-function providerCatalogReadiness(provider, readiness) {
-  const source = readiness?.[provider] ?? (provider === 'codex' ? readiness : null);
-  if (source) return providerReadiness(source);
-  if (provider === 'grok') return getGrokReadiness();
-  return unavailableProviderReadiness(provider);
-}
-
-function buildCatalog(ids, readiness = null) {
-  const used = new Set();
-  const models = ids
-    .map((id) => ({ id, details: modelCatalogDetails(id) }))
-    .filter(({ details }) => details)
-    .map(({ id, details }) => ({
-      slug: slugFor(details.provider, details.base, used),
-      id: gatewayClientModelId(id),
-      label: details.label,
-      provider: details.provider,
-    }));
-  const providers = Object.fromEntries(
-    [...new Set(models.map((model) => model.provider))].map((provider) => [provider, providerCatalogReadiness(provider, readiness)]),
-  );
-  return {
-    schemaVersion: CATALOG_SCHEMA_VERSION,
-    source: 'model-gateway',
-    updatedAt: new Date().toISOString(),
-    writtenBy: PLUGIN_VERSION,
-    providers,
-    codexReadiness: providers.codex ?? null,
-    models,
-  };
-}
-
-function readJsonFile(file) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
-}
 
 function catalogSchemaVersion(catalog) {
   if (!catalog || typeof catalog !== 'object') return null;
