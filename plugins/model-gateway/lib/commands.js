@@ -1206,7 +1206,7 @@ function displayName(id, backend = 'codex') {
 }
 
 // claude-code-proxy v0.1.10 has no /v1/models route, so the shim owns the
-// catalog: ~/.claude/model-gateway/models.json if present, else the Codex ids
+// catalog: $CLAUDE_CONFIG_DIR/model-gateway/models.json if present, else the Codex ids
 // its README documents. A future proxy /v1/models takes precedence over both.
 const PLAN_TOOLS = ['EnterPlanMode', 'ExitPlanMode'];
 
@@ -1490,7 +1490,7 @@ function dispatchRouteFromMessages(messages) {
 // ------------------------------------------------------------ model catalog
 //
 // sidequest (same marketplace) auto-discovers Codex models by reading this
-// file: ~/.claude/model-gateway/catalog.json. Shape is a frozen contract
+// file: $CLAUDE_CONFIG_DIR/model-gateway/catalog.json. Shape is a frozen contract
 // (see plugins/sidequest/lib/discovery.js) — don't change it casually.
 
 const CATALOG_PATH = path.join(STATE, 'catalog.json');
