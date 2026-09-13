@@ -78,8 +78,8 @@ install needs no restart of the current Claude Code process: the proxy is a sepa
 the next request routes through cleanly. Settings, discovery-cache, plugin, or model-row changes do need a full restart of the affected project process. Keep these two recovery paths separate. The shim supervisor also probes the proxy's `/v1/models` endpoint
 while it runs, restarting a proxy that stays unavailable across consecutive checks with single-flight bounded
 backoff. A proxy that misses a single probe while it still holds its port is left alone, so a slow answer never
-costs a live request. It leaves a healthy proxy alone. Recovery output remains in `~/.claude/model-gateway/logs/guardian.log`; bounded lifecycle records in
-`~/.claude/model-gateway/logs/lifecycle.jsonl` identify supervisor, worker, and proxy PIDs, orderly
+costs a live request. It leaves a healthy proxy alone. Recovery output remains in `$CLAUDE_CONFIG_DIR/model-gateway/logs/guardian.log`; bounded lifecycle records in
+`$CLAUDE_CONFIG_DIR/model-gateway/logs/lifecycle.jsonl` identify supervisor, worker, and proxy PIDs, orderly
 stop/restart requests, observed exits, and recovery outcomes. Use `doctor` to print the evidence path and
 the last observed exit. An OS termination or force-killed supervisor may leave no final record, so treat an
 absent exit record as absence of evidence, not a clean shutdown. Cleanup kills recorded PIDs only when the
@@ -107,7 +107,7 @@ bring auth back, or you kill the session that was about to use it.
   the last good pin, then a shipped safe default. Set a persistent per-alias override with
   `pin --opus claude-opus-4-8[1m]` (same for `--sonnet` and `--fable`), or use `pin --opus default`
   to return to auto-detection. Overrides always win. `pin` with no arguments shows each effective
-  pin and whether it is overridden. Overrides live in `~/.claude/model-gateway/pins.json`, outside
+  pin and whether it is overridden. Overrides live in `$CLAUDE_CONFIG_DIR/model-gateway/pins.json`, outside
   the plugin cache. After a pin change or Claude CLI upgrade, run `env --write-project` (or
   `env --write-user` for a shared fallback) and start a new Claude Code session; changing a saved value alone cannot alter
   an open session.
@@ -130,7 +130,7 @@ bring auth back, or you kill the session that was about to use it.
 ## Local gateway records
 
 Request-route logging is enabled by default. It writes metadata-only JSONL records to
-`~/.claude/model-gateway/logs/request-routes.jsonl`: timestamp, backend, model, request path, route and
+`$CLAUDE_CONFIG_DIR/model-gateway/logs/request-routes.jsonl`: timestamp, backend, model, request path, route and
 effort when present, safe session and agent correlation ids, and dispatch-marker length when present. It
 never writes request bodies, prompts, messages, tools, authentication, or arbitrary headers. Honor a user
 request to disable it by setting `CODEX_GATEWAY_REQUEST_LOG=0` before the shim starts, then restart the shim
@@ -138,7 +138,7 @@ through `setup` or `ensure`. The value is read when the shim process starts, so 
 change an already-running shim. `CODEX_GATEWAY_REQUEST_LOG_PATH` changes the file location.
 
 Usage observability also writes one high-water JSON file per valid session under
-`~/.claude/model-gateway/request-body/`. The filename is derived from the session id. Its contents are the
+`$CLAUDE_CONFIG_DIR/model-gateway/request-body/`. The filename is derived from the session id. Its contents are the
 largest forwarded request-body byte count observed for that session and an observation timestamp. It does
 not contain the request body. No retention period is promised for either local record.
 
@@ -190,7 +190,7 @@ does not support. A `FAIL` naming missing and extra ids means the shim is stale 
 matches: restart it through the normal `ensure` or `setup` path, then restart Claude Code sessions so the
 picker re-discovers the rows.
 
-Logs live in `~/.claude/model-gateway/logs/`. `guardian.log` has recovery output; `lifecycle.jsonl`
+Logs live in `$CLAUDE_CONFIG_DIR/model-gateway/logs/`. `guardian.log` has recovery output; `lifecycle.jsonl`
 has bounded process evidence that `doctor` summarizes. Ports: shim 18764, proxy 18765 (override with
 `CODEX_GATEWAY_PORT` / `CODEX_GATEWAY_PROXY_PORT`, but the env block and running processes must
 agree).

@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -7,8 +8,15 @@ const grokBackend = require('./grok-backend.js');
 const { writeFileAtomically } = require('./atomic-file.js');
 
 const WIN = process.platform === 'win32';
-const CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-const STATE = path.join(os.homedir(), '.claude', 'model-gateway');
+// Every gateway path hangs off the active config dir, never a hardcoded
+// ~/.claude. Account trees (a work tree and a personal tree) each run their own
+// gateway, so sharing one STATE dir would mean sharing one pid file, one unix
+// socket, one proxy binary, and one supervisor's view of the proxy port. This
+// precedence matches hooks/registry-writer.js and the installed update.js.
+const CLAUDE_CONFIG_DIR = process.env.MODEL_GATEWAY_CLAUDE_HOME
+  || process.env.CLAUDE_CONFIG_DIR
+  || path.join(os.homedir(), '.claude');
+const STATE = path.join(CLAUDE_CONFIG_DIR, 'model-gateway');
 const LOGS = path.join(STATE, 'logs');
 const BIN_DIR = path.join(STATE, 'bin');
 const WIRING_CONFIG_PATH = path.join(STATE, 'wiring.json');
@@ -44,8 +52,22 @@ const AUTH_HEADERS = ['authorization', 'proxy-authorization', 'x-api-key', 'cook
 const COMPAT_HOST = 'api.anthropic.com';
 const COMPAT_PORT = Number(process.env.CODEX_GATEWAY_COMPAT_PORT || 80);
 const DEFAULT_BASE_URL = `http://127.0.0.1:${PUBLIC_SHIM_PORT}`;
+// A Windows named pipe is a flat global name, so it cannot hang off STATE the
+// way the unix socket does. Without a per-config-dir suffix every account tree
+// would still meet on one pipe and share one gateway, which is the collision
+// this module otherwise exists to prevent. The suffix is a digest of the
+// resolved config dir, case-folded because Windows paths are case-insensitive
+// and two spellings of one directory must not become two gateways.
+function socketScopeSuffix() {
+  const resolved = path.resolve(CLAUDE_CONFIG_DIR);
+  return crypto.createHash('sha256')
+    .update(WIN ? resolved.toLowerCase() : resolved)
+    .digest('hex')
+    .slice(0, 12);
+}
+
 const SOCKET_PATH = process.env.CODEX_GATEWAY_SOCKET_PATH || (WIN
-  ? '\\\\.\\pipe\\model-gateway'
+  ? `\\\\.\\pipe\\model-gateway-${socketScopeSuffix()}`
   : path.join(STATE, 'gateway.sock'));
 const COMPAT_BASE_URL = `http://${COMPAT_HOST}`;
 const HOSTS_BLOCK_START = '# >>> model-gateway RC compatibility >>>';
@@ -167,6 +189,14 @@ function gatewayAdvertisedWindow(id) {
 function gatewayClientModelId(id) {
   const policy = resolveGatewayModelPolicy(id);
   if (!policy) return id;
+  // Native Anthropic ids pass through untouched. Upstream owns their window
+  // (advertisedWindow is null), and Claude Code sizes context off the [1m]
+  // suffix on the id itself -- so rewriting one here stripped the suffix from
+  // every pinned native model and compacted sessions at 167k instead of 967k.
+  // Routing them through pickerAlias is not the fix either: the fallback
+  // template appends [1m] unconditionally, which would claim a 1M window for
+  // 200k models such as claude-haiku-4-5.
+  if (policy.backend === 'anthropic') return id;
   return gatewayAdvertisedWindow(id) > CODEX_UNKNOWN_MODEL_WINDOW
     ? policy.pickerAlias
     : `${PREFIX}${policy.backendId}`;
@@ -307,7 +337,7 @@ module.exports = {
   LEGACY_ENV_BLOCK, LIST_DISPATCH_MODEL, LOGS, MIN_PROXY_VERSION, PIN_ALIASES, PIN_CACHE_PATH,
   PIN_CACHE_TTL_MS, PIN_OVERRIDE_PATH, PIN_PROBE_TIMEOUT_MS, PLUGIN_VERSION, PREFIX, PROXY_BIN,
   PROXY_PORT, PUBLIC_SHIM_PORT, REPO, REQUEST_ROUTE_LOG, REQUEST_ROUTE_LOG_PATH, LIFECYCLE_LOG_PATH,
-  PROJECT_WIRING_REGISTRY_PATH, ROUTE_TELEMETRY_ENABLED, ROUTE_TELEMETRY_TIMEOUT_MS, SHIM_FAILURE_PATH, SHIM_PORT, SOCKET_PATH, STATE,
+  PROJECT_WIRING_REGISTRY_PATH, ROUTE_TELEMETRY_ENABLED, ROUTE_TELEMETRY_TIMEOUT_MS, SHIM_FAILURE_PATH, SHIM_PORT, SOCKET_PATH, socketScopeSuffix, STATE,
   STATIC_ENV_BLOCK, TRACE_HEADERS, WIRING_CONFIG_PATH, WIN, CLI_PATH, CLAUDE_CONFIG_DIR, mkdirs,
   canReplaceInstalledCliPath, codexClientModelId, codexContextWindow, codexContextWindowModelId,
   gatewayAdvertisedWindow, gatewayBackendModelId, gatewayClientModelId, gatewayDiscoveryModels,

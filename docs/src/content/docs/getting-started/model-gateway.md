@@ -45,7 +45,7 @@ There are no routine Model Gateway commands to remember. The shim supervisor che
 
 SessionStart launches a missing supervisor outside the hook's process tree, then waits no more than 12 seconds inside its 30-second hook budget. A slow proxy keeps starting in the background. Claude asks you to retry the Codex model in a few seconds instead of holding the session-start hook open.
 
-When the gateway disappears or restarts, ask Claude to run `doctor`. It names `~/.claude/model-gateway/logs/lifecycle.jsonl` and says whether it found an observed supervisor, worker, or proxy exit. The bounded records include PIDs, orderly setup/stop/restart requests, signals, and recovery outcomes. A force-killed supervisor or OS termination can leave no final record, so a missing exit entry does not prove an orderly shutdown.
+When the gateway disappears or restarts, ask Claude to run `doctor`. It names `$CLAUDE_CONFIG_DIR/model-gateway/logs/lifecycle.jsonl` (the active config dir, default `~/.claude`) and says whether it found an observed supervisor, worker, or proxy exit. The bounded records include PIDs, orderly setup/stop/restart requests, signals, and recovery outcomes. A force-killed supervisor or OS termination can leave no final record, so a missing exit entry does not prove an orderly shutdown.
 
 Running Model Gateway's own suite uses a separate test home and never touches the installed gateway. Codex sessions dropping while tests ran was a supervisor cleanup bug, fixed in this version. Cleanup uses this home's recorded PIDs and targeted ownership checks only: the live command must still identify this install, and the recorded command or start time must match. A stale record is deleted without stopping its reused PID; `doctor` reports `stale pid file guardian: PID <pid> is now <command>`.
 
@@ -63,9 +63,9 @@ Authentication recovery has a different boundary. Complete `login` and let Claud
 
 ## Local gateway records
 
-The shim writes request-route metadata to `~/.claude/model-gateway/logs/request-routes.jsonl` by default. Records contain the time, backend, model, request path, route and effort when present, and safe session or agent correlation fields. They do not contain request bodies, prompts, messages, tools, authentication, or arbitrary headers. Set `CODEX_GATEWAY_REQUEST_LOG=0` before the shim starts, then restart the shim through `setup` or `ensure`, to disable this route log. The setting is read by the shim process at startup. `CODEX_GATEWAY_REQUEST_LOG_PATH` changes the file location.
+The shim writes request-route metadata to `$CLAUDE_CONFIG_DIR/model-gateway/logs/request-routes.jsonl` by default. Records contain the time, backend, model, request path, route and effort when present, and safe session or agent correlation fields. They do not contain request bodies, prompts, messages, tools, authentication, or arbitrary headers. Set `CODEX_GATEWAY_REQUEST_LOG=0` before the shim starts, then restart the shim through `setup` or `ensure`, to disable this route log. The setting is read by the shim process at startup. `CODEX_GATEWAY_REQUEST_LOG_PATH` changes the file location.
 
-Usage observability also keeps one high-water JSON file per valid session under `~/.claude/model-gateway/request-body/`. It records only the largest forwarded request-body byte count seen for that session and an observation timestamp. It does not contain the request body. No retention period is promised for either local record.
+Usage observability also keeps one high-water JSON file per valid session under `$CLAUDE_CONFIG_DIR/model-gateway/request-body/`. It records only the largest forwarded request-body byte count seen for that session and an observation timestamp. It does not contain the request body. No retention period is promised for either local record.
 
 Remote Control gives each project two choices.
 
