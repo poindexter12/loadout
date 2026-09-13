@@ -20,13 +20,19 @@ const { detectHostsCompat } = require('./remote-control.js');
 const { codexBaseFromId, ourBaseUrls } = require('./pins.js');
 const {
   ANTHROPIC_UPSTREAM, ANTIGRAVITY_ENDPOINT, AUTH_HEADERS, CODEX_FAMILY_RE, CODEX_UPSTREAM_BLOCK_PATH, COMPAT_HOST,
-  COMPAT_PORT, DISPATCH_MODEL_ID, DISPATCH_ROUTE_CACHE_PATH, GEMINI_PREFIX, GROK_ENDPOINT, GROK_PREFIX, LIST_DISPATCH_MODEL,
+  COMPAT_PORT, DISPATCH_ROUTE_CACHE_PATH, GEMINI_PREFIX, GROK_ENDPOINT, GROK_PREFIX, LIST_DISPATCH_MODEL,
   LOGS, PLUGIN_VERSION, PREFIX, PROXY_BIN, PROXY_PORT, REQUEST_ROUTE_LOG,
   REQUEST_ROUTE_LOG_PATH, ROUTE_TELEMETRY_ENABLED, ROUTE_TELEMETRY_TIMEOUT_MS, SHIM_PORT, SOCKET_PATH,
-  MODEL_WINDOW_POLICY, STATE, syncGatewayDiscoveryCache, TRACE_HEADERS, codexClientModelId,
-  codexContextWindow, codexContextWindowModelId, gatewayAdvertisedWindow, gatewayClientModelId, mkdirs,
+  MODEL_WINDOW_POLICY, STATE, syncGatewayDiscoveryCache, TRACE_HEADERS,
+  codexContextWindow, codexContextWindowModelId, mkdirs,
   resolveGatewayModelPolicy, resolveNewestInstalledCliPath,
 } = require('./runtime.js');
+// Catalog row/readiness shape is shared with commands.js — see catalog.js for
+// why these live there and why the write/read shells below do not.
+const {
+  CATALOG_PATH, CATALOG_SCHEMA_VERSION, CATALOG_STALE_MS, buildCatalog, catalogReadiness, gatewayModel,
+  modelCatalogDetails, readJsonFile,
+} = require('./catalog.js');
 
 function isAuthed() {
   const r = spawnSync(PROXY_BIN, ['codex', 'auth', 'status'], { encoding: 'utf8', timeout: 15000, windowsHide: true });
@@ -122,24 +128,6 @@ async function getCodexReadiness({
   };
 }
 
-function catalogReadiness(readiness) {
-  return {
-    ready: readiness.ready,
-    state: readiness.state,
-    message: readiness.message,
-    checks: readiness.checks,
-    upstreamBlocked: readiness.upstreamBlocked,
-  };
-}
-
-function providerReadiness(readiness) {
-  return {
-    ready: Boolean(readiness?.ready),
-    state: typeof readiness?.state === 'string' ? readiness.state : 'unavailable',
-    message: typeof readiness?.message === 'string' ? readiness.message : 'Readiness is unavailable.',
-  };
-}
-
 function hasOpenAiRejectionEvidence(statusCode, headers, body) {
   if (![401, 403, 429].includes(statusCode)) return false;
   const headerNames = Object.keys(headers || {});
@@ -178,12 +166,6 @@ function servingVersionIsCurrentOrNewer(servingVersion, installedVersion) {
     if (serving[index] !== installed[index]) return Number(serving[index]) > Number(installed[index]);
   }
   return true;
-}
-
-function displayName(id, backend = 'codex') {
-  if (backend === 'grok') return id.replace(/^grok-/, 'Grok ').replace(/-/g, ' ');
-  if (backend === 'antigravity') return id.replace(/^gemini-/, 'Gemini ').replace(/\[1m\]$/, '') + ' (Antigravity)';
-  return id.replace(/^gpt-/, 'GPT-').replace(/\[1m\]$/, '') + ' (Codex)';
 }
 
 // claude-code-proxy v0.1.10 has no /v1/models route, so the shim owns the
@@ -312,17 +294,6 @@ function noteCompactEvent(attempt, event) {
   if (event.type !== 'error') return;
   attempt.sawError = true;
   if (COMPACT_FATAL_ERROR_TYPES.has(event.error?.type)) attempt.fatal = true;
-}
-
-function gatewayModel(id, backend = 'codex') {
-  const policy = id === 'auto' ? null : resolveGatewayModelPolicy(id);
-  if (id !== 'auto' && policy?.backend !== backend) return null;
-  return {
-    id: id === 'auto' ? DISPATCH_MODEL_ID : gatewayClientModelId(id),
-    display_name: id === 'auto' ? 'Sidequest Dispatch (Codex)' : displayName(id, backend),
-    type: 'model',
-    max_input_tokens: gatewayAdvertisedWindow(id) || codexContextWindow(id),
-  };
 }
 
 const ROUTE_MARKER_RE = /\[(sidequest-route) model=([a-z0-9][a-z0-9.-]{0,63})(?: effort=(low|medium|high|xhigh|max))?\]/g;
@@ -496,139 +467,6 @@ function dispatchRouteFromMessages(messages) {
 // sidequest (same marketplace) auto-discovers Codex models by reading this
 // file: $CLAUDE_CONFIG_DIR/model-gateway/catalog.json. Shape is a frozen contract
 // (see plugins/sidequest/lib/discovery.js) — don't change it casually.
-
-const CATALOG_PATH = path.join(STATE, 'catalog.json');
-const CATALOG_STALE_MS = 5 * 60 * 1000;
-const CATALOG_SCHEMA_VERSION = 4;
-
-// Slugs keep the `codex-` backend name and so survive the id rename byte for
-// byte: the board's route table pins slugs, and re-slugging would break every
-// persisted route at once.
-//
-// Provider + base, dots→dashes, kept inside ^[a-z0-9][a-z0-9-]{1,31}$; on
-// collision (or an over-length base) fall back to a short deterministic hash
-// so the slug stays unique without depending on iteration order.
-function slugFor(provider, base, used) {
-  const providerPrefix = `${provider}-`;
-  const providerBase = base.startsWith(providerPrefix) ? base.slice(providerPrefix.length) : base;
-  let s = (providerPrefix + providerBase).toLowerCase()
-    .replace(/\[1m\]$/, '')
-    .replace(/\./g, '-')
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  if (!/^[a-z0-9]/.test(s)) s = 'x' + s;
-  if (s.length > 32) {
-    const hash = crypto.createHash('sha1').update(s).digest('hex').slice(0, 6);
-    s = s.slice(0, 32 - 1 - hash.length) + '-' + hash;
-  }
-  let unique = s;
-  let n = 2;
-  while (used.has(unique)) {
-    const suffix = '-' + n;
-    unique = s.slice(0, Math.max(1, 32 - suffix.length)) + suffix;
-    n++;
-  }
-  used.add(unique);
-  return unique;
-}
-
-// "gpt-5.6-sol" -> "GPT-5.6 Sol", "gpt-5.3-codex-spark" -> "GPT-5.3 Codex Spark"
-function labelFor(base) {
-  const rest = base.replace(/^gpt-/, '');
-  const m = rest.match(/^(\d+(?:\.\d+)?)(?:-(.+))?$/);
-  if (!m) return 'GPT-' + rest.replace(/-/g, ' ');
-  const [, ver, suffix] = m;
-  const suffixLabel = suffix
-    ? ' ' + suffix.split('-').map((w) => w[0].toUpperCase() + w.slice(1)).join(' ')
-    : '';
-  return `GPT-${ver}${suffixLabel}`;
-}
-
-function modelCatalogDetails(id) {
-  const codexBase = codexBaseFromId(id);
-  if (codexBase && codexBase !== 'auto') {
-    return { provider: 'codex', base: codexBase, label: labelFor(codexBase) };
-  }
-  if (typeof id === 'string' && id.startsWith(GROK_PREFIX)) {
-    const base = id.slice(PREFIX.length).replace(/\[1m\]$/, '');
-    return { provider: 'grok', base, label: displayName(base, 'grok') };
-  }
-  if (typeof id === 'string' && id.startsWith(GEMINI_PREFIX)) {
-    const base = id.slice(PREFIX.length).replace(/\[1m\]$/, '');
-    return { provider: 'antigravity', base, label: displayName(base, 'antigravity') };
-  }
-  return null;
-}
-
-function unavailableProviderReadiness(provider) {
-  return {
-    ready: false,
-    state: 'unavailable',
-    message: `${provider} readiness is unavailable.`,
-  };
-}
-
-function getGrokReadiness({ readAuth = grokBackend.readGrokAuth } = {}) {
-  try {
-    readAuth();
-    return {
-      ready: true,
-      state: 'ready',
-      message: 'Grok CLI auth is present.',
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Grok CLI auth is unavailable. Run `grok` and log in again.';
-    return {
-      ready: false,
-      state: /invalid/i.test(message) ? 'auth-invalid' : 'auth-missing',
-      message,
-    };
-  }
-}
-
-function providerCatalogReadiness(provider, readiness) {
-  const source = readiness?.[provider] ?? (provider === 'codex' ? readiness : null);
-  if (source) return providerReadiness(source);
-  if (provider === 'grok') return getGrokReadiness();
-  if (provider === 'antigravity') {
-    return {
-      ready: true,
-      state: 'ready',
-      message: 'Antigravity proxy readiness is checked per-request; run it with an added Google account.',
-    };
-  }
-  return unavailableProviderReadiness(provider);
-}
-
-function buildCatalog(ids, readiness = null) {
-  const used = new Set();
-  const models = ids
-    .map((id) => ({ id, details: modelCatalogDetails(id) }))
-    .filter(({ details }) => details)
-    .map(({ id, details }) => ({
-      slug: slugFor(details.provider, details.base, used),
-      id: details.provider === 'codex' ? codexClientModelId(id) : id,
-      label: details.label,
-      provider: details.provider,
-    }));
-  const providers = Object.fromEntries(
-    [...new Set(models.map((model) => model.provider))].map((provider) => [provider, providerCatalogReadiness(provider, readiness)]),
-  );
-  return {
-    schemaVersion: CATALOG_SCHEMA_VERSION,
-    source: 'model-gateway',
-    updatedAt: new Date().toISOString(),
-    writtenBy: PLUGIN_VERSION,
-    providers,
-    codexReadiness: providers.codex ?? null,
-    models,
-  };
-}
-
-function readJsonFile(file) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
-}
 
 function catalogSchemaVersion(catalog) {
   if (!catalog || typeof catalog !== 'object') return null;
