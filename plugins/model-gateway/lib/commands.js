@@ -1177,7 +1177,6 @@ const PLAN_TOOLS = ['EnterPlanMode', 'ExitPlanMode'];
 const DEFAULT_MODELS = [
   'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra',
 ];
-const DEFAULT_GROK_MODELS = grokBackend.GROK_MODELS;
 
 // Claude Code 2.1.261 ignores settings-file CLAUDE_CODE_MAX_CONTEXT_TOKENS for
 // its unrecognized-model resolver. Codex rows therefore use Claude Code's [1m]
