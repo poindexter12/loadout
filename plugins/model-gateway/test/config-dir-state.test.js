@@ -53,3 +53,25 @@ test('separate config dirs never share gateway state', () => {
   assert.notEqual(a.state, b.state);
   assert.notEqual(a.socket, b.socket);
 });
+
+// The Windows leg of this isolation is invisible to a POSIX-only assertion on
+// SOCKET_PATH, so the pipe-name mechanism is tested directly: a named pipe is a
+// flat global name, and a shared one puts two account trees on one gateway.
+test('the socket scope suffix separates config dirs and folds Windows case', () => {
+  const suffix = (dir) => {
+    const script = `const r = require(${JSON.stringify(RUNTIME)});`
+      + 'process.stdout.write(r.socketScopeSuffix());';
+    const environment = { ...process.env };
+    delete environment.MODEL_GATEWAY_CLAUDE_HOME;
+    environment.CLAUDE_CONFIG_DIR = dir;
+    return execFileSync(process.execPath, ['-e', script], { encoding: 'utf8', env: environment });
+  };
+
+  const work = suffix(path.join(os.tmpdir(), 'mg-work', '.claude'));
+  const personal = suffix(path.join(os.tmpdir(), 'mg-personal', '.claude'));
+  assert.notEqual(work, personal, 'two config dirs must not land on one pipe');
+  assert.match(work, /^[0-9a-f]{12}$/);
+  assert.equal(work, suffix(path.join(os.tmpdir(), 'mg-work', '.claude')), 'suffix must be stable');
+  // A trailing separator or a redundant segment is the same directory.
+  assert.equal(work, suffix(path.join(os.tmpdir(), 'mg-work', 'x', '..', '.claude')));
+});
