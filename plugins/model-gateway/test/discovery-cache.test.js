@@ -198,6 +198,15 @@ test('refreshModels writes the configured gateway discovery cache', async (testC
   const baseUrl = `http://127.0.0.1:${shimPort}`;
   const environment = discoveryEnvironment(testContext, baseUrl, shimPort, workerPort, proxyPort);
   const cache = path.join(environment.CLAUDE_CONFIG_DIR, 'cache', 'gateway-models.json');
+  // SQ-19 withholds the Grok rows unless Grok CLI auth is present, and the
+  // fixture home has none. Seeding it keeps this test's subject (what
+  // refreshModels writes into the cache) covering every backend instead of
+  // silently narrowing to Codex. readGrokAuth wants a `https://auth.x.ai::`
+  // entry with a non-empty `key`; less than that reads as auth-invalid.
+  fs.mkdirSync(environment.CODEX_GATEWAY_GROK_HOME, { recursive: true });
+  fs.writeFileSync(path.join(environment.CODEX_GATEWAY_GROK_HOME, 'auth.json'), JSON.stringify({
+    'https://auth.x.ai::openid': { key: 'test-grok-key', expires_at: Date.now() + 3600000 },
+  }));
 
   const shim = await startGateway(testContext, 'serve-shim', environment, {
     isolatedOverrides: discoveryProcessOverrides(shimPort, workerPort, proxyPort),

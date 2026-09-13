@@ -7,7 +7,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { startCountingProxy, startGateway, spawnGatewayProcess, spawnGatewayProcessSync } = require('./support.js');
+const { gatewayTestEnvironment, startCountingProxy, startGateway, spawnGatewayProcess, spawnGatewayProcessSync } = require('./support.js');
 
 const CLI = path.join(__dirname, '..', 'bin', 'model-gateway.js');
 const COMMANDS = path.join(__dirname, '..', 'lib', 'commands.js');
@@ -159,13 +159,23 @@ test('Codex discovery advertises client 1M aliases and forwards backend base ids
   const shimPort = await listen(shimProbe);
   await new Promise((resolve) => shimProbe.close(resolve));
 
+  // SQ-19 withholds the Grok rows unless Grok CLI auth is present, and the
+  // fixture home has none. This test is about the `[1m]` alias contract holding
+  // across BACKENDS, so seed auth rather than drop the Grok half of it.
+  // readGrokAuth wants a `https://auth.x.ai::` entry with a non-empty `key`.
+  const environment = gatewayTestEnvironment(t, {
+    ...process.env,
+    CODEX_GATEWAY_PORT: String(shimPort),
+    CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
+    CODEX_GATEWAY_REQUEST_LOG: '0',
+  });
+  fs.mkdirSync(environment.CODEX_GATEWAY_GROK_HOME, { recursive: true });
+  fs.writeFileSync(path.join(environment.CODEX_GATEWAY_GROK_HOME, 'auth.json'), JSON.stringify({
+    'https://auth.x.ai::openid': { key: 'test-grok-key', expires_at: Date.now() + 3600000 },
+  }));
+
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
-    env: {
-      ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
-      CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
-      CODEX_GATEWAY_REQUEST_LOG: '0',
-    },
+    env: environment,
     stdio: 'ignore',
   });
   t.after(() => child.kill());

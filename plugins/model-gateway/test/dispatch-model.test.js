@@ -8,7 +8,20 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { spawnGatewayProcess, spawnGatewayProcessSync } = require('./support.js');
+const { gatewayTestEnvironment, spawnGatewayProcess, spawnGatewayProcessSync } = require('./support.js');
+
+// getGrokReadiness() calls readGrokAuth(), which wants a `https://auth.x.ai::`
+// entry carrying a non-empty `key`; anything less reads as auth-invalid. The
+// fixture home already points CODEX_GATEWAY_GROK_HOME at a temp dir that does
+// NOT exist, so "auth absent" is simply not calling this.
+function seedGrokAuth(environment) {
+  const directory = environment.CODEX_GATEWAY_GROK_HOME;
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'auth.json'), JSON.stringify({
+    'https://auth.x.ai::openid': { key: 'test-grok-key', expires_at: Date.now() + 3600000 },
+  }));
+  return environment;
+}
 
 const CLI = path.join(__dirname, '..', 'bin', 'model-gateway.js');
 const gw = require(CLI);
@@ -654,15 +667,20 @@ test('the shim keeps Claude ids on the Anthropic path and claims both id forms f
   });
   t.after(() => anthropic.close());
 
+  // SQ-19 gates the Grok rows on CLI auth, and the fixture home has none, so
+  // the Grok assertion below only holds once auth is seeded. Seeding keeps this
+  // test's subject (which ids the shim claims) unchanged rather than quietly
+  // narrowing it to Codex.
+  const environment = seedGrokAuth(gatewayTestEnvironment(t, {
+    ...process.env,
+    CODEX_GATEWAY_PORT: String(shimPort),
+    CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
+    CODEX_GATEWAY_ANTHROPIC_UPSTREAM: `http://127.0.0.1:${anthropicPort}`,
+    CODEX_GATEWAY_REQUEST_LOG: '0',
+    CODEX_GATEWAY_SENTRY: '0',
+  }));
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
-    env: {
-      ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
-      CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
-      CODEX_GATEWAY_ANTHROPIC_UPSTREAM: `http://127.0.0.1:${anthropicPort}`,
-      CODEX_GATEWAY_REQUEST_LOG: '0',
-      CODEX_GATEWAY_SENTRY: '0',
-    },
+    env: environment,
     stdio: 'ignore',
   });
   t.after(() => child.kill());
@@ -682,38 +700,100 @@ test('the shim keeps Claude ids on the Anthropic path and claims both id forms f
   assert.deepEqual(toAnthropic, ['claude-opus-5[1m]', 'claude-sonnet-4-5', 'claude-haiku-4-5']);
 });
 
-test('the boot catalog advertises Grok before the first model refresh lands', async (t) => {
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
-  // A proxy that accepts and never answers keeps refreshModels() in flight for
-  // its full timeout, so /v1/models here can only be served from the boot
-  // catalog. Seeding that catalog with the Grok defaults is the fix under test.
-  const sockets = new Set();
-  const proxy = http.createServer(() => { /* never responds */ });
-  proxy.on('connection', (socket) => {
-    sockets.add(socket);
-    socket.on('close', () => sockets.delete(socket));
-  });
-  await new Promise((resolve) => proxy.listen(proxyPort, '127.0.0.1', resolve));
-  t.after(() => {
-    for (const socket of sockets) socket.destroy();
-    proxy.close();
-  });
+// SQ-17 made the boot catalog carry the Grok defaults so the picker did not
+// lose claude-grok-*[1m] for the first seconds after a restart. SQ-19 then
+// gated those rows on Grok CLI auth, because without it every request for them
+// dies at readGrokAuth and the picker shows a permanently dead row. The SQ-17
+// assertion therefore became conditional rather than absolute: Grok is still
+// advertised from the boot catalog, but only when auth is present.
+//
+// The matrix below is the real invariant. The boot window and the post-refresh
+// steady state must reach the SAME verdict under the same readiness: if they
+// disagreed, the SQ-17 race would return inverted — Grok visible for a few
+// seconds after a restart and then vanishing (or the reverse).
+for (const { name, seedAuth, advertised } of [
+  { name: 'advertises Grok when the Grok CLI is signed in', seedAuth: true, advertised: true },
+  { name: 'withholds Grok when the Grok CLI has no auth', seedAuth: false, advertised: false },
+]) {
+  test(`the boot catalog ${name} before the first model refresh lands`, async (t) => {
+    const shimPort = await freePort();
+    const proxyPort = await freePort();
+    // A proxy that accepts and never answers keeps refreshModels() in flight for
+    // its full timeout, so /v1/models here can only be served from the boot
+    // catalog — this is the only window in which that catalog is observable.
+    const sockets = new Set();
+    const proxy = http.createServer(() => { /* never responds */ });
+    proxy.on('connection', (socket) => {
+      sockets.add(socket);
+      socket.on('close', () => sockets.delete(socket));
+    });
+    await new Promise((resolve) => proxy.listen(proxyPort, '127.0.0.1', resolve));
+    t.after(() => {
+      for (const socket of sockets) socket.destroy();
+      proxy.close();
+    });
 
-  const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
-    env: {
+    const environment = gatewayTestEnvironment(t, {
       ...process.env,
       CODEX_GATEWAY_PORT: String(shimPort),
       CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
       CODEX_GATEWAY_REQUEST_LOG: '0',
       CODEX_GATEWAY_SENTRY: '0',
-    },
-    stdio: 'ignore',
-  });
-  t.after(() => child.kill());
-  await waitForHealthz(shimPort);
+    });
+    if (seedAuth) seedGrokAuth(environment);
 
-  const models = JSON.parse((await request(shimPort, '/v1/models')).body).data.map(({ id }) => id);
-  assert.ok(models.includes('claude-grok-4.5[1m]'), `advertised: ${models.join(', ')}`);
-  assert.ok(models.every((id) => id.startsWith('claude-')), 'boot catalog advertises a non-claude id');
-});
+    const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
+      env: environment,
+      stdio: 'ignore',
+    });
+    t.after(() => child.kill());
+    await waitForHealthz(shimPort);
+
+    const models = JSON.parse((await request(shimPort, '/v1/models')).body).data.map(({ id }) => id);
+    assert.equal(models.includes('claude-grok-4.5[1m]'), advertised, `advertised: ${models.join(', ')}`);
+    // The Codex defaults are unconditional, so their presence proves this really
+    // is the boot catalog and not an empty or half-built list.
+    assert.ok(models.includes('claude-gpt-5.6-terra[1m]'), `advertised: ${models.join(', ')}`);
+    assert.ok(models.every((id) => id.startsWith('claude-')), 'boot catalog advertises a non-claude id');
+  });
+
+  test(`the refreshed catalog ${name}`, async (t) => {
+    const shimPort = await freePort();
+    const proxyPort = await freePort();
+    // This proxy answers /v1/models with an id absent from DEFAULT_MODELS, which
+    // is how the assertions below can tell a landed refresh from the boot
+    // catalog without racing a timer.
+    const proxy = http.createServer((req, res) => {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ data: [{ id: 'gpt-5.9-probe' }] }));
+    });
+    await new Promise((resolve) => proxy.listen(proxyPort, '127.0.0.1', resolve));
+    t.after(() => proxy.close());
+
+    const environment = gatewayTestEnvironment(t, {
+      ...process.env,
+      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
+      CODEX_GATEWAY_REQUEST_LOG: '0',
+      CODEX_GATEWAY_SENTRY: '0',
+    });
+    if (seedAuth) seedGrokAuth(environment);
+
+    const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
+      env: environment,
+      stdio: 'ignore',
+    });
+    t.after(() => child.kill());
+    await waitForHealthz(shimPort);
+
+    let models = [];
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      models = JSON.parse((await request(shimPort, '/v1/models')).body).data.map(({ id }) => id);
+      if (models.includes('claude-gpt-5.9-probe[1m]')) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(models.includes('claude-gpt-5.9-probe[1m]'), `refresh never landed; advertised: ${models.join(', ')}`);
+    assert.equal(models.includes('claude-grok-4.5[1m]'), advertised, `advertised: ${models.join(', ')}`);
+  });
+}

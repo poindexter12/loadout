@@ -31,8 +31,20 @@ const {
 // why these live there and why the write/read shells below do not.
 const {
   CATALOG_PATH, CATALOG_SCHEMA_VERSION, CATALOG_STALE_MS, buildCatalog, catalogReadiness, gatewayModel,
-  modelCatalogDetails, readJsonFile,
+  getGrokReadiness, modelCatalogDetails, readJsonFile,
 } = require('./catalog.js');
+
+// Both the boot catalog and refreshModels() gate their Grok rows on this, and
+// they must call the SAME function: if the two ever disagreed the SQ-17 race
+// would come back inverted — the picker would show Grok for the first seconds
+// after a restart and then watch it vanish. Re-reading auth per call (rather
+// than caching one boot-time answer) is deliberate: a user who runs `grok` and
+// logs in mid-session gets the row on the next refresh instead of after a
+// restart. Without auth every claude-grok-* request dies at readGrokAuth, so
+// advertising the row unconditionally published a guaranteed-dead picker entry.
+function grokIsAdvertisable() {
+  return getGrokReadiness().ready;
+}
 
 function isAuthed() {
   const r = spawnSync(PROXY_BIN, ['codex', 'auth', 'status'], { encoding: 'utf8', timeout: 15000, windowsHide: true });
@@ -780,9 +792,11 @@ function runWorker() {
     // boot or restart. It carries every statically-known row for that reason:
     // omitting the Grok defaults hid claude-grok-*[1m] from that window.
     // Antigravity stays out — its roster is live-only (see refreshModels).
+    // The Grok rows are gated on grokIsAdvertisable() here and in
+    // refreshModels() alike, so this window and the steady state agree.
     data: [
       ...[...DEFAULT_MODELS, ...(LIST_DISPATCH_MODEL ? ['auto'] : [])].map((id) => gatewayModel(id)),
-      ...DEFAULT_GROK_MODELS.map((model) => gatewayModel(model.id, 'grok')),
+      ...(grokIsAdvertisable() ? DEFAULT_GROK_MODELS.map((model) => gatewayModel(model.id, 'grok')) : []),
     ].filter(Boolean),
   };
   const counters = { models: 0, codex: 0, grok: 0, gemini: 0, anthropic: 0 };
@@ -989,8 +1003,13 @@ function runWorker() {
     // api.anthropic.com, so a local models.json is held to the same family rule.
     if (Array.isArray(ids)) ids = ids.filter((id) => typeof id === 'string' && (id === 'auto' || CODEX_FAMILY_RE.test(id)));
     if (!Array.isArray(ids) || !ids.length) ids = DEFAULT_MODELS;
+    // No Grok CLI auth means every claude-grok-* request would fail at
+    // readGrokAuth, so the whole roster is withheld — the live cache included,
+    // since a stale models_cache.json outlives the login that filled it.
     const grokModels = grokBackend.grokModelsFromCache();
-    const advertisedGrokModels = grokModels.length ? grokModels : DEFAULT_GROK_MODELS;
+    const advertisedGrokModels = grokIsAdvertisable()
+      ? (grokModels.length ? grokModels : DEFAULT_GROK_MODELS)
+      : [];
     // Antigravity rows come from its live catalog only: advertising a gemini id
     // while its proxy is down would 502 every request for it, and there is no
     // useful static default because its roster tracks the Antigravity app.
