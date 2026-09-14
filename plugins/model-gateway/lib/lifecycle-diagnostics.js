@@ -17,7 +17,7 @@ function lifecycleRecord(event, fields = {}) {
     component: fields.component,
     pid: fields.pid,
   };
-  for (const key of ['startedAt', 'outcome', 'errorType']) {
+  for (const key of ['startedAt', 'outcome', 'errorType', 'reason']) {
     if (fields[key] != null) record[key] = fields[key];
   }
   if (fields.signal !== undefined) record.signal = fields.signal;

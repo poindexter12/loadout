@@ -514,6 +514,68 @@ test('sibling ensure retires dead records without deleting replacement worker an
   await waitForProcessesToExit([replacementGuardianPid, replacementWorkerPid, replacementProxyPid], 5000);
 });
 
+// SQ-23: on 2026-09-14 two concurrent `ensure` OS processes both observed the same
+// dying supervisor, both independently decided recovery was needed, and both
+// mutated lifecycle state — one of them tore down a supervisor that had been
+// healthy for 16 hours. There was no lock, mutex, or pidfile serializing `ensure`
+// invocations. This spins up two REAL `ensure` processes (not two calls on one
+// in-process object — see gateway-drain.test.js's "concurrent supervisor checks
+// share one proxy recovery attempt", which only covers the latter) against a
+// shared, cold-start home and asserts that only one of them ever decides recovery
+// is needed: exactly one `ensure-recovery-started` lifecycle record, one guardian.
+test('two concurrent ensure OS processes never both decide the gateway needs recovery', async (t) => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-concurrent-ensure-')));
+  installNodeProxy(home);
+  fs.writeFileSync(
+    path.join(home, 'serve'),
+    "require('node:http').createServer((request, response) => request.url === '/v1/models' ? response.end(JSON.stringify({ data: [] })) : response.end('{}')).listen(process.env.PORT, '127.0.0.1'); setInterval(() => {}, 1000);\n",
+  );
+  const shimReservation = net.createServer();
+  const shimPort = await listen(shimReservation);
+  await new Promise((resolve) => shimReservation.close(resolve));
+  const proxyReservation = net.createServer();
+  const proxyPort = await listen(proxyReservation);
+  await new Promise((resolve) => proxyReservation.close(resolve));
+  const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home }, {
+    CODEX_GATEWAY_PORT: String(shimPort),
+    CODEX_GATEWAY_WORKER_PORT: '0',
+    CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
+  });
+  let guardianPid = null;
+  t.after(async () => {
+    await runGatewayCli(CLI, 'stop', environment, { cwd: home }).catch(() => {});
+    if (guardianPid) await waitForProcessesToExit([guardianPid], 5000).catch(() => {});
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  const runEnsure = () => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [CLI, 'ensure', '--quiet'], { cwd: home, env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('exit', (status) => resolve({ status, stdout, stderr }));
+  });
+
+  const [first, second] = await Promise.all([runEnsure(), runEnsure()]);
+  assert.equal(first.status, 0, `first ensure: ${first.stderr}`);
+  assert.equal(second.status, 0, `second ensure: ${second.stderr}`);
+
+  const state = path.join(home, '.claude', 'model-gateway');
+  guardianPid = await waitForPidRecord(path.join(state, 'guardian.pid'));
+  assert.equal(processIsRunning(guardianPid), true, 'exactly one guardian ended up running');
+
+  const lifecycle = fs.readFileSync(path.join(state, 'logs', 'lifecycle.jsonl'), 'utf8')
+    .split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  const recoveryStarted = lifecycle.filter((record) => record.event === 'ensure-recovery-started');
+  assert.equal(
+    recoveryStarted.length,
+    1,
+    `expected exactly one ensure to independently decide recovery was needed, saw: ${JSON.stringify(recoveryStarted)}`,
+  );
+});
+
 test('older cache version leaves a newer sibling shim running', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-sibling-downgrade-'));
   const { olderCli, newerCli } = installCachedGatewayCliVersions(home);

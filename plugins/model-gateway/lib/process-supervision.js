@@ -730,6 +730,36 @@ function spawnDetached(name, command, cmdArgs, env) {
   return child.pid;
 }
 
+// Shared patience threshold: a probe must fail this many consecutive times before a
+// caller treats the thing it is probing as actually down. createProxyRecovery's
+// guardian loop has used this since e05f1947; startAll() (lib/commands.js) reuses the
+// same number via confirmProbeDown below so a single bad /healthz probe can no longer
+// make a one-shot `ensure` tear down a supervisor that has been healthy for hours
+// (see the SQ-23 incident: two concurrent `ensure` processes, one bad probe, one
+// SIGTERM to a supervisor healthy for 16 hours).
+const PROBE_FAILURE_THRESHOLD = 3;
+
+// One-shot sibling of createProxyRecovery's consecutive-failure patience. The guardian
+// loop accumulates a failure count across repeated calls from a long-running process;
+// a CLI invocation like `ensure` only runs once, so it needs the same patience inline:
+// retry `probe` up to `threshold` times (pausing `delayMs` between attempts), and only
+// report "down" once every attempt agrees. A probe that succeeds at any point returns
+// immediately with no added delay, so the common already-healthy path pays nothing.
+async function confirmProbeDown(probe, {
+  threshold = PROBE_FAILURE_THRESHOLD,
+  delayMs = 300,
+  isUp = Boolean,
+  pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
+  let value;
+  for (let attempt = 1; attempt <= threshold; attempt += 1) {
+    value = await probe();
+    if (isUp(value)) return { down: false, value, attempts: attempt };
+    if (attempt < threshold) await pause(delayMs);
+  }
+  return { down: true, value, attempts: threshold };
+}
+
 async function proxyModelsAnswering(port = PROXY_PORT, fetch = fetchUrl) {
   try {
     return (await fetch(`http://127.0.0.1:${port}/v1/models`, { timeout: 2000 })).status === 200;
@@ -781,7 +811,7 @@ function createProxyRecovery({
   recordLifecycle = () => {},
   initialBackoffMs = 1000,
   maximumBackoffMs = 30000,
-  probeFailureThreshold = 3,
+  probeFailureThreshold = PROBE_FAILURE_THRESHOLD,
 } = {}) {
   let recovery = null;
   let halted = false;
@@ -928,8 +958,8 @@ function createProxyRecovery({
 }
 
 module.exports = {
-  commandIncludesFile, commandResultAsync, createProbeChildRegistry, createProxyRecovery, fetchUrl, foreignPortOwner, foreignPortOwnerReason, gatewayInstallRoot, installBelongsToThisPlugin, isDescendantOfAsync, killPid, killPidAsync, pidFile, pidRecordFile, pluginCacheIdentity, portListening, postJson,
-  processInfoAsync, processIsOwnedByThisInstall, processIsOwnedByThisInstallAsync, processOwningPort: processOwningPortSync, processOwningPortAsync, processOwningPortInProcAsync, processTableAsync, resolvePortOwner, portOwnerRefusal,
+  commandIncludesFile, commandResultAsync, confirmProbeDown, createProbeChildRegistry, createProxyRecovery, fetchUrl, foreignPortOwner, foreignPortOwnerReason, gatewayInstallRoot, installBelongsToThisPlugin, isDescendantOfAsync, killPid, killPidAsync, pidFile, pidRecordFile, pluginCacheIdentity, portListening, postJson,
+  processInfoAsync, processIsOwnedByThisInstall, processIsOwnedByThisInstallAsync, processOwningPort: processOwningPortSync, processOwningPortAsync, processOwningPortInProcAsync, processTableAsync, resolvePortOwner, portOwnerRefusal, PROBE_FAILURE_THRESHOLD,
   proxyModelsAnswering, readPid, readPidRecord, recordedGatewayPids, reapGatewayOrphans, removePid, restartWorkerWithDrain, shimHealthy, spawnDetached,
   spawnSupervisedProxy, stopAll, stopProcess, stopRunningSupervisor, stopShimWithDrain, waitForPortRelease, waitForShimExit, writePidRecord, writePidRecordAsync,
 };
