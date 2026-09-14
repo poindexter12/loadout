@@ -22,7 +22,7 @@ const {
   ANTHROPIC_UPSTREAM, ANTIGRAVITY_ENDPOINT, AUTH_HEADERS, CODEX_FAMILY_RE, CODEX_UPSTREAM_BLOCK_PATH, COMPAT_HOST,
   COMPAT_PORT, DISPATCH_ROUTE_CACHE_PATH, GEMINI_PREFIX, GROK_ENDPOINT, GROK_PREFIX, LIST_DISPATCH_MODEL,
   LOGS, PLUGIN_VERSION, PREFIX, PROXY_BIN, PROXY_PORT, REQUEST_ROUTE_LOG,
-  REQUEST_ROUTE_LOG_PATH, ROUTE_TELEMETRY_ENABLED, ROUTE_TELEMETRY_TIMEOUT_MS, SHIM_PORT, SOCKET_PATH,
+  REQUEST_ROUTE_LOG_PATH, ROUTE_TELEMETRY_ENABLED, ROUTE_TELEMETRY_TIMEOUT_MS, SHIM_PORT, SOCKET_PATH, WIN,
   MODEL_WINDOW_POLICY, STATE, syncGatewayDiscoveryCache, TRACE_HEADERS,
   codexContextWindow, codexContextWindowModelId, mkdirs,
   resolveGatewayModelPolicy, resolveNewestInstalledCliPath,
@@ -780,6 +780,65 @@ function requestHeader(req, name) {
   return typeof value === 'string' ? value : null;
 }
 
+// Best-effort liveness probe for a unix socket file: connect and see what
+// happens. ECONNREFUSED means the listening end is gone (the file outlived
+// its process) -- anything else (a real accept, a timeout, a permission
+// error) is treated as "someone might still be home" and must not be
+// second-guessed here.
+function probeUnixSocketLive(socketPath, { timeoutMs = 300 } = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const socket = net.connect(socketPath);
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(result);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish('live'));
+    socket.once('timeout', () => finish('unknown'));
+    socket.once('error', (error) => finish(error.code === 'ECONNREFUSED' ? 'stale' : 'unknown'));
+  });
+}
+
+// SIGTERM during the concurrent-`ensure` race (see commands.js) -- and any
+// other unclean worker death -- kills this process before it can unlink its
+// own ANTHROPIC_UNIX_SOCKET file. Node's listen() never removes an existing
+// path for you, so the next boot hits EADDRINUSE forever on a file nothing is
+// behind, and silently keeps running on TCP only. Before binding, decide
+// whether the file is an orphan (safe to remove) or a live peer's socket
+// (must NOT be touched -- stealing a healthy peer's socket out from under it
+// is worse than the noisy bind failure this is fixing). When the probe is
+// inconclusive, the conservative choice is to leave the file alone and let
+// listen() fail and report why.
+async function reclaimStaleUnixSocket(socketPath) {
+  if (WIN) return 'skipped-windows'; // named pipes leave no filesystem entry to leak
+  let stat;
+  try {
+    stat = fs.statSync(socketPath);
+  } catch {
+    return 'absent';
+  }
+  if (!stat.isSocket()) return 'not-a-socket'; // not ours to clean up; let listen() fail loudly
+  const liveness = await probeUnixSocketLive(socketPath);
+  if (liveness === 'live') {
+    console.log(`model-gateway: ANTHROPIC_UNIX_SOCKET ${socketPath} is already being served by a live peer; leaving it in place and staying on TCP only for this process.`);
+    return 'live';
+  }
+  if (liveness === 'stale') {
+    try {
+      fs.unlinkSync(socketPath);
+      console.log(`model-gateway: removed a stale ANTHROPIC_UNIX_SOCKET file at ${socketPath} (no live peer answered; likely left behind by an unclean shutdown)`);
+      return 'removed';
+    } catch (error) {
+      if (error.code === 'ENOENT') return 'absent';
+      console.error(`model-gateway: found a stale ANTHROPIC_UNIX_SOCKET file at ${socketPath} but could not remove it: ${error.code || error.message}`);
+      return 'unknown';
+    }
+  }
+  return 'unknown'; // inconclusive -- when in doubt, do not unlink
+}
 
 function runWorker() {
   process.once('disconnect', () => process.exit(0));
@@ -2008,17 +2067,25 @@ function runWorker() {
   mainServer.listen(SHIM_PORT, '127.0.0.1', () => {
     const shimPort = mainServer.address().port;
     process.send?.({ type: 'listening', port: shimPort });
-    console.log(`model-gateway shim listening on 127.0.0.1:${shimPort} (proxy :${PROXY_PORT}, anthropic ${ANTHROPIC_UPSTREAM})`);
+    console.log(`model-gateway shim listening on 127.0.0.1:${shimPort} (default transport; proxy :${PROXY_PORT}, anthropic ${ANTHROPIC_UPSTREAM})`);
   });
 
+  // Secondary transport: TCP above is what default wiring actually points
+  // ANTHROPIC_BASE_URL at, so a failure here is a degraded-but-running state,
+  // never a fatal one. reclaimStaleUnixSocket() runs first so a leftover file
+  // from an unclean shutdown doesn't permanently blind this listener behind a
+  // bogus EADDRINUSE (see the SIGTERM/ensure-race note on that function).
   const socketServer = makeServer();
   servers.add(socketServer);
   socketServer.once('error', (error) => {
     servers.delete(socketServer);
-    console.error(`model-gateway: could not bind ANTHROPIC_UNIX_SOCKET ${SOCKET_PATH}: ${error.code || error.message}`);
+    console.error(`model-gateway: DEGRADED -- could not bind ANTHROPIC_UNIX_SOCKET ${SOCKET_PATH} (${error.code || error.message}). The unix-socket transport is unavailable for this process; continuing on TCP only at 127.0.0.1:${SHIM_PORT}, which is the default transport anyway.`);
   });
-  socketServer.listen(SOCKET_PATH, () => {
-    console.log(`model-gateway shim listening on ANTHROPIC_UNIX_SOCKET ${SOCKET_PATH}`);
+  reclaimStaleUnixSocket(SOCKET_PATH).finally(() => {
+    if (draining || !servers.has(socketServer) || socketServer.listening) return;
+    socketServer.listen(SOCKET_PATH, () => {
+      console.log(`model-gateway shim also listening on ANTHROPIC_UNIX_SOCKET ${SOCKET_PATH} (secondary transport; TCP 127.0.0.1:${SHIM_PORT} remains the default)`);
+    });
   });
 
   // RC-compatibility: only attempted when the user has added the exact hosts
@@ -2047,4 +2114,7 @@ function runWorker() {
   }
 }
 
-module.exports = { createHostsBypassResolver, effectiveCodexSentryPolicy, gatewayModel, runWorker };
+module.exports = {
+  createHostsBypassResolver, effectiveCodexSentryPolicy, gatewayModel, runWorker,
+  probeUnixSocketLive, reclaimStaleUnixSocket,
+};
