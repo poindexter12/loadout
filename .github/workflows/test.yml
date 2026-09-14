@@ -35,7 +35,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - run: node --test scripts/release/test/*.test.mjs
+      - run: node --test scripts/release/test/*.test.mjs scripts/test/*.test.mjs
 
   plugin-matrix:
     needs: release-engine
