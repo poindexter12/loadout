@@ -8,6 +8,27 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v3.538.0 (2026-09-13)
+
+### model-gateway 0.51.0 → 0.51.1
+
+#### Fixes
+
+- Strip backend-unsupported JSON Schema patterns from Codex-bound tool schemas (SQ-12) [`fb10a34`](https://github.com/poindexter12/loadout/commit/fb10a34f07c6014efed4ff494441e367c6f187b0)
+- Apply the tool-schema sanitizer to Grok-bound tool definitions (SQ-13) [`8eca119`](https://github.com/poindexter12/loadout/commit/8eca119a8fa6bb17e097d557e4a48d0a03100001)
+- Give each Claude config dir its own gateway state instead of sharing one ~/.claude tree (SQ-14) [`17cc193`](https://github.com/poindexter12/loadout/commit/17cc1939)
+- Stop stripping the 1M window suffix from native Anthropic model ids, which forced early auto-compaction (SQ-15) [`ae84b08`](https://github.com/poindexter12/loadout/commit/ae84b08f)
+- Stop restarting a busy proxy that misses one health probe, which dropped its in-flight requests (SQ-16) [`e05f194`](https://github.com/poindexter12/loadout/commit/e05f1947)
+- Advertise the Grok row in the shim boot catalog so /v1/models never hides it right after a restart (SQ-17) [`e0a8ce5`](https://github.com/poindexter12/loadout/commit/e0a8ce58)
+- Extract the duplicated catalog helpers into lib/catalog.js so the CLI reports Antigravity and the shim publishes selectable picker ids (SQ-18) [`af979a8`](https://github.com/poindexter12/loadout/commit/af979a81)
+- Advertise Grok models only when Grok CLI auth is present, so the picker stops showing a row whose every request fails (SQ-19) [`342d70c`](https://github.com/poindexter12/loadout/commit/342d70cf)
+
+### observability 0.8.0 → 0.8.1
+
+#### Fixes
+
+- Stop observability tests from writing into the developer's real ~/.claude/observability (SQ-3) [`fb9e3af`](https://github.com/poindexter12/loadout/commit/fb9e3af7f895f72b52e33729653bfcdfff33ae55)
+
 ## v3.537.0 (2026-09-10)
 
 ### codebase-mapper 2.15.8 → 2.16.0
