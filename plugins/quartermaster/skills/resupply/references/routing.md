@@ -1,8 +1,13 @@
 # Where each kind of finding lands
 
-One finding, one destination. Prefer the highest entry that fits: things that add a capability beat
-things that remove an annoyance, installable things beat written rules, and written rules beat
-asking the user to remember.
+One finding, one destination. Check project code and commands, native platform features, the
+standard library, and installed dependencies, plugins, and skills before proposing new machinery.
+Reuse an adequate capability; extend it only for a demonstrated gap. If a change is still needed,
+choose the smallest destination that fits.
+
+Routing is not permission to apply a change. A round needs current user approval or explicit standing
+permission before mining. Each exact change needs per-item approval unless explicit standing
+permission covers that class; round approval does not authorize unrelated edits.
 
 This orders *destinations*, not findings. A finding's rank in what you propose comes from how well
 the evidence carries it, so a measurement you inferred from one session title still lands below a
@@ -14,9 +19,10 @@ For a standard the user cares about that nothing can currently check: correctnes
 performance, coverage, cost. This sits at the top because an unverifiable goal cannot be closed,
 and because no friction counter will ever surface it.
 
-- Build it with skill-creator as a skill whose `scripts/` hold the measurement, committed in the
-  repo. A scratch script is gone by the next session, and the number it produced becomes an
-  assertion nobody can re-check.
+- Start with existing tests, benchmarks, linters, validation scripts, and native tooling. Record the
+  command and its limitations. Extend one before writing a second check of the same property.
+- Only when a recurring measurement needs a skill, build it with skill-creator and keep its scripts
+  beside it. A new skill is not the default response to a claim that needs checking.
 - Scope it to one question with a defensible answer. "Does the output match the reference on the
   real corpus" is an instrument; "is the pipeline good" is not.
 - This is not only a code move. A standard that cannot be checked shows up anywhere: whether a
@@ -26,9 +32,7 @@ and because no friction counter will ever surface it.
 - Have it report its own weaknesses next to its numbers: what the sample excludes, which
   population it actually measured, what it cannot separate. An instrument that names its blind
   spot can be trusted; one that hides it produces confident wrong conclusions.
-- Check for an existing one first (`ls .claude/skills/`, `catalog --installed`). Test suites,
-  benchmarks, linters, and validation scripts are instruments too, and extending one beats writing
-  a second that measures nearly the same thing.
+- Check `.claude/skills/` and `catalog --installed` for an existing measurement workflow.
 - Fingerprint: `skill:<name>`.
 
 ## 2. Plugin install
@@ -88,8 +92,9 @@ Fingerprint: `mcp:<name>`.
 For repeated corrections on one theme, conventions, and "stop doing X" findings.
 
 - If the live-rules plugin is installed (check `catalog --installed` for `live-rules@`), use its
-  add-rule skill: rules there inject only when they apply (keyword, glob, or dir scoped) instead of
-  costing context every prompt. Prefer it.
+  add-rule skill: rules inject when they first apply (keyword, glob, or dir scoped), and again when
+  their path/content hash changes. Unchanged rules do not repeat on every prompt or edit within a
+  tracked session. Prefer it.
 - Else: project conventions go in the project's `CLAUDE.md`; the user's personal preferences
   (voice, workflow, cross-project habits) go in `~/.claude/CLAUDE.md`. Keep the added rule to a few
   lines, in the file's existing style, and show the exact diff first.

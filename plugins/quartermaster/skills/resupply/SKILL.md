@@ -43,6 +43,12 @@ question rather than the question itself.
 
 ## Process
 
+Before mining or starting the round, require current user approval or explicit standing permission
+for these rounds. An explicit `/quartermaster:resupply` invocation requests a round; a seed, hook
+nudge, or natural pause is only a reason to offer one. Round approval does not authorize unrelated
+edits. Apply a recommendation only after showing its exact change and receiving per-item approval,
+unless explicit standing permission covers that exact class of change.
+
 If the user declines a SessionStart nudge or Stop-time offer before the round starts, record that whole-round decline, then stop. Run:
 
 ```
@@ -121,10 +127,11 @@ the order to propose in: step 6 ranks what you actually find.
 
 #### 4a. Is there something the user cannot measure?
 
-If they hold a standard goal and nothing can check it, **building that instrument is the most
-valuable thing available**, and it usually has to happen before any fix underneath it. An
-unverifiable goal cannot be closed: every change made under it is a guess, and the same ground gets
-re-argued later because nothing settled it.
+Trace how the claimed property is currently checked before declaring an instrument missing. Look
+first at project tests and commands, native platform features, the standard library, and installed
+dependencies, plugins, and skills. Reuse an adequate check or propose a small extension to one.
+Only propose a new instrument when that investigation shows an actual gap; an unverifiable goal
+needs evidence, not necessarily another tool.
 
 Tells, none of which appear as friction:
 
@@ -139,10 +146,10 @@ two different ways: that is the aggregate telling you the instrument is missing.
 title plus a habit is you inferring it. Raise either one, but only the attested kind outranks a cheap
 fix you are certain about.
 
-The fix is a **measurement built as a skill**, with its scripts committed beside it. A number that
-will be cited later needs something re-runnable behind it, and a scratch script is gone by then.
-This holds outside code too: whether a document covers what it claims, whether an export matches
-its source, whether a config still matches what is deployed.
+Propose the smallest reproducible check that answers the question. Use an existing test, benchmark,
+validation command, or script when it fits; package a measurement as a skill only when a recurring
+workflow needs that form. This holds outside code too: document coverage, export fidelity, or
+agreement between configuration and deployment can often be checked with existing tools.
 
 Have the instrument state its own limits when you propose it. A measurement built on whatever data
 was available usually carries a bias (a sample that only includes successes, a population that is
@@ -157,8 +164,8 @@ guess instead of their evidence.
 #### 4b. What is being done by hand that the workspace should own?
 
 Repeated command sequences, hand-rolled scripts written more than once, the same multi-step chore
-across sessions. Prefer, in order: an existing plugin, then a skill, then a rule. Plugins are
-versioned and removable; skills are yours to shape; rules only ask someone to remember.
+across sessions. Check project scripts and native tooling before suggesting an install. If those
+cannot cover the workflow, prefer an existing plugin or skill over new instructions in a rule.
 
 Search before building anything:
 
@@ -212,8 +219,8 @@ denials (the user does not want the action at all, so it is a rule about not doi
 ### 5. Route
 
 Map each finding to exactly one destination using [references/routing.md](references/routing.md).
-Prefer the highest destination that fits: installable things beat written rules, and written rules
-beat asking someone to remember.
+Reuse or extend what already serves the work before selecting a new destination. Choose the least
+additional machinery that closes the evidenced gap.
 
 New skills and skill improvements go through **skill-creator**. A hand-rolled SKILL.md tends to
 encode the one example in front of you instead of the general shape, and its description ends up
@@ -230,7 +237,8 @@ re-litigate unless they raise it.
 
 Seven findings maximum, best first. For each: the evidence, the purpose it serves, the exact command
 or diff, and the cost (for plugin installs, `claude plugin details <name>` when context cost is
-relevant). Wait for an explicit yes or no before touching anything or moving on. Never batch-apply.
+relevant). Wait for an explicit yes or no unless explicit standing permission covers that exact
+class of change. Show each exact change even under standing permission. Never batch-apply.
 
 Best first means value weighted by how well the evidence carries it, not step 4's search order. An
 attested measurement gap is the strongest thing you can lead with. An inferred one belongs below the
@@ -268,8 +276,11 @@ will check.
 
 ## Guidelines
 
-- Human in the loop, always. Every install, uninstall, file edit, and settings change gets its own
-  approval with the exact change visible first.
+- Human in the loop, always. Show each install, uninstall, file edit, or settings change before
+  applying it. Require per-item approval unless explicit standing permission covers that exact class.
+- Preserve project-required tests, security checks, trust-boundary validation, data-loss protections,
+  and accessibility safeguards. Focused checks supplement required gates, never replace them. Follow
+  an assigned integration owner's verification split; solo work retains all required verification.
 - Rank by the purpose, not by the count. A single missing measurement can outrank thirty denials,
   and a well-attested annoyance that serves no goal is still noise.
 - Seven findings maximum. A pass that surfaces thirty gets skimmed; the tools that tried continuous
@@ -278,9 +289,8 @@ will check.
   standards it cannot check and chores done by hand just as much; only the instruments differ.
 - Attribution counts are evidence of use; absence is only a hint. Say "no recorded tool activity in
   the window", never "unused". Hook-only and context-injection plugins legitimately show nothing.
-- **Kaizen:** Every pass should leave at least one existing capability better, or state explicitly
-  that the existing skills, rules, and instruments were reviewed and hold up. Small repeated
-  improvements beat batching a rewrite.
+- Improve existing capabilities only where the evidence warrants it. If they hold up, say so;
+  there is no minimum improvement count and no automatic unrelated cleanup.
 - Quotes and titles are the user's own words back at them. Keep them short and only where they
   carry the finding.
 - Every number you cite is the aggregate's number, as it reports it. Rounding a count, attributing a
@@ -290,7 +300,7 @@ will check.
 
 ## Success criteria
 
-- [ ] Mining ran through the script; no raw transcript was opened in context
+- [ ] Round approval confirmed before mining; no raw transcript was opened in context
 - [ ] Purpose was read from the aggregate and put to the user, not asked for cold
 - [ ] Sessions were weighed by effort, with `humanDriven: false` excluded from the purpose read
 - [ ] Past decisions were verified and reported before new findings
@@ -299,6 +309,6 @@ will check.
 - [ ] The findings were ranked once, and the closing order matched the order they were presented in
 - [ ] Existing plugins and skills were searched before anything new was proposed
 - [ ] Existing skills, rules, and instruments were assessed for improvement, not only for gaps
-- [ ] Every proposal showed the exact change and got an explicit yes or no
+- [ ] Every proposal showed the exact change and got per-item approval or matching explicit standing permission
 - [ ] Every decision, including rejections, was recorded with a fingerprint
 - [ ] mark-resupply ran at the end

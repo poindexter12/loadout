@@ -24,6 +24,10 @@ From the project directory, run:
 
 Setup reads the project, mines recent session history across your projects, asks a few setup questions, and proposes a plan covering Loadout plugins, stack plugins, starter rules, and permission entries. You approve each item before it installs or writes anything.
 
+Starter rules teach agents to trace actual behavior and reuse project code, native platform features, the standard library, and installed dependencies before adding tools. They keep changes scoped, without automatic cleanup or arbitrary function/class size quotas. Focused checks supplement project-required tests and release gates; they do not replace them. An assigned integration owner can split verification responsibilities, while solo work retains all required verification. Security, trust-boundary, data-loss, and accessibility safeguards still apply.
+
+Existing workspace rules are preserved. Updating Quartermaster changes its templates, not rules already seeded into your project; any refresh needs an approved diff.
+
 Setup installs the approved plugins and writes the approved project files, then pauses at the activation boundary. Run `/reload-plugins`, or restart Claude Code when the change affects the process environment, and tell Claude `continue`. Setup verifies the selected plugins and project configuration after that boundary.
 
 When setup wires Model Gateway or Sidequest routing, Quartermaster can offer the optional `325000` `autoCompactWindow` setting for a consistent Codex compaction point. Setup asks before writing it. If user or project settings already has a value, it reports which one wins and preserves that value.
@@ -52,13 +56,17 @@ The health check is read-only. It identifies stale installs, dead `enabledPlugin
 
 ## The in-the-moment loop
 
-Quartermaster's SessionStart hook can flag a repeated task that may belong in a skill, codebase-map entry, rule, or measurement. It offers to capture the improvement when it notices one; otherwise it stays silent. Setup also re-grounds unchanged rules and surfaces changed matching rules on the next prompt or edit.
+Quartermaster's SessionStart hook supplies a short improvement charter when `.claude/live-rules/rules/self-improvement.md` is absent. An approved setup seeds a project-specific rule at that path instead. Both forms favor existing capabilities and offer improvements rather than automatically building tools or starting resupply.
+
+Live Rules re-grounds applicable rules at SessionStart and tracks their path/content hashes per session. Later prompts or edits inject newly matching or changed rules, not unchanged rules repeatedly. Missing session IDs or an unavailable ledger can cause repeated grounding.
 
 ## Resupply an existing workspace
 
 After real work has accumulated, run it directly or accept Quartermaster's offer of a focused optimization round:
 
 > /quartermaster:resupply
+
+An offer is not permission to run the round. Resupply, including transcript mining, starts only after current user approval or explicit standing permission for these rounds. Running the command directly requests a round. Round approval does not authorize unrelated edits: each recommendation needs per-item approval unless explicit standing permission covers that exact class of change.
 
 The miner reads local transcript files and emits a bounded aggregate. The active model can see the aggregate, which may include:
 
@@ -72,7 +80,7 @@ The miner reads local transcript files and emits a bounded aggregate. The active
 
 Raw transcript files are never loaded into model context, and the resupply skill is forbidden from opening them. The default pass mines the current project. Setup explicitly requests the all-projects summary, while resupply only uses `--all-projects` for a global pass.
 
-The skill ranks findings in this order: a missing measurement, manual work, existing capabilities that underperform, knowledge being re-derived, then setup friction. It proposes at most seven findings one at a time with evidence and an exact change. A rejected recommendation is recorded and does not return; an accepted one is checked in a later pass.
+The skill checks for missing measurements, manual work, existing capabilities that underperform, knowledge being re-derived, and setup friction. It searches existing checks and workflows before proposing new machinery, then ranks findings by value and strength of evidence, not just that search order. It proposes at most seven findings one at a time with evidence and an exact change. A rejected recommendation is recorded and does not return; an accepted one is checked in a later pass.
 
 ## How the loop closes
 
