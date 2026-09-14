@@ -64,6 +64,7 @@ export default defineConfig({
           items: [
             { label: 'Architecture', slug: 'architecture' },
             { label: 'Modular Loadout', slug: 'architecture/modular-architecture' },
+            { label: 'Transcript measurement', slug: 'architecture/transcript-measurement' },
             { label: 'Contributing to the docs', slug: 'contributing' },
             { label: 'Release process', slug: 'release-process' },
           ],
