@@ -76,17 +76,27 @@ test('SQ-21: an external upstream failure is not misnamed as the local gateway p
 
 // --- SQ-22: unit coverage for the 429 rewrite ---
 
-test('SQ-22: codex 429 body names the backend, disclaims Anthropic, and warns off sibling gpt-* models', () => {
+test('SQ-22: codex 429 body names the backend, disclaims Anthropic, and offers both remedies', () => {
   const upstreamBody = Buffer.from(JSON.stringify({ error: { message: 'rate limited' } }));
   const message = codexRateLimitMessage(upstreamBody, { 'retry-after': '5' });
   assert.match(message, /codex backend is rate limiting/);
   assert.match(message, /not an Anthropic usage limit/);
   assert.match(message, /Claude subscription is unaffected/);
-  assert.match(message, /All 20 gpt-\* picker models share/);
-  assert.match(message, /will NOT help/);
+  assert.match(message, /All 20 gpt-\* picker models route to this same codex backend/);
+  assert.match(message, /sibling gpt-\* model is worth trying/);
   assert.match(message, /claude-\*.*Anthropic.*grok-4\.5.*Grok|grok-4\.5.*claude-\*/);
   assert.match(message, /Retry-After: 5s/);
   assert.match(message, /Upstream said: "rate limited"/);
+});
+
+// Guards the correction itself: an earlier revision asserted a shared account
+// rate pool and told the reader a sibling gpt-* "will NOT help". Measured data
+// contradicted that (gpt-5.6-luna: 140 requests, 0 429s, same backend, same day
+// gpt-6-astra took 420). Never reintroduce the claim without pool-level evidence.
+test('SQ-22: codex 429 body does not claim a shared rate pool or rule out sibling gpt-* models', () => {
+  const message = codexRateLimitMessage(Buffer.from('{}'), {});
+  assert.doesNotMatch(message, /rate pool/i);
+  assert.doesNotMatch(message, /will NOT help/);
 });
 
 test('SQ-22: codex 429 message still names the backend with no retry-after header or JSON body', () => {
@@ -135,7 +145,7 @@ test('SQ-22 e2e: a 429 from the codex proxy is rewritten before it reaches the c
   assert.equal(parsed.error.type, 'rate_limit_error');
   assert.match(parsed.error.message, /codex backend is rate limiting/);
   assert.match(parsed.error.message, /not an Anthropic usage limit/);
-  assert.match(parsed.error.message, /All 20 gpt-\* picker models share/);
+  assert.match(parsed.error.message, /All 20 gpt-\* picker models route to this same codex backend/);
   assert.doesNotMatch(parsed.error.message, /^Rate limited$/, 'must not be the raw opaque upstream body');
 });
 

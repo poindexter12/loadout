@@ -51,7 +51,7 @@ Running Model Gateway's own suite uses a separate test home and never touches th
 
 If a request fails with `502 model-gateway: the local gateway proxy is temporarily unreachable`, that names a brief connection drop (`ECONNREFUSED`/`ECONNRESET`/`EPIPE`) to the shim, most often mid-restart; recovery is automatic and the request is retried without any action needed. A 502 that instead says the failure "does not look like a transient restart" is not self-healing — run `model-gateway status`, then `doctor` if it persists.
 
-A `429` on a `gpt-*` model is rewritten to say the codex backend, not Anthropic, is rate limiting the account, and that it is not your Claude usage limit. All `gpt-*` picker models share one codex backend and one account rate pool, so switching to a different `gpt-*` model will not dodge it — only switching backend does (a `claude-*` model, or `grok-4.5`). Wait for the codex limit to clear to keep using `gpt-*` models.
+A `429` on a `gpt-*` model is rewritten to say the codex backend, not Anthropic, is rate limiting the account, and that it is not your Claude usage limit. All `gpt-*` picker models route to the same codex backend, but throttling has been observed to hit one model at a time rather than the whole account, so switching to a different `gpt-*` model is worth trying. The reliable escape is a different backend — a `claude-*` model, or `grok-4.5` — neither of which touches codex. Otherwise wait for the codex limit to clear.
 
 If something breaks, describe the symptom:
 

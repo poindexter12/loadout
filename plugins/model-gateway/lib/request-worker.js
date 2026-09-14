@@ -294,10 +294,16 @@ function sseErrorFrame(type, message) {
 // SQ-22: a bare codex 429 passed through opaquely renders in Claude Code as a
 // self-contradictory Anthropic-usage-limit message (the observed case named
 // "claude-gpt-6-astra" as if it were an Anthropic model over an Anthropic
-// limit). All 20 gpt-* picker ids share one codex backend and one account
-// rate pool (see catalog.js / `model-gateway doctor`), so the gateway names
-// the real source here and says plainly that swapping to a sibling gpt-*
-// model will not dodge it — only a backend change (claude-*, grok-4.5) will.
+// limit), so the gateway names the real source here.
+//
+// On remedies the message deliberately stops short of certainty. All 20 gpt-*
+// picker ids do share one codex backend (see catalog.js / `model-gateway
+// doctor`), but that topology does NOT establish a shared rate pool, and the
+// observed data cuts the other way: on 2026-09-14 gpt-6-astra took 420 429s
+// across 2423 requests while sibling gpt-5.6-luna served 140 requests on the
+// same backend with zero. Throttling looked per-model, not per-account. One
+// day of one account is too thin to promise that, so the text offers a sibling
+// gpt-* as worth trying and a backend change as the reliable escape.
 function codexRateLimitMessage(upstreamBody, headers) {
   let upstreamDetail = '';
   try {
@@ -313,10 +319,10 @@ function codexRateLimitMessage(upstreamBody, headers) {
     + '(HTTP 429 from OpenAI/Codex — this is the upstream provider\'s limit, not an Anthropic usage limit; '
     + 'your Claude subscription is unaffected).'
     + retryNote + upstreamDetail
-    + ' All 20 gpt-* picker models share this one codex backend and one account rate pool, so switching to another '
-    + 'gpt-* model will NOT help — it will hit the same limit immediately. To keep working now, switch backend '
-    + 'instead: a claude-* model (Anthropic) or grok-4.5 (Grok) are unaffected. Otherwise wait for the codex rate '
-    + 'limit to clear and retry this gpt-* model.';
+    + ' All 20 gpt-* picker models route to this same codex backend, but observed throttling has been per-model '
+    + 'rather than account-wide, so a sibling gpt-* model is worth trying and may well work. The reliable escape '
+    + 'is a different backend: a claude-* model (Anthropic) or grok-4.5 (Grok) do not touch codex at all. '
+    + 'Otherwise wait for the codex rate limit to clear and retry this model.';
 }
 
 function codexRateLimitBody(upstreamBody, headers) {
