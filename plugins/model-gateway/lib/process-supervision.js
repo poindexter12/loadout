@@ -379,7 +379,8 @@ function commandResultAsync(command, commandArgs, { timeout = probeTimeoutMs(), 
     let child;
     let closed;
     try {
-      child = spawnProcess(command, commandArgs, { detached: true, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      // Windows detached discovery children can lose their piped probe output.
+      child = spawnProcess(command, commandArgs, { detached: !WIN, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
       closed = probeChildren ? probeChildren.track(child) : waitForProbeChildClose(child);
     } catch (error) {
       finish({ status: null, stdout, stderr: String(error), timedOut: false });
@@ -399,20 +400,59 @@ function commandResultAsync(command, commandArgs, { timeout = probeTimeoutMs(), 
     timer.unref?.();
   });
 }
-async function processOwningPortAsync(port, { commandResult = commandResultAsync, probeChildren = null } = {}) {
+// Keep Linux discovery working without lsof, including in lifecycle/recovery
+// probes. Yield during the /proc walk and share the caller's deadline instead
+// of blocking the supervisor's health endpoint with synchronous filesystem IO.
+async function processOwningPortInProcAsync(port, { timeout = probeTimeoutMs(), now = Date.now, fsImpl = fs.promises } = {}) {
+  if (process.platform !== 'linux') return null;
+  const deadline = now() + timeout;
+  const portSuffix = `:${Number(port).toString(16).padStart(4, '0').toUpperCase()}`;
+  const inodes = new Set();
+  for (const tablePath of ['/proc/net/tcp', '/proc/net/tcp6']) {
+    if (now() >= deadline) return undefined;
+    try {
+      for (const line of (await fsImpl.readFile(tablePath, 'utf8')).trim().split(/\r?\n/).slice(1)) {
+        const fields = line.trim().split(/\s+/);
+        if (fields[1]?.endsWith(portSuffix) && fields[3] === '0A' && fields[9]) inodes.add(fields[9]);
+      }
+    } catch {}
+  }
+  if (!inodes.size) return null;
+  try {
+    for (const entry of await fsImpl.readdir('/proc')) {
+      if (now() >= deadline) return undefined;
+      if (!/^\d+$/.test(entry)) continue;
+      try {
+        for (const descriptor of await fsImpl.readdir(path.join('/proc', entry, 'fd'))) {
+          if (now() >= deadline) return undefined;
+          const target = await fsImpl.readlink(path.join('/proc', entry, 'fd', descriptor));
+          if (inodes.has(target.match(/^socket:\[(\d+)\]$/)?.[1])) return Number(entry);
+        }
+      } catch {}
+    }
+  } catch {}
+  return null;
+}
+async function processOwningPortAsync(port, { commandResult = commandResultAsync, probeChildren = null, timeout = probeTimeoutMs(), now = Date.now, procOwner = processOwningPortInProcAsync } = {}) {
   if (!port) return null;
-  const result = await commandResult(WIN ? 'netstat' : 'lsof', WIN ? ['-ano', '-p', 'tcp'] : ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { probeChildren });
+  const deadline = now() + timeout;
+  const result = await commandResult(WIN ? 'netstat' : 'lsof', WIN ? ['-ano', '-p', 'tcp'] : ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { probeChildren, timeout });
   if (result.timedOut) return undefined;
+  if (!WIN) {
+    const pid = result.status === 0 ? Number(String(result.stdout).trim().split(/\s+/)[0]) || null : null;
+    if (pid) return pid;
+    if (now() >= deadline) return undefined;
+    return procOwner(port, { timeout: deadline - now(), now });
+  }
   if (result.status !== 0) return null;
-  if (!WIN) return Number(String(result.stdout).trim().split(/\s+/)[0]) || null;
   const portPattern = new RegExp(`^\\s*TCP\\s+[^\\s]*:${port}\\s+[^\\s]+\\s+LISTENING\\s+(\\d+)\\s*$`, 'im');
   return Number(String(result.stdout).match(portPattern)?.[1]) || null;
 }
-async function processInfoAsync(pid, { commandResult = commandResultAsync, probeChildren = null } = {}) {
+async function processInfoAsync(pid, { commandResult = commandResultAsync, probeChildren = null, timeout } = {}) {
   if (!pid) return null;
   const result = await commandResult(WIN ? 'powershell.exe' : 'ps', WIN
     ? ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', `Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" | Select-Object ProcessId,ParentProcessId,CommandLine,CreationDate | ConvertTo-Json -Compress`]
-    : ['-p', String(pid), '-o', 'pid=,ppid=,lstart=,args='], { probeChildren });
+    : ['-p', String(pid), '-o', 'pid=,ppid=,lstart=,args='], { probeChildren, timeout });
   if (result.timedOut) return undefined;
   return result.status === 0 ? processInfoFromOutput(result.stdout) : null;
 }
@@ -463,10 +503,46 @@ function portOwner(port = PUBLIC_SHIM_PORT) {
   const process = processInfoSync(pid);
   return { installRoot: process ? gatewayInstallRootFromCommand(process.command) : null, pid };
 }
-function siblingPortOwner(port = PUBLIC_SHIM_PORT) {
-  const owner = portOwner(port);
-  if (!owner?.installRoot || normalizedPath(owner.installRoot) === normalizedPath(gatewayInstallRoot())) return null;
-  return installBelongsToThisPlugin(owner.installRoot) ? owner : null;
+// Absence of a discovered PID is not evidence that a bound port is free.
+// Only same-install may receive control HTTP; unowned permits startup/record
+// cleanup. Unknown is retryable, and never authorizes a lifecycle mutation.
+async function resolvePortOwner(port = PUBLIC_SHIM_PORT, {
+  owner = processOwningPortAsync,
+  inspectProcess = processInfoAsync,
+  listening = portListening,
+  belongsToThisInstall = installBelongsToThisPlugin,
+  probeChildren = null,
+  timeout = probeTimeoutMs(),
+  now = Date.now,
+} = {}) {
+  const deadline = now() + timeout;
+  const remainingTimeout = () => Math.max(1, deadline - now());
+  let lastPid = null;
+  for (let attempt = 0; attempt < 2 && now() < deadline; attempt += 1) {
+    try {
+      if (!(await listening(port, remainingTimeout()))) return { state: 'unowned', pid: null };
+      const pid = await owner(port, { probeChildren, timeout: remainingTimeout() });
+      if (!pid) continue;
+      const previousPid = lastPid;
+      lastPid = pid;
+      if (now() >= deadline) break;
+      const process = await inspectProcess(pid, { probeChildren, timeout: remainingTimeout() });
+      if (!process) continue;
+      const installRoot = gatewayInstallRootFromCommand(process.command);
+      if (!installRoot) continue;
+      // A changing PID during an inconclusive inspection needs a fresh attempt.
+      if (previousPid && previousPid !== pid) break;
+      return { state: belongsToThisInstall(installRoot) ? 'same-install' : 'foreign-install', installRoot, pid };
+    } catch { /* discovery failure remains unknown and retryable */ }
+  }
+  return { state: 'unknown', pid: lastPid };
+}
+function unknownPortOwnerReason(owner, port = PUBLIC_SHIM_PORT) {
+  return `could not confirm the owner of :${port} (last observed PID ${owner.pid || 'unknown'}); left the listener untouched. Retry ensure or stop after process inspection is available; do not kill an unconfirmed listener`;
+}
+function portOwnerRefusal(owner, port = PUBLIC_SHIM_PORT) {
+  if (owner.state === 'same-install' || owner.state === 'unowned') return null;
+  return owner.state === 'foreign-install' ? foreignPortOwnerReason(owner, port) : unknownPortOwnerReason(owner, port);
 }
 function foreignPortOwner(port = PUBLIC_SHIM_PORT) {
   const owner = portOwner(port);
@@ -528,25 +604,24 @@ function reapGatewayOrphans(supervisorPid = null) {
   }
   return reaped;
 }
-function stopAll({ report = console.log } = {}) {
-  const foreignOwner = foreignPortOwner();
-  if (foreignOwner) {
-    const reason = foreignPortOwnerReason(foreignOwner);
+async function stopAll({ report = console.log, resolveOwner = resolvePortOwner } = {}) {
+  const owner = await resolveOwner(PUBLIC_SHIM_PORT);
+  const reason = portOwnerRefusal(owner);
+  if (reason) {
     report(`model-gateway: ${reason}.`);
     return { ok: false, reason };
   }
   for (const name of ['shim', 'guardian', 'proxy']) recordStopRequest('stop', name);
-  const portOwner = processOwningPortSync(PUBLIC_SHIM_PORT);
   for (const name of ['shim', 'guardian', 'proxy']) stopProcess(name);
-  if (portOwner) killPid(portOwner);
+  if (owner.pid) killPid(owner.pid);
   reapGatewayOrphans(null);
   return { ok: true };
 }
-async function stopRunningSupervisor({ quiet = false, operation = 'restart', report = console.log } = {}) {
-  const foreignOwner = foreignPortOwner();
-  if (foreignOwner) return { ok: false, reason: foreignPortOwnerReason(foreignOwner) };
-  const siblingOwner = siblingPortOwner();
-  const pid = processOwningPortSync(PUBLIC_SHIM_PORT);
+async function stopRunningSupervisor({ quiet = false, operation = 'restart', report = console.log, resolveOwner = resolvePortOwner } = {}) {
+  const owner = await resolveOwner(PUBLIC_SHIM_PORT);
+  const reason = portOwnerRefusal(owner);
+  if (reason) return { ok: false, reason };
+  const pid = owner.pid;
   const targetPid = pid || readPid('guardian');
   if (targetPid) {
     recordGatewayLifecycle(`${operation}-supervisor-stop-requested`, {
@@ -563,7 +638,9 @@ async function stopRunningSupervisor({ quiet = false, operation = 'restart', rep
   }
   reapGatewayOrphans(null);
   if (!quiet) report(`model-gateway: stopped stale shim supervisor${pid ? ` (PID ${pid})` : ''}.`);
-  return { ok: true, pid, siblingInstallRoot: siblingOwner?.installRoot || null };
+  const siblingInstallRoot = owner.state === 'same-install' && normalizedPath(owner.installRoot) !== normalizedPath(gatewayInstallRoot())
+    ? owner.installRoot : null;
+  return { ok: true, pid, siblingInstallRoot };
 }
 function postJson(url, body, timeout = 2000) {
   return new Promise((resolve, reject) => {
@@ -594,13 +671,14 @@ async function waitForShimExit(timeout) {
   }
   return !(await portListening(SHIM_PORT, 100));
 }
-async function stopShimWithDrain({ quiet = false, timeout = Number(process.env.CODEX_GATEWAY_DRAIN_TIMEOUT_MS) || 30000, report = console.log, findForeignOwner = foreignPortOwner } = {}) {
-  if (!(await portListening(SHIM_PORT))) {
+async function stopShimWithDrain({ quiet = false, timeout = Number(process.env.CODEX_GATEWAY_DRAIN_TIMEOUT_MS) || 30000, report = console.log, resolveOwner = resolvePortOwner } = {}) {
+  const owner = await resolveOwner(SHIM_PORT);
+  const reason = portOwnerRefusal(owner, SHIM_PORT);
+  if (reason) return { ok: false, reason };
+  if (owner.state === 'unowned') {
     removePid('shim');
     return { ok: true, drained: true, running: false };
   }
-  const foreignOwner = findForeignOwner(SHIM_PORT);
-  if (foreignOwner) return { ok: false, reason: foreignPortOwnerReason(foreignOwner, SHIM_PORT) };
   if (!quiet) report(`model-gateway: restarting shim. It stopped accepting new requests and is waiting up to ${Math.ceil(timeout / 1000)}s for in-flight requests to finish.`);
   try {
     const response = await postJson(`http://127.0.0.1:${SHIM_PORT}/drain`, { timeout });
@@ -619,17 +697,18 @@ async function stopShimWithDrain({ quiet = false, timeout = Number(process.env.C
   stopProcess('shim');
   return { ok: true, drained: false, forced: true, reason: 'drain timeout' };
 }
-async function restartWorkerWithDrain({ quiet = false, timeout = Number(process.env.CODEX_GATEWAY_DRAIN_TIMEOUT_MS) || 30000, report = console.log, findForeignOwner = foreignPortOwner } = {}) {
-  if (!(await portListening(PUBLIC_SHIM_PORT))) return { ok: true, running: false };
-  const foreignOwner = findForeignOwner(PUBLIC_SHIM_PORT);
-  if (foreignOwner) return { ok: false, reason: foreignPortOwnerReason(foreignOwner, PUBLIC_SHIM_PORT) };
+async function restartWorkerWithDrain({ quiet = false, timeout = Number(process.env.CODEX_GATEWAY_DRAIN_TIMEOUT_MS) || 30000, report = console.log, resolveOwner = resolvePortOwner } = {}) {
+  const owner = await resolveOwner(PUBLIC_SHIM_PORT);
+  const reason = portOwnerRefusal(owner, PUBLIC_SHIM_PORT);
+  if (reason) return { ok: false, reason };
+  if (owner.state === 'unowned') return { ok: true, running: false };
   if (!quiet) report(`model-gateway: restarting shim without dropping its listener; waiting up to ${Math.ceil(timeout / 1000)}s for in-flight requests.`);
   try {
     const response = await postJson(`http://127.0.0.1:${PUBLIC_SHIM_PORT}/restart`, { script: resolveNewestInstalledCliPath() }, 2000);
     if (response.status === 202) return { ok: true, draining: true };
     if (response.status === 404) {
       if (!quiet) report('model-gateway: upgrading the legacy shim to a supervised listener; this one transition reconnects live sessions.');
-      return stopShimWithDrain({ quiet, timeout, report });
+      return stopShimWithDrain({ quiet, timeout, report, resolveOwner });
     }
     throw new Error(`restart endpoint returned ${response.status}`);
   } catch (error) { return { ok: false, reason: error.message }; }
@@ -688,7 +767,7 @@ function createProxyRecovery({
   processTable = () => processTableAsync({ probeChildren }),
   ownsProxy = async (pid) => {
     const proxyProcess = await inspectProcess(pid);
-    if (!proxyProcess) return proxyProcess === undefined ? undefined : false;
+    if (!proxyProcess?.command) return undefined;
     if (!processRunsThisProxyBinary(proxyProcess, proxyBinary)) return false;
     return isDescendantOfAsync(pid, process.pid, { processTable });
   },
@@ -772,7 +851,12 @@ function createProxyRecovery({
         }
         if (!ownedByProxy) {
           const ownerProcess = await inspectProcess(pid);
-          const installRoot = ownerProcess && gatewayInstallRootFromCommand(ownerProcess.command);
+          if (!ownerProcess?.command) {
+            log(`proxy restart deferred because process inspection could not confirm PID ${pid}; leaving the listener untouched and retrying later`);
+            recordLifecycle('proxy-recovery-finished', { component: 'supervisor', pid: process.pid, outcome: 'owner-unknown' });
+            return { ok: false, state: 'owner-unknown', retryAt: nextRestartAt };
+          }
+          const installRoot = gatewayInstallRootFromCommand(ownerProcess.command);
           halted = true;
           log(`proxy restart refused because PID ${pid} owns :${proxyPort} from a different install root (${installRoot || 'unknown'}), not ${gatewayInstallRoot()}`);
           recordLifecycle('proxy-recovery-finished', { component: 'supervisor', pid: process.pid, outcome: 'foreign-port-owner' });
@@ -845,7 +929,7 @@ function createProxyRecovery({
 
 module.exports = {
   commandIncludesFile, commandResultAsync, createProbeChildRegistry, createProxyRecovery, fetchUrl, foreignPortOwner, foreignPortOwnerReason, gatewayInstallRoot, installBelongsToThisPlugin, isDescendantOfAsync, killPid, killPidAsync, pidFile, pidRecordFile, pluginCacheIdentity, portListening, postJson,
-  processInfoAsync, processIsOwnedByThisInstall, processIsOwnedByThisInstallAsync, processOwningPort: processOwningPortSync, processOwningPortAsync, processTableAsync,
+  processInfoAsync, processIsOwnedByThisInstall, processIsOwnedByThisInstallAsync, processOwningPort: processOwningPortSync, processOwningPortAsync, processOwningPortInProcAsync, processTableAsync, resolvePortOwner, portOwnerRefusal,
   proxyModelsAnswering, readPid, readPidRecord, recordedGatewayPids, reapGatewayOrphans, removePid, restartWorkerWithDrain, shimHealthy, spawnDetached,
   spawnSupervisedProxy, stopAll, stopProcess, stopRunningSupervisor, stopShimWithDrain, waitForPortRelease, waitForShimExit, writePidRecord, writePidRecordAsync,
 };

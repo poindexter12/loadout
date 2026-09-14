@@ -129,6 +129,9 @@ const USAGE = `usage: model-gateway.js <command>
   login [--device] run the ChatGPT OAuth flow (--device for headless device-code)
   start | stop     start/stop the proxy + shim (detached, logs in ${LOGS})
   ensure [--quiet] start whatever isn't running; used by the SessionStart hook
+                   lifecycle changes require confirmed listener ownership;
+                   unknown listeners are untouched: restore process inspection, retry
+                   foreign installs must be managed through their own install
   status           show what's running
   models           show the model list the shim advertises to Claude Code
   catalog [--json] [--refresh] print the sidequest-readable model catalog (${path.join(STATE, 'catalog.json')})
@@ -200,7 +203,7 @@ function readPluginVersion() {
 function mkdirs() { for (const d of [STATE, LOGS, BIN_DIR]) fs.mkdirSync(d, { recursive: true }); }
 
 const {
-  createProbeChildRegistry, createProxyRecovery, fetchUrl, foreignPortOwner, killPidAsync, portListening, postJson, processOwningPort, processOwningPortAsync, recordedGatewayPids, reapGatewayOrphans,
+  createProbeChildRegistry, createProxyRecovery, fetchUrl, foreignPortOwner, killPidAsync, portListening, postJson, processOwningPort, processOwningPortAsync, recordedGatewayPids, reapGatewayOrphans, resolvePortOwner, portOwnerRefusal,
   removePid, restartWorkerWithDrain, shimHealthy, spawnDetached, stopAll, stopProcess, stopRunningSupervisor,
   stopShimWithDrain, waitForShimExit, writePidRecordAsync,
 } = require('./process-supervision.js');
@@ -633,8 +636,11 @@ function reportSiblingSupervisorReplacement(stopped, quiet) {
   if (!quiet && stopped.siblingInstallRoot) log(`model-gateway: replaced older sibling shim version at ${stopped.siblingInstallRoot}.`);
 }
 
-async function startAll({ quiet = false, lifecycleOperation = null } = {}) {
-  if (!fs.existsSync(PROXY_BIN)) return { ok: false, reason: 'proxy binary missing (run setup)' };
+async function startAll({ quiet = false, lifecycleOperation = null, resolveOwner = resolvePortOwner, proxyExists = () => fs.existsSync(PROXY_BIN) } = {}) {
+  const owner = await resolveOwner(PUBLIC_SHIM_PORT);
+  const reason = portOwnerRefusal(owner, PUBLIC_SHIM_PORT);
+  if (reason) return { ok: false, reason };
+  if (!proxyExists()) return { ok: false, reason: 'proxy binary missing (run setup)' };
   let recoveryAttempted = false;
   const finishRecovery = (result) => {
     if (recoveryAttempted && lifecycleOperation) {
@@ -656,11 +662,7 @@ async function startAll({ quiet = false, lifecycleOperation = null } = {}) {
     });
   };
   mkdirs();
-  const foreignOwner = foreignPortOwner(PUBLIC_SHIM_PORT);
-  if (foreignOwner) {
-    return { ok: false, reason: `PID ${foreignOwner.pid} owns :${PUBLIC_SHIM_PORT} from a different install root (${foreignOwner.installRoot || 'unknown'})` };
-  }
-  const portOwner = processOwningPort(PUBLIC_SHIM_PORT);
+  const portOwner = owner.pid;
   const started = [];
   const health = await fetchShimHealth();
   const staleSessionNotice = staleSessionReloadNotice(PLUGIN_VERSION, health);
@@ -2095,8 +2097,8 @@ const commands = {
     if (!result.ok) die(result.reason);
     await statusReport();
   },
-  stop: () => {
-    const result = stopAll();
+  stop: async () => {
+    const result = await stopAll();
     if (!result.ok) {
       console.error(`model-gateway: ${result.reason}.`);
       process.exitCode = 1;
@@ -2205,6 +2207,7 @@ module.exports = {
   sessionStartWiringNotice,
   loginSuccessMessage,
   startupWaitMsFor,
+  startAll,
   waitForStartupReadiness,
   settingsPath,
   COMPAT_HOST,

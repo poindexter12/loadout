@@ -129,7 +129,7 @@ test('restart with drain submits the newest installed CLI path', async (t) => {
   const shimPort = await listen(shim);
   t.after(() => shim.close());
 
-  const script = `require(${JSON.stringify(path.join(path.dirname(olderCliPath), '..', 'lib', 'process-supervision.js'))}).restartWorkerWithDrain({ quiet: true, findForeignOwner: () => null }).then((result) => process.exit(result.ok ? 0 : 1))`;
+  const script = `require(${JSON.stringify(path.join(path.dirname(olderCliPath), '..', 'lib', 'process-supervision.js'))}).restartWorkerWithDrain({ quiet: true, resolveOwner: async () => ({ state: 'same-install', pid: 123 }) }).then((result) => process.exit(result.ok ? 0 : 1))`;
   const child = spawnGatewayProcess(t, process.execPath, ['-e', script], {
     env: { ...process.env, CODEX_GATEWAY_PORT: String(shimPort) },
     stdio: 'ignore',
@@ -156,7 +156,7 @@ test('drain timeout says that the shim was force-stopped', async (t) => {
   const shimPort = await listen(stuckShim);
   t.after(() => stuckShim.close());
 
-  const script = `require(${JSON.stringify(CLI)}).stopShimWithDrain({ timeout: 20, report: console.log, findForeignOwner: () => null }).then((result) => console.log(JSON.stringify(result)))`;
+  const script = `require(${JSON.stringify(CLI)}).stopShimWithDrain({ timeout: 20, report: console.log, resolveOwner: async () => ({ state: 'same-install', pid: 123 }) }).then((result) => console.log(JSON.stringify(result)))`;
   const child = spawnGatewayProcess(t, process.execPath, ['-e', script], {
     env: environment,
     isolatedOverrides: {
@@ -181,6 +181,30 @@ test('drain timeout says that the shim was force-stopped', async (t) => {
   assert.match(output, /drain timed out after 1s; force-stopping it/);
   assert.match(output, /"forced":true/);
 });
+test('confirmed legacy worker supports restart through the drain fallback', async (t) => {
+  const environment = gatewayTestEnvironment(t);
+  // Legacy workers pass unknown endpoints through; simulate the upstream 404
+  // without ever contacting a provider.
+  const upstream = http.createServer((_req, res) => { res.writeHead(404); res.end(); });
+  const upstreamPort = await listen(upstream);
+  t.after(() => upstream.close());
+  const { port } = await startGateway(t, 'serve-worker', environment, {
+    isolatedOverrides: { CODEX_GATEWAY_ANTHROPIC_UPSTREAM: `http://127.0.0.1:${upstreamPort}` },
+  });
+  const script = `require(${JSON.stringify(require.resolve('../lib/process-supervision.js'))}).restartWorkerWithDrain({ quiet: true, timeout: 2000 }).then(result => console.log(JSON.stringify(result)))`;
+  const controller = spawnGatewayProcess(t, process.execPath, ['-e', script], {
+    env: environment,
+    isolatedOverrides: { CODEX_GATEWAY_PORT: String(port), CODEX_GATEWAY_WORKER_PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  controller.stdout.on('data', (chunk) => { output += chunk; });
+  controller.stderr.on('data', (chunk) => { output += chunk; });
+  assert.equal(await waitForChildExit(controller), 0, output);
+  assert.match(output, /"ok":true,"drained":true/);
+  await waitFor(port, 'closed');
+});
+
 test('draining shim finishes an in-flight request before it exits', async (t) => {
   const environment = gatewayTestEnvironment(t);
   const home = environment.HOME;

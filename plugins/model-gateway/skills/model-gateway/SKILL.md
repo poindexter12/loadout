@@ -207,11 +207,19 @@ agree).
   (`doctor` shows auth), then proxy log. OpenAI gates non-Codex clients by request fingerprint;
   when they tighten it, requests die mid-stream until claude-code-proxy ships a fix, so
   suggest re-running `setup` (it fetches the latest release).
-- **Recovery refuses to stop a listener it cannot identify**: the supervisor bounds each ownership
-  probe with `CODEX_GATEWAY_PROBE_TIMEOUT_MS` (2 seconds by default). A timeout means the owner is
-  unknown, so it logs an `owner-unknown` lifecycle outcome, refuses the kill, and retries on its next
-  recovery tick. Its probe child is killed as part of the supervisor's shutdown and cannot keep a test
-  fixture home open. A confirmed foreign owner gets the same refusal and stays running.
+- **Lifecycle refuses an unidentified listener**: startup, stop, supervisor replacement, drain, and
+  worker restart require positive shim listener ownership before cleanup or control HTTP. A bound port
+  with no discoverable PID, missing command line, or failed inspection stays untouched. Retry `ensure`
+  or `stop` after process inspection is available; do not kill an unconfirmed listener or bypass the
+  refusal with a direct `/drain` or `/restart` request. Confirmed older cache siblings may be replaced;
+  a foreign install must be managed through its own install.
+- **Proxy recovery cannot confirm ownership**: three consecutive failed health probes are required
+  before recovering a still-bound proxy. Ownership probes use `CODEX_GATEWAY_PROBE_TIMEOUT_MS`
+  (2 seconds by default). An inspection failure stays retryable: recovery leaves the listener alone,
+  records `owner-unknown` when process inspection is inconclusive, and tries again after backoff.
+  Linux discovery retains the `/proc` fallback when `lsof` is unavailable. Windows discovery keeps
+  probe output attached; shutdown kills and reaps probe children. A confirmed foreign owner is
+  refused and never replaced. Account-specific state and socket paths remain isolated.
 - **`doctor` shows `Not authenticated` right after an upgrade**: bumping the proxy binary (e.g.
   0.1.10 → 0.1.17 via `setup`) can invalidate the credential the old version accepted — the new
   binary reads it as not authenticated and `setup` stops before wiring. Fix: re-run `login`, then

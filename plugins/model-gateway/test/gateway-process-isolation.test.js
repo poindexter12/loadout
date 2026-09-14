@@ -438,7 +438,9 @@ test('sibling ensure retires dead records without deleting replacement worker an
     CODEX_GATEWAY_PORT: String(shimPort),
     CODEX_GATEWAY_WORKER_PORT: '0',
     CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
-    CODEX_GATEWAY_PROBE_TIMEOUT_MS: '100',
+    // Use the production ownership budget: this tests confirmed replacement,
+    // not timeout refusal. A 100ms lsof deadline can expire before finding the
+    // PID on macOS; dedicated ownership tests cover that conservative refusal.
   });
   const olderShim = spawn(process.execPath, [olderCli, 'serve-shim'], { cwd: home, env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
   let ensuring = null;
@@ -472,7 +474,8 @@ test('sibling ensure retires dead records without deleting replacement worker an
     ensuring.once('error', reject);
     ensuring.once('exit', (status) => resolve({ status, stderr: ensureStderr, stdout: ensureStdout }));
   });
-  replacementGuardianPid = await waitForReplacementPidRecord(path.join(state, 'guardian.pid'), retiredGuardianPid);
+  replacementGuardianPid = await waitForReplacementPidRecord(path.join(state, 'guardian.pid'), retiredGuardianPid)
+    .catch((error) => { throw new Error(`${error.message}\nensure stdout: ${ensureStdout}\nensure stderr: ${ensureStderr}`); });
   const replacementWorkerPid = await waitForReplacementPidRecord(path.join(state, 'shim.pid'), retiredWorkerPid);
   const replacementProxyPid = await waitForReplacementPidRecord(path.join(state, 'proxy.pid'), retiredProxyPid);
   await waitForPidRecordDetails(path.join(state, 'shim.pid.json'), replacementWorkerPid);
