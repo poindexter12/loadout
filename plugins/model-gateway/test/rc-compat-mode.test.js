@@ -604,6 +604,72 @@ test('serve-shim accepts requests through ANTHROPIC_UNIX_SOCKET', async (t) => {
   assert.ok(JSON.parse(catalog.body).data.some((model) => model.id === 'claude-gpt-5.6-terra[1m]'));
 });
 
+// SQ-25: a socket file orphaned by an unclean worker death (the concurrent
+// `ensure` SIGTERM race is one source -- see request-worker.js
+// reclaimStaleUnixSocket) must not wedge every future boot behind
+// EADDRINUSE. End-to-end version of the reclaim unit tests in
+// test/unix-socket-reclaim.test.js: pre-seed a genuinely orphaned socket
+// file, then confirm a real serve-shim boot reclaims it and serves through
+// it exactly like the happy-path test above.
+test('serve-shim reclaims a stale ANTHROPIC_UNIX_SOCKET file and serves through it', { skip: process.platform === 'win32' }, async (t) => {
+  const hostsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-shimstale-'));
+  const hostsFile = path.join(hostsDir, 'hosts');
+  fs.writeFileSync(hostsFile, '127.0.0.1 localhost\n');
+  const socketPath = path.join(hostsDir, 'gateway.sock');
+
+  const holder = spawn(process.execPath, [
+    '-e',
+    "const net=require('net');const s=net.createServer();s.listen(process.argv[1],()=>{process.stdout.write('ready\\n');});",
+    socketPath,
+  ], { stdio: ['ignore', 'pipe', 'ignore'] });
+  await once(holder.stdout, 'data');
+  holder.kill('SIGKILL');
+  await once(holder, 'exit');
+  assert.equal(fs.existsSync(socketPath), true, 'fixture must leave a genuinely orphaned socket file behind');
+
+  const shimPort = await freePort();
+  const proxyPort = await freePort();
+  const compatPort = await freePort();
+  spawnShim(t, { shimPort, proxyPort, compatPort, hostsFile, home: hostsDir, socketPath });
+
+  const health = await waitForSocketHealthz(socketPath);
+  assert.equal(health.ok, true);
+});
+
+// SQ-25: when the socket genuinely cannot be bound (here: something other
+// than a socket already sits at the path, so reclaim correctly refuses to
+// touch it) the shim must keep serving on TCP and must say so loudly -- this
+// used to look like routine startup noise, which is exactly why nobody
+// noticed the transport was never actually working.
+test('serve-shim logs a DEGRADED line and keeps serving on TCP when the unix socket cannot be bound', { skip: process.platform === 'win32' }, async (t) => {
+  const hostsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-shimdegraded-'));
+  const hostsFile = path.join(hostsDir, 'hosts');
+  fs.writeFileSync(hostsFile, '127.0.0.1 localhost\n');
+  const socketPath = path.join(hostsDir, 'gateway.sock');
+  fs.writeFileSync(socketPath, 'not a socket -- reclaim must leave this alone and let listen() fail');
+
+  const shimPort = await freePort();
+  const proxyPort = await freePort();
+  const compatPort = await freePort();
+  spawnShim(t, { shimPort, proxyPort, compatPort, hostsFile, home: hostsDir, socketPath });
+
+  const health = await waitForHealthz(shimPort);
+  assert.equal(health.ok, true, 'the shim keeps serving on TCP even though the unix socket never bound');
+
+  const logPath = path.join(hostsDir, '.claude', 'model-gateway', 'logs', 'shim.log');
+  const deadline = Date.now() + 5000;
+  let logText = '';
+  while (Date.now() < deadline) {
+    try { logText = fs.readFileSync(logPath, 'utf8'); } catch { /* not written yet */ }
+    if (logText.includes('DEGRADED')) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.match(logText, /model-gateway: DEGRADED -- could not bind ANTHROPIC_UNIX_SOCKET/);
+  assert.match(logText, /continuing on TCP only/);
+  assert.equal(fs.readFileSync(socketPath, 'utf8'), 'not a socket -- reclaim must leave this alone and let listen() fail',
+    'the untouched non-socket file must be exactly as the fixture left it');
+});
+
 test('serve-shim forwards an unexpected bodyless request without crashing on raw.length', async (t) => {
   const hostsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-bodyless-'));
   const hostsFile = path.join(hostsDir, 'hosts');
