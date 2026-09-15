@@ -65,6 +65,12 @@ const SHIM_FAILURE_PATH = path.join(STATE, 'shim-supervisor-failure.txt');
 const CODEX_UPSTREAM_BLOCK_PATH = path.join(STATE, 'codex-upstream-blocked.json');
 const ENSURE_LOCK_PATH = path.join(STATE, 'ensure.lock');
 const ENSURE_RESULT_PATH = path.join(STATE, 'ensure.lastResult.json');
+// tryClaimEnsureLock's create (openSync 'wx') and its pid write (writeSync) are
+// two separate syscalls, not one atomic op. A concurrent claimant that hits
+// EEXIST in that gap reads an empty/unwritten file, and must not mistake that
+// for an abandoned lock -- give a legitimate in-flight writer this long to
+// finish before an unparseable lock file is treated as reclaimable.
+const ENSURE_LOCK_WRITE_GRACE_MS = 2000;
 const PLUGIN_VERSION = readPluginVersion();
 const PROXY_BIN = path.join(BIN_DIR, WIN ? 'claude-code-proxy.exe' : 'claude-code-proxy');
 const PROXY_SERVING_VERSION_PATH = path.join(STATE, 'proxy-serving-version.txt');
@@ -239,9 +245,25 @@ function tryClaimEnsureLock() {
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
       const holder = readEnsureLockHolder();
-      if (!holder?.pid || !isPidAlive(holder.pid)) {
+      // A named, dead pid is unambiguously stale: reclaim immediately.
+      if (holder?.pid && !isPidAlive(holder.pid)) {
         try { fs.rmSync(ENSURE_LOCK_PATH); } catch {}
         continue;
+      }
+      // An unparseable lock (holder is null: the file exists but is empty or
+      // malformed) is NOT the same evidence. It is also what a legitimate
+      // concurrent claimant's lock file looks like for the instant between its
+      // create and its pid write. Reclaiming it unconditionally lets two
+      // processes both become holder (observed on Windows CI: two `ensure`
+      // OS processes both logged ensure-recovery-started 2ms apart). Only
+      // reclaim once the file is older than a real writer would ever take.
+      if (!holder) {
+        let ageMs = Infinity;
+        try { ageMs = Date.now() - fs.statSync(ENSURE_LOCK_PATH).mtimeMs; } catch { /* file vanished; next attempt's openSync settles it */ }
+        if (ageMs > ENSURE_LOCK_WRITE_GRACE_MS) {
+          try { fs.rmSync(ENSURE_LOCK_PATH); } catch {}
+          continue;
+        }
       }
       return false;
     }

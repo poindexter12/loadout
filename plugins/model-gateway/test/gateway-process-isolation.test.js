@@ -629,6 +629,44 @@ test('ensure reclaims a stale lock left by a pid that is no longer running inste
   );
 });
 
+// SQ-23 follow-up: tryClaimEnsureLock's create (openSync 'wx') and its pid
+// write (writeSync) are two separate syscalls. A concurrent claimant that
+// hits EEXIST in the gap between them reads an empty, unparseable lock file.
+// The original fix treated that identically to "pid confirmed dead" and
+// reclaimed it immediately, so two OS-process `ensure`s could both become
+// holder -- observed on Windows CI as two `ensure-recovery-started` events
+// 2ms apart. An old-but-empty lock file (this test) is genuinely abandoned
+// and must still be reclaimed; a fresh one must not be, which the companion
+// concurrency test above now covers under real racing load.
+test('ensure reclaims an old corrupt (unparseable) lock file instead of treating it as live', async (t) => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-corrupt-ensure-lock-')));
+  installNodeProxy(home);
+  fs.writeFileSync(
+    path.join(home, 'serve'),
+    "require('node:http').createServer((request, response) => request.url === '/v1/models' ? response.end(JSON.stringify({ data: [] })) : response.end('{}')).listen(process.env.PORT, '127.0.0.1'); setInterval(() => {}, 1000);\n",
+  );
+  const state = path.join(home, '.claude', 'model-gateway');
+  fs.mkdirSync(state, { recursive: true });
+  const lockPath = path.join(state, 'ensure.lock');
+  fs.writeFileSync(lockPath, '');
+  const old = new Date(Date.now() - 60000);
+  fs.utimesSync(lockPath, old, old);
+  const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home });
+  let guardianPid = null;
+  t.after(async () => {
+    await runGatewayCli(CLI, 'stop', environment, { cwd: home }).catch(() => {});
+    if (guardianPid) await waitForProcessesToExit([guardianPid], 5000).catch(() => {});
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  const ensured = await runGatewayCli(CLI, 'ensure', environment, { cwd: home, arguments: ['--quiet'] });
+  assert.equal(ensured.status, 0, ensured.stderr);
+  assert.equal(fs.existsSync(lockPath), false, 'the lock is released once this ensure finishes');
+
+  guardianPid = await waitForPidRecord(path.join(state, 'guardian.pid'));
+  assert.equal(processIsRunning(guardianPid), true, 'the reclaiming ensure actually started the gateway');
+});
+
 test('older cache version leaves a newer sibling shim running', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-sibling-downgrade-'));
   const { olderCli, newerCli } = installCachedGatewayCliVersions(home);
