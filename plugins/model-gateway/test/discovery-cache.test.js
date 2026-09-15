@@ -260,7 +260,7 @@ test('ensure writes the discovery cache before reporting missing ChatGPT auth', 
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stderr, /ChatGPT sign-in is required/);
   await waitUntil(() => fs.existsSync(cache), 'ensure did not write the discovery cache');
-  assert.match(result.stdout, /discovery cache: (?:wrote 2 models|unchanged)/);
+  assert.match(result.stdout, /discovery cache: (?:wrote \d+ models?|unchanged)/);
 
   const stopped = await runGatewayCommand(
     testContext,

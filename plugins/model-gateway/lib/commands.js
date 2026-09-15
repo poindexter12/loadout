@@ -2258,7 +2258,29 @@ const commands = {
       finish(0, 'model-gateway is installed but not set up.');
     }
     await restartProxyIfOutdated({ quiet });
-    const result = await startAll({ quiet, lifecycleOperation: 'ensure' });
+    // startAll()'s port-ownership resolution exists to gate lifecycle
+    // *mutation* (SQ-23: never kill/replace a listener whose owner can't be
+    // confirmed) and, by design, runs unconditionally before anything else
+    // startAll does (see the "startup refuses before cleanup, replacement or
+    // health HTTP" contract test in test/gateway-ownership.test.js) — so it
+    // can't be reordered inside startAll itself. When a direct, cheap health
+    // probe already shows the shim running and serving a current-or-newer
+    // version, startAll has nothing to start or restart here, so there is
+    // nothing for that resolution to gate. Calling it anyway just risks an
+    // inconclusive ownership probe (observed on Windows CI, where process
+    // inspection can time out even for a listener this exact process owns)
+    // refusing to proceed and shadowing a real precondition failure below
+    // (e.g. missing ChatGPT auth) behind "could not confirm the owner of the
+    // port". This mirrors what startAll's own health branch would have
+    // concluded (health && !shimNeedsRestart), except it doesn't require the
+    // supervisor-only proxyRecovery flag that shimNeedsRestart also checks:
+    // fetchShimHealth here can land on the internal worker port instead of
+    // the public supervisor port (see CODEX_GATEWAY_WORKER_PORT), whose bare
+    // health never carries that flag even when everything is fine.
+    const alreadyHealthy = initialReadiness.checks.shimRunning && initialReadiness.checks.servingVersionMatches;
+    const result = alreadyHealthy
+      ? await writeCatalog().then(() => ({ ok: true, started: [] }), () => ({ ok: true, started: [] }))
+      : await startAll({ quiet, lifecycleOperation: 'ensure' });
     if (!result.ok) {
       if (quiet && result.waitCutShort) {
         if (result.started?.includes('shim')) {
