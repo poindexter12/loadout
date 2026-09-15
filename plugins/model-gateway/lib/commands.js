@@ -63,6 +63,8 @@ const BIN_DIR = path.join(STATE, 'bin');
 const WIRING_CONFIG_PATH = path.join(STATE, 'wiring.json');
 const SHIM_FAILURE_PATH = path.join(STATE, 'shim-supervisor-failure.txt');
 const CODEX_UPSTREAM_BLOCK_PATH = path.join(STATE, 'codex-upstream-blocked.json');
+const ENSURE_LOCK_PATH = path.join(STATE, 'ensure.lock');
+const ENSURE_RESULT_PATH = path.join(STATE, 'ensure.lastResult.json');
 const PLUGIN_VERSION = readPluginVersion();
 const PROXY_BIN = path.join(BIN_DIR, WIN ? 'claude-code-proxy.exe' : 'claude-code-proxy');
 const PROXY_SERVING_VERSION_PATH = path.join(STATE, 'proxy-serving-version.txt');
@@ -129,6 +131,12 @@ const USAGE = `usage: model-gateway.js <command>
   login [--device] run the ChatGPT OAuth flow (--device for headless device-code)
   start | stop     start/stop the proxy + shim (detached, logs in ${LOGS})
   ensure [--quiet] start whatever isn't running; used by the SessionStart hook
+                   lifecycle changes require confirmed listener ownership;
+                   unknown listeners are untouched: restore process inspection, retry
+                   foreign installs must be managed through their own install
+                   concurrent ensure invocations are serialized by a lockfile; a second,
+                   overlapping ensure waits briefly and reports the first one's outcome
+                   instead of independently deciding recovery is needed
   status           show what's running
   models           show the model list the shim advertises to Claude Code
   catalog [--json] [--refresh] print the sidequest-readable model catalog (${path.join(STATE, 'catalog.json')})
@@ -199,8 +207,68 @@ function readPluginVersion() {
 }
 function mkdirs() { for (const d of [STATE, LOGS, BIN_DIR]) fs.mkdirSync(d, { recursive: true }); }
 
+// Cross-process mutual exclusion for `ensure`. There is no other serialization
+// between independent `ensure` OS processes (e.g. two SessionStart hooks firing
+// close together): without this, two of them can each observe the same dying
+// supervisor, each independently decide recovery is needed, and each spawn a
+// guardian — exactly the SQ-23 incident (concurrent `ensure`s tore down a
+// supervisor that had been healthy for 16 hours). A second concurrent `ensure`
+// waits briefly for the first to finish and reports its actual outcome, or
+// times out and exits cleanly without ever calling startAll() itself.
+function isPidAlive(pid) {
+  if (!pid) return false;
+  try { process.kill(pid, 0); return true; } catch (error) { return error.code !== 'ESRCH'; }
+}
+function readEnsureLockHolder() {
+  try { return JSON.parse(fs.readFileSync(ENSURE_LOCK_PATH, 'utf8')); } catch { return null; }
+}
+function readLastEnsureResult() {
+  try { return JSON.parse(fs.readFileSync(ENSURE_RESULT_PATH, 'utf8')); } catch { return null; }
+}
+// Claims the lock file exclusively. A lock left behind by a process that is no
+// longer alive (a crash that skipped cleanup) is stale and gets reclaimed rather
+// than blocking forever.
+function tryClaimEnsureLock() {
+  mkdirs();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = fs.openSync(ENSURE_LOCK_PATH, 'wx');
+      fs.writeSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+      fs.closeSync(fd);
+      return true;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      const holder = readEnsureLockHolder();
+      if (!holder?.pid || !isPidAlive(holder.pid)) {
+        try { fs.rmSync(ENSURE_LOCK_PATH); } catch {}
+        continue;
+      }
+      return false;
+    }
+  }
+  return false;
+}
+async function acquireEnsureLock({
+  timeoutMs = 20000,
+  pollMs = 200,
+  now = Date.now,
+  pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+} = {}) {
+  if (tryClaimEnsureLock()) return { role: 'holder' };
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    if (!fs.existsSync(ENSURE_LOCK_PATH)) return { role: 'follower', outcome: readLastEnsureResult() };
+    await pause(pollMs);
+  }
+  return { role: 'follower', outcome: null, timedOut: true };
+}
+function releaseEnsureLock(outcome) {
+  try { fs.writeFileSync(ENSURE_RESULT_PATH, JSON.stringify({ ...outcome, at: new Date().toISOString() })); } catch {}
+  try { fs.rmSync(ENSURE_LOCK_PATH); } catch {}
+}
+
 const {
-  createProbeChildRegistry, createProxyRecovery, fetchUrl, foreignPortOwner, killPidAsync, portListening, postJson, processOwningPort, processOwningPortAsync, recordedGatewayPids, reapGatewayOrphans,
+  confirmProbeDown, createProbeChildRegistry, createProxyRecovery, fetchUrl, foreignPortOwner, killPidAsync, portListening, postJson, processOwningPort, processOwningPortAsync, recordedGatewayPids, reapGatewayOrphans, resolvePortOwner, portOwnerRefusal,
   removePid, restartWorkerWithDrain, shimHealthy, spawnDetached, stopAll, stopProcess, stopRunningSupervisor,
   stopShimWithDrain, waitForShimExit, writePidRecordAsync,
 } = require('./process-supervision.js');
@@ -633,8 +701,22 @@ function reportSiblingSupervisorReplacement(stopped, quiet) {
   if (!quiet && stopped.siblingInstallRoot) log(`model-gateway: replaced older sibling shim version at ${stopped.siblingInstallRoot}.`);
 }
 
-async function startAll({ quiet = false, lifecycleOperation = null } = {}) {
-  if (!fs.existsSync(PROXY_BIN)) return { ok: false, reason: 'proxy binary missing (run setup)' };
+async function startAll({
+  quiet = false,
+  lifecycleOperation = null,
+  resolveOwner = resolvePortOwner,
+  proxyExists = () => fs.existsSync(PROXY_BIN),
+  probeShimHealth = fetchShimHealth,
+  shimReady = shimHealthy,
+  proxyAnswers = proxyModelsAnswering,
+  confirmDown = confirmProbeDown,
+  isPortBound = portListening,
+  startupWaitMs = startupWaitMsFor(quiet),
+} = {}) {
+  const owner = await resolveOwner(PUBLIC_SHIM_PORT);
+  const reason = portOwnerRefusal(owner, PUBLIC_SHIM_PORT);
+  if (reason) return { ok: false, reason };
+  if (!proxyExists()) return { ok: false, reason: 'proxy binary missing (run setup)' };
   let recoveryAttempted = false;
   const finishRecovery = (result) => {
     if (recoveryAttempted && lifecycleOperation) {
@@ -646,54 +728,83 @@ async function startAll({ quiet = false, lifecycleOperation = null } = {}) {
     }
     return { ...result, recoveryAttempted };
   };
-  const beginRecovery = () => {
+  const beginRecovery = (why) => {
     if (recoveryAttempted || !lifecycleOperation) return;
     recoveryAttempted = true;
     recordGatewayLifecycle(`${lifecycleOperation}-recovery-started`, {
       component: lifecycleOperation,
       pid: process.pid,
       startedAt: new Date().toISOString(),
+      reason: why,
     });
   };
   mkdirs();
-  const foreignOwner = foreignPortOwner(PUBLIC_SHIM_PORT);
-  if (foreignOwner) {
-    return { ok: false, reason: `PID ${foreignOwner.pid} owns :${PUBLIC_SHIM_PORT} from a different install root (${foreignOwner.installRoot || 'unknown'})` };
-  }
-  const portOwner = processOwningPort(PUBLIC_SHIM_PORT);
+  const portOwner = owner.pid;
   const started = [];
-  const health = await fetchShimHealth();
+  // A bound port means someone is home; a single failed /healthz probe is not proof
+  // they are unhealthy. The SQ-23 incident tore down a supervisor that had been
+  // healthy for 16 hours on exactly one bad probe during a concurrent `ensure` race.
+  // Only decide the supervisor is actually down after PROBE_FAILURE_THRESHOLD
+  // consecutive failures, mirroring the patience createProxyRecovery already applies
+  // to the proxy. A port that isn't bound at all needs no such patience — it is
+  // already unambiguous — so this never adds latency to a normal cold start.
+  const portBound = await isPortBound(PUBLIC_SHIM_PORT);
+  let health = null;
+  let healthProbeAttempts = 0;
+  if (portBound) {
+    const healthProbe = await confirmDown(probeShimHealth, { isUp: (value) => value != null });
+    health = healthProbe.value;
+    healthProbeAttempts = healthProbe.attempts;
+  }
   const staleSessionNotice = staleSessionReloadNotice(PLUGIN_VERSION, health);
   if (staleSessionNotice) noticeForUser(staleSessionNotice, { toStderr: true });
   if (health && shimNeedsRestart(PLUGIN_VERSION, health)) {
-    beginRecovery();
+    beginRecovery(`installed model-gateway ${PLUGIN_VERSION} is newer than the serving shim (${servingShimVersion(health)})`);
     const stopped = await stopRunningSupervisor({ quiet, operation: lifecycleOperation || 'restart' });
     if (!stopped.ok) return finishRecovery(stopped);
     reportSiblingSupervisorReplacement(stopped, quiet);
   } else if (health) {
     reapGatewayOrphans(portOwner);
-  } else if (await portListening(PUBLIC_SHIM_PORT)) {
-    beginRecovery();
+  } else if (portBound) {
+    beginRecovery(`shim /healthz did not answer after ${healthProbeAttempts} consecutive check${healthProbeAttempts === 1 ? '' : 's'} while :${PUBLIC_SHIM_PORT} stayed bound`);
     const stopped = await stopRunningSupervisor({ quiet, operation: lifecycleOperation || 'restart' });
     if (!stopped.ok) return finishRecovery(stopped);
     reportSiblingSupervisorReplacement(stopped, quiet);
   } else {
     reapGatewayOrphans(null);
   }
-  if (!(await shimHealthy())) {
-    beginRecovery();
+  // Same patience for the final "is the shim actually serving" check, but only when
+  // we have not just torn something down ourselves (in which case we already know
+  // it's down; no need to wait) and something is plausibly bound on the shim's own
+  // port (otherwise a cold start with nothing running would pay a needless delay).
+  const shimPortBound = !recoveryAttempted && (await isPortBound(SHIM_PORT));
+  const shimReadyProbe = await confirmDown(shimReady, {
+    isUp: (value) => value === true,
+    threshold: shimPortBound ? undefined : 1,
+  });
+  if (shimReadyProbe.down) {
+    beginRecovery(`shim /healthz did not answer after ${shimReadyProbe.attempts} consecutive check${shimReadyProbe.attempts === 1 ? '' : 's'}`);
     try { fs.rmSync(SHIM_FAILURE_PATH); } catch {}
     spawnDetached('guardian', process.execPath, [resolveNewestInstalledCliPath(), 'serve-shim'], {});
     started.push('shim');
   }
-  const startupWaitMs = startupWaitMsFor(quiet);
-  const readiness = await waitForStartupReadiness({ timeout: startupWaitMs });
+  const readiness = await waitForStartupReadiness({ timeout: startupWaitMs, proxyAnswers, shimReady });
   if (readiness.ok) {
     if (!quiet && started.length) log(`started: ${started.join(', ')}`);
     await writeCatalog().catch(() => { /* advisory only; sidequest just won't see fresh models */ });
     return finishRecovery({ ok: true, started });
   }
   if (!readiness.timedOut) return finishRecovery({ ok: false, reason: readiness.reason });
+  // Our own wait window can expire while the gateway is, in fact, serving — exactly
+  // what happened in the SQ-23 incident, where both racing `ensure` processes
+  // reported "failed" while curl against :18765 returned HTTP 200 in under 1ms. One
+  // last authoritative check of live server state before this reports a false
+  // failure: a racer whose own wait timed out but which can observe the gateway now
+  // serving must report ready, not failed.
+  if ((await proxyAnswers()) && (await shimReady())) {
+    await writeCatalog().catch(() => { /* advisory only; sidequest just won't see fresh models */ });
+    return finishRecovery({ ok: true, started, recoveredAfterOwnTimeout: true });
+  }
   return finishRecovery({
     ok: false,
     reason: `not healthy after ${Math.ceil(startupWaitMs / 1000)}s (check logs in ${LOGS})`,
@@ -2095,8 +2206,8 @@ const commands = {
     if (!result.ok) die(result.reason);
     await statusReport();
   },
-  stop: () => {
-    const result = stopAll();
+  stop: async () => {
+    const result = await stopAll();
     if (!result.ok) {
       console.error(`model-gateway: ${result.reason}.`);
       process.exitCode = 1;
@@ -2104,14 +2215,35 @@ const commands = {
     }
     log('stopped');
   },
-  ensure: async () => {
+  ensure: async ({ lockTimeoutMs } = {}) => {
     const quiet = flag('--quiet');
     if (quiet) bufferedHookLines = [];
     // The hook path exits 0 even on a refusal state, because Claude Code reads a hook's stdout JSON only on a
     // zero exit: exiting nonzero there trades the one user-visible line for a bare "hook failed" badge, which is
     // this ticket's whole complaint (SQ-1901). A direct `ensure` still fails loudly for the updater and for a
     // person running it by hand.
-    const finish = (code) => { flushHookOutput(); process.exit(quiet ? 0 : code); };
+    let lastOutcome = { ok: false, message: 'ensure did not complete' };
+    const finish = (code, message = null) => {
+      lastOutcome = { ok: code === 0, message };
+      flushHookOutput();
+      process.exit(quiet ? 0 : code);
+    };
+    // Cross-process serialization: only one `ensure` may decide the gateway needs
+    // recovery at a time (see acquireEnsureLock above; SQ-23). A second, concurrent
+    // `ensure` neither races the winner nor duplicates its work: it waits briefly and
+    // reports the winner's actual outcome, or times out and exits cleanly having
+    // never called startAll() itself.
+    const lock = await acquireEnsureLock({ timeoutMs: lockTimeoutMs ?? (startupWaitMsFor(quiet) + 8000) });
+    if (lock.role === 'follower') {
+      if (lock.outcome) {
+        if (lock.outcome.message) noticeForUser(lock.outcome.message, lock.outcome.ok ? {} : { toStderr: true });
+        finish(lock.outcome.ok ? 0 : 1, lock.outcome.message);
+      }
+      noticeForUser(`model-gateway: another ensure is already recovering the gateway${lock.timedOut ? ' and has not finished yet' : ''}; not duplicating the attempt.`, { toStderr: true });
+      finish(0, null);
+      return;
+    }
+    process.once('exit', () => releaseEnsureLock(lastOutcome));
     cleanLegacyEnvSettings();
     cleanLegacyGatewayModelCache();
     sweepOldProxyBinaries();
@@ -2120,13 +2252,35 @@ const commands = {
     if (!initialReadiness.checks.proxyBinary) {
       if (wired) {
         noticeForUser(initialReadiness.message, { toStderr: true });
-        finish(1);
+        finish(1, initialReadiness.message);
       }
       noticeForUser('model-gateway is installed but not set up. Offer to run its setup (one command; needs a ChatGPT browser sign-in) to put the user\'s ChatGPT/Codex models in the /model picker. See the model-gateway skill.');
-      finish(0);
+      finish(0, 'model-gateway is installed but not set up.');
     }
     await restartProxyIfOutdated({ quiet });
-    const result = await startAll({ quiet, lifecycleOperation: 'ensure' });
+    // startAll()'s port-ownership resolution exists to gate lifecycle
+    // *mutation* (SQ-23: never kill/replace a listener whose owner can't be
+    // confirmed) and, by design, runs unconditionally before anything else
+    // startAll does (see the "startup refuses before cleanup, replacement or
+    // health HTTP" contract test in test/gateway-ownership.test.js) — so it
+    // can't be reordered inside startAll itself. When a direct, cheap health
+    // probe already shows the shim running and serving a current-or-newer
+    // version, startAll has nothing to start or restart here, so there is
+    // nothing for that resolution to gate. Calling it anyway just risks an
+    // inconclusive ownership probe (observed on Windows CI, where process
+    // inspection can time out even for a listener this exact process owns)
+    // refusing to proceed and shadowing a real precondition failure below
+    // (e.g. missing ChatGPT auth) behind "could not confirm the owner of the
+    // port". This mirrors what startAll's own health branch would have
+    // concluded (health && !shimNeedsRestart), except it doesn't require the
+    // supervisor-only proxyRecovery flag that shimNeedsRestart also checks:
+    // fetchShimHealth here can land on the internal worker port instead of
+    // the public supervisor port (see CODEX_GATEWAY_WORKER_PORT), whose bare
+    // health never carries that flag even when everything is fine.
+    const alreadyHealthy = initialReadiness.checks.shimRunning && initialReadiness.checks.servingVersionMatches;
+    const result = alreadyHealthy
+      ? await writeCatalog().then(() => ({ ok: true, started: [] }), () => ({ ok: true, started: [] }))
+      : await startAll({ quiet, lifecycleOperation: 'ensure' });
     if (!result.ok) {
       if (quiet && result.waitCutShort) {
         if (result.started?.includes('shim')) {
@@ -2137,15 +2291,15 @@ const commands = {
           });
         }
         noticeForUser('model-gateway is still starting; retry the Codex model in a few seconds', { toStderr: true });
-        finish(0);
+        finish(0, 'model-gateway is still starting; retry the Codex model in a few seconds');
       }
       noticeForUser(`model-gateway could not start: ${result.reason}. Run \`node "${CLI_PATH}" doctor\` to see which part is down.`, { toStderr: true });
-      finish(1);
+      finish(1, `model-gateway could not start: ${result.reason}`);
     }
     const readiness = await getCodexReadiness();
     if (wired && !readiness.ready) {
       noticeForUser(readiness.message, { toStderr: true });
-      finish(1);
+      finish(1, readiness.message);
     }
     warnIfProxyOutdated();
     const effectiveWiring = effectiveBaseUrl();
@@ -2167,6 +2321,7 @@ const commands = {
       await syncGatewayWiring();
     }
     if (!quiet) await statusReport({ readiness });
+    lastOutcome = { ok: true, message: 'ready' };
     flushHookOutput();
   },
   status: async () => { process.exitCode = (await statusReport()).ok ? 0 : 1; },
@@ -2205,6 +2360,7 @@ module.exports = {
   sessionStartWiringNotice,
   loginSuccessMessage,
   startupWaitMsFor,
+  startAll,
   waitForStartupReadiness,
   settingsPath,
   COMPAT_HOST,

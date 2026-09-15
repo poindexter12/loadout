@@ -438,7 +438,9 @@ test('sibling ensure retires dead records without deleting replacement worker an
     CODEX_GATEWAY_PORT: String(shimPort),
     CODEX_GATEWAY_WORKER_PORT: '0',
     CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
-    CODEX_GATEWAY_PROBE_TIMEOUT_MS: '100',
+    // Use the production ownership budget: this tests confirmed replacement,
+    // not timeout refusal. A 100ms lsof deadline can expire before finding the
+    // PID on macOS; dedicated ownership tests cover that conservative refusal.
   });
   const olderShim = spawn(process.execPath, [olderCli, 'serve-shim'], { cwd: home, env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
   let ensuring = null;
@@ -472,7 +474,8 @@ test('sibling ensure retires dead records without deleting replacement worker an
     ensuring.once('error', reject);
     ensuring.once('exit', (status) => resolve({ status, stderr: ensureStderr, stdout: ensureStdout }));
   });
-  replacementGuardianPid = await waitForReplacementPidRecord(path.join(state, 'guardian.pid'), retiredGuardianPid);
+  replacementGuardianPid = await waitForReplacementPidRecord(path.join(state, 'guardian.pid'), retiredGuardianPid)
+    .catch((error) => { throw new Error(`${error.message}\nensure stdout: ${ensureStdout}\nensure stderr: ${ensureStderr}`); });
   const replacementWorkerPid = await waitForReplacementPidRecord(path.join(state, 'shim.pid'), retiredWorkerPid);
   const replacementProxyPid = await waitForReplacementPidRecord(path.join(state, 'proxy.pid'), retiredProxyPid);
   await waitForPidRecordDetails(path.join(state, 'shim.pid.json'), replacementWorkerPid);
@@ -509,6 +512,121 @@ test('sibling ensure retires dead records without deleting replacement worker an
   const stopped = await runGatewayCli(newerCli, 'stop', environment, { cwd: home });
   assert.equal(stopped.status, 0, stopped.stderr);
   await waitForProcessesToExit([replacementGuardianPid, replacementWorkerPid, replacementProxyPid], 5000);
+});
+
+// SQ-23: on 2026-09-14 two concurrent `ensure` OS processes both observed the same
+// dying supervisor, both independently decided recovery was needed, and both
+// mutated lifecycle state — one of them tore down a supervisor that had been
+// healthy for 16 hours. There was no lock, mutex, or pidfile serializing `ensure`
+// invocations. This spins up two REAL `ensure` processes (not two calls on one
+// in-process object — see gateway-drain.test.js's "concurrent supervisor checks
+// share one proxy recovery attempt", which only covers the latter) against a
+// shared, cold-start home and asserts that only one of them ever decides recovery
+// is needed: exactly one `ensure-recovery-started` lifecycle record, one guardian.
+test('two concurrent ensure OS processes never both decide the gateway needs recovery', async (t) => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-concurrent-ensure-')));
+  installNodeProxy(home);
+  fs.writeFileSync(
+    path.join(home, 'serve'),
+    "require('node:http').createServer((request, response) => request.url === '/v1/models' ? response.end(JSON.stringify({ data: [] })) : response.end('{}')).listen(process.env.PORT, '127.0.0.1'); setInterval(() => {}, 1000);\n",
+  );
+  const shimReservation = net.createServer();
+  const shimPort = await listen(shimReservation);
+  await new Promise((resolve) => shimReservation.close(resolve));
+  const proxyReservation = net.createServer();
+  const proxyPort = await listen(proxyReservation);
+  await new Promise((resolve) => proxyReservation.close(resolve));
+  const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home }, {
+    CODEX_GATEWAY_PORT: String(shimPort),
+    CODEX_GATEWAY_WORKER_PORT: '0',
+    CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
+  });
+  let guardianPid = null;
+  t.after(async () => {
+    await runGatewayCli(CLI, 'stop', environment, { cwd: home }).catch(() => {});
+    if (guardianPid) await waitForProcessesToExit([guardianPid], 5000).catch(() => {});
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  const runEnsure = () => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [CLI, 'ensure', '--quiet'], { cwd: home, env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('exit', (status) => resolve({ status, stdout, stderr }));
+  });
+
+  const [first, second] = await Promise.all([runEnsure(), runEnsure()]);
+  assert.equal(first.status, 0, `first ensure: ${first.stderr}`);
+  assert.equal(second.status, 0, `second ensure: ${second.stderr}`);
+
+  const state = path.join(home, '.claude', 'model-gateway');
+  guardianPid = await waitForPidRecord(path.join(state, 'guardian.pid'));
+  assert.equal(processIsRunning(guardianPid), true, 'exactly one guardian ended up running');
+
+  const lifecycle = fs.readFileSync(path.join(state, 'logs', 'lifecycle.jsonl'), 'utf8')
+    .split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  const recoveryStarted = lifecycle.filter((record) => record.event === 'ensure-recovery-started');
+  assert.equal(
+    recoveryStarted.length,
+    1,
+    `expected exactly one ensure to independently decide recovery was needed, saw: ${JSON.stringify(recoveryStarted)}`,
+  );
+});
+
+// SQ-23: the ensure lock must never deadlock on a lock file left behind by a process
+// that crashed (or was killed) before it could release it — that is exactly the shape
+// of failure the lock exists to survive, since the incident it fixes involved processes
+// dying mid-recovery. A lock recorded against a pid that is provably not running must be
+// reclaimed immediately, not held onto until the follower's wait timeout expires.
+test('ensure reclaims a stale lock left by a pid that is no longer running instead of deadlocking', async (t) => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-stale-ensure-lock-')));
+  installNodeProxy(home);
+  fs.writeFileSync(
+    path.join(home, 'serve'),
+    "require('node:http').createServer((request, response) => request.url === '/v1/models' ? response.end(JSON.stringify({ data: [] })) : response.end('{}')).listen(process.env.PORT, '127.0.0.1'); setInterval(() => {}, 1000);\n",
+  );
+  const state = path.join(home, '.claude', 'model-gateway');
+  fs.mkdirSync(state, { recursive: true });
+  const deadPid = 987654318;
+  assert.equal(processIsRunning(deadPid), false, 'fixture pid is unavailable');
+  fs.writeFileSync(path.join(state, 'ensure.lock'), JSON.stringify({ pid: deadPid, startedAt: new Date(0).toISOString() }));
+  const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home });
+  let guardianPid = null;
+  t.after(async () => {
+    await runGatewayCli(CLI, 'stop', environment, { cwd: home }).catch(() => {});
+    if (guardianPid) await waitForProcessesToExit([guardianPid], 5000).catch(() => {});
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  const startedAt = Date.now();
+  const ensured = await runGatewayCli(CLI, 'ensure', environment, { cwd: home, arguments: ['--quiet'] });
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(ensured.status, 0, ensured.stderr);
+  // The default follower fallback is QUIET_STARTUP_WAIT_MS (12s) + 8s = 20s: a lock that
+  // is NOT reclaimed forces this lone `ensure` down the follower path, which polls for the
+  // (nonexistent, since no other process holds it) holder to finish and only gives up at
+  // that 20s deadline -- never starting the gateway. A real cold start's own bounded
+  // startup wait already costs several seconds, so this asserts comfortably under the 20s
+  // follower deadline rather than near-zero, while still being incompatible with having
+  // gone through that fallback.
+  assert.ok(elapsedMs < 18000, `ensure took ${elapsedMs}ms; a reclaimed stale lock should finish well short of the 20s follower fallback`);
+
+  assert.equal(fs.existsSync(path.join(state, 'ensure.lock')), false, 'the lock is released once this ensure finishes');
+  const holder = JSON.parse(fs.readFileSync(path.join(state, 'ensure.lastResult.json'), 'utf8'));
+  assert.equal(holder.ok, true, `expected the reclaiming ensure to record a successful outcome: ${JSON.stringify(holder)}`);
+
+  guardianPid = await waitForPidRecord(path.join(state, 'guardian.pid'));
+  assert.equal(processIsRunning(guardianPid), true, 'the reclaiming ensure actually started the gateway');
+
+  const lifecycle = fs.readFileSync(path.join(state, 'logs', 'lifecycle.jsonl'), 'utf8')
+    .split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  assert.ok(
+    lifecycle.some((record) => record.event === 'ensure-recovery-started'),
+    'the reclaiming ensure must have actually driven its own recovery, not merely reported a follower outcome',
+  );
 });
 
 test('older cache version leaves a newer sibling shim running', async (t) => {
