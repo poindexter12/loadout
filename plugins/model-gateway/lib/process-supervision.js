@@ -971,7 +971,7 @@ function createProxyRecovery({
 }
 
 module.exports = {
-  commandIncludesFile, commandResultAsync, confirmProbeDown, createProbeChildRegistry, createProxyRecovery, fetchUrl, foreignPortOwner, foreignPortOwnerReason, gatewayInstallRoot, installBelongsToThisPlugin, isDescendantOfAsync, killPid, killPidAsync, pidFile, pidRecordFile, pluginCacheIdentity, portListening, postJson,
+  commandIncludesFile, commandResultAsync, confirmProbeDown, createProbeChildRegistry, createProxyRecovery, fetchUrl, foreignPortOwner, foreignPortOwnerReason, gatewayInstallRoot, gatewayInstallRootFromCommand, installBelongsToThisPlugin, isDescendantOfAsync, killPid, killPidAsync, pidFile, pidRecordFile, pluginCacheIdentity, portListening, postJson,
   processInfoAsync, processIsOwnedByThisInstall, processIsOwnedByThisInstallAsync, processOwningPort: processOwningPortSync, processOwningPortAsync, processOwningPortInProcAsync, processTableAsync, resolvePortOwner, portOwnerRefusal, PROBE_FAILURE_THRESHOLD,
   proxyModelsAnswering, readPid, readPidRecord, recordedGatewayPids, reapGatewayOrphans, removePid, restartWorkerWithDrain, shimHealthy, spawnDetached,
   spawnSupervisedProxy, stopAll, stopProcess, stopRunningSupervisor, stopShimWithDrain, waitForPortRelease, waitForShimExit, writePidRecord, writePidRecordAsync,

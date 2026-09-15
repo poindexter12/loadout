@@ -2,85 +2,66 @@
 
 // TEMPORARY DIAGNOSTIC — remove before merge.
 //
-// SQ-23: on the Windows CI leg, resolvePortOwner returns { state: 'unknown' }
-// with a PID already in hand, which means netstat found the listener but
-// processInfoAsync came back falsy. Three causes are indistinguishable from
-// the refusal string: the powershell.exe probe timed out inside the shared
-// 2000ms budget, it exited non-zero, or its CIM JSON did not parse. This test
-// measures each one directly so a single CI run settles it.
+// SQ-23 round 2. Round 1 disproved the timeout theory: powershell.exe returns
+// in ~545ms with exit 0 and a readable CommandLine, and resolvePortOwner still
+// answers 'unknown' in ~1s even with a 15s budget. So inspection succeeds and
+// the loop is taking the `if (!installRoot) continue` branch instead.
+//
+// This run starts a REAL shim through the same harness the failing tests use
+// and dumps the listener's raw command line alongside every derived value, so
+// the exact point where install-root resolution breaks on Windows is visible.
 
-const net = require('node:net');
 const test = require('node:test');
-const { spawn } = require('node:child_process');
+const path = require('node:path');
 const {
-  processInfoAsync, processOwningPortAsync, resolvePortOwner, portListening,
+  processInfoAsync, processOwningPortAsync, resolvePortOwner,
 } = require('../lib/process-supervision.js');
+const { gatewayTestEnvironment, startGateway } = require('./support.js');
 
 const WINDOWS = process.platform === 'win32';
+const CLI = path.join(__dirname, '..', 'bin', 'model-gateway.js');
 
-function timed(label, promise) {
-  const started = Date.now();
-  return promise.then(
-    (value) => ({ label, ms: Date.now() - started, value }),
-    (error) => ({ label, ms: Date.now() - started, error: String(error) }),
-  );
-}
+test('DIAGNOSTIC: real shim listener ownership resolution', { skip: !WINDOWS && 'windows only' }, async (t) => {
+  const environment = gatewayTestEnvironment(t);
+  const shim = await startGateway(t, 'serve-shim', environment);
 
-function rawPowershell(pid) {
-  return new Promise((resolve) => {
-    const started = Date.now();
-    const child = spawn('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
-      `Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" | Select-Object ProcessId,ParentProcessId,CommandLine,CreationDate | ConvertTo-Json -Compress`,
-    ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.once('error', (error) => resolve({ ms: Date.now() - started, spawnError: String(error) }));
-    child.once('close', (status) => resolve({
-      ms: Date.now() - started, status, stdout: stdout.trim(), stderr: stderr.trim(),
-    }));
-  });
-}
+  const report = { shimPort: shim.port, childPid: shim.child.pid };
 
-test('DIAGNOSTIC: Windows port-ownership probe timings', { skip: !WINDOWS && 'windows only' }, async (t) => {
-  const server = net.createServer(() => {});
-  const port = await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const ownerPid = await processOwningPortAsync(shim.port);
+  report.netstatPid = ownerPid;
+  report.netstatPidMatchesChild = ownerPid === shim.child.pid;
 
-  const report = {};
-
-  // 1. Raw powershell cold start against our own PID — the dominant cost.
-  const cold = await rawPowershell(process.pid);
-  report.powershellCold = {
-    ms: cold.ms,
-    status: cold.status,
-    spawnError: cold.spawnError,
-    stderr: cold.stderr?.slice(0, 300),
-    stdoutLength: cold.stdout?.length,
-    parsed: (() => { try { return Boolean(JSON.parse(cold.stdout || 'null')?.ProcessId); } catch { return 'PARSE_FAILED'; } })(),
-    commandLinePresent: (() => { try { return Boolean(JSON.parse(cold.stdout || 'null')?.CommandLine); } catch { return 'PARSE_FAILED'; } })(),
-    commandLineSample: (() => { try { return String(JSON.parse(cold.stdout || 'null')?.CommandLine || '').slice(0, 200); } catch { return null; } })(),
+  const info = await processInfoAsync(ownerPid);
+  report.processInfo = info === undefined ? 'UNDEFINED' : info === null ? 'NULL' : {
+    pid: info.pid,
+    parentPid: info.parentPid,
+    startedAt: info.startedAt,
+    command: info.command,
+    commandLength: String(info.command || '').length,
   };
 
-  // 2. Second run — warm, to separate cold-start cost from query cost.
-  const warm = await rawPowershell(process.pid);
-  report.powershellWarm = { ms: warm.ms, status: warm.status };
+  // The exact expression resolvePortOwner runs, reproduced verbatim so a null
+  // here pins the failure to install-root parsing rather than inspection.
+  const { gatewayInstallRootFromCommand } = (() => {
+    const supervision = require('../lib/process-supervision.js');
+    return { gatewayInstallRootFromCommand: supervision.gatewayInstallRootFromCommand || null };
+  })();
+  report.gatewayInstallRootFromCommandExported = Boolean(gatewayInstallRootFromCommand);
+  if (gatewayInstallRootFromCommand && info) {
+    report.derivedInstallRoot = gatewayInstallRootFromCommand(info.command);
+  }
 
-  // 3. The pieces resolvePortOwner actually calls, each under the real default budget.
-  report.portListening = await timed('portListening', Promise.resolve(portListening(port, 2000)));
-  report.processOwningPortAsync = await timed('netstat', processOwningPortAsync(port));
-  const ownerPid = report.processOwningPortAsync.value;
-  report.processInfoAsync = await timed('processInfoAsync', processInfoAsync(ownerPid || process.pid));
-  report.processInfoAsyncValue = report.processInfoAsync.value === undefined
-    ? 'UNDEFINED (timed out)'
-    : report.processInfoAsync.value === null ? 'NULL (non-zero exit or parse fail)' : 'OK';
-  delete report.processInfoAsync.value;
+  report.expectedCliPath = CLI;
+  report.expectedInstallRoot = path.resolve(path.join(CLI, '..', '..'));
 
-  // 4. The whole thing, default budget, then with a generous budget.
-  report.resolveDefault = await timed('resolve@default', resolvePortOwner(port));
-  report.resolveGenerous = await timed('resolve@15s', resolvePortOwner(port, { timeout: 15000 }));
+  // Also try the parent, in case the listening socket is held by a child the
+  // shim spawned rather than the shim process the harness returned.
+  if (info?.parentPid) {
+    const parent = await processInfoAsync(info.parentPid);
+    report.parentCommand = parent?.command ?? String(parent);
+  }
+
+  report.resolved = await resolvePortOwner(shim.port, { timeout: 15000 });
 
   console.log('SQ23_DIAGNOSTIC_JSON_BEGIN');
   console.log(JSON.stringify(report, null, 2));
