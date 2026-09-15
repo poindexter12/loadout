@@ -134,6 +134,9 @@ const USAGE = `usage: model-gateway.js <command>
                    lifecycle changes require confirmed listener ownership;
                    unknown listeners are untouched: restore process inspection, retry
                    foreign installs must be managed through their own install
+                   concurrent ensure invocations are serialized by a lockfile; a second,
+                   overlapping ensure waits briefly and reports the first one's outcome
+                   instead of independently deciding recovery is needed
   status           show what's running
   models           show the model list the shim advertises to Claude Code
   catalog [--json] [--refresh] print the sidequest-readable model catalog (${path.join(STATE, 'catalog.json')})

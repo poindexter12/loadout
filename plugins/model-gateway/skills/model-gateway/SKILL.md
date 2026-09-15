@@ -213,6 +213,16 @@ agree).
   or `stop` after process inspection is available; do not kill an unconfirmed listener or bypass the
   refusal with a direct `/drain` or `/restart` request. Confirmed older cache siblings may be replaced;
   a foreign install must be managed through its own install.
+- **Two `ensure` invocations overlap** (e.g. two SessionStart hooks firing close together): `ensure`
+  claims an exclusive `ensure.lock` in the gateway state dir before deciding recovery is needed. A
+  second, concurrent `ensure` waits briefly for the first to finish and reports its actual outcome
+  rather than independently observing the same symptom and starting its own recovery; a lock left by
+  a process that is no longer alive is reclaimed, not blocked on forever. `startAll` (the routine
+  behind `ensure`/`setup`/SessionStart) also requires three consecutive failed shim-health probes
+  before it will stop a bound-but-unresponsive supervisor, and a racer whose own startup wait times
+  out still reports ready if a final authoritative check finds the gateway actually serving. Together
+  these close the 2026-09-14 incident where two concurrent `ensure`s each tore down, on one bad probe,
+  a supervisor that had been healthy for 16 hours.
 - **Proxy recovery cannot confirm ownership**: three consecutive failed health probes are required
   before recovering a still-bound proxy. Ownership probes use `CODEX_GATEWAY_PROBE_TIMEOUT_MS`
   (2 seconds by default). An inspection failure stays retryable: recovery leaves the listener alone,
