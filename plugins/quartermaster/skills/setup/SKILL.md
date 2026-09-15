@@ -125,8 +125,13 @@ One visible plan, then per-item approval. Draw from three sources, in this order
   from recurring correction themes, using
   [references/rule-templates.md](references/rule-templates.md) as reference material to derive
   from, never copy (byte-identical output means it was copied; rewrite or drop it); the
-  self-improvement rule from [references/self-improvement.md](references/self-improvement.md) on
-  every workspace.
+  self-improvement rule from [references/self-improvement.md](references/self-improvement.md) for
+  approved setups. Derive guidance that traces actual behavior and reuses project code, native
+  platform features, the standard library, and installed dependencies before adding tools. Keep
+  project-required tests and security, trust-boundary, data-loss, and accessibility safeguards.
+  Focused checks supplement required gates; honor an assigned integration owner's testing split,
+  with full required verification for solo work. Do not seed automatic cleanup or size quotas.
+  Preserve existing rule files; a template update is not approval to migrate or overwrite them.
 
 Default plugin installs to project scope so the config travels with the repo. Show the full
 install and write list (every file path, including any `~/.claude/settings.json` change) and get
@@ -168,8 +173,10 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/quartermaster.js" decisions add --project "${CLA
 Close with what they got, a short next-actions list using only what was installed and verified,
 a reminder to commit `.claude/`, and a pointer to
 https://poindexter12.github.io/loadout/getting-started/ naming the page for each plugin
-just installed. `/quartermaster:resupply` picks it up from here: once real sessions exist, it asks
-what would make the user's current work easier and whether this setup is earning its place.
+just installed. Offer `/quartermaster:resupply` once real sessions exist. Do not run it or mine
+transcripts for a resupply round without current user approval or explicit standing permission for
+these rounds. Round approval does not authorize unrelated edits; recommendations require per-item
+approval unless explicit standing permission covers that exact class of change.
 
 ## Guidelines
 

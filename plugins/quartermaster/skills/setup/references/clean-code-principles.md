@@ -4,6 +4,14 @@ Working principles distilled from five practitioners. Apply them when writing, r
 refactoring code. They are guidance, not dogma : break one when you can articulate why, the way Sandi
 Metz lets you break a rule if you can talk your pair into it.
 
+Project conventions and required verification take precedence over this digest. Trace the existing
+behavior before editing. Prefer project code, native platform features, the standard library, and
+installed dependencies to another tool. Limit changes to what the request needs, preserving security,
+trust-boundary validation, data-loss protections, and accessibility safeguards.
+
+Use focused tests while iterating, without skipping project-required tests or release gates. Follow
+an assigned integration owner's verification split; solo work retains all required verification.
+
 House convention first: **no inline comments unless they capture a real hidden constraint** (a *why*
 the code itself cannot express). Lean on naming and structure, not narration.
 
@@ -20,14 +28,14 @@ the code itself cannot express). Lean on naming and structure, not narration.
   function has one reason to exist.
 - **Comments are a last resort.** A comment is an apology for code that failed to explain itself.
   Delete comments that restate the code; keep only the ones that record a real constraint or *why*.
-- **Boy Scout Rule.** Leave every file a little cleaner than you found it.
+- **Keep cleanup scoped.** Fix what the requested change needs; propose unrelated cleanup separately.
 
 ## Martin Fowler : *Refactoring*
 
 - **Write for the next human.** "Any fool can write code that a computer can understand. Good
   programmers write code that humans can understand."
-- **Refactor first, then change.** "When you have to add a feature to a program and the code is not
-  structured conveniently, first refactor the program to make it easy to add the feature, then add it."
+- **Refactor when needed.** If the requested behavior cannot be changed safely in the current
+  structure, identify the obstacle and make a small, behavior-preserving change first.
 - **Name the smell, then fix it in small steps.** Identify the code smell (duplication, long function,
   feature envy, primitive obsession...) and remove it with small, behavior-preserving refactorings :
   ideally with tests green between each step.
@@ -46,8 +54,8 @@ the code itself cannot express). Lean on naming and structure, not narration.
 
 - **Prefer duplication over the wrong abstraction.** "Duplication is far cheaper than the wrong
   abstraction." Wait until the pattern is obvious before extracting it.
-- **Keep units small.** Short classes, short methods, few parameters. When a method grows, extract a
-  well-named private method : private methods are great documentation.
+- **Keep responsibilities clear.** Extract when it separates distinct work or clarifies intent,
+  not to satisfy a line-count or parameter-count target.
 - **Depend on abstractions, not concretions.** Talk to objects through roles/messages and inject
   collaborators, so behavior is swappable and testable.
 

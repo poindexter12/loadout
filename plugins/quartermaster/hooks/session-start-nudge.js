@@ -18,10 +18,9 @@ const { markNudged, readProjectState, statusFor } = require('../lib/state.js');
 
 const FIRST_RUN_MIN_TRANSCRIPTS = 5;
 
-// The in-the-moment half of the loop: recognizing mid-session that the thing being done for the
-// third time should become a skill, a map entry, a rule, or a measurement. The setup skill seeds a
-// stronger per-prompt live rule for this; the charter covers every project that never ran setup.
-const CAPABILITY_CHARTER = 'quartermaster: while you work, watch for capability gaps worth capturing in the moment. A multi-step task you have now done by hand more than once should become a skill; knowledge you re-derived belongs in the codebase map or CLAUDE.md; a convention you had to be told becomes a rule; a claim nobody can check deserves a committed measurement. When you notice one, say so and offer to capture it right then. If an existing skill misfires, under-triggers, or needs manual correction, offer to improve it right then. If nothing was missing, stay silent. At a natural pause after substantial work, proactively ask whether the user wants a focused optimization round for their development system, setup, tooling, or workflow. Run the quartermaster resupply skill after they say yes, or automatically when they have explicitly given standing permission for these rounds. It proposes each change separately and applies nothing without approval unless the user has also explicitly pre-approved that exact class of change.';
+// Setup seeds a project-specific live rule; Live Rules deduplicates it by path/hash within a
+// session. This fallback covers projects without that file and grants no permission to make changes.
+const CAPABILITY_CHARTER = 'quartermaster: notice repeated manual work, missing checks, re-derived knowledge, and unclear conventions during the requested work. Check project code, native platform features, the standard library, and installed dependencies, plugins, and skills before proposing another capability. Reuse what works; a missing check need not become a new measurement skill. If an existing skill misfires, under-triggers, or needs manual correction, offer to improve it. If nothing was missing, stay silent. At a useful pause, offer a focused optimization round for the development system, setup, tooling, or workflow. Before running resupply or mining transcripts, require current user approval or explicit standing permission for these rounds. Round approval does not authorize unrelated edits. Show each exact change and get per-item approval unless explicit standing permission covers that exact class of change.';
 
 function readStdin() {
   try {

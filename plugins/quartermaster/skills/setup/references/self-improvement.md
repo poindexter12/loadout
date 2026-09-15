@@ -1,94 +1,64 @@
 # The self-improvement loop
 
-Every workspace gets a baked-in self-improvement loop. It's what makes the setup a **starting point
-that keeps sharpening itself** instead of a static scaffold that goes stale. The mechanism is
-deliberately simple: a global live rule (re-injected every prompt) plus the on-demand `resupply` skill
-for a deeper pass. No hook, no background process, it rides the live-rules mechanism that's already
-installed.
-
-The rule is written around one question: **what would have made this easier?** Fixing what went
-wrong returns the workspace to the speed the user already expected; adding a capability it never had
-moves that baseline. The highest-value improvements almost never announce themselves as errors, so a
-rule that asked about errors would miss them.
+Use a global live rule to notice useful improvements during the requested work, not to start
+unrequested work. Offer `/quartermaster:resupply` for a deeper review when the evidence warrants it.
+An offer needs no round approval; running the round, including transcript mining, does.
 
 ## Install this atomic rule
 
-Ship it on every workspace as `.claude/live-rules/rules/self-improvement.md`, global scope,
-`priority: 40`. Include its path, SHA-256 hash, and frontmatter metadata in
-`.claude/live-rules/manifest.json` as described in `rule-templates.md`:
+For an approved new setup, derive a project-specific rule at
+`.claude/live-rules/rules/self-improvement.md`, global scope, `priority: 40`. Include its path,
+SHA-256 hash, and frontmatter metadata in `.claude/live-rules/manifest.json` as described in
+`rule-templates.md`. Preserve existing rules; do not refresh them from this template without approval.
 
 ```markdown
 ---
-description: Self-improvement: build the capability that makes the next goal cheaper
+description: Self-improvement within the approved scope
 priority: 40
 ---
-When you finish a chunk of work, ask what was missing that you needed, and build that. Look past
-whether anything went wrong: the gaps that cost the most raise no errors at all.
-- **A claim you couldn't check** (is it correct? fast enough? complete?) is the most expensive gap
-  of all: with no way to measure it, every fix underneath is a guess and the same argument reopens
-  a week later. Build the measurement first, as a skill with its scripts committed in the repo, so
-  the number can be re-run instead of re-argued.
-- **A multi-step task you did by hand** becomes a skill (build it with skill-creator).
-- **A skill that misfired, under-triggered, or needed manual correction** should be improved with
-  skill-creator, including its trigger description. Prefer that over building a parallel skill.
-- **Something you re-derived or re-explored** becomes a codebase map doc or a CLAUDE.md line.
-- **A convention you had to be told** becomes a tightly-scoped live rule.
-- **A tool that would have done this for you**: check what's already installed, then propose one.
-Look at what exists before building; a lot of what feels missing is installed under a name you
-didn't think of. Improve an existing skill, rule, or instrument before building a parallel one from
-the same evidence. Keep it to one improvement, as its own step and commit. If existing skills,
-rules, and instruments hold up, say so explicitly. Small repeated improvements beat batching a
-rewrite. For a deeper periodic pass, run `resupply`.
+- Notice repeated manual work, missing checks, re-derived knowledge, and unclear conventions while
+  doing the requested work. These are leads to discuss, not permission to build or edit anything.
+- Check project code, native platform features, the standard library, and installed dependencies,
+  plugins, and skills before proposing another capability. Reuse what works; improve an existing
+  capability when evidence shows a gap. A missing check need not become a new measurement skill.
+- Keep improvements within the approved scope. Show the proposed change and get per-item approval
+  unless explicit standing permission covers that exact class of change. Leave unrelated cleanup alone.
+- At a useful pause, offer `/quartermaster:resupply`. Before running the round or mining transcripts,
+  require current user approval or explicit standing permission for these rounds. Round approval
+  does not authorize unrelated edits; recommendations still need their own approval as above.
+- If existing capabilities suffice, say so when reviewing them. Do not invent an improvement quota.
 ```
 
-## The fallback when this rule is absent
+## Injection and fallback
 
-Quartermaster's own SessionStart hook injects a condensed version of this charter once per session
-in any project that does not have this rule file at
-`.claude/live-rules/rules/self-improvement.md`. Seeding the rule supersedes the hook line: the
-hook checks for that exact path and stays silent when it exists, and the rule is stronger because
-live-rules re-injects it on every prompt instead of once at session start.
+Live Rules tracks each rule's path and content hash per session. SessionStart re-grounds applicable
+rules; later prompts and edits inject newly matching or changed rules. Unchanged rules do not repeat
+on every prompt or edit when the session ledger is available. Without a session id or usable ledger,
+repeated grounding is possible.
 
-## Why a rule and not a hook
+Quartermaster's SessionStart hook supplies a condensed charter only when the exact
+`.claude/live-rules/rules/self-improvement.md` path is absent. Its presence suppresses that fallback;
+the hook does not inspect whether the seeded rule is enabled. Both forms offer improvements without
+authorizing them. Seeding content adds no new background process or hook.
 
-- A **hook** (like a `Stop` hook) fires deterministically but can't judge whether a turn was worth
-  reflecting on: it either nags on everything or needs brittle path-matching to guess. A read-only
-  Q&A turn shouldn't trigger a pass; a hairy debugging session should.
-- A **live rule** leaves that judgment to Claude, where it belongs, and stays in front of the model
-  on every prompt so it doesn't get forgotten mid-session. It also costs nothing to disable
-  (`enabled: false`) or tune, like any other rule.
-- Keeping it a rule also keeps the quartermaster setup skill **hook-free and orchestrator-pure**: it
-  installs content, not machinery.
+## Choose the smallest useful response
 
-## What "improving the workspace" actually means
+| Evidence from the work | Check before proposing a change |
+| --- | --- |
+| A claim cannot be verified | Existing tests, validation commands, benchmarks, or native tooling; name their limits |
+| A repeated manual workflow | Project scripts and installed plugins or skills; improve the existing workflow if possible |
+| Knowledge keeps being re-derived | The relevant codebase-map entry or `CLAUDE.md` section |
+| A convention is repeatedly clarified | Existing project rules and the narrowest applicable scope |
 
-Map what was missing to the cheapest durable fix. The rows are in value order, which is roughly the
-inverse of how loudly each one complains:
+A new instrument is an option only when existing checks cannot answer the actual question. Explain
+that gap and propose a reproducible check with its limitations. Do not turn a single inconvenience
+into a permanent tool by default. Required project verification remains required whether or not a
+resupply round is approved.
 
-| What was missing | The fix that makes it stick |
-|------------------|-----------------------------|
-| A way to tell whether a quality goal is met | A **measurement built as a skill**, scripts committed |
-| A capability, for work done by hand | A **plugin** if one exists, else a **skill** (skill-creator) |
-| Project knowledge, re-derived again | The **codebase map** doc for that area, or **CLAUDE.md** |
-| A convention nobody wrote down | A tightly-scoped **live rule** |
-| Coverage in the setup itself, for this stack | Extend the quartermaster setup skill's reference catalog |
+## The deeper round
 
-Two rows deserve the extra note:
-
-**The measurement row is first because it is the one nothing else can find.** Building an instrument
-produces no errors, no denials, and no corrections, and it happens exactly once, so anything that
-watches for repeated pain will miss it every time. Meanwhile a goal phrased as a standard ("make it
-reliable", "make sure it's correct") cannot be closed without one: the work under it stays a matter
-of opinion, and the same ground gets re-argued in later sessions because nothing ever settled it.
-
-**The last row is the loop eating its own tail:** when the workspace setup didn't cover this stack
-well, the improvement is to teach the catalog, so the next project of that kind starts better.
-
-## The `resupply` skill (deeper, on-demand)
-
-The rule handles the lightweight, in-the-moment case. The `resupply` skill is the periodic deep pass:
-run it (or say "what would make this easier" / "what are we missing") and it reads recent sessions
-for what the user was working toward, taken from each session's own title, its opening ask, and any
-explicit `/goal`, then ranks what's missing against that and proposes improvements across skills,
-plugins, the map, `CLAUDE.md`, and rules, applying the ones the user approves. Point users at it in
-the Phase 5 wrap-up.
+Point users to `/quartermaster:resupply` in the setup handover. An explicit invocation requests a
+round; a seed, hook nudge, or natural pause only suggests offering one. After current or explicit
+standing round approval, resupply mines a bounded aggregate, reads the user's goals, checks past
+decisions, and proposes evidenced changes. The round is not blanket permission to install plugins,
+edit rules, or change settings. Follow the skill's per-item approval and recording steps.

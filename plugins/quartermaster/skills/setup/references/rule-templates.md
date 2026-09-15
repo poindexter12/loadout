@@ -38,7 +38,10 @@ has this shape:
 ```
 
 Write the complete directory through a temporary sibling, validate every hash against the files, then
-rename it into `.claude/live-rules/`. The manifest's `path` values are relative to that directory.
+rename it into `.claude/live-rules/` only when that destination does not exist. For an existing
+workspace, preserve its rule files and manifest; propose specific additions or edits for approval
+instead of replacing the directory. Updating this catalog does not refresh installed rules.
+The manifest's `path` values are relative to that directory.
 
 ---
 
@@ -82,7 +85,8 @@ priority: 90
 Wear one hat at a time; small reversible steps, re-check between moves. Separate a behavior change
 (pin with a test) from a refactor (behavior-preserving) : never fold tidy-up into a behavior change.
 Beck's order: 1) passes tests, 2) reveals intention, 3) no duplication, 4) fewest elements (YAGNI).
-Ties break toward clarity. Leave each file cleaner than you found it : as its own step.
+Ties break toward clarity. Refactor only when the requested change needs it; leave unrelated cleanup
+alone unless separately approved.
 ```
 
 ### Surgical, simple, honest (Karpathy directive)
@@ -94,8 +98,11 @@ priority: 90
 ---
 - Think before coding: state assumptions, surface ambiguity, push back on overcomplication. A wrong
   guess costs more than a question : ask instead of silently picking a reading.
-- Simplicity first: the minimum code that solves it. No speculative abstractions, no "flexibility"
-  nobody asked for, no error handling for impossible states.
+- Trace the current behavior through its callers, configuration, and tests before choosing a fix.
+- Reuse project code first, then native platform features, the standard library, and installed
+  dependencies. Add a tool or abstraction only for a demonstrated gap in those options.
+- Make the smallest change supported by that evidence, without speculative flexibility. Preserve
+  security checks, trust-boundary validation, data-loss protections, and accessibility safeguards.
 - Surgical: every changed line traces to the request. Don't "improve" adjacent code or refactor what
   isn't broken; match the existing style. Remove only the dead code your change created.
 - Define "done" and verify it before calling a change finished.
@@ -108,9 +115,11 @@ priority: 90
 description: Verify behavior deterministically
 priority: 85
 ---
-- Prove changes by exercising them : a script that asserts, a test, a real run whose output you show :
-  not by eyeballing that it "looks right". Round-trip harnesses, diffs, exact-equality checks, counts.
-- A change isn't "done" until a deterministic check passes and its output is shown.
+- Start with an existing test or command that exercises the changed behavior. Add a focused check
+  when coverage is missing; report the command, result, and anything it does not establish.
+- Focused checks do not replace project-required tests or release gates. If an integration owner
+  is assigned, follow the agreed split of verification and report remaining gates to that owner.
+  When working solo, complete all required verification before declaring the work done.
 ```
 
 ### House code conventions (naming over comments)
@@ -121,7 +130,8 @@ description: House code conventions
 priority: 80
 ---
 - No inline comments unless they capture a real hidden constraint (a *why* the code can't express).
-  Lean on naming and structure, not narration. Delete commented-out code.
+  Lean on naming and structure, not narration. Remove commented-out code only when the requested
+  change makes it obsolete; propose other cleanup separately.
 - Replace magic numbers with named constants. Match the surrounding code's idiom, naming, and
   comment density.
 ```
@@ -200,7 +210,7 @@ priority: 50
 ---
 - One clear responsibility per function/class, named for its role (not its data).
 - Tell, don't ask; talk to friends, not strangers (Demeter). Guard clauses over deep nesting.
-- Metz targets, justify any break: methods ~5 lines, classes ~100, ≤4 params.
+- Split functions and classes when responsibilities diverge, not to meet a line or parameter quota.
 - Isolate external deps (the network, the clock, RNG, heavy libs) behind small seams so core logic
   stays pure and testable. Validate at boundaries; prefer immutable value objects.
 - Public API is a contract (Bloch): start private, widen only when needed. Log via a real logger,
@@ -351,7 +361,7 @@ globs: ["**/*.md"]
 priority: 50
 ---
 - Wikilinks and relative links resolve to an existing note or intended destination. Match the project's canonical link spelling and use aliases only when the project supports them.
-- When renaming or moving a note, update inbound links or leave the project's supported redirect or alias. Fix dead links when found.
+- When renaming or moving a note, update inbound links or leave the project's supported redirect or alias. Fix links broken by the requested change; propose unrelated dead-link repairs separately.
 - Give new durable notes an intentional inbound link from the relevant index, map, or neighbor. Mark genuinely standalone notes as intentional or place them where the project's orphan policy says they belong.
 ```
 
