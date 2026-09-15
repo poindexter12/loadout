@@ -12,6 +12,10 @@ Most of what this repo ships is read by agents, not by people. An orchestrator o
 
 When shipping (orchestrator publish flow), the integration checklist includes: "does this change what an agent is told, or what a human reads? → agent-facing strings updated in this change, prose docs updated or docs ticket filed."
 
+## Upstream tracking
+
+Use the project-local `/upstream-check` skill (`.claude/skills/upstream-check/SKILL.md`) and `.upstream/ledger.md` for upstream comparisons. Review the intent and local need, not just patch differences; an independent solution can satisfy the same requirement. Record adoption evidence in the ledger when implementing a tracked change, but mark it integrated/adapted only once verified on fork main. Tracking is optional and may be paused or retired as the fork diverges; preserve the ledger and honor its tracking mode.
+
 ## Release guidance
 
 Conditional release and manifest rules live in `.claude/live-rules/`. They are injected for matching manifest edits and release-related prompts.
