@@ -576,6 +576,59 @@ test('two concurrent ensure OS processes never both decide the gateway needs rec
   );
 });
 
+// SQ-23: the ensure lock must never deadlock on a lock file left behind by a process
+// that crashed (or was killed) before it could release it — that is exactly the shape
+// of failure the lock exists to survive, since the incident it fixes involved processes
+// dying mid-recovery. A lock recorded against a pid that is provably not running must be
+// reclaimed immediately, not held onto until the follower's wait timeout expires.
+test('ensure reclaims a stale lock left by a pid that is no longer running instead of deadlocking', async (t) => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-stale-ensure-lock-')));
+  installNodeProxy(home);
+  fs.writeFileSync(
+    path.join(home, 'serve'),
+    "require('node:http').createServer((request, response) => request.url === '/v1/models' ? response.end(JSON.stringify({ data: [] })) : response.end('{}')).listen(process.env.PORT, '127.0.0.1'); setInterval(() => {}, 1000);\n",
+  );
+  const state = path.join(home, '.claude', 'model-gateway');
+  fs.mkdirSync(state, { recursive: true });
+  const deadPid = 987654318;
+  assert.equal(processIsRunning(deadPid), false, 'fixture pid is unavailable');
+  fs.writeFileSync(path.join(state, 'ensure.lock'), JSON.stringify({ pid: deadPid, startedAt: new Date(0).toISOString() }));
+  const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home });
+  let guardianPid = null;
+  t.after(async () => {
+    await runGatewayCli(CLI, 'stop', environment, { cwd: home }).catch(() => {});
+    if (guardianPid) await waitForProcessesToExit([guardianPid], 5000).catch(() => {});
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  const startedAt = Date.now();
+  const ensured = await runGatewayCli(CLI, 'ensure', environment, { cwd: home, arguments: ['--quiet'] });
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(ensured.status, 0, ensured.stderr);
+  // The default follower fallback is QUIET_STARTUP_WAIT_MS (12s) + 8s = 20s: a lock that
+  // is NOT reclaimed forces this lone `ensure` down the follower path, which polls for the
+  // (nonexistent, since no other process holds it) holder to finish and only gives up at
+  // that 20s deadline -- never starting the gateway. A real cold start's own bounded
+  // startup wait already costs several seconds, so this asserts comfortably under the 20s
+  // follower deadline rather than near-zero, while still being incompatible with having
+  // gone through that fallback.
+  assert.ok(elapsedMs < 18000, `ensure took ${elapsedMs}ms; a reclaimed stale lock should finish well short of the 20s follower fallback`);
+
+  assert.equal(fs.existsSync(path.join(state, 'ensure.lock')), false, 'the lock is released once this ensure finishes');
+  const holder = JSON.parse(fs.readFileSync(path.join(state, 'ensure.lastResult.json'), 'utf8'));
+  assert.equal(holder.ok, true, `expected the reclaiming ensure to record a successful outcome: ${JSON.stringify(holder)}`);
+
+  guardianPid = await waitForPidRecord(path.join(state, 'guardian.pid'));
+  assert.equal(processIsRunning(guardianPid), true, 'the reclaiming ensure actually started the gateway');
+
+  const lifecycle = fs.readFileSync(path.join(state, 'logs', 'lifecycle.jsonl'), 'utf8')
+    .split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  assert.ok(
+    lifecycle.some((record) => record.event === 'ensure-recovery-started'),
+    'the reclaiming ensure must have actually driven its own recovery, not merely reported a follower outcome',
+  );
+});
+
 test('older cache version leaves a newer sibling shim running', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-sibling-downgrade-'));
   const { olderCli, newerCli } = installCachedGatewayCliVersions(home);
