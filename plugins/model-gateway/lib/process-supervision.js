@@ -206,8 +206,16 @@ function processOwningPortInProc(port) {
     for (const entry of fs.readdirSync('/proc')) {
       if (!/^\d+$/.test(entry)) continue;
       try {
-        for (const descriptor of fs.readdirSync(path.join('/proc', entry, 'fd'))) {
-          const target = fs.readlinkSync(path.join('/proc', entry, 'fd', descriptor));
+        // /proc is always POSIX-shaped, even for a process running on a
+        // win32 build of Node under a Linux-behavior simulation (see the
+        // WIN-override technique in test/gateway-ownership.test.js). This
+        // function only ever runs for real when process.platform === 'linux'
+        // (checked in the async twin below and by listeningSocketInodesInProc
+        // above), where path.join already produces '/'; path.posix.join keeps
+        // that true under the simulation too, instead of emitting backslashes
+        // that never match a '/proc/.../fd/N' layout.
+        for (const descriptor of fs.readdirSync(path.posix.join('/proc', entry, 'fd'))) {
+          const target = fs.readlinkSync(path.posix.join('/proc', entry, 'fd', descriptor));
           if (inodes.has(target.match(/^socket:\[(\d+)\]$/)?.[1])) return Number(entry);
         }
       } catch {}
@@ -423,9 +431,14 @@ async function processOwningPortInProcAsync(port, { timeout = probeTimeoutMs(), 
       if (now() >= deadline) return undefined;
       if (!/^\d+$/.test(entry)) continue;
       try {
-        for (const descriptor of await fsImpl.readdir(path.join('/proc', entry, 'fd'))) {
+        // See the sync twin above: /proc is always POSIX-shaped, so use
+        // path.posix.join even when Node's own path module is win32-flavored
+        // (real Linux hosts, and the WIN-override test simulation, both stay
+        // correct; only a bare path.join broke under that simulation on a
+        // real Windows host, where it emits backslashes /proc never has).
+        for (const descriptor of await fsImpl.readdir(path.posix.join('/proc', entry, 'fd'))) {
           if (now() >= deadline) return undefined;
-          const target = await fsImpl.readlink(path.join('/proc', entry, 'fd', descriptor));
+          const target = await fsImpl.readlink(path.posix.join('/proc', entry, 'fd', descriptor));
           if (inodes.has(target.match(/^socket:\[(\d+)\]$/)?.[1])) return Number(entry);
         }
       } catch {}
