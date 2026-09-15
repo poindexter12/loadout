@@ -49,6 +49,10 @@ When the gateway disappears or restarts, ask Claude to run `doctor`. It names `$
 
 Running Model Gateway's own suite uses a separate test home and never touches the installed gateway. Codex sessions dropping while tests ran was a supervisor cleanup bug, fixed in this version. Cleanup uses this home's recorded PIDs and targeted ownership checks only: the live command must still identify this install, and the recorded command or start time must match. A stale record is deleted without stopping its reused PID; `doctor` reports `stale pid file guardian: PID <pid> is now <command>`.
 
+If a request fails with `502 model-gateway: the local gateway proxy is temporarily unreachable`, that names a brief connection drop (`ECONNREFUSED`/`ECONNRESET`/`EPIPE`) to the shim, most often mid-restart; recovery is automatic and the request is retried without any action needed. A 502 that instead says the failure "does not look like a transient restart" is not self-healing — run `model-gateway status`, then `doctor` if it persists.
+
+A `429` on a `gpt-*` model is rewritten to say the codex backend, not Anthropic, is rate limiting the account, and that it is not your Claude usage limit. All `gpt-*` picker models route to the same codex backend, but throttling has been observed to hit one model at a time rather than the whole account, so switching to a different `gpt-*` model is worth trying. The reliable escape is a different backend — a `claude-*` model, or `grok-4.5` — neither of which touches codex. Otherwise wait for the codex limit to clear.
+
 If something breaks, describe the symptom:
 
 > My gateway models disappeared from `/model`. Diagnose and fix it.
