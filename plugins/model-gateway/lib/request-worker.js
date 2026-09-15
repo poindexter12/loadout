@@ -291,7 +291,77 @@ function sseErrorFrame(type, message) {
   return `event: error\ndata: ${JSON.stringify(event)}\n\n`;
 }
 
-function upstreamErrorMessage(body, statusCode) {
+// SQ-22: a bare codex 429 passed through opaquely renders in Claude Code as a
+// self-contradictory Anthropic-usage-limit message (the observed case named
+// "claude-gpt-6-astra" as if it were an Anthropic model over an Anthropic
+// limit), so the gateway names the real source here.
+//
+// On remedies the message deliberately stops short of certainty. All 20 gpt-*
+// picker ids do share one codex backend (see catalog.js / `model-gateway
+// doctor`), but that topology does NOT establish a shared rate pool, and the
+// observed data cuts the other way: on 2026-09-14 gpt-6-astra took 420 429s
+// across 2423 requests while sibling gpt-5.6-luna served 140 requests on the
+// same backend with zero. Throttling looked per-model, not per-account. One
+// day of one account is too thin to promise that, so the text offers a sibling
+// gpt-* as worth trying and a backend change as the reliable escape.
+function codexRateLimitMessage(upstreamBody, headers) {
+  let upstreamDetail = '';
+  try {
+    const parsed = JSON.parse(upstreamBody.toString());
+    const detail = parsed?.error?.message || parsed?.message;
+    if (typeof detail === 'string' && detail) upstreamDetail = ` Upstream said: "${detail}".`;
+  } catch { /* not JSON */ }
+  const retryAfter = headers?.['retry-after'];
+  const retryNote = retryAfter
+    ? ` Upstream sent Retry-After: ${retryAfter}s.`
+    : ' Upstream sent no Retry-After hint.';
+  return 'model-gateway: the codex backend is rate limiting this account '
+    + '(HTTP 429 from OpenAI/Codex — this is the upstream provider\'s limit, not an Anthropic usage limit; '
+    + 'your Claude subscription is unaffected).'
+    + retryNote + upstreamDetail
+    + ' All 20 gpt-* picker models route to this same codex backend, but observed throttling has been per-model '
+    + 'rather than account-wide, so a sibling gpt-* model is worth trying and may well work. The reliable escape '
+    + 'is a different backend: a claude-* model (Anthropic) or grok-4.5 (Grok) do not touch codex at all. '
+    + 'Otherwise wait for the codex rate limit to clear and retry this model.';
+}
+
+function codexRateLimitBody(upstreamBody, headers) {
+  return Buffer.from(JSON.stringify({
+    type: 'error',
+    error: { type: 'rate_limit_error', message: codexRateLimitMessage(upstreamBody, headers) },
+  }));
+}
+
+// SQ-21: a bare Node socket error reaching the client is indistinguishable
+// between "the local proxy is mid-restart and this recovers itself" and "the
+// proxy is dead, go fix it." Transient codes get wording that says wait;
+// everything else gets a concrete next step. This file has no visibility
+// into the caller's own retry budget (that lives in Claude Code's client and
+// in claude-code-proxy, both out of scope here), so we do not fabricate an
+// attempt number — only classify and point at the right command.
+const TRANSIENT_UPSTREAM_CONNECT_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE']);
+
+function upstreamConnectErrorMessage(e, url) {
+  const code = e && e.code;
+  const isLocal = !!url && ['127.0.0.1', 'localhost', '::1'].includes(url.hostname);
+  // Only a 127.0.0.1/localhost target is a component this plugin supervises
+  // and can point a user at `model-gateway status`/`doctor` for. An external
+  // origin (Anthropic passthrough, antigravity) is named by its origin
+  // instead — calling it "the local gateway proxy" would be wrong.
+  const component = isLocal ? 'the local gateway proxy' : `the upstream at ${url.origin}`;
+  if (code && TRANSIENT_UPSTREAM_CONNECT_CODES.has(code)) {
+    return `model-gateway: ${component} is temporarily unreachable (${code}). `
+      + 'This usually happens for a few seconds while the supervisor restarts it; recovery is automatic and '
+      + 'this request will be retried. If it does not recover within a minute, run `model-gateway status` '
+      + '(or `model-gateway doctor` for a full diagnosis).';
+  }
+  return `model-gateway: ${component} failed${code ? ` (${code})` : ''}: ${e && e.message}. `
+    + 'This does not look like a transient restart. Run `model-gateway status` to check its health, '
+    + 'or `model-gateway doctor` for a full diagnosis.';
+}
+
+function upstreamErrorMessage(body, statusCode, headers) {
+  if (statusCode === 429) return codexRateLimitMessage(body, headers || {});
   try {
     const parsed = JSON.parse(body.toString());
     const detail = parsed?.error?.message || parsed?.message;
@@ -1382,7 +1452,7 @@ function runWorker() {
           // The status line is gone but the sentry's learned ceiling is not.
           if (normalizeContextErrors && CODEX_SENTRY_ENABLED && upRes.statusCode === 413) noteGenuineOverflow(sessionId, contextModel);
           if (normalizeContextErrors) noteCodexUpstreamRejection(upRes.statusCode, upRes.headers, Buffer.concat(chunks));
-          clientRes.write(sseErrorFrame('api_error', upstreamErrorMessage(Buffer.concat(chunks), upRes.statusCode)));
+          clientRes.write(sseErrorFrame('api_error', upstreamErrorMessage(Buffer.concat(chunks), upRes.statusCode, upRes.headers)));
           clientRes.end();
         };
         upRes.on('data', (chunk) => {
@@ -1456,6 +1526,28 @@ function runWorker() {
           resHeaders['content-length'] = normalized.length;
           clientRes.writeHead(413, resHeaders);
           clientRes.end(normalized);
+        });
+        return;
+      }
+      // SQ-22: a codex 429 must never fall through to the generic buffer
+      // branch below, which would pass the opaque upstream body straight to
+      // the client. Rewrite it here, before that branch's `>= 400` catch-all
+      // can see it.
+      if (normalizeContextErrors && upRes.statusCode === 429) {
+        const chunks = [];
+        upRes.on('data', (chunk) => {
+          usageCapture?.noteResponseBytes(chunk.length);
+          chunks.push(chunk);
+        });
+        upRes.on('error', () => clientRes.destroy());
+        upRes.on('aborted', () => clientRes.destroy());
+        upRes.on('end', () => {
+          const upstreamBody = Buffer.concat(chunks);
+          noteCodexUpstreamRejection(upRes.statusCode, upRes.headers, upstreamBody);
+          const rewritten = codexRateLimitBody(upstreamBody, upRes.headers);
+          resHeaders['content-length'] = rewritten.length;
+          clientRes.writeHead(429, resHeaders);
+          clientRes.end(rewritten);
         });
         return;
       }
@@ -1653,7 +1745,7 @@ function runWorker() {
       clientRes.writeHead(502, { 'content-type': 'application/json' });
       clientRes.end(JSON.stringify({
         type: 'error',
-        error: { type: 'api_error', message: `model-gateway shim: upstream ${url.origin} failed: ${e.message}` },
+        error: { type: 'api_error', message: upstreamConnectErrorMessage(e, url) },
       }));
     });
     if (body != null) upReq.end(body);
@@ -2117,4 +2209,5 @@ function runWorker() {
 module.exports = {
   createHostsBypassResolver, effectiveCodexSentryPolicy, gatewayModel, runWorker,
   probeUnixSocketLive, reclaimStaleUnixSocket,
+  codexRateLimitBody, codexRateLimitMessage, upstreamConnectErrorMessage,
 };
