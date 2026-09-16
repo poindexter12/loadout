@@ -1,8 +1,9 @@
 'use strict';
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+
+const { claudeDir } = require('./paths.js');
 
 const AGENT_TEAMS_ENV = 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS';
 const AUTO_COMPACT_WINDOW_MIN = 100_000;
@@ -14,8 +15,8 @@ function projectSettingsPath(projectDir) {
   return path.join(path.resolve(projectDir), '.claude', 'settings.local.json');
 }
 
-function userSettingsPath() {
-  return path.join(os.homedir(), '.claude', 'settings.json');
+function userSettingsPath(env = process.env) {
+  return path.join(claudeDir(env), 'settings.json');
 }
 
 function readSettings(settingsPath) {

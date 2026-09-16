@@ -173,3 +173,34 @@ test('rejects unsupported Sidequest compaction policies', (t) => {
     /pin, veto, off/,
   );
 });
+
+// SQ-27: on multi-account machines CLAUDE_CONFIG_DIR names the real account
+// tree while ~/.claude may resolve to a different account. Global settings
+// reads and writes must follow CLAUDE_CONFIG_DIR or they land in (and report
+// success against) the wrong account's settings.json.
+test('userSettingsPath follows CLAUDE_CONFIG_DIR instead of ~/.claude', () => {
+  const { userSettingsPath } = require('../lib/project-settings.js');
+  const configDir = path.join(os.tmpdir(), 'loadout-config-dir-fixture');
+  assert.equal(
+    userSettingsPath({ CLAUDE_CONFIG_DIR: configDir }),
+    path.join(configDir, 'settings.json'),
+  );
+  assert.equal(
+    userSettingsPath({}),
+    path.join(os.homedir(), '.claude', 'settings.json'),
+  );
+});
+
+test('compactionWindowFinding reads the global settings from CLAUDE_CONFIG_DIR', (t) => {
+  const { projectDir } = temporaryProject(t);
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-config-dir-'));
+  t.after(() => fs.rmSync(configDir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(configDir, 'settings.json'), JSON.stringify({ autoCompactWindow: 325000 }));
+
+  const { userSettingsPath } = require('../lib/project-settings.js');
+  const finding = compactionWindowFinding(projectDir, {
+    globalSettingsPath: userSettingsPath({ CLAUDE_CONFIG_DIR: configDir }),
+  });
+  assert.match(finding, /autoCompactWindow" is 325000/);
+  assert.ok(finding.includes(configDir), 'finding should cite the CLAUDE_CONFIG_DIR settings path');
+});
