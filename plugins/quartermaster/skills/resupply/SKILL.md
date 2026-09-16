@@ -1,10 +1,12 @@
 ---
 name: resupply
 description: >-
-  Work out what a workspace is short of and get it: a measurement nobody can run yet, work being
-  done by hand that a plugin or skill should own, knowledge that keeps being re-derived, and the
-  setup pushing back. Reads recent sessions for what the user was actually working toward, then
-  proposes one item at a time for approval. Use whenever the user asks what would make this easier
+  Work out what a workspace is short of and close the gap with the least new machinery: reuse or
+  improve a capability that is already installed before proposing anything new, then look for work
+  being done by hand that a plugin or skill should own, knowledge that keeps being re-derived, an
+  evidenced measurement gap no existing check covers, and the setup pushing back. Reads recent
+  sessions for what the user was actually working toward, then proposes one item at a time for
+  approval. Use whenever the user asks what would make this easier
   or faster, what they are missing, why something keeps being hard, or what could have gone better;
   when they want to improve their Claude Code setup, tooling, or workflow; whenever the
   quartermaster nudge fires at SessionStart or a Stop-time offer blocks a real pause, after proactively asking and receiving the user's approval or when the
