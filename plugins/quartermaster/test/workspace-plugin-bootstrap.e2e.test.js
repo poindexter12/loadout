@@ -85,7 +85,12 @@ function readJson(file) {
 }
 
 function withFixture(callback) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-bootstrap-e2e-'));
+  // realpath: on macOS os.tmpdir() is a symlink (/var -> /private/var), so a child
+  // spawned with this cwd reports the resolved path from process.cwd(). The installer
+  // compares that recorded projectPath against the plan's projectDir with
+  // path.resolve, which does not resolve symlinks — so the fixture must hand out
+  // the resolved path or every project-scoped install verifies as missing.
+  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-bootstrap-e2e-')));
   const projectDir = path.join(directory, 'project');
   const homeDir = path.join(directory, 'home');
   const stateFile = path.join(directory, 'claude-state.json');
