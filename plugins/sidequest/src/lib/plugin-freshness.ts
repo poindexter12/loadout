@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { resolveClaudeHome } from './claude-home.js';
 
 export const SIDEQUEST_PLUGIN_ID = 'sidequest@loadout';
 
@@ -40,7 +41,7 @@ export interface DispatchFreshness {
 const CLAIM_SELF_HEAL_VERSION = '4.48.1';
 
 function claudeHome(options: FreshnessOptions = {}): string {
-  return options.claudeHome || process.env.SIDEQUEST_CLAUDE_HOME || path.join(os.homedir(), '.claude');
+  return resolveClaudeHome(options.claudeHome);
 }
 
 function normalizedPath(value: unknown): string | null {

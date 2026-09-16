@@ -3,6 +3,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { execFileSync } = require("node:child_process");
+const { resolveClaudeHome } = require("./claude-home.js");
 const { stableClaudeName, stableDispatchName, stableReadOnlyClaudeName, stableReadOnlyDispatchName, DIAGNOSTIC_PROBE_NAME, bundledAgentType } = require("./exec-names.js");
 const { createWorktreeLease, worktreeResumeDecision } = require("./kernel/worktree.js");
 const crypto = require("crypto");
@@ -30,7 +31,7 @@ function defaultAgentsDir() {
   if (explicit && String(explicit).trim()) return path.resolve(String(explicit).trim());
   const home = process.env.SIDEQUEST_HOME;
   if (home && String(home).trim()) return path.join(path.resolve(String(home).trim()), "agents");
-  return path.join(os.homedir(), ".claude", "agents");
+  return path.join(resolveClaudeHome(), "agents");
 }
 const DISPATCH_MODEL_ID = "claude-codex-auto";
 const ROUTE_MODEL_RE = /^[a-z0-9][a-z0-9.-]{0,63}$/;
@@ -829,7 +830,9 @@ function compareVersions(left, right) {
 }
 
 function currentSidequestCli() {
-  const claudeHome = process.env.SIDEQUEST_CLAUDE_HOME || path.join(os.homedir(), '.claude');
+  // Inlined (not resolveClaudeHome()): this function is serialized into the
+  // standalone launcher stub, so it can only reference its own scope (SQ-27).
+  const claudeHome = process.env.SIDEQUEST_CLAUDE_HOME || process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
   const registryPath = path.join(claudeHome, 'plugins', 'installed_plugins.json');
   const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
   const installs = registry.plugins?.['sidequest@loadout'] || [];

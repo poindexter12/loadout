@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { resolveClaudeHome } from './claude-home.js';
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,31}$/;
 
@@ -51,7 +51,7 @@ function discoveryRoots(): string[] {
   if (override?.trim()) {
     return override.split(',').map((value) => value.trim()).filter(Boolean).map((value) => path.resolve(value));
   }
-  return [path.join(os.homedir(), '.claude')];
+  return [resolveClaudeHome()];
 }
 
 function readJsonSafe(file: string): unknown {
@@ -106,7 +106,7 @@ function isNewerVersion(candidate: [number, number, number], current: [number, n
 
 function newestGatewayCatalogCommand(): string | null {
   if (process.env.SIDEQUEST_DISCOVERY_DIRS?.trim()) return null;
-  const registry = readJsonSafe(path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json'));
+  const registry = readJsonSafe(path.join(resolveClaudeHome(), 'plugins', 'installed_plugins.json'));
   if (!isRecord(registry) || !isRecord(registry.plugins)) return null;
   const entries = registry.plugins['model-gateway@loadout'];
   if (!Array.isArray(entries)) return null;

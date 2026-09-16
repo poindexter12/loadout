@@ -38,8 +38,8 @@ __export(discovery_exports, {
 module.exports = __toCommonJS(discovery_exports);
 var import_node_child_process = require("node:child_process");
 var import_node_fs = __toESM(require("node:fs"));
-var import_node_os = __toESM(require("node:os"));
 var import_node_path = __toESM(require("node:path"));
+var import_claude_home = require("./claude-home.js");
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,31}$/;
 const CATALOG_SOURCES = [
   { source: "model-gateway", relPath: import_node_path.default.join("model-gateway", "catalog.json"), schemas: /* @__PURE__ */ new Set([2, 3, 4]) }
@@ -49,7 +49,7 @@ function discoveryRoots() {
   if (override?.trim()) {
     return override.split(",").map((value) => value.trim()).filter(Boolean).map((value) => import_node_path.default.resolve(value));
   }
-  return [import_node_path.default.join(import_node_os.default.homedir(), ".claude")];
+  return [(0, import_claude_home.resolveClaudeHome)()];
 }
 function readJsonSafe(file) {
   try {
@@ -91,7 +91,7 @@ function isNewerVersion(candidate, current) {
 }
 function newestGatewayCatalogCommand() {
   if (process.env.SIDEQUEST_DISCOVERY_DIRS?.trim()) return null;
-  const registry = readJsonSafe(import_node_path.default.join(import_node_os.default.homedir(), ".claude", "plugins", "installed_plugins.json"));
+  const registry = readJsonSafe(import_node_path.default.join((0, import_claude_home.resolveClaudeHome)(), "plugins", "installed_plugins.json"));
   if (!isRecord(registry) || !isRecord(registry.plugins)) return null;
   const entries = registry.plugins["model-gateway@loadout"];
   if (!Array.isArray(entries)) return null;

@@ -44,10 +44,11 @@ var import_node_crypto = __toESM(require("node:crypto"));
 var import_node_fs = __toESM(require("node:fs"));
 var import_node_os = __toESM(require("node:os"));
 var import_node_path = __toESM(require("node:path"));
+var import_claude_home = require("./claude-home.js");
 const SIDEQUEST_PLUGIN_ID = "sidequest@loadout";
 const CLAIM_SELF_HEAL_VERSION = "4.48.1";
 function claudeHome(options = {}) {
-  return options.claudeHome || process.env.SIDEQUEST_CLAUDE_HOME || import_node_path.default.join(import_node_os.default.homedir(), ".claude");
+  return (0, import_claude_home.resolveClaudeHome)(options.claudeHome);
 }
 function normalizedPath(value) {
   if (typeof value !== "string" || !value.trim()) return null;

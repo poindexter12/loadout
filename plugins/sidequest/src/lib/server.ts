@@ -19,6 +19,7 @@ const path = require('path');
 const url = require('url');
 const { spawn } = require('child_process');
 const store = require('./store');
+const { resolveClaudeHome } = require('./claude-home');
 
 const DASHBOARD_DIST = path.join(__dirname, '..', 'dashboard', 'dist');
 
@@ -1289,7 +1290,7 @@ async function findNewerInstall(options?: any) {
     if (!CLEAN_SEMVER_RE.test(selfVersion)) return null;
     if (process.env.SIDEQUEST_NO_HOT_RECYCLE && !opts.ignoreOptOut) return null;
 
-    const claudeHome = opts.claudeHome || process.env.SIDEQUEST_CLAUDE_HOME || path.join(os.homedir(), '.claude');
+    const claudeHome = resolveClaudeHome(opts.claudeHome);
     const registryPath = opts.registryPath || path.join(claudeHome, 'plugins', 'installed_plugins.json');
     let registry: any;
     try { registry = JSON.parse(await fsp.readFile(registryPath, 'utf8')); } catch (_: any) { registry = null; }

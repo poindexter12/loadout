@@ -25,7 +25,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 
 // src/hooks/session-start.ts
 var import_node_fs7 = __toESM(require("node:fs"));
-var import_node_path7 = __toESM(require("node:path"));
+var import_node_path8 = __toESM(require("node:path"));
 
 // src/hooks/shared/input.ts
 var import_node_fs = __toESM(require("node:fs"));
@@ -506,15 +506,24 @@ function diagnosticWorktreeWarning(input, now = Date.now()) {
 // src/lib/plugin-freshness.ts
 var import_node_crypto3 = __toESM(require("node:crypto"));
 var import_node_fs6 = __toESM(require("node:fs"));
+var import_node_os5 = __toESM(require("node:os"));
+var import_node_path7 = __toESM(require("node:path"));
+
+// src/lib/claude-home.ts
 var import_node_os4 = __toESM(require("node:os"));
 var import_node_path6 = __toESM(require("node:path"));
+function resolveClaudeHome(explicit) {
+  return explicit || process.env.SIDEQUEST_CLAUDE_HOME || process.env.CLAUDE_CONFIG_DIR || import_node_path6.default.join(import_node_os4.default.homedir(), ".claude");
+}
+
+// src/lib/plugin-freshness.ts
 var SIDEQUEST_PLUGIN_ID = "sidequest@loadout";
 function claudeHome(options = {}) {
-  return options.claudeHome || process.env.SIDEQUEST_CLAUDE_HOME || import_node_path6.default.join(import_node_os4.default.homedir(), ".claude");
+  return resolveClaudeHome(options.claudeHome);
 }
 function normalizedPath(value) {
   if (typeof value !== "string" || !value.trim()) return null;
-  return import_node_path6.default.resolve(value).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return import_node_path7.default.resolve(value).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 function pathsOverlap(left, right) {
   return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
@@ -550,7 +559,7 @@ function compareSemver(left, right) {
 function registryInstalls(projectPath, options = {}) {
   let registry;
   try {
-    registry = JSON.parse(import_node_fs6.default.readFileSync(import_node_path6.default.join(claudeHome(options), "plugins", "installed_plugins.json"), "utf8"));
+    registry = JSON.parse(import_node_fs6.default.readFileSync(import_node_path7.default.join(claudeHome(options), "plugins", "installed_plugins.json"), "utf8"));
   } catch (_) {
     return [];
   }
@@ -568,7 +577,7 @@ function registryInstalls(projectPath, options = {}) {
 function loadedPluginVersion(pluginRoot2 = process.env.CLAUDE_PLUGIN_ROOT) {
   if (!pluginRoot2) return null;
   try {
-    const manifest = JSON.parse(import_node_fs6.default.readFileSync(import_node_path6.default.join(pluginRoot2, ".claude-plugin", "plugin.json"), "utf8"));
+    const manifest = JSON.parse(import_node_fs6.default.readFileSync(import_node_path7.default.join(pluginRoot2, ".claude-plugin", "plugin.json"), "utf8"));
     return typeof manifest.version === "string" ? manifest.version : null;
   } catch (_) {
     return null;
@@ -587,7 +596,7 @@ function sidequestReloadWarning(projectPath, options = {}) {
   return `Sidequest: loaded ${loadedVersion}, installed ${installedVersion}. Run /reload-plugins or restart Claude Code before dispatching work.`;
 }
 function stateDirectory3(options = {}) {
-  return options.stateDirectory || import_node_path6.default.join(import_node_os4.default.tmpdir(), "loadout", "freshness-warnings", "loaded-plugin-versions");
+  return options.stateDirectory || import_node_path7.default.join(import_node_os5.default.tmpdir(), "loadout", "freshness-warnings", "loaded-plugin-versions");
 }
 function sessionId2(input) {
   const value = input.session_id ?? input.sessionId;
@@ -597,14 +606,14 @@ function loadedVersionStateFile(input, pluginId = SIDEQUEST_PLUGIN_ID, options =
   const id = sessionId2(input);
   if (!id) return null;
   const digest = import_node_crypto3.default.createHash("sha256").update(`${id}\0${pluginId}`).digest("hex");
-  return import_node_path6.default.join(stateDirectory3(options), `${digest}.json`);
+  return import_node_path7.default.join(stateDirectory3(options), `${digest}.json`);
 }
 function reportLoadedSidequestVersion(input, options = {}) {
   const version = loadedPluginVersion(options.pluginRoot);
   const stateFile3 = loadedVersionStateFile(input, SIDEQUEST_PLUGIN_ID, options);
   if (!version || !stateFile3) return version;
   try {
-    import_node_fs6.default.mkdirSync(import_node_path6.default.dirname(stateFile3), { recursive: true });
+    import_node_fs6.default.mkdirSync(import_node_path7.default.dirname(stateFile3), { recursive: true });
     import_node_fs6.default.writeFileSync(stateFile3, JSON.stringify({ pluginId: SIDEQUEST_PLUGIN_ID, version }));
   } catch (_) {
   }
@@ -704,7 +713,7 @@ function upstreamDefectDestination() {
     const store = require(runtimeModule("store"));
     const project = store.listProjects({ all: true }).find((candidate) => {
       const root = String(candidate.path || "").trim();
-      return root && import_node_fs7.default.existsSync(import_node_path7.default.join(root, "plugins", "sidequest", ".claude-plugin", "plugin.json"));
+      return root && import_node_fs7.default.existsSync(import_node_path8.default.join(root, "plugins", "sidequest", ".claude-plugin", "plugin.json"));
     });
     if (project) return `Offer to file it as a ticket on the ${project.name} board on this machine (the Loadout working copy), not via the Anthropic feedback tool.`;
   } catch (_) {

@@ -129,15 +129,25 @@ function seedGatewayHome(t: { after(fn: () => void): void }, stored: unknown, re
   const previousHome = process.env.HOME;
   const previousUserProfile = process.env.USERPROFILE;
   const previousDiscoveryDirs = process.env.SIDEQUEST_DISCOVERY_DIRS;
+  const previousClaudeHome = process.env.SIDEQUEST_CLAUDE_HOME;
+  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
   t.after(() => {
     process.env.HOME = previousHome;
     process.env.USERPROFILE = previousUserProfile;
     process.env.SIDEQUEST_DISCOVERY_DIRS = previousDiscoveryDirs;
+    if (previousClaudeHome === undefined) delete process.env.SIDEQUEST_CLAUDE_HOME;
+    else process.env.SIDEQUEST_CLAUDE_HOME = previousClaudeHome;
+    if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
     fs.rmSync(home, { recursive: true, force: true });
   });
   process.env.HOME = home;
   process.env.USERPROFILE = home;
   delete process.env.SIDEQUEST_DISCOVERY_DIRS;
+  // SQ-27: discovery now honors SIDEQUEST_CLAUDE_HOME/CLAUDE_CONFIG_DIR above
+  // the faked homedir, so pin the fixture tree or the live session tree leaks in.
+  process.env.SIDEQUEST_CLAUDE_HOME = path.join(home, '.claude');
+  delete process.env.CLAUDE_CONFIG_DIR;
 
   const catalogPath = path.join(home, '.claude', 'model-gateway', 'catalog.json');
   const installs = Object.entries(refreshWrites).map(([version, catalog]) => {

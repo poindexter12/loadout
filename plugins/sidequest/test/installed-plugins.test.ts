@@ -200,3 +200,63 @@ test('dispatch preflight identity includes canonical hooks and refuses a missing
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   }
 });
+
+// SQ-27: multi-account setups point CLAUDE_CONFIG_DIR away from ~/.claude. The
+// preflight must read the registry from that tree when no explicit claudeHome
+// or SIDEQUEST_CLAUDE_HOME override is present, and SIDEQUEST_CLAUDE_HOME must
+// keep outranking it so test fixtures and operator stopgaps stay pinned.
+function withClaudeHomeEnvironment(overrides: Record<string, string | undefined>, run: () => void): void {
+  const savedEnvironment = new Map(Object.keys(overrides).map((key) => [key, process.env[key]]));
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    run();
+  } finally {
+    for (const [key, value] of savedEnvironment) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+test('dispatch preflight reads the registry from CLAUDE_CONFIG_DIR when no override names a tree', () => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-config-dir-'));
+  const configDir = path.join(temporaryDirectory, 'config-dir');
+  const installPath = path.join(temporaryDirectory, 'install');
+  const projectPath = path.join(temporaryDirectory, 'project');
+  writeInstallRuntimeConfig(installPath);
+  writeRegistry(path.join(configDir, 'plugins', 'installed_plugins.json'), installPath);
+
+  try {
+    withClaudeHomeEnvironment({ SIDEQUEST_CLAUDE_HOME: undefined, CLAUDE_CONFIG_DIR: configDir }, () => {
+      const check = checkSidequestInstall(projectPath, {});
+      assert.equal(check.ok, true, `expected the CLAUDE_CONFIG_DIR registry to satisfy the preflight: ${check.reason ?? ''} ${check.detail ?? ''}`);
+      assert.equal(check.registryPath, path.join(configDir, 'plugins', 'installed_plugins.json'));
+    });
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test('SIDEQUEST_CLAUDE_HOME outranks CLAUDE_CONFIG_DIR for the dispatch preflight', () => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-home-precedence-'));
+  const pinnedHome = path.join(temporaryDirectory, 'pinned-home');
+  const configDir = path.join(temporaryDirectory, 'config-dir');
+  const installPath = path.join(temporaryDirectory, 'install');
+  const projectPath = path.join(temporaryDirectory, 'project');
+  writeInstallRuntimeConfig(installPath);
+  writeRegistry(path.join(pinnedHome, 'plugins', 'installed_plugins.json'), installPath);
+  fs.mkdirSync(path.join(configDir, 'plugins'), { recursive: true });
+
+  try {
+    withClaudeHomeEnvironment({ SIDEQUEST_CLAUDE_HOME: pinnedHome, CLAUDE_CONFIG_DIR: configDir }, () => {
+      const check = checkSidequestInstall(projectPath, {});
+      assert.equal(check.ok, true, `expected the pinned SIDEQUEST_CLAUDE_HOME registry to satisfy the preflight: ${check.reason ?? ''} ${check.detail ?? ''}`);
+      assert.equal(check.registryPath, path.join(pinnedHome, 'plugins', 'installed_plugins.json'));
+    });
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});

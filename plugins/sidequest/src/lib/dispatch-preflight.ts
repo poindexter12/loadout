@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { resolveClaudeHome } from './claude-home.js';
 
 export interface LocalAheadWarning {
   count: number;
@@ -91,7 +91,7 @@ export interface InstallCheckResult {
 }
 
 function claudeHomeDir(opts: InstallCheckOptions = {}): string {
-  return opts.claudeHome || process.env.SIDEQUEST_CLAUDE_HOME || path.join(os.homedir(), '.claude');
+  return resolveClaudeHome(opts.claudeHome);
 }
 
 function projectContainsPythonSource(projectPath: string): boolean {

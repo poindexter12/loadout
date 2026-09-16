@@ -40,8 +40,8 @@ module.exports = __toCommonJS(dispatch_preflight_exports);
 var import_node_child_process = require("node:child_process");
 var import_node_crypto = require("node:crypto");
 var import_node_fs = __toESM(require("node:fs"));
-var import_node_os = __toESM(require("node:os"));
 var import_node_path = __toESM(require("node:path"));
+var import_claude_home = require("./claude-home.js");
 function localAheadOfUpstreamWarning(projectPath, branch, worktreeFork) {
   try {
     const upstream = (0, import_node_child_process.execFileSync)("git", ["rev-parse", "--abbrev-ref", `${branch}@{upstream}`], {
@@ -94,7 +94,7 @@ function readFileSyncWithRetry(filePath, encoding) {
   }
 }
 function claudeHomeDir(opts = {}) {
-  return opts.claudeHome || process.env.SIDEQUEST_CLAUDE_HOME || import_node_path.default.join(import_node_os.default.homedir(), ".claude");
+  return (0, import_claude_home.resolveClaudeHome)(opts.claudeHome);
 }
 function projectContainsPythonSource(projectPath) {
   const pending = [projectPath];
