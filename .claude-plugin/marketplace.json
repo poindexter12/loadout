@@ -4,7 +4,7 @@
     "name": "poindexter12"
   },
   "description": "Loadout: a kit of Claude Code plugins. Independently maintained fork of the Eigenwise Toolshed; original work by Eigenwise.",
-  "version": "3.538.0",
+  "version": "3.539.0",
   "plugins": [
     {
       "name": "observability",
@@ -33,7 +33,7 @@
       "name": "model-gateway",
       "source": "./plugins/model-gateway",
       "description": "Your ChatGPT/Codex and Grok subscription models in Claude Code's /model picker. A local gateway routes claude-gpt-* models to OpenAI's Codex backend, claude-grok-* models to Grok, and everything else to api.anthropic.com, so you switch between Claude, GPT-5.x, and Grok mid-session like any other model. No API keys.",
-      "version": "0.51.1",
+      "version": "0.51.2",
       "author": {
         "name": "poindexter12"
       },
@@ -102,7 +102,7 @@
       "name": "quartermaster",
       "source": "./plugins/quartermaster",
       "description": "Set up a project from your existing Claude Code habits, keep Loadout installs healthy, and find missing capabilities after real work accumulates. Local scripts reduce session history to a bounded summary before the active model sees it; setup, resupply, updates, and config changes happen only with your approval.",
-      "version": "0.8.0",
+      "version": "0.8.1",
       "author": {
         "name": "poindexter12"
       },

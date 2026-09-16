@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.1 (2026-09-15)
+
+Released in v3.539.0, up from 0.8.0.
+
+### Fixes
+
+- Quartermaster reuse-first rules (UP-001) [`08336c2`](https://github.com/poindexter12/loadout/commit/08336c2c)
+
 ## 0.8.0 (2026-09-10)
 
 Released in v3.537.0, up from 0.7.7.

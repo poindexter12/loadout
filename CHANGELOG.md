@@ -8,6 +8,23 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v3.539.0 (2026-09-15)
+
+### model-gateway 0.51.1 → 0.51.2
+
+#### Fixes
+
+- Classify upstream connect errors instead of passing raw Node errors through (SQ-21) [`cd759f1`](https://github.com/poindexter12/loadout/commit/cd759f1e)
+- Rewrite opaque codex 429s to name the real rate-limiting backend (SQ-22) [`cd759f1`](https://github.com/poindexter12/loadout/commit/cd759f1e)
+- Serialize concurrent ensure invocations so they cannot both tear down a healthy gateway (SQ-23)
+- Stop the model-gateway shim from bind-failing its unix socket on every boot (SQ-25)
+
+### quartermaster 0.8.0 → 0.8.1
+
+#### Fixes
+
+- Quartermaster reuse-first rules (UP-001) [`08336c2`](https://github.com/poindexter12/loadout/commit/08336c2c)
+
 ## v3.538.0 (2026-09-13)
 
 ### model-gateway 0.51.0 → 0.51.1
