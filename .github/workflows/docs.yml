@@ -12,6 +12,7 @@ on:
       - plugins/**/.claude-plugin/plugin.json
       - plugins/**/skills/**
       - plugins/**/hooks/hooks.json
+      - plugins/**/bin/**
       - .claude-plugin/marketplace.json
   workflow_dispatch:
 
