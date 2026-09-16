@@ -23,3 +23,13 @@ Conditional release and manifest rules live in `.claude/live-rules/`. They are i
 ## Screenshots
 
 Documentation screenshots come ONLY from the committed pipeline (`docs/screenshots/`, `npm run screenshots`), which renders isolated, synthetically-seeded instances. Never screenshot live boards or dashboards for docs — real project names, session ids, and costs must never appear in committed imagery. Ad-hoc verification captures are gitignored (`/*.png`, `.playwright-mcp/`); keep them out of commits.
+
+## Platform support
+
+Windows is abandoned as a supported platform (decision 2026-09-15).
+
+Windows CI was removed from the test matrix 2026-09-15 (PR #11); the matrix is ubuntu-only.
+
+The `WIN` code paths in model-gateway (`lib/process-supervision.js`: taskkill, PowerShell CIM queries, netstat parsing) are unmaintained and unverified — do not write Windows fixes or Windows tests.
+
+Deleting the dead `WIN` branches and Windows-simulation tests is a welcome follow-up ticket, not required now.
