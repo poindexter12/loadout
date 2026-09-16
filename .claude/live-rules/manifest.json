@@ -46,6 +46,17 @@
       "priority": 0,
       "enabled": true,
       "include": []
+    },
+    {
+      "path": "rules/self-improvement.md",
+      "hash": "0c7b7106a677e402ecc2aae28ba8b0222db09bda41f512286ac6136c564f91af",
+      "description": "Self-improvement within the approved scope",
+      "globs": [],
+      "dirs": [],
+      "prompt": [],
+      "priority": 40,
+      "enabled": true,
+      "include": []
     }
   ]
 }

@@ -1,6 +1,6 @@
 # Entry points
 
-Last Updated: 2026-09-08
+Last Updated: 2026-09-15
 
 ## User and runtime entry points
 
@@ -11,7 +11,7 @@ Last Updated: 2026-09-08
 - Dashboard app: `plugins/sidequest/dashboard/app/src/main.ts`; shell is `App.svelte`; API client is `app/src/lib/api.ts`.
 - Model Gateway CLI: `plugins/model-gateway/bin/model-gateway.js`; dispatches setup/login/start/stop/ensure/status/models/catalog/pin/env/doctor/remote-control commands.
 - Model Gateway hook and skills: `plugins/model-gateway/hooks/hooks.json`, `plugins/model-gateway/hooks/registry-writer.js`, and `plugins/model-gateway/skills/{model-gateway,remote-control-compatibility}/SKILL.md`. Registry writing installs `~/.claude/model-gateway/update.js`; CLI `setup`/`ensure` handle atomic proxy replacement and deferred restart.
-- Quartermaster maintenance skills: `update-toolshed` and `toolshed-doctor` under `plugins/quartermaster/skills/`; `bin/update-toolshed.js` and `bin/install-workspace-plugins.js` are the bundled programs, with updates handed to the stable Model Gateway updater. Its `hooks/hooks.json` registers SessionStart freshness and billing-path checks plus a UserPromptSubmit freshness check, and Stop hooks for resupply offers and `hooks/stop-update-check.js`, which refreshes marketplace freshness and reports remote updates or installed-version reloads without installing or blocking. `project-settings.js` exposes the effective Codex compaction-window finding used by setup and doctor.
+- Quartermaster maintenance skills: `update-loadout` and `loadout-doctor` under `plugins/quartermaster/skills/`; `bin/update-loadout.js` and `bin/install-workspace-plugins.js` are the bundled programs, with updates handed to the stable Model Gateway updater. Its `hooks/hooks.json` registers SessionStart freshness and billing-path checks plus a UserPromptSubmit freshness check, and Stop hooks for resupply offers and `hooks/stop-update-check.js`, which refreshes marketplace freshness and reports remote updates or installed-version reloads without installing or blocking. `project-settings.js` exposes the effective Codex compaction-window finding used by setup and doctor.
 - Observability skill: `enable-project-telemetry` under `plugins/observability/skills/`; its setup provisions dashboards from opted-in projects, and `hooks/hooks.json` registers the eight lifecycle observers, the SessionStart ensure worker, and the `Agent|Task` request-body preflight. Grafana targets live in `observability/sinks/grafana/model-prices.js`; Astra uses per-request input tiers and unpriced models appear as token usage.
 - Live-rules skills: `manage-rules` and `add-rule` under `plugins/live-rules/skills/`.
 - Codebase-mapper hooks: `plugins/codebase-mapper/hooks/hooks.json` registers `PreToolUse: Skill` and `Stop`, both invoking `hooks/inject-context.js`; the hook enforces that an announced map update invokes `codebase-mapper:update-codebase-map`. Map creation/update: `plugins/codebase-mapper/skills/map-codebase/SKILL.md` and `update-codebase-map/SKILL.md`.

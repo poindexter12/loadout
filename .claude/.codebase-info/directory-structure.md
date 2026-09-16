@@ -1,15 +1,17 @@
 # Directory structure
 
-Last Updated: 2026-09-08
+Last Updated: 2026-09-15
 
-- `.claude/`: project settings, live rules, and generated codebase map.
+- `.claude/`: project settings, live rules, generated codebase map, and the project-local `upstream-check` skill.
+- `.upstream/`: intent-first upstream tracking ledger (`ledger.md`) read by the `upstream-check` skill.
+- `scripts/test/`: transcript read-cost measurement test (`measure.test.mjs`, SQ-20).
 - `.claude-plugin/`: marketplace manifest and published plugin entries.
 - `plugins/sidequest/`: board engine, MCP server, CLI, hooks, dashboard, tests, committed build output, and bundled stable executor agents under `agents/`. Pure lifecycle and worktree decisions live in `src/lib/kernel/`; persistence is split under `src/lib/store/`, with matching compiled modules under `lib/`. `scripts/generate-bundled-agents.mjs` derives the packaged agent markdown from `lib/agentsync.js`. `plugins/sidequest/scripts/owned-process-tree.js` and `plugins/sidequest/scripts/owned-phase-supervisor.js` keep test and release subprocess ownership explicit through cleanup.
 - `plugins/observability/`: observer, statusline, Collector setup, and sinks under `observability/sinks/`, including Grafana model pricing and generated dashboard templates, plus the eight lifecycle hooks and the `enable-project-telemetry` skill.
 - `plugins/model-gateway/`: local model gateway CLI, registry hook, skills, and tests; `lib/` holds the shim/worker runtime, the per-model policy table, process supervision, the Windows detached launcher, lifecycle diagnostics, and cache-sibling identity checks.
 - `plugins/live-rules/`: rule-management skills and prompt/edit/session hooks.
 - `plugins/codebase-mapper/`: map-generation/update skills and context injection hooks.
-- `plugins/quartermaster/`: workspace setup and resupply skills (`setup`, `resupply`), the `update-toolshed` and `toolshed-doctor` skills, updater and workspace-plugin installers under `bin/`, transcript miner CLI under `bin/quartermaster.js`, streaming signal collector under `lib/`, a SessionEnd tally hook, and SessionStart hooks that inject the capability-capture charter every session (skipped where setup seeded the self-improvement live rule) plus a threshold-gated offer of a user-approved optimization round, a Stop hook that re-raises an overdue offer once per session at turn end, and a separate Stop freshness/update check plus compaction-window diagnostics and billing-path checks.
+- `plugins/quartermaster/`: workspace setup and resupply skills (`setup`, `resupply`), the `update-loadout` and `loadout-doctor` skills, updater and workspace-plugin installers under `bin/`, transcript miner CLI under `bin/quartermaster.js`, streaming signal collector under `lib/`, a SessionEnd tally hook, and SessionStart hooks that inject the capability-capture charter every session (skipped where setup seeded the self-improvement live rule) plus a threshold-gated offer of a user-approved optimization round, a Stop hook that re-raises an overdue offer once per session at turn end, and a separate Stop freshness/update check plus compaction-window diagnostics and billing-path checks.
 - `plugins/test-support/`: JavaScript test scanner shared by Quartermaster, Observability, and Model Gateway tests.
 - `docs/`: Astro/Starlight prose, generated reference source, scripts, and synthetic screenshots.
 - `sandbox/windows/`: maintainer-only, gitignored Windows Sandbox launcher, guest bootstrap, and PowerShell contract test — never committed, no public docs page.

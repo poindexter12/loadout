@@ -2,14 +2,18 @@
   "permissions": {
     "allow": [
       "Bash(node plugins/sidequest/bin/sidequest.js:*)",
-      "Bash(node plugins/codex-gateway/bin/codex-gateway.js:*)",
+      "Bash(node plugins/model-gateway/bin/model-gateway.js:*)",
       "Bash(node --test:*)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(node scripts/release/cut.mjs --dry-run:*)"
     ]
   },
   "enabledPlugins": {
     "playwright@claude-plugins-official": true,
     "frontend-design@claude-plugins-official": true,
-    "svelte@svelte": true
+    "svelte@svelte": true,
+    "live-rules@loadout": true,
+    "codebase-mapper@loadout": true,
+    "sidequest@loadout": true
   }
 }
