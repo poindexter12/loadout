@@ -1,9 +1,9 @@
 ---
 title: Model Gateway
-description: Add ChatGPT/Codex and Grok subscription models to Claude Code.
+description: Add ChatGPT/Codex and Grok subscription models, and Antigravity Gemini models, to Claude Code.
 ---
 
-Model Gateway adds subscription-backed GPT and Grok models to Claude Code. Claude Code v2.1.129+ can show those gateway models in its `/model` picker. Claude models keep using Anthropic normally.
+Model Gateway adds subscription-backed GPT and Grok models, and Antigravity-backed Gemini models, to Claude Code. Claude Code v2.1.129+ can show those gateway models in its `/model` picker. Claude models keep using Anthropic normally.
 
 ## Install
 
@@ -35,6 +35,7 @@ new rows appear after a full Claude Code restart. `/reload-plugins` does not rel
 - `claude-gpt-*[1m]` uses your ChatGPT/Codex subscription. `MODEL_WINDOW_POLICY` in Model Gateway's runtime is the authority for every gateway picker row. GPT-5.6 Sol, Terra, Luna, and GPT-6 Astra are measured rows; other Codex proxy rows use its explicit unmeasured 920k default until measured.
 - A `[1m]` alias gives Claude Code a 1M client window, but a lower explicit `autoCompactWindow` still wins. The optional `325000` setting is a cap, and with that cap the client compacts around `292000`. The alias is removed before forwarding to the backend and does not promise a 1M backend input limit. Use `/context` to inspect the selected model and effective cap.
 - `claude-grok-4.5[1m]` uses your Grok subscription and is advertised only while the Grok CLI is installed and signed in. Without that sign-in the row is withheld from `/model` rather than shown as a row whose every request fails. Sign in with `grok`, then restart Claude Code to pick the row up. Its measured backend window is 500k. The alias is removed before requests reach the backend.
+- `claude-gemini-*` routes to a local `antigravity-claude-proxy`, which speaks the Anthropic Messages API natively and signs in with a Google account — Model Gateway does not install or log into it for you. Install it from its project page, [antigravity-claude-proxy on GitHub](https://github.com/badrisnarayanan/antigravity-claude-proxy) (also published on npm), run it, and add an account with `antigravity-claude-proxy accounts add`. The rows are live-only: the gateway advertises whatever the proxy's `/v1/models` answers with, and while the proxy is down every Gemini row is withheld from `/model` rather than shown as a row whose every request fails. The gateway probes the proxy at `http://127.0.0.1:18766`; set `CODEX_GATEWAY_ANTIGRAVITY_ENDPOINT` if yours listens elsewhere. With the proxy up, restart Claude Code to pick the rows up. `doctor`'s model-window table includes the live Gemini rows, and its readiness report has no local credential probe for Antigravity — the proxy checks the Google login per request.
 - Claude models keep using Anthropic.
 
 Sidequest can select these models automatically when both plugins are installed.

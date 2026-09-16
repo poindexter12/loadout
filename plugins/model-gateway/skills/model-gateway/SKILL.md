@@ -11,7 +11,9 @@ Two local processes give Claude Code native access to the user's ChatGPT subscri
 `claude-code-proxy` (does OpenAI OAuth and translates Anthropic Messages API to the Codex
 backend) and a shim router this plugin owns. `ANTHROPIC_BASE_URL` points at the shim: requests
 for `claude-gpt-*` models are un-prefixed and go to the proxy, `claude-gemini-*` models are
-un-prefixed and go to a local antigravity-claude-proxy (default http://127.0.0.1:18766, override
+un-prefixed and go to a local antigravity-claude-proxy (installed separately from
+https://github.com/badrisnarayanan/antigravity-claude-proxy or the `antigravity-claude-proxy`
+npm package; default http://127.0.0.1:18766, override
 with `CODEX_GATEWAY_ANTIGRAVITY_ENDPOINT`; it needs its own `antigravity-claude-proxy accounts
 add` Google login and is advertised only while its `/v1/models` answers), everything else passes through
 to api.anthropic.com with the user's normal claude.ai login. The shim's `/v1/models` advertises

@@ -35,7 +35,7 @@ template: splash
     </article>
     <article class="shed-card card">
       <h2>You want another model in Claude Code</h2>
-      <p><a href="./getting-started/model-gateway/">Model Gateway</a> adds supported ChatGPT/Codex and Grok subscription models through a local gateway.</p>
+      <p><a href="./getting-started/model-gateway/">Model Gateway</a> adds supported ChatGPT/Codex and Grok subscription models, and Antigravity Gemini models, through a local gateway.</p>
     </article>
     <article class="shed-card card">
       <h2>Usage is hard to see</h2>
