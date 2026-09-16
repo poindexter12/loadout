@@ -13,7 +13,7 @@ Each plugin can run by itself. Integration uses explicit local files and Claude 
 - **Project context:** Codebase Mapper and Live Rules own their project files and update flows. Other plugins consume their outputs as context instead of reaching into their implementation.
 - **Work delivery:** Sidequest owns tickets, stories, categories, routing profiles, dispatch, and executor evidence.
 
-Claude Code records installed plugins in `~/.claude/plugins/installed_plugins.json`. Quartermaster reads that install registry to find active Loadout instances before checking their freshness.
+Claude Code records installed plugins in `plugins/installed_plugins.json` under the Claude config tree — the directory named by `CLAUDE_CONFIG_DIR` when set, otherwise `~/.claude`. Quartermaster reads that install registry to find active Loadout instances before checking their freshness, and Sidequest's dispatch preflight resolves the same tree (with `SIDEQUEST_CLAUDE_HOME` as a tool-specific override) so multi-account machines route to the account that is actually running the session.
 
 ## Sidequest routing profiles
 
