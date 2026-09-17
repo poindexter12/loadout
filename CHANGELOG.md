@@ -8,6 +8,21 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v3.540.0 (2026-09-16)
+
+### quartermaster 0.8.1 → 0.8.2
+
+#### Fixes
+
+- Honor CLAUDE_CONFIG_DIR when resolving the Claude config tree (dispatch gate, discovery, global settings writes) (SQ-27) [`368efe2`](https://github.com/poindexter12/loadout/commit/368efe2b)
+- Resupply skill description leads with reuse-first, matching UP-001 behavior (SQ-38) [`e8112ee`](https://github.com/poindexter12/loadout/commit/e8112eebc4fee5b6db7f4675b632bab772617fbb)
+
+### sidequest 5.1.0 → 5.1.1
+
+#### Fixes
+
+- Honor CLAUDE_CONFIG_DIR when resolving the Claude config tree (dispatch gate, discovery, global settings writes) (SQ-27) [`368efe2`](https://github.com/poindexter12/loadout/commit/368efe2b)
+
 ## v3.539.0 (2026-09-15)
 
 ### model-gateway 0.51.1 → 0.51.2

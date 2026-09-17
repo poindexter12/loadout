@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.2 (2026-09-16)
+
+Released in v3.540.0, up from 0.8.1.
+
+### Fixes
+
+- Honor CLAUDE_CONFIG_DIR when resolving the Claude config tree (dispatch gate, discovery, global settings writes) (SQ-27) [`368efe2`](https://github.com/poindexter12/loadout/commit/368efe2b)
+- Resupply skill description leads with reuse-first, matching UP-001 behavior (SQ-38) [`e8112ee`](https://github.com/poindexter12/loadout/commit/e8112eebc4fee5b6db7f4675b632bab772617fbb)
+
 ## 0.8.1 (2026-09-15)
 
 Released in v3.539.0, up from 0.8.0.
