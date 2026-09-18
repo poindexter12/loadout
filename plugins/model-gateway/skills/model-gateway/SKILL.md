@@ -219,7 +219,10 @@ agree).
   claims an exclusive `ensure.lock` in the gateway state dir before deciding recovery is needed. A
   second, concurrent `ensure` waits briefly for the first to finish and reports its actual outcome
   rather than independently observing the same symptom and starting its own recovery; a lock left by
-  a process that is no longer alive is reclaimed, not blocked on forever. `startAll` (the routine
+  a process that is no longer alive is reclaimed, not blocked on forever, and so is one past an
+  absolute age cap whatever its pid reports, so a holder that died and had its pid recycled onto an
+  unrelated live process cannot deadlock recovery. Releasing only ever frees a lock the releasing
+  process still holds, so a reclaimed-from holder cannot delete its successor's lock. `startAll` (the routine
   behind `ensure`/`setup`/SessionStart) also requires three consecutive failed shim-health probes
   before it will stop a bound-but-unresponsive supervisor, and a racer whose own startup wait times
   out still reports ready if a final authoritative check finds the gateway actually serving. Together
