@@ -13,6 +13,7 @@ const { commandIncludesFile, commandResultAsync, createProxyRecovery, installBel
 const { canReplaceInstalledCliPath } = require('../lib/runtime.js');
 
 const CLI = path.join(__dirname, '..', 'bin', 'model-gateway.js');
+const COMMANDS = path.join(__dirname, '..', 'lib', 'commands.js');
 const BODY_SESSION_ID = 'gateway-fixture-body-sentinel';
 
 function listen(server) {
@@ -665,6 +666,136 @@ test('ensure reclaims an old corrupt (unparseable) lock file instead of treating
 
   guardianPid = await waitForPidRecord(path.join(state, 'guardian.pid'));
   assert.equal(processIsRunning(guardianPid), true, 'the reclaiming ensure actually started the gateway');
+});
+
+// SQ-34: the three lock-lifecycle races below cannot be staged through the CLI the
+// way the two tests above stage theirs — nothing makes a real second `ensure` steal
+// the lock at the exact instant the first releases it, and a truncate window is not
+// addressable from outside the writing process. So they drive the lock helpers
+// directly, from a child process pinned to a throwaway home. That keeps the part of
+// the pattern that matters (every write lands in a temp tree, never in the real
+// CLAUDE_CONFIG_DIR of whoever runs the suite) while making the race deterministic:
+// commands.js resolves its state directory once, at require time, so the isolation
+// has to come from the child's environment rather than from an in-process stub.
+// Each probe body fills `report`, which comes back as JSON on stdout.
+function runEnsureLockProbe(home, environment, body) {
+  const script = path.join(home, `ensure-lock-probe-${Date.now()}-${Math.random().toString(16).slice(2)}.js`);
+  fs.writeFileSync(script, [
+    "'use strict';",
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    `const commands = require(${JSON.stringify(COMMANDS)});`,
+    'const report = { pid: process.pid };',
+    body,
+    'process.stdout.write(JSON.stringify(report));',
+  ].join('\n'));
+  const run = spawnSync(process.execPath, [script], { encoding: 'utf8', env: environment });
+  assert.equal(run.status, 0, `ensure-lock probe exited ${run.status}: ${run.stderr}`);
+  return JSON.parse(run.stdout);
+}
+
+// SQ-34: releaseEnsureLock used to rmSync the lock unconditionally. A claim can end
+// before the process holding it does — the absolute age cap exercised below hands the
+// lock to a new holder while the old one is still running — and the old one's exit
+// handler then deleted a lock that was live, freeing a third `ensure` to start a
+// concurrent recovery: exactly the SQ-23 double-recovery the lock exists to prevent.
+// Release must free only a lock still naming its own pid, while still recording the
+// outcome its followers are waiting to read.
+test('releasing the ensure lock frees only a lock this process still holds', (t) => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-release-ensure-lock-')));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home });
+
+  const report = runEnsureLockProbe(home, environment, `
+    report.ownClaim = commands.tryClaimEnsureLock();
+    commands.releaseEnsureLock({ ok: true, message: 'own lock' });
+    report.ownLockFreed = !fs.existsSync(commands.ENSURE_LOCK_PATH);
+
+    report.reclaim = commands.tryClaimEnsureLock();
+    fs.writeFileSync(commands.ENSURE_LOCK_PATH, JSON.stringify({ pid: ${process.pid}, startedAt: new Date().toISOString() }));
+    commands.releaseEnsureLock({ ok: true, message: 'foreign lock' });
+    report.foreignHolder = fs.existsSync(commands.ENSURE_LOCK_PATH)
+      ? JSON.parse(fs.readFileSync(commands.ENSURE_LOCK_PATH, 'utf8'))
+      : null;
+    report.lastResult = JSON.parse(fs.readFileSync(commands.ENSURE_RESULT_PATH, 'utf8'));
+  `);
+
+  assert.equal(report.ownClaim, true, 'the probe took the lock');
+  assert.equal(report.ownLockFreed, true, 'releasing a lock this process still holds must remove it');
+  assert.equal(report.reclaim, true, 'the probe retook the lock for the foreign-holder leg');
+  assert.notEqual(report.foreignHolder, null, 'release must not delete a lock another process now holds');
+  assert.equal(report.foreignHolder.pid, process.pid, 'the new holder kept its own lock file');
+  assert.equal(report.lastResult.message, 'foreign lock', 'a release that left the lock alone still records its outcome');
+});
+
+// SQ-34: reclaim trusted isPidAlive alone, and pid numbers are recycled. A holder
+// that died mid-recovery whose number has since been handed to an unrelated live
+// process leaves a lock nothing can ever reclaim: every later `ensure` sees a live
+// pid, takes the follower path, waits out its deadline, and the gateway is never
+// recovered. Past an absolute age cap the lock is reclaimed whatever its pid says —
+// and, just as importantly, a lock young enough that its holder could still be doing
+// the work is left alone, or the cap would reintroduce the SQ-23 race it guards.
+test('a lock naming a live foreign pid is reclaimed once past the absolute age cap, not before', (t) => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-ensure-lock-age-cap-')));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home });
+  fs.mkdirSync(path.join(home, '.claude', 'model-gateway'), { recursive: true });
+  // This runner's own pid: unambiguously alive for the whole probe and never the
+  // probe child's own — the shape a recycled pid presents to a would-be claimant.
+  assert.equal(processIsRunning(process.pid), true, 'the foreign lock pid is alive');
+
+  const report = runEnsureLockProbe(home, environment, `
+    const plantForeignLock = (ageMs) => {
+      fs.writeFileSync(commands.ENSURE_LOCK_PATH, JSON.stringify({ pid: ${process.pid}, startedAt: new Date(Date.now() - ageMs).toISOString() }));
+      const when = (Date.now() - ageMs) / 1000;
+      fs.utimesSync(commands.ENSURE_LOCK_PATH, when, when);
+    };
+
+    plantForeignLock(Math.round(commands.ENSURE_LOCK_MAX_AGE_MS / 2));
+    report.freshClaim = commands.tryClaimEnsureLock();
+    report.freshHolder = JSON.parse(fs.readFileSync(commands.ENSURE_LOCK_PATH, 'utf8')).pid;
+
+    plantForeignLock(commands.ENSURE_LOCK_MAX_AGE_MS * 2);
+    report.agedClaim = commands.tryClaimEnsureLock();
+    report.agedHolder = JSON.parse(fs.readFileSync(commands.ENSURE_LOCK_PATH, 'utf8')).pid;
+  `);
+
+  assert.equal(report.freshClaim, false, 'a live holder young enough to still be working keeps its lock');
+  assert.equal(report.freshHolder, process.pid, 'the young lock was left untouched');
+  assert.equal(report.agedClaim, true, 'a lock past the age cap is reclaimed even though its pid answers as alive');
+  assert.equal(report.agedHolder, report.pid, 'the reclaiming process owns the lock afterwards');
+  assert.equal(processIsRunning(process.pid), true, 'the displaced pid stayed alive throughout: liveness alone did not decide this');
+});
+
+// SQ-34: the outcome file was written with a plain writeFileSync, which truncates in
+// place. A follower polls for the lock to disappear and reads this file immediately
+// after, so it can land inside that truncate window, parse nothing, and report
+// "another ensure is already recovering" instead of the outcome the holder just
+// recorded for it. tmp+rename (lib/atomic-file.js) makes the replacement one
+// indivisible step — observable here as a new inode rather than a rewritten one.
+test('the ensure result is replaced atomically instead of truncated in place', (t) => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-ensure-result-atomic-')));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home });
+  const state = path.join(home, '.claude', 'model-gateway');
+  fs.mkdirSync(state, { recursive: true });
+  const resultPath = path.join(state, 'ensure.lastResult.json');
+  fs.writeFileSync(resultPath, JSON.stringify({ ok: false, message: 'a previous run' }));
+  const previousInode = fs.statSync(resultPath).ino;
+
+  const report = runEnsureLockProbe(home, environment, `
+    report.claimed = commands.tryClaimEnsureLock();
+    commands.releaseEnsureLock({ ok: true, message: 'x'.repeat(8192) });
+    report.inode = fs.statSync(commands.ENSURE_RESULT_PATH).ino;
+    report.result = JSON.parse(fs.readFileSync(commands.ENSURE_RESULT_PATH, 'utf8'));
+    report.temporarySiblings = fs.readdirSync(path.dirname(commands.ENSURE_RESULT_PATH)).filter((entry) => entry.endsWith('.tmp'));
+  `);
+
+  assert.equal(report.claimed, true, 'the probe took the lock before releasing it');
+  assert.equal(report.result.ok, true, 'the follower reads this run\'s outcome');
+  assert.equal(report.result.message.length, 8192, 'the recorded outcome is complete, not a partial write');
+  assert.notEqual(report.inode, previousInode, 'the result file was replaced by rename, not rewritten in place');
+  assert.deepEqual(report.temporarySiblings, [], 'the atomic write leaves no .tmp residue behind');
 });
 
 test('older cache version leaves a newer sibling shim running', async (t) => {

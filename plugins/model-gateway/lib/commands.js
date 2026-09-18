@@ -71,6 +71,19 @@ const ENSURE_RESULT_PATH = path.join(STATE, 'ensure.lastResult.json');
 // for an abandoned lock -- give a legitimate in-flight writer this long to
 // finish before an unparseable lock file is treated as reclaimable.
 const ENSURE_LOCK_WRITE_GRACE_MS = 2000;
+// That grace only covers a lock with no pid in it yet. A lock that names a LIVE
+// pid is otherwise trusted forever, and liveness is not ownership: pids get
+// recycled, so a holder that died mid-recovery can have its number reappear on an
+// unrelated process, and the lock then never becomes reclaimable -- every later
+// `ensure` takes the follower path, waits out its deadline, and nobody ever
+// recovers the gateway. That is the mirror image of the double-holder race
+// observed on Windows CI and just as platform-independent (POSIX pids wrap too).
+// So cap absolute lock age: past this the holder is presumed gone whatever its
+// pid claims. 150x the write grace keeps the cap far above any legitimate hold --
+// an `ensure` holder is bounded by its own startup wait, and its followers give up
+// after startupWaitMsFor + 8s (~20s) -- so a slow-but-live holder is never robbed
+// mid-recovery.
+const ENSURE_LOCK_MAX_AGE_MS = 150 * ENSURE_LOCK_WRITE_GRACE_MS; // 5 minutes
 const PLUGIN_VERSION = readPluginVersion();
 const PROXY_BIN = path.join(BIN_DIR, WIN ? 'claude-code-proxy.exe' : 'claude-code-proxy');
 const PROXY_SERVING_VERSION_PATH = path.join(STATE, 'proxy-serving-version.txt');
@@ -231,6 +244,11 @@ function readEnsureLockHolder() {
 function readLastEnsureResult() {
   try { return JSON.parse(fs.readFileSync(ENSURE_RESULT_PATH, 'utf8')); } catch { return null; }
 }
+// A lock file that vanished under us reads as infinitely old: the reclaim that
+// triggers is a no-op rmSync, and the next attempt's openSync settles who owns it.
+function ensureLockAgeMs() {
+  try { return Date.now() - fs.statSync(ENSURE_LOCK_PATH).mtimeMs; } catch { return Infinity; }
+}
 // Claims the lock file exclusively. A lock left behind by a process that is no
 // longer alive (a crash that skipped cleanup) is stale and gets reclaimed rather
 // than blocking forever.
@@ -257,13 +275,13 @@ function tryClaimEnsureLock() {
       // processes both become holder (observed on Windows CI: two `ensure`
       // OS processes both logged ensure-recovery-started 2ms apart). Only
       // reclaim once the file is older than a real writer would ever take.
-      if (!holder) {
-        let ageMs = Infinity;
-        try { ageMs = Date.now() - fs.statSync(ENSURE_LOCK_PATH).mtimeMs; } catch { /* file vanished; next attempt's openSync settles it */ }
-        if (ageMs > ENSURE_LOCK_WRITE_GRACE_MS) {
-          try { fs.rmSync(ENSURE_LOCK_PATH); } catch {}
-          continue;
-        }
+      // A lock that does name a live pid gets the far longer absolute cap
+      // instead: trusted while a real recovery could still be running, reclaimed
+      // past the age where a recycled pid is the likelier explanation for that
+      // liveness than a holder still doing the work.
+      if (ensureLockAgeMs() > (holder ? ENSURE_LOCK_MAX_AGE_MS : ENSURE_LOCK_WRITE_GRACE_MS)) {
+        try { fs.rmSync(ENSURE_LOCK_PATH); } catch {}
+        continue;
       }
       return false;
     }
@@ -285,7 +303,22 @@ async function acquireEnsureLock({
   return { role: 'follower', outcome: null, timedOut: true };
 }
 function releaseEnsureLock(outcome) {
-  try { fs.writeFileSync(ENSURE_RESULT_PATH, JSON.stringify({ ...outcome, at: new Date().toISOString() })); } catch {}
+  // Atomic on purpose: a follower reads this file the instant the lock disappears,
+  // and a truncate-in-place write is observable as an empty or half-written file.
+  // The follower's parse then fails, it reports "another ensure is already
+  // recovering" and exits, discarding the outcome this run just produced for it.
+  // tmp+rename means every reader sees one whole version or the other.
+  try { writeFileAtomically(ENSURE_RESULT_PATH, JSON.stringify({ ...outcome, at: new Date().toISOString() })); } catch {}
+  // Never remove a lock we no longer hold. A claim can end before the process
+  // does: the absolute age cap in tryClaimEnsureLock hands the lock to a new
+  // holder while the old one is still running, and an unconditional rmSync here
+  // would then delete THAT process's live lock -- freeing a third `ensure` to
+  // start a concurrent recovery, which is the SQ-23 failure this lock exists to
+  // prevent. Re-read and match our own pid; another holder's lock, or one already
+  // gone, is left alone. The outcome above is still recorded either way: it is a
+  // real result of a real run, and a follower reading a stale-but-complete one is
+  // strictly better than a follower reading nothing.
+  if (readEnsureLockHolder()?.pid !== process.pid) return;
   try { fs.rmSync(ENSURE_LOCK_PATH); } catch {}
 }
 
@@ -2384,6 +2417,11 @@ module.exports = {
   startupWaitMsFor,
   startAll,
   waitForStartupReadiness,
+  tryClaimEnsureLock,
+  releaseEnsureLock,
+  ENSURE_LOCK_PATH,
+  ENSURE_RESULT_PATH,
+  ENSURE_LOCK_MAX_AGE_MS,
   settingsPath,
   COMPAT_HOST,
   COMPAT_PORT,
