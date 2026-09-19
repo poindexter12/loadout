@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { execFileSync } = require('node:child_process');
 
 const {
   allocateLargestRemainder,
@@ -21,6 +22,8 @@ const {
   resolveUsageEndpoint,
   serializedBytes,
 } = require('../lib/usage-observability.js');
+
+const USAGE_OBSERVABILITY = path.join(__dirname, '..', 'lib', 'usage-observability.js');
 
 function attributeMap(payload) {
   const attributes = payload.resourceLogs[0].scopeLogs[0].logRecords[0].attributes;
@@ -585,4 +588,59 @@ test('OTLP payload carries the event.name attribute the collector filter matches
   // If either side changes its key or pattern, this must fail.
   const filterRegex = /^(claude_code|agent_sdk|gateway)\.|^(mcp_server_connection|hook_execution_(start|complete))$/;
   assert.match(attributes['event.name'], filterRegex);
+});
+
+// SQ-44: usage-observability.js resolves REQUEST_BODY_STATE_DIR once at
+// require time (matching lib/runtime.js's own top-level CLAUDE_CONFIG_DIR
+// constant, see config-dir-state.test.js), so an in-process env mutation
+// would not be observed here. Read the resolved directory out of a fresh
+// process instead. observability's own copy of this same directory
+// computation (lib/observability/request-body.js) must resolve identically
+// on a multi-account machine or the statusline never finds what the gateway
+// wrote; see plugins/observability/test/request-body-state-dir.test.js.
+function requestBodyStateDir(overrides = {}) {
+  const environment = { ...process.env };
+  delete environment.MODEL_GATEWAY_REQUEST_BODY_DIR;
+  delete environment.MODEL_GATEWAY_CLAUDE_HOME;
+  delete environment.CLAUDE_CONFIG_DIR;
+  Object.assign(environment, overrides);
+  const script = `const path = require('node:path');`
+    + `const m = require(${JSON.stringify(USAGE_OBSERVABILITY)});`
+    + `process.stdout.write(path.dirname(m.requestBodyHighWaterPath('probe-session')));`;
+  return execFileSync(process.execPath, ['-e', script], { encoding: 'utf8', env: environment });
+}
+
+test('request-body state dir follows CLAUDE_CONFIG_DIR instead of the OS home', () => {
+  const configDir = path.join(os.tmpdir(), 'model-gateway-request-body-account-a', '.claude');
+  assert.equal(
+    requestBodyStateDir({ CLAUDE_CONFIG_DIR: configDir }),
+    path.join(configDir, 'model-gateway', 'request-body'),
+  );
+});
+
+test('MODEL_GATEWAY_CLAUDE_HOME outranks CLAUDE_CONFIG_DIR for the request-body state dir', () => {
+  const configDir = path.join(os.tmpdir(), 'model-gateway-request-body-account-a', '.claude');
+  const claudeHome = path.join(os.tmpdir(), 'model-gateway-request-body-account-b', '.claude');
+  assert.equal(
+    requestBodyStateDir({ CLAUDE_CONFIG_DIR: configDir, MODEL_GATEWAY_CLAUDE_HOME: claudeHome }),
+    path.join(claudeHome, 'model-gateway', 'request-body'),
+  );
+});
+
+test('MODEL_GATEWAY_REQUEST_BODY_DIR still outranks CLAUDE_CONFIG_DIR for the request-body state dir', () => {
+  const explicit = path.join(os.tmpdir(), 'model-gateway-request-body-explicit');
+  assert.equal(
+    requestBodyStateDir({
+      CLAUDE_CONFIG_DIR: path.join(os.tmpdir(), 'model-gateway-request-body-irrelevant', '.claude'),
+      MODEL_GATEWAY_REQUEST_BODY_DIR: explicit,
+    }),
+    explicit,
+  );
+});
+
+test('request-body state dir falls back to the OS home when no config dir is set', () => {
+  assert.equal(
+    requestBodyStateDir(),
+    path.join(os.homedir(), '.claude', 'model-gateway', 'request-body'),
+  );
 });

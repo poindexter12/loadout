@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { spawnSync } = require('node:child_process');
 const {
   COLLECTOR_VERSION,
   DOCKER_PROBE_TIMEOUT_MS,
@@ -19,6 +20,7 @@ const {
   dashboardSkippedMessage,
   dockerProbe,
   downloadCollector,
+  ensureStatuslineShim,
   mergeObservabilitySettings,
   parseArgs,
   parseChecksum,
@@ -28,6 +30,9 @@ const {
   setupObservability,
   setupPlan,
   startLgtm,
+  statuslineCommand,
+  statuslineShimPath,
+  userSettingsPath,
   verificationGuidance,
 } = require('../bin/setup-observability.js');
 
@@ -174,6 +179,94 @@ test('installs a stable status line shim when none is configured', () => {
     assert.doesNotMatch(result.settings.statusLine.command, /plugins[\\/]cache/);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// SQ-44: on multi-account machines CLAUDE_CONFIG_DIR names the real account
+// tree while the OS home's ~/.claude may resolve to a different account.
+// statuslineShimPath/statuslineCommand/userSettingsPath/ensureStatuslineShim
+// keep every existing caller's contract when a `home` is passed explicitly
+// (tests above, and quartermaster's stale-statusline healer): that value is
+// still a raw OS home with `.claude` joined on. Only the default -- no `home`
+// argument -- changes, and now follows CLAUDE_CONFIG_DIR first.
+test('statusline paths follow CLAUDE_CONFIG_DIR by default instead of the OS home', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-statusline-config-dir-'));
+  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    assert.equal(statuslineShimPath(), path.join(configDir, 'workbench-statusline.js'));
+    assert.equal(statuslineCommand(), `node --no-warnings "${path.join(configDir, 'workbench-statusline.js')}"`);
+    assert.equal(userSettingsPath(), path.join(configDir, 'settings.json'));
+  } finally {
+    if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+    fs.rmSync(configDir, { recursive: true, force: true });
+  }
+});
+
+test('statusline paths fall back to the OS home when CLAUDE_CONFIG_DIR is unset', () => {
+  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    delete process.env.CLAUDE_CONFIG_DIR;
+    assert.equal(statuslineShimPath(), path.join(os.homedir(), '.claude', 'workbench-statusline.js'));
+    assert.equal(userSettingsPath(), path.join(os.homedir(), '.claude', 'settings.json'));
+  } finally {
+    if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+  }
+});
+
+test('an explicit home still means the OS home with .claude joined on, regardless of CLAUDE_CONFIG_DIR', () => {
+  const explicitHome = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-statusline-explicit-home-'));
+  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    // A caller that already resolved its own home (quartermaster's
+    // healStaleStatuslines) must keep getting exactly what it asked for, even
+    // when CLAUDE_CONFIG_DIR names a different tree entirely.
+    process.env.CLAUDE_CONFIG_DIR = path.join(os.tmpdir(), 'loadout-statusline-unrelated-config-dir');
+    assert.equal(statuslineShimPath(explicitHome), path.join(explicitHome, '.claude', 'workbench-statusline.js'));
+    assert.equal(userSettingsPath(explicitHome), path.join(explicitHome, '.claude', 'settings.json'));
+  } finally {
+    if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+    fs.rmSync(explicitHome, { recursive: true, force: true });
+  }
+});
+
+test('the generated statusline shim resolves the plugin registry through CLAUDE_CONFIG_DIR at runtime', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-statusline-shim-registry-'));
+  const decoyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-statusline-shim-decoy-home-'));
+  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    const shimPath = ensureStatuslineShim();
+    assert.equal(shimPath, path.join(configDir, 'workbench-statusline.js'));
+
+    const installPath = path.join(configDir, 'fake-observability-install');
+    fs.mkdirSync(path.join(installPath, 'bin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(installPath, 'bin', 'statusline.js'),
+      "module.exports.main = () => { process.stdout.write('found-via-config-dir'); };",
+    );
+    fs.mkdirSync(path.join(configDir, 'plugins'), { recursive: true });
+    fs.writeFileSync(path.join(configDir, 'plugins', 'installed_plugins.json'), JSON.stringify({
+      plugins: { 'observability@loadout': [{ installPath, version: '9.9.9', lastUpdated: '2026-01-01' }] },
+    }));
+
+    // HOME/USERPROFILE point at a decoy directory with no registry at all, so
+    // a pass only if the shim actually followed CLAUDE_CONFIG_DIR rather than
+    // falling through to the real OS home.
+    const result = spawnSync(process.execPath, [shimPath], {
+      encoding: 'utf8',
+      env: { ...process.env, CLAUDE_CONFIG_DIR: configDir, HOME: decoyHome, USERPROFILE: decoyHome },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, 'found-via-config-dir');
+  } finally {
+    if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+    fs.rmSync(configDir, { recursive: true, force: true });
+    fs.rmSync(decoyHome, { recursive: true, force: true });
   }
 });
 
