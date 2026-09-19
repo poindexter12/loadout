@@ -4,7 +4,6 @@ const assert = require('node:assert/strict');
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const http = require('node:http');
-const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
@@ -26,13 +25,45 @@ function seedGrokAuth(environment) {
 const CLI = path.join(__dirname, '..', 'bin', 'model-gateway.js');
 const gw = require(CLI);
 
-function freePort() {
+// SQ-37: a real HTTP test double (the mock Codex/Anthropic proxy, or the mock
+// shim below) binds its own ephemeral port directly and reports the OS-assigned
+// value from its own listen callback -- no separate reservation, so no gap for
+// another process to steal the number.
+function listen(server) {
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
+}
+
+// 'serve-shim' is the supervisor (lib/commands.js runShim()): it binds
+// CODEX_GATEWAY_PORT itself and forks a separate worker child over its own
+// internal IPC channel, so a process.send from that worker never reaches this
+// test (it is only the supervisor's parent, not the worker's). What IS visible
+// here is the supervisor's own real bind, logged with the actual OS-assigned
+// port (`main.address().port`, never the literal '0' the env passed in) as
+// `model-gateway shim supervisor listening on 127.0.0.1:<port>` -- the same
+// stdout text support.js's startGateway() already parses. Reading it here
+// replaces the old bind/close/reuse freePort() reservation, which raced
+// against whatever else on the machine grabbed the freed port before the
+// supervisor itself got to bind it -- the CI flake this ticket retires.
+function waitForListeningPort(child) {
   return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close(() => resolve(port));
+    const timeout = setTimeout(() => reject(new Error(`model-gateway did not report a listening port: ${buffered}`)), 5000);
+    let buffered = '';
+    const onData = (chunk) => {
+      buffered += chunk;
+      const match = buffered.match(/listening on 127\.0\.0\.1:(\d+)/);
+      if (!match) return;
+      clearTimeout(timeout);
+      child.stdout.off('data', onData);
+      resolve(Number(match[1]));
+    };
+    child.stdout.on('data', onData);
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timeout);
+      reject(new Error(`model-gateway exited before reporting a listening port (${code ?? signal}): ${buffered}`));
     });
   });
 }
@@ -69,8 +100,6 @@ async function waitForHealthz(port) {
 }
 
 test('dispatch model stays routable when omitted from the default model listing', async (t) => {
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-dispatch-'));
   const routeLog = path.join(logDir, 'routes.jsonl');
   const forwarded = [];
@@ -87,20 +116,21 @@ test('dispatch model stays routable when omitted from the default model listing'
       res.end(JSON.stringify({ type: 'message', model: 'gpt-5.6-terra', content: [] }));
     });
   });
-  await new Promise((resolve) => proxy.listen(proxyPort, '127.0.0.1', resolve));
+  const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
 
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PORT: '0',
       CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
       CODEX_GATEWAY_REQUEST_LOG_PATH: routeLog,
       CODEX_GATEWAY_SENTRY: '0',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
   await waitForHealthz(shimPort);
 
   const models = JSON.parse((await request(shimPort, '/v1/models')).body).data;
@@ -139,8 +169,6 @@ test('dispatch model stays routable when omitted from the default model listing'
 });
 
 test('dispatch model is listed with the explicit rollback flag and stays routable', async (t) => {
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
   const forwarded = [];
   const proxy = http.createServer((req, res) => {
     const chunks = [];
@@ -155,21 +183,22 @@ test('dispatch model is listed with the explicit rollback flag and stays routabl
       res.end(JSON.stringify({ type: 'message', model: 'gpt-5.6-terra', content: [] }));
     });
   });
-  await new Promise((resolve) => proxy.listen(proxyPort, '127.0.0.1', resolve));
+  const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
 
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PORT: '0',
       CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
       CODEX_GATEWAY_LIST_DISPATCH_MODEL: '1',
       CODEX_GATEWAY_REQUEST_LOG: '0',
       CODEX_GATEWAY_SENTRY: '0',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
   await waitForHealthz(shimPort);
 
   const models = JSON.parse((await request(shimPort, '/v1/models')).body).data;
@@ -185,19 +214,20 @@ test('dispatch model is listed with the explicit rollback flag and stays routabl
 });
 
 test('dispatch model rejects missing and malformed route markers', async (t) => {
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
+  // No proxy target is ever dereferenced on this test's rejection path, so
+  // CODEX_GATEWAY_PROXY_PORT stays at the environment default ('0') too.
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
-      CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
+      CODEX_GATEWAY_PORT: '0',
+      CODEX_GATEWAY_PROXY_PORT: '0',
       CODEX_GATEWAY_REQUEST_LOG: '0',
       CODEX_GATEWAY_SENTRY: '0',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
   await waitForHealthz(shimPort);
 
   const retiredMarker = `[${['switch', 'board-route'].join('')} model=gpt-5.6-terra]`;
@@ -294,8 +324,6 @@ test('dispatchRouteFromMessages scans only user-authored text blocks', () => {
 });
 
 test('dispatch route ignores markers echoed through tool_result blocks end-to-end', async (t) => {
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
   const forwarded = [];
   const proxy = http.createServer((req, res) => {
     const chunks = [];
@@ -310,20 +338,21 @@ test('dispatch route ignores markers echoed through tool_result blocks end-to-en
       res.end(JSON.stringify({ type: 'message', model: 'gpt-5.6-terra', content: [] }));
     });
   });
-  await new Promise((resolve) => proxy.listen(proxyPort, '127.0.0.1', resolve));
+  const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
 
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PORT: '0',
       CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
       CODEX_GATEWAY_REQUEST_LOG: '0',
       CODEX_GATEWAY_SENTRY: '0',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
   await waitForHealthz(shimPort);
 
   // Briefing marker wins even though a later tool_result echoes a competing
@@ -549,12 +578,11 @@ test('SQ-2208: catalog --refresh --json keeps stdout parseable while it logs a p
     'claude-gpt-5.6-sol',
   ])));
 
-  const port = await freePort();
   const shim = http.createServer((request, response) => {
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(request.url === '/healthz' ? '{"ok":true}' : '{"data":[{"id":"claude-gpt-5.6-terra"}]}');
   });
-  await new Promise((resolve) => shim.listen(port, '127.0.0.1', resolve));
+  const port = await listen(shim);
   t.after(() => {
     shim.close();
     fs.rmSync(home, { recursive: true, force: true });
@@ -636,8 +664,6 @@ test('codexBaseFromId claims only gateway ids', () => {
 });
 
 test('the shim keeps Claude ids on the Anthropic path and claims both id forms for Codex', async (t) => {
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
   const toCodex = [];
   const toAnthropic = [];
   const proxy = http.createServer((req, res) => {
@@ -650,7 +676,7 @@ test('the shim keeps Claude ids on the Anthropic path and claims both id forms f
       res.end(JSON.stringify({ type: 'message', model: 'gpt-5.6-terra', content: [] }));
     });
   });
-  await new Promise((resolve) => proxy.listen(proxyPort, '127.0.0.1', resolve));
+  const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
 
   const anthropic = http.createServer((req, res) => {
@@ -662,9 +688,7 @@ test('the shim keeps Claude ids on the Anthropic path and claims both id forms f
       res.end(JSON.stringify({ type: 'message', model: 'claude-opus-5', content: [] }));
     });
   });
-  const anthropicPort = await new Promise((resolve) => {
-    anthropic.listen(0, '127.0.0.1', () => resolve(anthropic.address().port));
-  });
+  const anthropicPort = await listen(anthropic);
   t.after(() => anthropic.close());
 
   // SQ-19 gates the Grok rows on CLI auth, and the fixture home has none, so
@@ -673,7 +697,7 @@ test('the shim keeps Claude ids on the Anthropic path and claims both id forms f
   // narrowing it to Codex.
   const environment = seedGrokAuth(gatewayTestEnvironment(t, {
     ...process.env,
-    CODEX_GATEWAY_PORT: String(shimPort),
+    CODEX_GATEWAY_PORT: '0',
     CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
     CODEX_GATEWAY_ANTHROPIC_UPSTREAM: `http://127.0.0.1:${anthropicPort}`,
     CODEX_GATEWAY_REQUEST_LOG: '0',
@@ -681,9 +705,10 @@ test('the shim keeps Claude ids on the Anthropic path and claims both id forms f
   }));
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: environment,
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
   await waitForHealthz(shimPort);
 
   const models = JSON.parse((await request(shimPort, '/v1/models')).body).data.map(({ id }) => id);
@@ -716,8 +741,6 @@ for (const { name, seedAuth, advertised } of [
   { name: 'withholds Grok when the Grok CLI has no auth', seedAuth: false, advertised: false },
 ]) {
   test(`the boot catalog ${name} before the first model refresh lands`, async (t) => {
-    const shimPort = await freePort();
-    const proxyPort = await freePort();
     // A proxy that accepts and never answers keeps refreshModels() in flight for
     // its full timeout, so /v1/models here can only be served from the boot
     // catalog — this is the only window in which that catalog is observable.
@@ -727,7 +750,7 @@ for (const { name, seedAuth, advertised } of [
       sockets.add(socket);
       socket.on('close', () => sockets.delete(socket));
     });
-    await new Promise((resolve) => proxy.listen(proxyPort, '127.0.0.1', resolve));
+    const proxyPort = await listen(proxy);
     t.after(() => {
       for (const socket of sockets) socket.destroy();
       proxy.close();
@@ -735,7 +758,7 @@ for (const { name, seedAuth, advertised } of [
 
     const environment = gatewayTestEnvironment(t, {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PORT: '0',
       CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
       CODEX_GATEWAY_REQUEST_LOG: '0',
       CODEX_GATEWAY_SENTRY: '0',
@@ -744,9 +767,10 @@ for (const { name, seedAuth, advertised } of [
 
     const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
       env: environment,
-      stdio: 'ignore',
+      stdio: ['ignore', 'pipe', 'ignore'],
     });
     t.after(() => child.kill());
+    const shimPort = await waitForListeningPort(child);
     await waitForHealthz(shimPort);
 
     const models = JSON.parse((await request(shimPort, '/v1/models')).body).data.map(({ id }) => id);
@@ -758,8 +782,6 @@ for (const { name, seedAuth, advertised } of [
   });
 
   test(`the refreshed catalog ${name}`, async (t) => {
-    const shimPort = await freePort();
-    const proxyPort = await freePort();
     // This proxy answers /v1/models with an id absent from DEFAULT_MODELS, which
     // is how the assertions below can tell a landed refresh from the boot
     // catalog without racing a timer.
@@ -767,12 +789,12 @@ for (const { name, seedAuth, advertised } of [
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify({ data: [{ id: 'gpt-5.9-probe' }] }));
     });
-    await new Promise((resolve) => proxy.listen(proxyPort, '127.0.0.1', resolve));
+    const proxyPort = await listen(proxy);
     t.after(() => proxy.close());
 
     const environment = gatewayTestEnvironment(t, {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PORT: '0',
       CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
       CODEX_GATEWAY_REQUEST_LOG: '0',
       CODEX_GATEWAY_SENTRY: '0',
@@ -781,9 +803,10 @@ for (const { name, seedAuth, advertised } of [
 
     const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
       env: environment,
-      stdio: 'ignore',
+      stdio: ['ignore', 'pipe', 'ignore'],
     });
     t.after(() => child.kill());
+    const shimPort = await waitForListeningPort(child);
     await waitForHealthz(shimPort);
 
     let models = [];
