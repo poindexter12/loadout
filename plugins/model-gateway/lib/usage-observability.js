@@ -20,8 +20,17 @@ const DEFAULT_CONTEXT_SNAPSHOT_MAX_IDENTITIES = 500;
 const DEFAULT_PROJECT_LOOKUP_BYTES = 64 * 1024;
 const TOOL_RESULT_EVENT = 'gateway.tool_result.usage';
 const MCP_FOOTPRINT_EVENT = 'gateway.mcp.footprint';
+// Matches lib/runtime.js's CLAUDE_CONFIG_DIR precedence (MODEL_GATEWAY_CLAUDE_HOME
+// || CLAUDE_CONFIG_DIR || ~/.claude) so this state lands in the same account
+// tree as the rest of the gateway's state, and observability's copy of this
+// same directory computation (lib/observability/request-body.js) can find it
+// on a multi-account machine (SQ-44).
 const REQUEST_BODY_STATE_DIR = process.env.MODEL_GATEWAY_REQUEST_BODY_DIR
-  || path.join(os.homedir(), '.claude', 'model-gateway', 'request-body');
+  || path.join(
+    process.env.MODEL_GATEWAY_CLAUDE_HOME || process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'),
+    'model-gateway',
+    'request-body',
+  );
 const requestBodyHighWater = new Map();
 
 const RATE_LIMIT_HEADERS = Object.freeze({

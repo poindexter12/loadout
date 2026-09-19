@@ -7,8 +7,18 @@ const path = require('node:path');
 const REQUEST_BODY_LIMIT_BYTES = 32 * 1024 * 1024;
 const REQUEST_BODY_WARNING_BYTES = 24 * 1024 * 1024;
 const MAX_REQUEST_BODY_RECORD_BYTES = 1024;
+// This state is model-gateway's own (it records the per-session request-body
+// high water that gateway writes and this statusline reads), so the default
+// must mirror model-gateway's own CLAUDE_CONFIG_DIR precedence
+// (lib/runtime.js: MODEL_GATEWAY_CLAUDE_HOME || CLAUDE_CONFIG_DIR || ~/.claude)
+// or the two plugins compute different directories on a multi-account
+// machine and this reader never finds what the gateway wrote (SQ-44).
 const REQUEST_BODY_STATE_DIR = process.env.MODEL_GATEWAY_REQUEST_BODY_DIR
-  || path.join(os.homedir(), '.claude', 'model-gateway', 'request-body');
+  || path.join(
+    process.env.MODEL_GATEWAY_CLAUDE_HOME || process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'),
+    'model-gateway',
+    'request-body',
+  );
 const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,255}$/;
 
 function requestBodyHighWaterPath(sessionId, directory = REQUEST_BODY_STATE_DIR) {
