@@ -6,6 +6,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const { claudeDir, pluginsDir } = require('../lib/paths.js');
+
 const GATEWAY_MARKETPLACE = 'loadout';
 const OBSERVABILITY_PLUGIN = 'observability@loadout';
 const LEGACY_GATEWAY_PLUGIN = `codex-gateway@${GATEWAY_MARKETPLACE}`;
@@ -50,8 +52,8 @@ their recorded project directory so Claude Code updates the right scope.
   --claude      Claude Code command to run (default: claude)`;
 }
 
-function registryPath(home = os.homedir()) {
-  return path.join(home, '.claude', 'plugins', 'installed_plugins.json');
+function registryPath(env = process.env) {
+  return path.join(pluginsDir(env), 'installed_plugins.json');
 }
 
 function readRegistry(file) {
@@ -163,10 +165,10 @@ function healStatuslineFile(filePath, fallbackStatusLine, command, dryRun) {
 // The statusline belongs to the observability plugin. Resolve its setup module from
 // the install registry rather than importing it, so Observability keeps working for the
 // people who never installed it directly.
-function observabilitySetup(home) {
-  const registryPath = path.join(home, '.claude', 'plugins', 'installed_plugins.json');
+function observabilitySetup(env) {
+  const registryFile = path.join(pluginsDir(env), 'installed_plugins.json');
   let registry;
-  try { registry = JSON.parse(fs.readFileSync(registryPath, 'utf8')); } catch { return null; }
+  try { registry = JSON.parse(fs.readFileSync(registryFile, 'utf8')); } catch { return null; }
   const installs = registry?.plugins?.[OBSERVABILITY_PLUGIN];
   if (!Array.isArray(installs)) return null;
   for (const install of installs) {
@@ -181,11 +183,12 @@ function observabilitySetup(home) {
 
 function healStaleStatuslines(instances, options = {}) {
   const home = options.home || os.homedir();
-  const setup = options.observabilitySetup || observabilitySetup(home);
+  const env = options.env || process.env;
+  const setup = options.observabilitySetup || observabilitySetup(env);
   if (!setup) return [];
   const { ensureStatuslineShim, statuslineCommand } = setup;
   const command = statuslineCommand(home);
-  const userSettingsPath = path.join(home, '.claude', 'settings.json');
+  const userSettingsPath = path.join(claudeDir(env), 'settings.json');
   const user = healStatuslineFile(userSettingsPath, null, command, options.dryRun);
   const userStatusLine = user.settings?.statusLine;
   const projects = [...new Set(instances.map((instance) => instance.projectPath).filter(Boolean))];
@@ -462,7 +465,7 @@ function execute(command, options, run, report) {
   return false;
 }
 
-function runModelGatewayMigration({ registryFile = registryPath(), home = os.homedir(), options, run = defaultRun, report = console.log }) {
+function runModelGatewayMigration({ env = process.env, registryFile = registryPath(env), home = os.homedir(), options, run = defaultRun, report = console.log }) {
   if (!options.confirmSessionsClosed) {
     report('Migration stopped: close every Claude Code session using Codex, then retry with --confirm-sessions-closed. The migration will not stop the shared gateway for you.');
     return { ok: false, failures: ['model-gateway migration confirmation required'] };
@@ -532,7 +535,7 @@ function runModelGatewayMigration({ registryFile = registryPath(), home = os.hom
   return { ok: true, failures: [] };
 }
 
-function runUpdate({ registryFile = registryPath(), home = os.homedir(), options, run = defaultRun, report = console.log, installGatewayLauncher = installGatewayUpdateLauncher }) {
+function runUpdate({ env = process.env, registryFile = registryPath(env), home = os.homedir(), options, run = defaultRun, report = console.log, installGatewayLauncher = installGatewayUpdateLauncher }) {
   let registry;
   try {
     registry = readRegistry(registryFile);
@@ -617,7 +620,7 @@ function runUpdate({ registryFile = registryPath(), home = os.homedir(), options
     report('Gateway wiring is handled by the stable model-gateway updater.');
   }
 
-  const healedStatuslines = options.check ? [] : healStaleStatuslines(instances, { home, dryRun: options.dryRun });
+  const healedStatuslines = options.check ? [] : healStaleStatuslines(instances, { home, env, dryRun: options.dryRun });
   if (healedStatuslines.length > 0) {
     report(`Healed ${healedStatuslines.length} stale managed status-line shim setting(s).`);
   }

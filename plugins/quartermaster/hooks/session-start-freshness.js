@@ -16,6 +16,7 @@ const {
   reportLoadedPluginVersion,
 } = require('./freshness-helpers.js');
 const { localGatewayCheck, parseGatewayDoctorOutput } = require('../lib/gateway-health.js');
+const { pluginsDir } = require('../lib/paths.js');
 
 const CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MIN_CLAUDE_CODE_VERSION = '2.1.0';
@@ -408,8 +409,9 @@ function currentProjectInstances(instances, currentProject) {
 
 function audit(options = {}) {
   const home = options.home || os.homedir();
-  const registry = options.registry || readJson(path.join(home, '.claude', 'plugins', 'installed_plugins.json')) || {};
-  const registeredMarketplaces = options.marketplaces || readJson(path.join(home, '.claude', 'plugins', 'known_marketplaces.json')) || {};
+  const env = options.env || process.env;
+  const registry = options.registry || readJson(path.join(pluginsDir(env), 'installed_plugins.json')) || {};
+  const registeredMarketplaces = options.marketplaces || readJson(path.join(pluginsDir(env), 'known_marketplaces.json')) || {};
   const marketplaces = withDeclaredAutoUpdate(registeredMarketplaces, options.currentProject, home);
   const now = options.now ?? Date.now();
   const instances = pluginInstances(registry);
