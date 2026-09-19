@@ -27,12 +27,9 @@ jobs:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           RELEASE_AUTOMATION: ${{ vars.RELEASE_AUTOMATION }}
         run: |
+          automation_active=0
           case "${RELEASE_AUTOMATION,,}" in
-            active|on|true|1) ;;
-            *)
-              echo "Release enforcement is staged or paused by RELEASE_AUTOMATION."
-              exit 0
-              ;;
+            active|on|true|1) automation_active=1 ;;
           esac
           if [ "$EVENT_NAME" = "pull_request" ]; then
             mode=dev
@@ -46,6 +43,17 @@ jobs:
             mode=dev
             base="$BEFORE_SHA"
             publish_ref=origin/main
+          fi
+          # RELEASE_AUTOMATION softens main-mode strictness only. Dev mode -- which is
+          # every pull request -- always runs, because its fragment-coverage check is
+          # the one thing that catches a plugin change shipping with no release note,
+          # and nothing downstream catches it afterwards: once the commit is on main
+          # the fragment is simply missing from the next cut. Gating that check on the
+          # same variable that pauses releases meant omissions landed silently for as
+          # long as automation stayed paused.
+          if [ "$automation_active" -ne 1 ] && [ "$mode" = "main" ]; then
+            echo "Release enforcement is staged or paused by RELEASE_AUTOMATION; skipping main-mode checks."
+            exit 0
           fi
           if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
             base="$(git rev-parse HEAD^)"
