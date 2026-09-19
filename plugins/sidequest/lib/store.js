@@ -3268,3 +3268,5 @@ module.exports = {
   reconcileSession,
   sessionClaims
 };
+
+// SQ-33 verification scratch; this branch is deleted immediately.
