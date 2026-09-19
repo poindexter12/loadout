@@ -1,6 +1,6 @@
 # Release and publishing
 
-Last Updated: 2026-09-08
+Last Updated: 2026-09-19
 
 The marketplace manifests on `main` are delivery. Verified integration lands on `main` and writes a release fragment in the same push with `node scripts/release/note.mjs`. Plugin version bumps ship with that integration; do not hold a bump for a later GitHub Release.
 
@@ -8,12 +8,12 @@ Sidequest executors stop at immutable submitted candidates. The orchestrator ass
 
 Every plugin release updates three version fields: the marketplace top-level version, the plugin entry version in `.claude-plugin/marketplace.json`, and `plugins/<name>/.claude-plugin/plugin.json`. `scripts/release/lib/manifests.mjs` owns these writes after a plugin has matching bootstrap versions.
 
-Release tooling covers note, plan, cut, guard, hold, and commit operations. `.release/HOLD` pauses a normal release window; hotfix behavior is separately documented in `.release/README.md`. The `RELEASE_AUTOMATION` repository variable gates `.github/workflows/release-guard.yml` only; its gate runs no-op while paused. Releases are cut locally with `node scripts/release/cut.mjs` from a clean tree while holding the `sidequest publish lock`. The pre-push hook enforces that lock on `main`; publish with the exact `git push --atomic` command `cut.mjs` prints. `scripts/release/lib/suites.mjs` delegates package-script and test-directory discovery to the committed `plugins/sidequest/lib/suite-resolver.js`; generated Sidequest `agents/`, `lib/`, and other committed build output ship in the plugin package, and generated `lib` output drives release-suite resolution.
+Release tooling covers note, plan, cut, guard, hold, and commit operations. `.release/HOLD` pauses a normal release window; hotfix behavior is separately documented in `.release/README.md`. The `RELEASE_AUTOMATION` repository variable gates `.github/workflows/release-guard.yml` only, and it softens the stricter `main`-mode checks alone. Pull-request checks always run whatever that variable says, because the fragment-coverage check in `scripts/release/guard.mjs` is mode-independent and nothing downstream catches a plugin change that ships with no release note. Releases are cut locally with `node scripts/release/cut.mjs` from a clean tree while holding the `sidequest publish lock`. The pre-push hook enforces that lock on `main`; publish with the exact `git push --atomic` command `cut.mjs` prints. `scripts/release/lib/suites.mjs` delegates package-script and test-directory discovery to the committed `plugins/sidequest/lib/suite-resolver.js`; generated Sidequest `agents/`, `lib/`, and other committed build output ship in the plugin package, and generated `lib` output drives release-suite resolution.
 
 CI gates are split across:
 
 - `.github/workflows/test.yml`, including the manifest-derived plugin matrix and affected-plugin selection. It triggers on `main` pushes and pull requests.
-- `.github/workflows/release-guard.yml`, which validates the publish ref.
+- `.github/workflows/release-guard.yml`, which validates the publish ref. It computes `dev` or `main` mode first and applies the `RELEASE_AUTOMATION` gate afterwards, to `main` mode only. Forcing `dev` mode on a `main` push would be wrong, not merely lax: `dev` asserts versions have not moved against the publish ref while `main` asserts they have.
 - `.github/workflows/release.yml` (Publish GitHub Release), which triggers on `v*` tags, a daily schedule, and manual dispatch, and creates at most one GitHub Release per UTC day: a capped tag-push run exits successfully without publishing, and the daily catch-up publishes the newest unreleased `v*` tag with generated notes covering every intermediate version. `cut.mjs` reports a capped run as `githubRelease.status === 'deferred'` instead of failing.
 - `.github/workflows/docs.yml`, which builds and deploys the Astro docs site.
 
