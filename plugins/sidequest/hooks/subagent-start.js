@@ -120,7 +120,7 @@ function projectedText(hookEventName, value) {
   if (byteLength(value) <= budget) return value;
   const watermark = stableWatermark(value);
   const omission = `
-[sidequest context v1 id=${hookEventName} revision=${watermark} watermark=${watermark}; content omitted for ${budget}B budget. Retrieve current board state with mcp__plugin_sidequest_board__comments({ref:"<ticket-ref>"}).]`;
+[sidequest v1 id=${hookEventName} revision=${watermark}; content omitted (${budget}B budget). Full state: mcp__plugin_sidequest_board__comments({ref:"<ticket-ref>"}).]`;
   return `${truncateUtf8(value, Math.max(0, budget - byteLength(omission)))}${omission}`;
 }
 function writeJson(value) {
@@ -243,13 +243,13 @@ function warningFor(worktrees, roots) {
   const candidates = worktrees.filter((entry) => entry.lifecycle === "candidate");
   const gone = worktrees.filter((entry) => !entry.onDisk);
   const sentences = [
-    `sidequest: ${worktrees.length} foreign agent worktree${worktrees.length === 1 ? "" : "s"} in play, and Claude Code delivers their LSP diagnostics into YOUR context because that registry is keyed per session, not per agent.`,
-    `Nothing under ${roots.join(" or ")} is yours.`
+    `sidequest: ${worktrees.length} foreign agent worktree${worktrees.length === 1 ? "" : "s"} in play, and Claude Code delivers their LSP diagnostics into YOUR context because that registry is keyed per session, not per agent.`
   ];
   if (gone.length) sentences.push(`${gone.length} of those ${gone.length === 1 ? "paths is" : "paths are"} already gone from disk, and a diagnostic naming a path that no longer exists is always false.`);
   if (live.length) sentences.push(`${live.length} hold${live.length === 1 ? "s" : ""} a live claim (${refList(live)}): errors there are expected mid-refactor state and never outrank that executor's own verify.`);
   if (candidates.length) sentences.push(`Actionable exception: ${refList(candidates)} hold${candidates.length === 1 ? "s" : ""} a candidate awaiting integration, so a diagnostic in that worktree outweighs an executor's \`verify passed\` and is worth reading before you integrate.`);
   sentences.push("Keep error-severity diagnostics in your own files actionable.");
+  sentences.push(`Nothing under ${roots.join(" or ")} is yours.`);
   return sentences.join(" ");
 }
 function diagnosticWorktreeWarning(input, now = Date.now()) {

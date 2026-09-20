@@ -42,7 +42,10 @@ function projectedText(hookEventName: string, value: string): string {
   const budget = contextBudget(hookEventName);
   if (byteLength(value) <= budget) return value;
   const watermark = stableWatermark(value);
-  const omission = `\n[sidequest context v1 id=${hookEventName} revision=${watermark} watermark=${watermark}; content omitted for ${budget}B budget. Retrieve current board state with mcp__plugin_sidequest_board__comments({ref:"<ticket-ref>"}).]`;
+  // Every byte here is a byte a truncated message cannot spend on its own payload (SQ-56: this note was
+  // 222B of a 512B budget, so crossing that budget by one byte cost 208B more content than the overflow
+  // itself). `revision` and `watermark` used to duplicate the same hash under two labels; keep only one.
+  const omission = `\n[sidequest v1 id=${hookEventName} revision=${watermark}; content omitted (${budget}B budget). Full state: mcp__plugin_sidequest_board__comments({ref:"<ticket-ref>"}).]`;
   return `${truncateUtf8(value, Math.max(0, budget - byteLength(omission)))}${omission}`;
 }
 

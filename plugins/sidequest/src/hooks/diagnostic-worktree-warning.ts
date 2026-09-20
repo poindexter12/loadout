@@ -161,18 +161,24 @@ function refList(worktrees: ForeignWorktree[]): string {
   return refs.length ? refs.join(', ') : 'an unnamed dispatch';
 }
 
+// Sentence order is truncation order: projectedText() cuts from the END when the message overflows its
+// hook budget (SQ-56), so whatever is least essential to what the agent does next has to be last. `roots`
+// is the only unbounded input here (full absolute paths, one or two of them), so its sentence is placed
+// last on purpose — it is what gets sacrificed on a long checkout path. The two sentences that change agent
+// behavior (the actionable-candidate exception and the "keep your own diagnostics actionable" directive)
+// come before it so they survive truncation regardless of path length.
 function warningFor(worktrees: ForeignWorktree[], roots: string[]): string {
   const live = worktrees.filter((entry) => entry.lifecycle === 'live');
   const candidates = worktrees.filter((entry) => entry.lifecycle === 'candidate');
   const gone = worktrees.filter((entry) => !entry.onDisk);
   const sentences = [
     `sidequest: ${worktrees.length} foreign agent worktree${worktrees.length === 1 ? '' : 's'} in play, and Claude Code delivers their LSP diagnostics into YOUR context because that registry is keyed per session, not per agent.`,
-    `Nothing under ${roots.join(' or ')} is yours.`,
   ];
   if (gone.length) sentences.push(`${gone.length} of those ${gone.length === 1 ? 'paths is' : 'paths are'} already gone from disk, and a diagnostic naming a path that no longer exists is always false.`);
   if (live.length) sentences.push(`${live.length} hold${live.length === 1 ? 's' : ''} a live claim (${refList(live)}): errors there are expected mid-refactor state and never outrank that executor's own verify.`);
   if (candidates.length) sentences.push(`Actionable exception: ${refList(candidates)} hold${candidates.length === 1 ? 's' : ''} a candidate awaiting integration, so a diagnostic in that worktree outweighs an executor's \`verify passed\` and is worth reading before you integrate.`);
   sentences.push('Keep error-severity diagnostics in your own files actionable.');
+  sentences.push(`Nothing under ${roots.join(' or ')} is yours.`);
   return sentences.join(' ');
 }
 

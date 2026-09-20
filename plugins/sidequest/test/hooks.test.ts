@@ -3784,7 +3784,40 @@ test('subagent-start warns only for embedded worktrees outside the receiving age
   fs.mkdirSync(path.join(worktrees, 'agent-foreign'));
   const warning = runHook(SUBAGENT_START, payload);
   assert.match(warning, /1 foreign agent worktree in play/);
-  assert.match(warning, /error-severity diagnostics/);
+  assert.match(warning, /Keep error-severity diagnostics in your own files actionable\./);
+});
+
+// SQ-56: the warning embeds the checkout's own worktree roots verbatim, and that path is unbounded (it
+// grows with checkout depth, e.g. nested full-suite temp dirs). Tail truncation in projectedText() used to
+// delete exactly the two sentences that change what the receiving agent does whenever that path pushed the
+// message over the SubagentStart budget -- a checkout past ~75 characters lost them silently, and the only
+// signal was an environment-dependent test failure under nested CI temp dirs (path-length dependent, so it
+// read as flaky noise rather than a real defect). Pin the invariant directly against a deliberately deep
+// checkout path instead of asserting on a string that only happens to fit at a short mkdtemp path.
+test('subagent-start keeps the actionable diagnostic-worktree sentences at any checkout path length', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-diagnostic-worktrees-deep-'));
+  // Well past the ~75-char root that used to trip truncation, and past the ~107-char nested full-suite
+  // temp dir that reproduced the real CI failure.
+  const repo = path.join(base, 'nested-segment-'.repeat(4), 'sq-hooks-test-deep-checkout', 'repo');
+  fs.mkdirSync(repo, { recursive: true });
+  gitFixture(['init', '-b', 'main'], repo);
+  const worktrees = path.join(repo, '.claude', 'worktrees');
+  const current = path.join(worktrees, 'agent-current');
+  fs.mkdirSync(current, { recursive: true });
+  fs.writeFileSync(path.join(current, '.git'), `gitdir: ${path.join(repo, '.git', 'worktrees', 'agent-current')}\n`);
+  fs.mkdirSync(path.join(worktrees, 'agent-foreign'));
+  const payload = {
+    session_id: 'diagnostic-worktree-warning-deep',
+    agent_type: 'sidequest-exec-dispatch',
+    agent_id: 'diagnostic-worktree-agent-deep',
+    cwd: current,
+  };
+
+  const warning = runHook(SUBAGENT_START, payload);
+  assert.ok(Buffer.byteLength(warning, 'utf8') <= 512, 'the projected warning must respect the SubagentStart budget');
+  assert.match(warning, /content omitted/, 'this checkout path is deliberately deep enough to overflow the budget');
+  assert.match(warning, /1 foreign agent worktree in play/);
+  assert.match(warning, /Keep error-severity diagnostics in your own files actionable\./, 'the actionable trailer must survive truncation regardless of checkout path length');
 });
 
 test('combined Stop hook gives actionable reconciliation priority over a compaction suggestion', () => {

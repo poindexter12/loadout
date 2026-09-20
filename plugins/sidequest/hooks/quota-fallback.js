@@ -117,7 +117,7 @@ function projectedText(hookEventName, value) {
   if (byteLength(value) <= budget) return value;
   const watermark = stableWatermark(value);
   const omission = `
-[sidequest context v1 id=${hookEventName} revision=${watermark} watermark=${watermark}; content omitted for ${budget}B budget. Retrieve current board state with mcp__plugin_sidequest_board__comments({ref:"<ticket-ref>"}).]`;
+[sidequest v1 id=${hookEventName} revision=${watermark}; content omitted (${budget}B budget). Full state: mcp__plugin_sidequest_board__comments({ref:"<ticket-ref>"}).]`;
   return `${truncateUtf8(value, Math.max(0, budget - byteLength(omission)))}${omission}`;
 }
 function writeJson(value) {
