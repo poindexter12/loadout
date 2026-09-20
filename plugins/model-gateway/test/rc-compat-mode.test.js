@@ -364,17 +364,29 @@ test('writeEnv removes retired socket wiring while preserving unrelated settings
   // Claude Code session, so the ambient base URL has to go or the file under
   // test is not what is being measured.
   const prevBaseUrl = process.env.ANTHROPIC_BASE_URL;
+  // effectiveBaseUrl() ranks project-local and project-shared ahead of user, and
+  // settingsPath() derives both from process.cwd(). Run from the repo root this
+  // suite therefore reads the checkout's own .claude/settings.local.json, whose
+  // ANTHROPIC_BASE_URL shadows the isolated user file and makes wiredMode()
+  // report project-local. Park the cwd somewhere with no .claude of its own; it
+  // cannot be `home`, because settingsPath('project-shared') would then collide
+  // with the user settings file this test writes.
+  const prevCwd = process.cwd();
+  const cwdHome = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-writeenv-cwd-'));
   t.after(() => {
+    process.chdir(prevCwd);
     if (prevUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevUserProfile;
     if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
     if (prevConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prevConfigDir;
     if (prevBaseUrl === undefined) delete process.env.ANTHROPIC_BASE_URL; else process.env.ANTHROPIC_BASE_URL = prevBaseUrl;
     fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    fs.rmSync(cwdHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
   process.env.USERPROFILE = home;
   process.env.HOME = home;
   process.env.CLAUDE_CONFIG_DIR = path.join(home, '.claude');
   delete process.env.ANTHROPIC_BASE_URL;
+  process.chdir(cwdHome);
   const isolatedGateway = loadGatewayWithCurrentHome(home);
 
   const file = isolatedGateway.settingsPath('user');
