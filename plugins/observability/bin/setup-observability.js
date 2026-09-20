@@ -127,15 +127,29 @@ function writePrivateJson(filePath, value) {
   try { fs.chmodSync(path.dirname(filePath), 0o700); fs.chmodSync(filePath, 0o600); } catch {}
 }
 
-function statuslineShimPath(home = os.homedir()) {
-  return path.join(home, '.claude', STATUSLINE_SHIM);
+// Every caller here that names a home explicitly keeps its existing contract:
+// a raw OS home directory with `.claude` joined on below (tests and the
+// stale-statusline healer in quartermaster's update-loadout.js both rely on
+// that). Only the default -- no argument supplied -- changes: it now follows
+// CLAUDE_CONFIG_DIR before falling back to the OS home's ~/.claude, so a
+// setup run on a non-default account tree (multi-account machines; see
+// SQ-27/SQ-44) resolves the statusline shim and settings against the active
+// account instead of always landing in the OS home.
+function resolveClaudeHome(home) {
+  return home !== undefined
+    ? path.join(home, '.claude')
+    : (process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'));
 }
 
-function statuslineCommand(home = os.homedir()) {
+function statuslineShimPath(home) {
+  return path.join(resolveClaudeHome(home), STATUSLINE_SHIM);
+}
+
+function statuslineCommand(home) {
   return `node --no-warnings "${statuslineShimPath(home)}"`;
 }
 
-function managedStatuslineCommand(command, home = os.homedir()) {
+function managedStatuslineCommand(command, home) {
   return String(command || '') === statuslineCommand(home)
     || /[\\/]plugins[\\/]cache[\\/]loadout[\\/](?:observability[\\/][^\\/]+[\\/]bin[\\/]statusline|workbench[\\/][^\\/]+[\\/]bin[\\/]workbench-statusline)\.js/i.test(String(command || ''));
 }
@@ -159,7 +173,7 @@ function compareVersions(left, right) {
 }
 
 function resolveStatusline() {
-  const registryPath = path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json');
+  const registryPath = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'plugins', 'installed_plugins.json');
   const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
   // The workbench entry is the pre-split fallback: a user mid-upgrade may still
   // have only that install, and a dead statusline is a silent failure.
@@ -184,7 +198,7 @@ if (script) require(script).main();
 `;
 }
 
-function ensureStatuslineShim(home = os.homedir()) {
+function ensureStatuslineShim(home) {
   const filePath = statuslineShimPath(home);
   const source = statuslineShim();
   let current = null;
@@ -235,8 +249,8 @@ function legacyProjectSettingsPath(projectDir) {
   return path.join(projectDir, '.claude', 'settings.json');
 }
 
-function userSettingsPath(home = os.homedir()) {
-  return path.join(home, '.claude', 'settings.json');
+function userSettingsPath(home) {
+  return path.join(resolveClaudeHome(home), 'settings.json');
 }
 
 function updateSettingsFile(filePath, transform) {
