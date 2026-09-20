@@ -270,6 +270,52 @@ test('stays silent for a healthy fleet', () => {
   assert.equal(emitWarning(result.problems), '');
 });
 
+// SQ-46: on multi-account machines CLAUDE_CONFIG_DIR names the real account tree while the
+// os.homedir()-derived ~/.claude may resolve to a different account. audit() must read the plugin
+// registry and known marketplaces from CLAUDE_CONFIG_DIR, not the home tree. Populate BOTH trees
+// with different contents so a resolver that silently fell back to home would be caught reading
+// the wrong one; os.homedir() itself is stubbed rather than pointed at the real machine home so
+// this never touches (or risks corrupting) a real account's settings.
+test('audit reads the plugin registry and known marketplaces from CLAUDE_CONFIG_DIR, not the home tree', (t) => {
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'quartermaster-audit-fake-home-'));
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quartermaster-audit-config-dir-'));
+  const originalHomedir = os.homedir;
+  t.after(() => {
+    os.homedir = originalHomedir;
+    fs.rmSync(fakeHome, { recursive: true, force: true });
+    fs.rmSync(configDir, { recursive: true, force: true });
+  });
+  os.homedir = () => fakeHome;
+
+  // pluginInstances() only picks up `@loadout` ids, so both trees register the marketplace as
+  // "loadout" and differ by plugin name and by whether that marketplace is registered at all —
+  // that keeps the "wrong tree" case observable even though the marketplace key can't differ.
+  fs.mkdirSync(path.join(fakeHome, '.claude', 'plugins'), { recursive: true });
+  fs.mkdirSync(path.join(configDir, 'plugins'), { recursive: true });
+  fs.writeFileSync(path.join(fakeHome, '.claude', 'plugins', 'installed_plugins.json'), JSON.stringify({
+    plugins: { 'from-home@loadout': [{ scope: 'user', version: '1.0.0' }] },
+  }));
+  fs.writeFileSync(path.join(configDir, 'plugins', 'installed_plugins.json'), JSON.stringify({
+    plugins: { 'from-config-dir@loadout': [{ scope: 'user', version: '1.0.0' }] },
+  }));
+  fs.writeFileSync(path.join(fakeHome, '.claude', 'plugins', 'known_marketplaces.json'), JSON.stringify({}));
+  fs.writeFileSync(path.join(configDir, 'plugins', 'known_marketplaces.json'), JSON.stringify({
+    'loadout': { autoUpdate: true, lastUpdated: new Date(now).toISOString() },
+  }));
+
+  const options = fixture({ env: { CLAUDE_CONFIG_DIR: configDir } });
+  delete options.home;
+  delete options.registry;
+  delete options.marketplaces;
+  const result = audit(options);
+
+  assert.deepEqual(result.instances.map((instance) => instance.id), ['from-config-dir@loadout']);
+  const problems = findingText(result.problems).join('\n');
+  assert.doesNotMatch(problems, /loadout marketplace is not registered locally/);
+  assert.match(problems, /from-config-dir@loadout freshness is unknown because it is missing from its cached marketplace manifest/);
+  assert.doesNotMatch(problems, /from-home@loadout/);
+});
+
 test('collapses multiple problems into one actionable warning', () => {
   const message = emitWarning([
     'one', 'two', 'three', 'four', 'five', 'six',
@@ -324,7 +370,10 @@ function hookOutput({ registry, manifest, loadedVersion, marketplaces = {}, inpu
     fs.writeFileSync(path.join(pluginRoot, '.claude-plugin', 'plugin.json'), JSON.stringify({ version: loadedVersion }));
     const output = childProcess.execFileSync(process.execPath, [hookPath], {
       encoding: 'utf8',
-      env: { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_ROOT: pluginRoot },
+      // audit() prefers CLAUDE_CONFIG_DIR over the HOME-derived tree (SQ-46). Spreading
+      // process.env would otherwise leak this executor's own real CLAUDE_CONFIG_DIR into the
+      // subprocess, so it has to be pinned to the fixture tree alongside HOME/USERPROFILE.
+      env: { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: path.join(home, '.claude'), CLAUDE_PLUGIN_ROOT: pluginRoot },
       input: JSON.stringify(input),
       timeout: 10_000,
     });

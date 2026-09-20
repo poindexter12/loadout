@@ -35,7 +35,7 @@ Telemetry lives in the separate Observability plugin. Its files are under a diff
 that root first and skip this whole section when the plugin is absent:
 
 ```sh
-node -e "const fs=require('node:fs'),os=require('node:os'),path=require('node:path');const reg=JSON.parse(fs.readFileSync(path.join(os.homedir(),'.claude','plugins','installed_plugins.json'),'utf8'));const installs=reg?.plugins?.['observability@loadout']||[];const hit=installs.map(i=>i?.installPath).filter(Boolean).find(p=>fs.existsSync(path.join(p,'bin','setup-observability.js')));console.log(hit||'');"
+node -e "const fs=require('node:fs'),path=require('node:path');const { claudeDir }=require(process.env.CLAUDE_PLUGIN_ROOT + '/lib/paths.js');const reg=JSON.parse(fs.readFileSync(path.join(claudeDir(process.env),'plugins','installed_plugins.json'),'utf8'));const installs=reg?.plugins?.['observability@loadout']||[];const hit=installs.map(i=>i?.installPath).filter(Boolean).find(p=>fs.existsSync(path.join(p,'bin','setup-observability.js')));console.log(hit||'');"
 ```
 
 An empty result means observability is not installed. Say so in one line and move on. Otherwise use that path

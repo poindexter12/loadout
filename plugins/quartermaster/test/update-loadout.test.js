@@ -12,9 +12,19 @@ const {
   installedPlugins,
   marketplacesFor,
   parseArgs,
+  registryPath,
   runUpdate,
   updateCommand,
 } = require('../bin/update-loadout.js');
+
+// runUpdate() (outside --check) resolves the observability registry and the healed user
+// settings.json through CLAUDE_CONFIG_DIR (SQ-46). A test that omits `env` no longer falls back
+// to the `home` fixture it passed — it falls back to this process's REAL CLAUDE_CONFIG_DIR, which
+// on a developer machine is a live account tree with real installs and a real settings.json
+// (exactly the failure mode in the 2026-09-09 test-pollution incident). Every non-check runUpdate
+// call below pins `env` to either a matching fixture tree or this deliberately absent path so
+// healStaleStatuslines never sees real account state.
+const ISOLATED_CONFIG_DIR = path.join(os.tmpdir(), `quartermaster-update-loadout-test-isolated-config-dir-${process.pid}`);
 
 const registry = {
   version: 1,
@@ -81,6 +91,7 @@ test('dry-run scopes the update plan to Loadout and does not enumerate third-par
   const lines = [];
   const result = runUpdate({
     registryFile,
+    env: { CLAUDE_CONFIG_DIR: ISOLATED_CONFIG_DIR },
     options: { claude: 'claude', dryRun: true, check: false },
     run: (command) => {
       calls.push(command);
@@ -102,6 +113,7 @@ test('update and check modes touch only Loadout installs', () => withRegistry(re
   const updateCalls = [];
   runUpdate({
     registryFile,
+    env: { CLAUDE_CONFIG_DIR: ISOLATED_CONFIG_DIR },
     options: { claude: 'claude', dryRun: false, check: false },
     run: (command) => {
       updateCalls.push(command);
@@ -234,6 +246,7 @@ test('leaves gateway wiring to the stable updater', () => withRegistry(registry,
     const calls = [];
     const result = runUpdate({
       home,
+      env: { CLAUDE_CONFIG_DIR: path.join(home, '.claude') },
       registryFile,
       options: { claude: 'claude', dryRun: false, check: false },
       run: (command) => { calls.push(command); return { ok: true }; },
@@ -273,6 +286,7 @@ test('skips stale project installs without blocking gateway wiring', () => {
       const lines = [];
       const result = runUpdate({
         home,
+        env: { CLAUDE_CONFIG_DIR: path.join(home, '.claude') },
         registryFile,
         options: { claude: 'claude', dryRun: false, check: false },
         run: (command) => {
@@ -318,6 +332,7 @@ test('GCs only missing Sidequest agent worktree registry entries and preserves a
       const lines = [];
       const result = runUpdate({
         registryFile,
+        env: { CLAUDE_CONFIG_DIR: ISOLATED_CONFIG_DIR },
         options: { claude: 'claude', dryRun: false, check: false },
         run: () => ({ ok: true }),
         report: (line) => lines.push(line),
@@ -394,6 +409,7 @@ test('reports a stable gateway updater failure', () => withRegistry(registry, (r
   try {
     const result = runUpdate({
       home,
+      env: { CLAUDE_CONFIG_DIR: path.join(home, '.claude') },
       registryFile,
       options: { claude: 'claude', dryRun: false, check: false },
       run: (command) => ({ ok: command.args[0] !== path.join(home, '.claude', 'model-gateway', 'update.js') }),
@@ -424,6 +440,7 @@ test('heals stale managed status-line shim pins after updating', () => {
 
     const result = runUpdate({
       home,
+      env: { CLAUDE_CONFIG_DIR: path.join(home, '.claude') },
       registryFile,
       options: { claude: 'claude', dryRun: false, check: false },
       run: () => ({ ok: true }),
@@ -443,6 +460,7 @@ test('heals stale managed status-line shim pins after updating', () => {
 test('continues after failures and returns every failed operation', () => withRegistry(registry, (registryFile) => {
   const failed = runUpdate({
     registryFile,
+    env: { CLAUDE_CONFIG_DIR: ISOLATED_CONFIG_DIR },
     options: { claude: 'claude', dryRun: false, check: false },
     run: () => ({ ok: false, error: 'unreachable' }),
     report: () => {},
@@ -462,6 +480,7 @@ test('reports version transitions and gateway interruption before setup', () => 
   const lines = [];
   runUpdate({
     registryFile,
+    env: { CLAUDE_CONFIG_DIR: ISOLATED_CONFIG_DIR },
     options: { claude: 'claude', dryRun: false, check: false },
     run: (command) => {
       if (command.args.join(' ') === 'plugin update model-gateway@loadout --scope user') {
@@ -507,6 +526,7 @@ test('skips statusline healing when the observability plugin is not installed', 
 
     const result = runUpdate({
       home,
+      env: { CLAUDE_CONFIG_DIR: path.join(home, '.claude') },
       registryFile,
       options: { claude: 'claude', dryRun: false, check: false },
       run: () => ({ ok: true }),
@@ -519,4 +539,36 @@ test('skips statusline healing when the observability plugin is not installed', 
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+// SQ-46: on multi-account machines CLAUDE_CONFIG_DIR names the real account tree while the
+// os.homedir()-derived ~/.claude may resolve to a different account. registryPath must follow
+// CLAUDE_CONFIG_DIR, not the machine home, or it reads (and later writes against) the wrong
+// account's plugin registry. Populate BOTH trees with different contents so a resolver that
+// silently fell back to the home tree would be caught reading the wrong one.
+test('registryPath follows CLAUDE_CONFIG_DIR instead of the machine home tree', (t) => {
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-registry-fake-home-'));
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-registry-config-dir-'));
+  const originalHomedir = os.homedir;
+  t.after(() => {
+    os.homedir = originalHomedir;
+    fs.rmSync(fakeHome, { recursive: true, force: true });
+    fs.rmSync(configDir, { recursive: true, force: true });
+  });
+  os.homedir = () => fakeHome;
+
+  const homeRegistryFile = path.join(fakeHome, '.claude', 'plugins', 'installed_plugins.json');
+  const configRegistryFile = path.join(configDir, 'plugins', 'installed_plugins.json');
+  fs.mkdirSync(path.dirname(homeRegistryFile), { recursive: true });
+  fs.mkdirSync(path.dirname(configRegistryFile), { recursive: true });
+  fs.writeFileSync(homeRegistryFile, JSON.stringify({ plugins: { 'from-home@loadout': [] } }));
+  fs.writeFileSync(configRegistryFile, JSON.stringify({ plugins: { 'from-config-dir@loadout': [] } }));
+
+  assert.equal(registryPath({ CLAUDE_CONFIG_DIR: configDir }), configRegistryFile);
+  assert.equal(registryPath({}), homeRegistryFile);
+
+  const fromConfigDir = JSON.parse(fs.readFileSync(registryPath({ CLAUDE_CONFIG_DIR: configDir }), 'utf8'));
+  const fromHome = JSON.parse(fs.readFileSync(registryPath({}), 'utf8'));
+  assert.deepEqual(Object.keys(fromConfigDir.plugins), ['from-config-dir@loadout']);
+  assert.deepEqual(Object.keys(fromHome.plugins), ['from-home@loadout']);
 });
