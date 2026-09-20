@@ -859,6 +859,50 @@ test('SQ-806: an empty dispatch binding falls back to the declared files instead
   );
 });
 
+// loadout SQ-37/44/46. Submit admits a candidate against the live binding and
+// records it as submission.admittedScope, then terminates the attempt. Wave
+// assembly reads declaredSurfaces from executionScope AFTER that, so the
+// terminal-dispatch fallback dropped every path the board had granted but
+// ticket.files never listed — including the .release/unreleased/<REF>.md
+// fragment the executor was required to author. All three candidates submitted
+// with `unscopedPaths: []` and then invalidated with surface_overlap against
+// the board's own grant, refusing the whole wave.
+test('loadout SQ-46: a pending submission is judged against the scope it was admitted under, not the shrunken ticket files', () => {
+  const declared = ['plugins/quartermaster/lib/paths.js'];
+  const admitted = [...declared, 'docs/', '.release/unreleased/SQ-46.md'];
+  const terminal = { declaredFiles: admitted, terminalAt: '2026-09-19T20:00:00.000Z' };
+
+  const pending = {
+    ref: 'SQ-46',
+    files: declared,
+    dispatch: terminal,
+    submission: { admittedScope: admitted, integratedAt: null },
+  };
+  assert.deepEqual(
+    store.executionScope(undefined, pending).sort(),
+    [...admitted].sort(),
+    'the admitted scope is recorded evidence, so integration sees the granted paths',
+  );
+
+  const integrated = {
+    ...pending,
+    submission: { admittedScope: admitted, integratedAt: '2026-09-19T20:30:00.000Z' },
+  };
+  assert.deepEqual(
+    store.executionScope(undefined, integrated),
+    declared,
+    'an integrated candidate stops widening scope, so a later direct claim is bound by ticket.files again',
+  );
+
+  // SQ-825 stays fixed: a dead binding alone is still history, not authority.
+  const reclaimed = { ref: 'SQ-46', files: declared, dispatch: terminal, submission: null };
+  assert.deepEqual(
+    store.executionScope(undefined, reclaimed),
+    declared,
+    'with no pending candidate the terminal binding grants nothing',
+  );
+});
+
 test('add and update refuse foreign declared release fragments while retaining the ticket fragment', () => {
   const root = repo();
   const add = ticketHandler('add');

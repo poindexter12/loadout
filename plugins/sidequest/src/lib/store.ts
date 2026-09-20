@@ -123,6 +123,23 @@ function effectiveScope(...args: any[]) { return configLayer.effectiveScope(...a
 // dispatch — so an orchestrator submit was gated on the dead binding while
 // pulse reported enforced: null for it, and a granted path had to land as an
 // out-of-band commit (the-bot-resurrection SQ-825, three refused submits).
+// A PENDING submission's admitted scope is different from that dead binding: it
+// is evidence the board itself recorded. Sidequest grants paths at dispatch that
+// never appear in ticket.files — the .release/unreleased/<REF>.md fragment every
+// executor must author when it changes a published plugin, an auto-approved test
+// scope — admits the candidate against them, and stores them on the submission.
+// Because the attempt goes terminal at submit, and integration reads scope after
+// that, the wave gate saw its own grant as an out-of-scope surface: every
+// candidate carrying a release fragment invalidated with surface_overlap while
+// its submission recorded unscopedPaths: [] (loadout SQ-37/44/46, one wave
+// refusing all three participants). Honor it only while the submission is
+// pending, so an integrated or superseded candidate stops widening scope.
+function submittedScope(ticket?: any) {
+  const submission = ticket?.submission;
+  if (!submission || submission.integratedAt) return [];
+  return Array.isArray(submission.admittedScope) ? submission.admittedScope : [];
+}
+
 function executionScope(slug?: any, ticket?: any) {
   const dispatch = ticket?.dispatch;
   const bound = dispatch && !dispatch.terminalAt ? dispatch.declaredFiles : null;
@@ -130,6 +147,8 @@ function executionScope(slug?: any, ticket?: any) {
     const granted = Array.isArray(ticket?.scopeResolution?.granted) ? ticket.scopeResolution.granted : [];
     return Array.from(new Set([...bound, ...effectiveScope(slug, { files: granted })]));
   }
+  const submitted = submittedScope(ticket);
+  if (submitted.length) return Array.from(new Set([...effectiveScope(slug, ticket), ...submitted]));
   return effectiveScope(slug, ticket);
 }
 

@@ -143,6 +143,11 @@ function setBoardConfig(...args) {
 function effectiveScope(...args) {
   return configLayer.effectiveScope(...args);
 }
+function submittedScope(ticket) {
+  const submission = ticket?.submission;
+  if (!submission || submission.integratedAt) return [];
+  return Array.isArray(submission.admittedScope) ? submission.admittedScope : [];
+}
 function executionScope(slug, ticket) {
   const dispatch2 = ticket?.dispatch;
   const bound = dispatch2 && !dispatch2.terminalAt ? dispatch2.declaredFiles : null;
@@ -150,6 +155,8 @@ function executionScope(slug, ticket) {
     const granted = Array.isArray(ticket?.scopeResolution?.granted) ? ticket.scopeResolution.granted : [];
     return Array.from(/* @__PURE__ */ new Set([...bound, ...effectiveScope(slug, { files: granted })]));
   }
+  const submitted = submittedScope(ticket);
+  if (submitted.length) return Array.from(/* @__PURE__ */ new Set([...effectiveScope(slug, ticket), ...submitted]));
   return effectiveScope(slug, ticket);
 }
 let projectsLayer;
