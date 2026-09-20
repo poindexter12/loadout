@@ -1,6 +1,6 @@
 # Patterns
 
-Last Updated: 2026-09-08
+Last Updated: 2026-09-19
 
 - Build from source, run committed output: Sidequest TypeScript under `src/` compiles to `lib/`, `bin/`, and bundled hook files, while `scripts/generate-bundled-agents.mjs` renders the committed `agents/` roster from `lib/agentsync.js`. Runtime manifests point at generated files; release suite discovery is shared through `plugins/sidequest/lib/suite-resolver.js` and re-exported by `scripts/release/lib/suites.mjs`.
 - Stable executor packaging and migration: the Sidequest plugin owns its generated diagnostic, dispatch, and read-only agent definitions in `agents/`; session-start maintenance and normal CLI sync remove only marked legacy generated files from user agent directories, preserving custom content.
@@ -24,5 +24,5 @@ Last Updated: 2026-09-08
 - Stream oversized inputs, never load them: quartermaster's miner reads transcripts line by line into bounded collector state and emits aggregates, because one session runs to tens of megabytes. Quotes, titles, and paths are clipped in one place as they are collected, so no reporting path can leak a whole transcript into context.
 - Poll local APIs: the dashboard uses HTTP JSON endpoints and a 2.5-second polling layer, with no browser-side SQLite or WebSocket dependency.
 - Keep project opt-in local: Quartermaster writes project-local settings, and Observability writes telemetry opt-in state, rather than machine-wide configuration.
-- Cross-plugin use is registry-resolved, never imported: a plugin cannot `require` across plugin roots, so Quartermaster finds Observability through `~/.claude/plugins/installed_plugins.json` and degrades to a no-op when it is absent. Observability uses the same registry to provision project dashboards, and Model Gateway uses it to resolve its stable updater. Small shared helpers are duplicated per plugin instead.
+- Cross-plugin use is registry-resolved, never imported: a plugin cannot `require` across plugin roots, so Quartermaster finds Observability through `plugins/installed_plugins.json` under the active config tree (`CLAUDE_CONFIG_DIR`, else `~/.claude`) and degrades to a no-op when it is absent. Observability uses the same registry to provision project dashboards, and Model Gateway uses it to resolve its stable updater. Small shared helpers are duplicated per plugin instead.
 - The Windows Sandbox harness (`sandbox/windows/`, gitignored, maintainer-only) maps only its bootstrap directory read-only and tests isolation and feature flags before launch.
