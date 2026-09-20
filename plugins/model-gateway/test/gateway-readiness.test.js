@@ -17,28 +17,6 @@ function listen(server) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 }
 
-function freePort() {
-  return new Promise((resolve) => {
-    const probe = net.createServer();
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-}
-
-function freePortInRange(firstPort, lastPort) {
-  return new Promise((resolve, reject) => {
-    const tryPort = (port) => {
-      if (port > lastPort) return reject(new Error(`no free port between ${firstPort} and ${lastPort}`));
-      const probe = net.createServer();
-      probe.once('error', () => tryPort(port + 1));
-      probe.listen(port, '127.0.0.1', () => probe.close(() => resolve(port)));
-    };
-    tryPort(firstPort);
-  });
-}
-
 function request(port, method, pathname, body) {
   return new Promise((resolve, reject) => {
     const encoded = body ? Buffer.from(JSON.stringify(body)) : null;
@@ -123,7 +101,15 @@ test('readiness reports each local failure state from an isolated home', async (
   });
   const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
-  const downProxyPort = await freePort();
+  // SQ-37: proxyModelsAnswering() (lib/commands.js) treats ANY fetch failure
+  // -- refused, reset, or timed out -- as "proxy-down", so a server that
+  // stays bound for the whole test and destroys every incoming connection
+  // proves the same thing a freed, hopefully-still-unclaimed port number
+  // used to, without ever releasing the port for something else on the
+  // machine to grab in between.
+  const downProxy = net.createServer((socket) => socket.destroy());
+  const downProxyPort = await listen(downProxy);
+  t.after(() => new Promise((resolve) => downProxy.close(resolve)));
 
   const missing = await runReadiness(t, environment, proxyPort, { binary: false, auth: false, version: gateway.PLUGIN_VERSION });
   assert.equal(missing.before.state, 'binary-missing');
@@ -174,7 +160,6 @@ test('upstream-blocked survives a health check and clears on a successful Codex 
 });
 
 test('shim health retains an OpenAI rejection until a successful proxied request', async (t) => {
-  const supervisorPort = await freePortInRange(30000, 39999);
   let messages = 0;
   const proxy = http.createServer((req, res) => {
     if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'gpt-5.6-terra' }] }));
@@ -187,8 +172,11 @@ test('shim health retains an OpenAI rejection until a successful proxied request
   });
   const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
+  // SQ-37: CODEX_GATEWAY_PORT stays at the environment default ('0'), so the
+  // supervisor binds without a pre-reserved number to race against; the real
+  // OS-assigned port is read back below from startGateway(), which parses it
+  // out of the supervisor's own "listening on 127.0.0.1:<port>" stdout line.
   const environment = gatewayTestEnvironment(t, { CODEX_GATEWAY_REQUEST_LOG: '0' }, {
-    CODEX_GATEWAY_PORT: String(supervisorPort),
     CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
   });
   const home = environment.HOME;
@@ -199,10 +187,9 @@ test('shim health retains an OpenAI rejection until a successful proxied request
     'fixture teardown removes the home after the supervisor and worker exit',
   ));
 
-  assert.equal(shimPort, supervisorPort);
   const workerLog = fs.readFileSync(path.join(home, '.claude', 'model-gateway', 'logs', 'shim.log'), 'utf8');
   const workerPort = Number(workerLog.match(/model-gateway shim listening on 127\.0\.0\.1:(\d+)/)[1]);
-  assert.notEqual(workerPort, supervisorPort);
+  assert.notEqual(workerPort, shimPort);
 
   const payload = { model: 'claude-gpt-5.6-terra', messages: [], max_tokens: 1 };
   assert.equal((await request(shimPort, 'POST', '/v1/messages', payload)).status, 429);

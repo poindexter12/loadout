@@ -3,7 +3,6 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');
-const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
@@ -28,17 +27,6 @@ function shimModels() {
 
 function listen(server) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
-}
-
-function freePort() {
-  const probe = net.createServer();
-  return new Promise((resolve, reject) => {
-    probe.once('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
 }
 
 async function waitUntil(check, message) {
@@ -77,23 +65,42 @@ function installProxyStub(home) {
   return proxyBinary;
 }
 
-function discoveryEnvironment(testContext, baseUrl, shimPort, workerPort, proxyPort) {
+// SQ-37: CODEX_GATEWAY_PORT is left at the environment default ('0') here so
+// the shim binds without a pre-reserved number to race against. runtime.js's
+// DEFAULT_BASE_URL is a static, require-time constant computed straight from
+// the literal CODEX_GATEWAY_PORT string, never corrected to the real
+// OS-assigned port, so ANTHROPIC_BASE_URL must be pinned to the SAME literal
+// 'http://127.0.0.1:0' placeholder for effectiveBaseUrl() === DEFAULT_BASE_URL
+// to hold inside that process -- otherwise syncGatewayDiscoveryCache() skips
+// the write as "gateway-not-wired". Both sides being the same fixed string is
+// what keeps this self-consistent without needing to know the real port in
+// advance.
+function discoveryEnvironment(testContext, baseUrl, proxyPort) {
   return gatewayTestEnvironment(testContext, {
     ANTHROPIC_BASE_URL: baseUrl,
     CODEX_GATEWAY_REQUEST_LOG: '0',
   }, {
-    CODEX_GATEWAY_PORT: String(shimPort),
-    CODEX_GATEWAY_WORKER_PORT: String(workerPort),
     CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
   });
 }
 
-function discoveryProcessOverrides(shimPort, workerPort, proxyPort) {
-  return {
-    CODEX_GATEWAY_PORT: String(shimPort),
-    CODEX_GATEWAY_WORKER_PORT: String(workerPort),
-    CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
-  };
+// SQ-37: once the shim above has reported the real port it bound (there is no
+// gap for another process to steal the number, since this reads it back
+// after the bind already happened rather than reserving it beforehand), a
+// later command that must target that exact already-running shim needs the
+// shared environment corrected to match: the literal port ensure/stop probe
+// over HTTP, and the ANTHROPIC_BASE_URL placeholder so that process's own
+// wiring stays self-consistent too. CODEX_GATEWAY_WORKER_PORT is dropped
+// rather than left at the environment's '0' default: lib/commands.js and
+// lib/process-supervision.js both compute
+// `Number(CODEX_GATEWAY_WORKER_PORT || PUBLIC_SHIM_PORT)`, and the string
+// '0' is truthy, so leaving it in place would freeze that health-probe port
+// at 0 instead of falling back to the real supervisor port -- an existing
+// env-fallback quirk, not something this test-only change fixes in lib/.
+function pinDiscoveredShim(environment, shimPort) {
+  environment.CODEX_GATEWAY_PORT = String(shimPort);
+  environment.ANTHROPIC_BASE_URL = `http://127.0.0.1:${shimPort}`;
+  delete environment.CODEX_GATEWAY_WORKER_PORT;
 }
 
 test('writes Claude Code discovery cache schema from the shim model list', () => {
@@ -193,10 +200,8 @@ test('refreshModels writes the configured gateway discovery cache', async (testC
   });
   const proxyPort = await listen(proxy);
   testContext.after(() => new Promise((resolve) => proxy.close(resolve)));
-  const shimPort = await freePort();
-  const workerPort = await freePort();
-  const baseUrl = `http://127.0.0.1:${shimPort}`;
-  const environment = discoveryEnvironment(testContext, baseUrl, shimPort, workerPort, proxyPort);
+  const baseUrl = 'http://127.0.0.1:0';
+  const environment = discoveryEnvironment(testContext, baseUrl, proxyPort);
   const cache = path.join(environment.CLAUDE_CONFIG_DIR, 'cache', 'gateway-models.json');
   // SQ-19 withholds the Grok rows unless Grok CLI auth is present, and the
   // fixture home has none. Seeding it keeps this test's subject (what
@@ -208,16 +213,13 @@ test('refreshModels writes the configured gateway discovery cache', async (testC
     'https://auth.x.ai::openid': { key: 'test-grok-key', expires_at: Date.now() + 3600000 },
   }));
 
-  const shim = await startGateway(testContext, 'serve-shim', environment, {
-    isolatedOverrides: discoveryProcessOverrides(shimPort, workerPort, proxyPort),
-  });
+  await startGateway(testContext, 'serve-shim', environment);
   testContext.after(() => assert.equal(
     fs.existsSync(environment.HOME),
     false,
     'fixture teardown removes the home after the supervisor and worker exit',
   ));
 
-  assert.equal(shim.port, shimPort);
   await waitUntil(() => fs.existsSync(cache), 'refreshModels did not write the discovery cache');
 
   const discoveryCache = JSON.parse(fs.readFileSync(cache, 'utf8'));
@@ -236,38 +238,25 @@ test('ensure writes the discovery cache before reporting missing ChatGPT auth', 
   });
   const proxyPort = await listen(proxy);
   testContext.after(() => new Promise((resolve) => proxy.close(resolve)));
-  const shimPort = await freePort();
-  const workerPort = await freePort();
-  const baseUrl = `http://127.0.0.1:${shimPort}`;
-  const environment = discoveryEnvironment(testContext, baseUrl, shimPort, workerPort, proxyPort);
+  const baseUrl = 'http://127.0.0.1:0';
+  const environment = discoveryEnvironment(testContext, baseUrl, proxyPort);
   const cache = path.join(environment.CLAUDE_CONFIG_DIR, 'cache', 'gateway-models.json');
   installProxyStub(environment.HOME);
-  const shim = await startGateway(testContext, 'serve-shim', environment, {
-    isolatedOverrides: discoveryProcessOverrides(shimPort, workerPort, proxyPort),
-  });
+  const shim = await startGateway(testContext, 'serve-shim', environment);
 
-  assert.equal(shim.port, shimPort);
   await waitUntil(() => fs.existsSync(cache), 'initial refresh did not write the discovery cache');
   fs.rmSync(cache);
 
-  const result = await runGatewayCommand(
-    testContext,
-    'ensure',
-    environment,
-    discoveryProcessOverrides(shimPort, workerPort, proxyPort),
-  );
+  pinDiscoveredShim(environment, shim.port);
+
+  const result = await runGatewayCommand(testContext, 'ensure', environment);
 
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stderr, /ChatGPT sign-in is required/);
   await waitUntil(() => fs.existsSync(cache), 'ensure did not write the discovery cache');
   assert.match(result.stdout, /discovery cache: (?:wrote \d+ models?|unchanged)/);
 
-  const stopped = await runGatewayCommand(
-    testContext,
-    'stop',
-    environment,
-    discoveryProcessOverrides(shimPort, workerPort, proxyPort),
-  );
+  const stopped = await runGatewayCommand(testContext, 'stop', environment);
   assert.equal(stopped.status, 0, stopped.stderr);
 });
 
@@ -347,10 +336,8 @@ test('simulated-Windows ensure surfaces missing ChatGPT auth instead of an uncon
   });
   const proxyPort = await listen(proxy);
   testContext.after(() => new Promise((resolve) => proxy.close(resolve)));
-  const shimPort = await freePort();
-  const workerPort = await freePort();
-  const baseUrl = `http://127.0.0.1:${shimPort}`;
-  const environment = discoveryEnvironment(testContext, baseUrl, shimPort, workerPort, proxyPort);
+  const baseUrl = 'http://127.0.0.1:0';
+  const environment = discoveryEnvironment(testContext, baseUrl, proxyPort);
   const cache = path.join(environment.CLAUDE_CONFIG_DIR, 'cache', 'gateway-models.json');
   installProxyStub(environment.HOME);
   // installProxyStub names the fixture for *this* process's real platform.
@@ -361,23 +348,17 @@ test('simulated-Windows ensure surfaces missing ChatGPT auth instead of an uncon
   if (!fs.existsSync(exeStub)) {
     try { fs.linkSync(process.execPath, exeStub); } catch { fs.copyFileSync(process.execPath, exeStub); }
   }
-  const shim = await startGateway(testContext, 'serve-shim', environment, {
-    isolatedOverrides: discoveryProcessOverrides(shimPort, workerPort, proxyPort),
-  });
+  const shim = await startGateway(testContext, 'serve-shim', environment);
 
-  assert.equal(shim.port, shimPort);
   await waitUntil(() => fs.existsSync(cache), 'initial refresh did not write the discovery cache');
   fs.rmSync(cache);
+
+  pinDiscoveredShim(environment, shim.port);
 
   // The real shim above is already running and healthy on this process's
   // actual platform. The `ensure` invocation below runs in a separate,
   // simulated-Windows process against that same, already-healthy shim.
-  const result = await runGatewayCommandOnSimulatedWindows(
-    testContext,
-    'ensure',
-    environment,
-    discoveryProcessOverrides(shimPort, workerPort, proxyPort),
-  );
+  const result = await runGatewayCommandOnSimulatedWindows(testContext, 'ensure', environment);
 
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stderr, /ChatGPT sign-in is required/);
@@ -385,11 +366,6 @@ test('simulated-Windows ensure surfaces missing ChatGPT auth instead of an uncon
   await waitUntil(() => fs.existsSync(cache), 'simulated-Windows ensure did not write the discovery cache');
   assert.match(result.stdout, /discovery cache: (?:wrote \d+ models?|unchanged)/);
 
-  const stopped = await runGatewayCommand(
-    testContext,
-    'stop',
-    environment,
-    discoveryProcessOverrides(shimPort, workerPort, proxyPort),
-  );
+  const stopped = await runGatewayCommand(testContext, 'stop', environment);
   assert.equal(stopped.status, 0, stopped.stderr);
 });

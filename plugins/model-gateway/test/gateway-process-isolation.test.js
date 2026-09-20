@@ -66,6 +66,65 @@ function waitForReady(child) {
   });
 }
 
+// SQ-37: replaces the bind/close/reuse freePort() pattern for fixture
+// processes we author ourselves (the "foreign" gateway stand-ins below). The
+// fixture binds its own listener on port 0 and reports the OS-assigned port
+// back over stdout once it actually holds it, so there is never a gap where
+// another process on the machine can steal the number between reservation
+// and use.
+function waitForReadyPort(child) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('foreign gateway fixture did not report a ready port')), 5000);
+    let buffered = '';
+    const onData = (chunk) => {
+      buffered += chunk;
+      const match = buffered.match(/ready:(\d+)/);
+      if (!match) return;
+      clearTimeout(timeout);
+      child.stdout.off('data', onData);
+      resolve(Number(match[1]));
+    };
+    child.stdout.on('data', onData);
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timeout);
+      reject(new Error(`foreign gateway fixture exited before reporting a ready port (${code ?? signal})`));
+    });
+  });
+}
+
+// SQ-37: same idea, for the real model-gateway shim under test. request-worker.js
+// logs `... shim listening on 127.0.0.1:<port> ...` with the real bound port once
+// its listener is actually up (CODEX_GATEWAY_PORT='0' lets the OS pick it), so a
+// sibling-detection test that needs a second process to target the same port can
+// read the true value here instead of pre-reserving one.
+function waitForListeningPort(child) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`shim did not report a listening port: ${buffered}`)), 5000);
+    let buffered = '';
+    const onData = (chunk) => {
+      buffered += chunk;
+      const match = buffered.match(/listening on 127\.0\.0\.1:(\d+)/);
+      if (!match) return;
+      clearTimeout(timeout);
+      child.stdout.off('data', onData);
+      resolve(Number(match[1]));
+    };
+    child.stdout.on('data', onData);
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timeout);
+      reject(new Error(`shim exited before reporting a listening port (${code ?? signal}): ${buffered}`));
+    });
+  });
+}
+
 function waitForOutput(child, expectedOutput) {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error(`foreign gateway fixture did not write ${expectedOutput}`)), 5000);
@@ -426,19 +485,17 @@ test('sibling ensure retires dead records without deleting replacement worker an
   // tmpdir home would never match the /private/var/... it logs.
   const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-sibling-record-replacement-')));
   const { olderCli, newerCli } = installCachedGatewayCliVersions(home);
-  const shimReservation = net.createServer();
-  const shimPort = await listen(shimReservation);
-  await new Promise((resolve) => shimReservation.close(resolve));
-  const proxyReservation = net.createServer();
-  const proxyPort = await listen(proxyReservation);
-  await new Promise((resolve) => proxyReservation.close(resolve));
   const proxyBinary = path.join(home, '.claude', 'model-gateway', 'bin', process.platform === 'win32' ? 'claude-code-proxy.exe' : 'claude-code-proxy');
   installNodeProxy(home);
   fs.writeFileSync(path.join(home, 'serve'), "require('node:http').createServer((request, response) => request.url === '/v1/models' ? response.end(JSON.stringify({ data: [] })) : response.end('{}')).listen(process.env.PORT, '127.0.0.1'); setInterval(() => {}, 1000);\n");
+  // CODEX_GATEWAY_PORT starts at '0' (the environment default) so the older shim
+  // picks its own free port with no reservation gap; the port it actually bound
+  // is read back below and only then pinned into `environment` so the sibling
+  // `ensure` targets the exact same listener. PROXY_PORT stays at '0' throughout:
+  // this test only cares that a proxy process gets spawned and its pid record
+  // survives replacement, never that its port is dereferenced.
   const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home }, {
-    CODEX_GATEWAY_PORT: String(shimPort),
     CODEX_GATEWAY_WORKER_PORT: '0',
-    CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
     // Use the production ownership budget: this tests confirmed replacement,
     // not timeout refusal. A 100ms lsof deadline can expire before finding the
     // PID on macOS; dedicated ownership tests cover that conservative refusal.
@@ -454,7 +511,8 @@ test('sibling ensure retires dead records without deleting replacement worker an
     await waitForExit(olderShim);
     fs.rmSync(home, { recursive: true, force: true });
   });
-  await waitForReady(olderShim);
+  const shimPort = await waitForListeningPort(olderShim);
+  environment.CODEX_GATEWAY_PORT = String(shimPort);
 
   const state = path.join(home, '.claude', 'model-gateway');
   await waitForPidRecord(path.join(state, 'shim.pid'));
@@ -531,16 +589,13 @@ test('two concurrent ensure OS processes never both decide the gateway needs rec
     path.join(home, 'serve'),
     "require('node:http').createServer((request, response) => request.url === '/v1/models' ? response.end(JSON.stringify({ data: [] })) : response.end('{}')).listen(process.env.PORT, '127.0.0.1'); setInterval(() => {}, 1000);\n",
   );
-  const shimReservation = net.createServer();
-  const shimPort = await listen(shimReservation);
-  await new Promise((resolve) => shimReservation.close(resolve));
-  const proxyReservation = net.createServer();
-  const proxyPort = await listen(proxyReservation);
-  await new Promise((resolve) => proxyReservation.close(resolve));
+  // Only the ensure that wins the SQ-23 lock actually calls startAll() and binds
+  // anything; the loser never touches a socket. So there is no cross-process
+  // port to pre-arrange here, and the environment default of '0' for all three
+  // gateway ports is safe -- the shared home's ensure.lock file is the resource
+  // both processes actually race over, not the port number.
   const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home }, {
-    CODEX_GATEWAY_PORT: String(shimPort),
     CODEX_GATEWAY_WORKER_PORT: '0',
-    CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
   });
   let guardianPid = null;
   t.after(async () => {
@@ -801,13 +856,10 @@ test('the ensure result is replaced atomically instead of truncated in place', (
 test('older cache version leaves a newer sibling shim running', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-sibling-downgrade-'));
   const { olderCli, newerCli } = installCachedGatewayCliVersions(home);
-  const shimReservation = net.createServer();
-  const shimPort = await listen(shimReservation);
-  await new Promise((resolve) => shimReservation.close(resolve));
+  // Single spawn, no sibling to agree on a port with -- the environment default
+  // of '0' lets the OS assign it with no reservation gap.
   const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home }, {
-    CODEX_GATEWAY_PORT: String(shimPort),
     CODEX_GATEWAY_WORKER_PORT: '0',
-    CODEX_GATEWAY_PROXY_PORT: '0',
   });
   const newerShim = spawn(process.execPath, [newerCli, 'serve-shim'], { env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
   t.after(async () => {
@@ -825,18 +877,15 @@ test('older cache version leaves a newer sibling shim running', async (t) => {
 test('foreign configured-port supervisor is preserved and reported', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-foreign-port-'));
   const foreignScript = path.join(home, 'foreign-install', 'model-gateway', 'bin', 'model-gateway.js');
-  const reservation = net.createServer();
-  const port = await listen(reservation);
-  await new Promise((resolve) => reservation.close(resolve));
   fs.mkdirSync(path.dirname(foreignScript), { recursive: true });
-  fs.writeFileSync(foreignScript, `const http = require('node:http'); const server = http.createServer((request, response) => response.end(JSON.stringify({ proxyRecovery: true }))); server.listen(${port}, '127.0.0.1', () => process.stdout.write('ready\\n'));\n`);
+  fs.writeFileSync(foreignScript, `const http = require('node:http'); const server = http.createServer((request, response) => response.end(JSON.stringify({ proxyRecovery: true }))); server.listen(0, '127.0.0.1', () => process.stdout.write('ready:' + server.address().port + '\\n'));\n`);
   const foreign = spawn(process.execPath, [foreignScript, 'serve-shim'], { stdio: ['ignore', 'pipe', 'ignore'] });
   t.after(async () => {
     foreign.kill();
     await waitForExit(foreign);
     fs.rmSync(home, { recursive: true, force: true });
   });
-  await waitForReady(foreign);
+  const port = await waitForReadyPort(foreign);
 
   const testOptions = {
     encoding: 'utf8',
@@ -865,12 +914,9 @@ test('cache-junction gateway process is preserved as a foreign port owner', asyn
   const foreignRoot = path.join(home, 'dev', 'foreign-model-gateway');
   const junctionRoot = path.dirname(path.dirname(olderCli));
   const foreignScript = path.join(foreignRoot, 'bin', 'model-gateway.js');
-  const reservation = net.createServer();
-  const port = await listen(reservation);
-  await new Promise((resolve) => reservation.close(resolve));
   fs.rmSync(junctionRoot, { recursive: true, force: true });
   fs.mkdirSync(path.dirname(foreignScript), { recursive: true });
-  fs.writeFileSync(foreignScript, `const http = require('node:http'); const server = http.createServer((request, response) => response.end('foreign')); server.listen(${port}, '127.0.0.1', () => process.stdout.write('ready\\n'));\n`);
+  fs.writeFileSync(foreignScript, `const http = require('node:http'); const server = http.createServer((request, response) => response.end('foreign')); server.listen(0, '127.0.0.1', () => process.stdout.write('ready:' + server.address().port + '\\n'));\n`);
   linkDirectory(foreignRoot, junctionRoot);
   const foreign = spawn(process.execPath, [path.join(junctionRoot, 'bin', 'model-gateway.js'), 'serve-shim'], { stdio: ['ignore', 'pipe', 'ignore'] });
   t.after(async () => {
@@ -878,7 +924,7 @@ test('cache-junction gateway process is preserved as a foreign port owner', asyn
     await waitForExit(foreign);
     fs.rmSync(home, { recursive: true, force: true });
   });
-  await waitForReady(foreign);
+  const port = await waitForReadyPort(foreign);
 
   const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home }, {
     CODEX_GATEWAY_PORT: String(port),
@@ -895,17 +941,14 @@ test('cache-junction gateway process is preserved as a foreign port owner', asyn
 test('proxy recovery preserves a foreign configured-port proxy owner', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-foreign-proxy-'));
   const foreignScript = path.join(home, 'foreign-install', 'model-gateway', 'bin', 'model-gateway.js');
-  const reservation = net.createServer();
-  const port = await listen(reservation);
-  await new Promise((resolve) => reservation.close(resolve));
   fs.mkdirSync(path.dirname(foreignScript), { recursive: true });
-  fs.writeFileSync(foreignScript, `const http = require('node:http'); const server = http.createServer((request, response) => { process.stdout.write('models\\n'); response.writeHead(503); response.end('unhealthy'); }); server.listen(${port}, '127.0.0.1', () => process.stdout.write('ready\\n'));`);
+  fs.writeFileSync(foreignScript, `const http = require('node:http'); const server = http.createServer((request, response) => { process.stdout.write('models\\n'); response.writeHead(503); response.end('unhealthy'); }); server.listen(0, '127.0.0.1', () => process.stdout.write('ready:' + server.address().port + '\\n'));`);
   const foreign = spawn(process.execPath, [foreignScript], { stdio: ['ignore', 'pipe', 'ignore'] });
   t.after(async () => {
     if (processIsRunning(foreign.pid)) foreign.kill();
     await waitForExit(foreign);
   });
-  await waitForReady(foreign);
+  const port = await waitForReadyPort(foreign);
   const proxyProbe = waitForOutput(foreign, 'models\n');
   installNodeProxy(home);
 
@@ -1043,18 +1086,15 @@ test('ensure and stop discard a stale guardian PID without killing its reused pr
 test('setup restart path refuses a foreign shim before it can restart its worker', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-foreign-setup-'));
   const foreignScript = path.join(home, 'foreign-install', 'model-gateway', 'bin', 'model-gateway.js');
-  const reservation = net.createServer();
-  const port = await listen(reservation);
-  await new Promise((resolve) => reservation.close(resolve));
   fs.mkdirSync(path.dirname(foreignScript), { recursive: true });
-  fs.writeFileSync(foreignScript, `const { spawn } = require('node:child_process'); const http = require('node:http'); const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); const server = http.createServer((request, response) => { if (request.url === '/restart') worker.kill(); response.end(JSON.stringify({ workerPid: worker.pid })); }); server.listen(${port}, '127.0.0.1', () => process.stdout.write('ready\\n')); process.on('SIGTERM', () => { worker.kill(); server.close(() => process.exit(0)); });`);
+  fs.writeFileSync(foreignScript, `const { spawn } = require('node:child_process'); const http = require('node:http'); const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); const server = http.createServer((request, response) => { if (request.url === '/restart') worker.kill(); response.end(JSON.stringify({ workerPid: worker.pid })); }); server.listen(0, '127.0.0.1', () => process.stdout.write('ready:' + server.address().port + '\\n')); process.on('SIGTERM', () => { worker.kill(); server.close(() => process.exit(0)); });`);
   const foreign = spawn(process.execPath, [foreignScript], { stdio: ['ignore', 'pipe', 'ignore'] });
   t.after(async () => {
     foreign.kill();
     await waitForExit(foreign);
     fs.rmSync(home, { recursive: true, force: true });
   });
-  await waitForReady(foreign);
+  const port = await waitForReadyPort(foreign);
   const health = await new Promise((resolve, reject) => {
     http.get(`http://127.0.0.1:${port}/healthz`, (response) => {
       const chunks = [];
