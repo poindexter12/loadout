@@ -22,7 +22,7 @@ The skill runs `setup` with project-local wiring, installs and starts the local 
 
 After the wiring is confirmed, fully restart the Claude Code process for that same project. A plugin reload alone does not reload the picker cache or the settings in the new process. Select a gateway model only after that restart.
 
-Model Gateway writes `ANTHROPIC_BASE_URL` to `.claude/settings.local.json`, never the committed `.claude/settings.json`. That keeps your local gateway endpoint out of other people's checkouts. You can opt into one shared fallback URL in `~/.claude/settings.json`, but a project's local setting wins. `model-gateway doctor` marks the effective source and calls out conflicting gateway modes.
+Model Gateway writes `ANTHROPIC_BASE_URL` to `.claude/settings.local.json`, never the committed `.claude/settings.json`. That keeps your local gateway endpoint out of other people's checkouts. You can opt into one shared fallback URL in the `settings.json` of your active Claude config tree — `CLAUDE_CONFIG_DIR` when it is set, otherwise `~/.claude` — but a project's local setting wins. `model-gateway doctor` marks the effective source and calls out conflicting gateway modes.
 
 You may need to complete a browser sign-in or restart Claude Code. Claude will ask only when either step is actually needed.
 

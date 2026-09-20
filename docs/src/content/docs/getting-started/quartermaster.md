@@ -88,6 +88,6 @@ A SessionEnd hook tallies each session locally in one streamed pass. Once enough
 
 ## What it stores
 
-Tallies and decisions live under `~/.claude/quartermaster-state/`: per-session counters and a decision ledger with fingerprints. The bounded aggregate is the model-facing summary for setup and resupply. Raw transcripts are not loaded into model context, and the resupply skill must not open them. Transcript-derived text in the aggregate is clipped, and scratch directories are dropped from path areas.
+Tallies and decisions live under `quartermaster-state/` in your active Claude config tree — `CLAUDE_CONFIG_DIR` when it is set, otherwise `~/.claude` — or wherever `QUARTERMASTER_STATE_DIR` points: per-session counters and a decision ledger with fingerprints. The bounded aggregate is the model-facing summary for setup and resupply. Raw transcripts are not loaded into model context, and the resupply skill must not open them. Transcript-derived text in the aggregate is clipped, and scratch directories are dropped from path areas.
 
 The [generated Quartermaster reference](../../reference/quartermaster/) contains the agent-facing skill and command details. See [contributing](../../contributing/) for maintainer workflows and the separate [support page](https://poindexter12.github.io/loadout/support/) for ways to help.
