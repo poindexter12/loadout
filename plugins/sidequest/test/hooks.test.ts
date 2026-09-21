@@ -168,8 +168,16 @@ function runHookProcessForBudget(script?: any, payload?: any, envOverrides?: any
   });
 }
 
+const WAIT_FOR_PATH_PER_TEST_WORKER_MS = 2_000;
+
+function testWorkerConcurrency(): number {
+  const argument = process.execArgv.find((value: string) => value.startsWith('--test-concurrency='));
+  const requested = Number(argument?.slice('--test-concurrency='.length));
+  return Number.isInteger(requested) && requested > 0 ? requested : os.availableParallelism();
+}
+
 async function waitForPath(file: string): Promise<void> {
-  const deadline = Date.now() + 2000;
+  const deadline = Date.now() + WAIT_FOR_PATH_PER_TEST_WORKER_MS * testWorkerConcurrency();
   while (Date.now() < deadline) {
     if (fs.existsSync(file)) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
