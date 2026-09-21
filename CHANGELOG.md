@@ -8,6 +8,77 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v3.541.0 (2026-09-21)
+
+### model-gateway 0.51.2 → 0.51.3
+
+#### Fixes
+
+- Close three ensure-lock races: releasing another process's lock, a recycled pid deadlocking reclaim, and a non-atomic ensure result write (SQ-34) [`7f95ea4`](https://github.com/poindexter12/loadout/commit/7f95ea4c)
+  `ensure` no longer deletes an ensure lock that another `ensure` has since taken, no longer
+  deadlocks when a dead holder's pid has been recycled onto an unrelated live process (a lock
+  past an absolute age cap is now reclaimed whatever its pid reports), and records its outcome
+  for waiting invocations with an atomic replace instead of a truncate-in-place write.
+- De-flake four model-gateway spawn-test files by retiring bind/close/reuse port reservations (SQ-37) [`a04c5c3`](https://github.com/poindexter12/loadout/commit/a04c5c364eae0)
+  `gateway-process-isolation.test.js`, `dispatch-model.test.js`, `discovery-cache.test.js`, and
+  `gateway-readiness.test.js` no longer reserve a port by binding it, closing it, and hoping nothing
+  else grabs it before the real spawn does. Spawned gateway processes now bind with
+  `CODEX_GATEWAY_PORT='0'` and the test reads the real OS-assigned port back from the process's own
+  "listening" stdout line, closing the race window that was a primary source of model-gateway CI
+  flakiness. Test-only change; no runtime behavior differs. Full-suite-level flakiness can still occur
+  from 8 other test files that retain the same pattern, outside this ticket's scope.
+- Route the observability statusline chain and the shared model-gateway request-body state dir through CLAUDE_CONFIG_DIR (SQ-44) [`6a9dc9c`](https://github.com/poindexter12/loadout/commit/6a9dc9c4)
+  On a multi-account machine where `CLAUDE_CONFIG_DIR` names a different tree than the OS home's
+  `~/.claude`, observability's statusline shim, its settings/registry lookups, and the shared
+  model-gateway request-body high-water state directory now resolve against the active account
+  tree instead of always falling back to the OS home. Every explicit caller (existing tests,
+  quartermaster's stale-statusline healer) keeps its prior contract; only the unset-argument
+  default changed.
+- Reap model-gateway integration-test fixture processes (SQ-57)
+  `gateway-process-isolation.test.js` now tracks the guardian, shim, and proxy PIDs that its three real `ensure` fixtures create, reaps every recorded process during teardown, and asserts that none survive before removing the fixture home. Test-only change; no runtime behavior differs.
+- Fix the deterministic local failure that made the model-gateway suite unpassable off CI (SQ-61)
+  The sibling-ensure record-replacement test in `gateway-process-isolation.test.js` now parks the supervisor's periodic proxy recovery for its own fixture. The fixture runs with `CODEX_GATEWAY_PROXY_PORT=0`, so the proxy health probe can never answer and every 5-second recovery tick restarted a healthy proxy and rewrote `proxy.pid` with a live PID. On a loaded machine that tick beat the `ensure` under test to the record, which then retired a real PID instead of the planted sentinel; a faster CI runner usually won the race, so the suite was green on CI and red locally. Each supervisor still starts exactly one proxy, so every assertion is unchanged. Test-only change; no runtime behavior differs.
+
+### observability 0.8.1 → 0.8.2
+
+#### Fixes
+
+- Route the observability statusline chain and the shared model-gateway request-body state dir through CLAUDE_CONFIG_DIR (SQ-44) [`6a9dc9c`](https://github.com/poindexter12/loadout/commit/6a9dc9c4)
+  On a multi-account machine where `CLAUDE_CONFIG_DIR` names a different tree than the OS home's
+  `~/.claude`, observability's statusline shim, its settings/registry lookups, and the shared
+  model-gateway request-body high-water state directory now resolve against the active account
+  tree instead of always falling back to the OS home. Every explicit caller (existing tests,
+  quartermaster's stale-statusline healer) keeps its prior contract; only the unset-argument
+  default changed.
+
+### quartermaster 0.8.2 → 0.8.3
+
+#### Fixes
+
+- Quartermaster doctor read paths now follow CLAUDE_CONFIG_DIR instead of ~/.claude (SQ-46) [`80531aa`](https://github.com/poindexter12/loadout/commit/80531aae)
+  `update-loadout --check`, the SessionStart freshness hook, and the loadout-doctor skill's
+  observability lookup now resolve the plugin registry, known marketplaces, and user
+  settings.json through `CLAUDE_CONFIG_DIR` (falling back to `~/.claude`), matching the resolver
+  already used for settings writes. On multi-account machines this stops the doctor from reading
+  the wrong account's tree, which produced blocking false findings and masked the model-gateway
+  health check.
+- Freshness hooks now follow CLAUDE_CONFIG_DIR (SQ-60)
+  Quartermaster's UserPromptSubmit and Stop freshness hooks now read installed plugins and
+  store marketplace freshness caches in `CLAUDE_CONFIG_DIR` (falling back to `~/.claude`). This
+  restores update and reload notifications for non-default account trees without writing cache
+  state into another account's configuration.
+
+### sidequest 5.1.1 → 5.1.2
+
+#### Fixes
+
+- Wave assembly judged candidates against shrunken scope after the attempt went terminal (SQ-55)
+  Integration read a ticket's scope after submit had already terminated the attempt, so it lost every path granted at dispatch but absent from the ticket's declared files — including the release fragment each executor must author. A pending candidate is now judged against the scope it was actually admitted under. A terminal dispatch with no pending candidate still grants nothing.
+- Hook context truncation no longer drops the actionable sentences of the diagnostic-worktree warning (SQ-56)
+  `projectedText()` truncated over-budget hook messages from the end, and the diagnostic-worktree warning put its only actionable sentences last and its unbounded content (full absolute worktree paths) earlier — so a checkout past roughly 75 characters silently lost the exact guidance that changes what a receiving agent does, keeping only boilerplate and the long paths that caused the overflow. The warning now orders its unbounded roots sentence last so truncation sacrifices it instead of the actionable content, and the omission note itself was shrunk (it no longer duplicates the same watermark under two labels), cutting what a one-byte overflow costs from 208B to well under 100B.
+- Scale detached-hook test waits with suite concurrency (SQ-58)
+  The Sidequest test suite now gives detached hook workers a wait budget proportional to the active test-worker count, avoiding false failures when a full suite contends for system resources. This is test-only and not user-visible.
+
 ## v3.540.0 (2026-09-16)
 
 ### quartermaster 0.8.1 → 0.8.2

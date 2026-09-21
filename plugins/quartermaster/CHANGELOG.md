@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.8.3 (2026-09-21)
+
+Released in v3.541.0, up from 0.8.2.
+
+### Fixes
+
+- Quartermaster doctor read paths now follow CLAUDE_CONFIG_DIR instead of ~/.claude (SQ-46) [`80531aa`](https://github.com/poindexter12/loadout/commit/80531aae)
+  `update-loadout --check`, the SessionStart freshness hook, and the loadout-doctor skill's
+  observability lookup now resolve the plugin registry, known marketplaces, and user
+  settings.json through `CLAUDE_CONFIG_DIR` (falling back to `~/.claude`), matching the resolver
+  already used for settings writes. On multi-account machines this stops the doctor from reading
+  the wrong account's tree, which produced blocking false findings and masked the model-gateway
+  health check.
+- Freshness hooks now follow CLAUDE_CONFIG_DIR (SQ-60)
+  Quartermaster's UserPromptSubmit and Stop freshness hooks now read installed plugins and
+  store marketplace freshness caches in `CLAUDE_CONFIG_DIR` (falling back to `~/.claude`). This
+  restores update and reload notifications for non-default account trees without writing cache
+  state into another account's configuration.
+
 ## 0.8.2 (2026-09-16)
 
 Released in v3.540.0, up from 0.8.1.
