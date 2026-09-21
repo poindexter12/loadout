@@ -48,15 +48,50 @@ function input(sessionId = 'stop-update-session') {
   return { cwd: 'C:\\dev\\project', session_id: sessionId };
 }
 
+function environmentFor(home) {
+  return { CLAUDE_CONFIG_DIR: path.join(home, '.claude') };
+}
+
 function options(home, extras = {}) {
   return {
-    home,
+    environment: environmentFor(home),
     now: NOW,
     warningStateDirectory: path.join(home, 'warnings'),
     warnedStates: new Set(),
     ...extras,
   };
 }
+
+test('Stop hook production registry lookup follows CLAUDE_CONFIG_DIR instead of the home tree', async (testContext) => {
+  const fakeHome = tempDirectory();
+  const configDir = tempDirectory();
+  testContext.after(() => {
+    fs.rmSync(fakeHome, { recursive: true, force: true });
+    fs.rmSync(configDir, { recursive: true, force: true });
+  });
+
+  const homeRegistry = path.join(fakeHome, '.claude', 'plugins', 'installed_plugins.json');
+  const configRegistry = path.join(configDir, 'plugins', 'installed_plugins.json');
+  fs.mkdirSync(path.dirname(homeRegistry), { recursive: true });
+  fs.mkdirSync(path.dirname(configRegistry), { recursive: true });
+  fs.writeFileSync(homeRegistry, JSON.stringify({ plugins: {
+    'model-gateway@loadout': [{ scope: 'user', version: '1.0.0' }],
+  } }));
+  fs.writeFileSync(configRegistry, JSON.stringify({ plugins: {
+    'sidequest@loadout': [{ scope: 'user', version: '1.0.0' }],
+  } }));
+
+  const output = JSON.parse(await decide(input('stop-config-tree'), {
+    home: fakeHome,
+    environment: { CLAUDE_CONFIG_DIR: configDir },
+    now: NOW,
+    cache: { checkedAt: new Date(NOW).toISOString(), manifest: { plugins: [{ name: 'sidequest', version: '2.0.0' }] } },
+    warningStateDirectory: path.join(configDir, 'warnings'),
+    warnedStates: new Set(),
+  }));
+  assert.match(output.systemMessage, /sidequest 1\.0\.0 → 2\.0\.0/);
+  assert.doesNotMatch(output.systemMessage, /model-gateway/);
+});
 
 test('refreshes a stale cache before reporting an available update', async (testContext) => {
   const home = tempDirectory();
@@ -73,7 +108,7 @@ test('refreshes a stale cache before reporting an available update', async (test
   }));
 
   assert.equal(requests, 1);
-  assert.deepEqual(readCache(fs, home), cacheAt(NOW, '2.0.0'));
+  assert.deepEqual(readCache(fs, environmentFor(home)), cacheAt(NOW, '2.0.0'));
   assert.match(JSON.parse(output).systemMessage, /quartermaster 1\.0\.0 → 2\.0\.0/);
 });
 
@@ -104,7 +139,7 @@ test('leaves an existing stale cache untouched when refreshing fails', async (te
   }));
 
   assert.equal(output, '');
-  assert.deepEqual(readCache(fs, home), staleCache);
+  assert.deepEqual(readCache(fs, environmentFor(home)), staleCache);
 });
 
 test('reports each distinct available version once per session without blocking', async (testContext) => {

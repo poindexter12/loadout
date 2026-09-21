@@ -3,20 +3,20 @@
 
 const fs = require('node:fs');
 const https = require('node:https');
-const os = require('node:os');
 const path = require('node:path');
+const { claudeDir } = require('../lib/paths.js');
 
 const CACHE_MAX_AGE_MS = 60 * 60 * 1000;
 const MARKETPLACE_URL = 'https://raw.githubusercontent.com/poindexter12/loadout/main/.claude-plugin/marketplace.json';
 const REQUEST_TIMEOUT_MS = 5_000;
 
-function cacheFile(home = os.homedir()) {
-  return path.join(home, '.claude', 'loadout', 'marketplace-freshness.json');
+function cacheFile(environment = process.env) {
+  return path.join(claudeDir(environment), 'loadout', 'marketplace-freshness.json');
 }
 
-function readCache(fileSystem = fs, home = os.homedir()) {
+function readCache(fileSystem = fs, environment = process.env) {
   try {
-    return JSON.parse(fileSystem.readFileSync(cacheFile(home), 'utf8'));
+    return JSON.parse(fileSystem.readFileSync(cacheFile(environment), 'utf8'));
   } catch (_) {
     return null;
   }
@@ -52,8 +52,8 @@ function requestManifest(request = https.get, timeoutMs = REQUEST_TIMEOUT_MS) {
   });
 }
 
-function writeCache(cache, fileSystem = fs, home = os.homedir()) {
-  const destination = cacheFile(home);
+function writeCache(cache, fileSystem = fs, environment = process.env) {
+  const destination = cacheFile(environment);
   fileSystem.mkdirSync(path.dirname(destination), { recursive: true });
   const temporary = `${destination}.${process.pid}.tmp`;
   fileSystem.writeFileSync(temporary, `${JSON.stringify(cache)}\n`, 'utf8');
@@ -62,17 +62,17 @@ function writeCache(cache, fileSystem = fs, home = os.homedir()) {
 
 async function refreshCache(options = {}) {
   const now = options.now ?? Date.now();
-  const existing = readCache(options.fileSystem, options.home);
+  const existing = readCache(options.fileSystem, options.environment);
   if (cacheIsCurrent(existing, now)) return existing;
   try {
     const manifest = await (options.requestManifest || requestManifest)();
     const cache = { checkedAt: new Date(now).toISOString(), manifest };
-    writeCache(cache, options.fileSystem, options.home);
+    writeCache(cache, options.fileSystem, options.environment);
     return cache;
   } catch (_) {
     const cache = { checkedAt: new Date(now).toISOString(), unavailable: true };
     try {
-      writeCache(cache, options.fileSystem, options.home);
+      writeCache(cache, options.fileSystem, options.environment);
     } catch (_) {
       // The prompt guard still treats an unwritable cache as unknown.
     }

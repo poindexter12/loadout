@@ -14,6 +14,7 @@ const {
   reportedLoadedPluginVersion,
 } = require('./freshness-helpers.js');
 const { cacheIsCurrent, readCache } = require('./marketplace-freshness-cache.js');
+const { pluginsDir } = require('../lib/paths.js');
 
 const MARKETPLACE = 'loadout';
 const warnedStates = new Set();
@@ -132,10 +133,10 @@ function remoteWarning(instances, cache, now) {
 function decide(input, options = {}) {
   if (process.env.LOADOUT_FRESHNESS_BYPASS === '1' || isMaintenancePrompt(input?.prompt)) return '';
   const fileSystem = options.fileSystem || fs;
-  const home = options.home || os.homedir();
-  const registryFile = options.registryFile || path.join(home, '.claude', 'plugins', 'installed_plugins.json');
+  const environment = options.environment || process.env;
+  const registryFile = options.registryFile || path.join(pluginsDir(environment), 'installed_plugins.json');
   const instances = activeInstances(readJson(fileSystem, registryFile) || {}, input?.cwd, MARKETPLACE, options.platform);
-  const cache = options.cache === undefined ? readCache(fileSystem, home) : options.cache;
+  const cache = options.cache === undefined ? readCache(fileSystem, environment) : options.cache;
   const remoteMessage = remoteWarning(instances, cache, options.now ?? Date.now());
   const updates = remoteUpdates(instances, cache?.manifest);
   if (remoteMessage && warnOnce(input, 'remote', options, availableVersionsKey(updates))) return warningOutput(remoteMessage);

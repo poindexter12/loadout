@@ -2,7 +2,6 @@
 'use strict';
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const {
   cacheIsCurrent,
@@ -25,6 +24,7 @@ const {
   warnOnce,
 } = require('./user-prompt-freshness.js');
 const { readJson } = require('./freshness-helpers.js');
+const { pluginsDir } = require('../lib/paths.js');
 
 const REFRESH_TIMEOUT_MS = 2_000;
 
@@ -39,8 +39,8 @@ function readStdin(fileSystem = fs) {
 
 function activeLoadoutInstances(input, options) {
   const fileSystem = options.fileSystem || fs;
-  const home = options.home || os.homedir();
-  const registryFile = options.registryFile || path.join(home, '.claude', 'plugins', 'installed_plugins.json');
+  const environment = options.environment || process.env;
+  const registryFile = options.registryFile || path.join(pluginsDir(environment), 'installed_plugins.json');
   return activeInstances(readJson(fileSystem, registryFile) || {}, input.cwd, MARKETPLACE, options.platform);
 }
 
@@ -54,14 +54,13 @@ async function decide(input, options = {}) {
   if (input?.stop_hook_active || !input?.session_id || environment.LOADOUT_FRESHNESS_BYPASS === '1') return '';
 
   const fileSystem = options.fileSystem || fs;
-  const home = options.home || os.homedir();
   const now = options.now ?? Date.now();
-  let cache = options.cache === undefined ? readCache(fileSystem, home) : options.cache;
+  let cache = options.cache === undefined ? readCache(fileSystem, environment) : options.cache;
   if (!cacheIsCurrent(cache, now)) {
     try {
       const manifest = await refreshManifest(options);
       cache = { checkedAt: new Date(now).toISOString(), manifest };
-      writeCache(cache, fileSystem, home);
+      writeCache(cache, fileSystem, environment);
     } catch {
       cache = null;
     }
