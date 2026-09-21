@@ -208,6 +208,58 @@ async function waitForProcessesToExit(processIds, timeout = 1000) {
   assert.deepEqual(processIds.filter(processIsRunning), [], 'probe child survived its supervisor');
 }
 
+function recordedGatewayFixturePids(home) {
+  const state = path.join(home, '.claude', 'model-gateway');
+  return [...new Set(['guardian', 'shim', 'proxy'].map((name) => {
+    try { return Number(fs.readFileSync(path.join(state, `${name}.pid`), 'utf8').trim()) || null; } catch { return null; }
+  }).filter(Boolean))];
+}
+
+function gatewayFixturePids(home) {
+  const fixtureRoot = fs.realpathSync(home);
+  const result = spawnSync('ps', ['-Ao', 'pid=,command='], { encoding: 'utf8' });
+  const fixtureProxyPids = String(result.stdout).split(/\r?\n/).flatMap((line) => {
+    const match = line.trim().match(/^(\d+)\s+(.+)$/);
+    return match && commandIncludesFile(match[2], fixtureRoot) ? [Number(match[1])] : [];
+  });
+  return [...new Set([...recordedGatewayFixturePids(home), ...fixtureProxyPids])];
+}
+
+async function stopGatewayFixture(home, environment, expectedPids) {
+  // With every gateway port set to 0, `stop` cannot inspect the listener it must
+  // prove belongs to this fixture. It is still worthwhile to ask for a graceful
+  // stop first, then terminate only PIDs recorded under this test's own home.
+  const fixturePids = [...new Set([...expectedPids, ...gatewayFixturePids(home)])];
+  await runGatewayCli(CLI, 'stop', environment, { cwd: home }).catch(() => {});
+  fixturePids.push(...gatewayFixturePids(home));
+  const uniqueFixturePids = [...new Set(fixturePids)];
+  const runningFixturePids = uniqueFixturePids.filter(processIsRunning);
+  for (const pid of runningFixturePids) {
+    try { process.kill(pid, 'SIGTERM'); } catch (error) {
+      if (error.code !== 'ESRCH') throw error;
+    }
+  }
+  await waitForProcessesToExit(uniqueFixturePids, 5000);
+  assert.equal(
+    uniqueFixturePids.filter(processIsRunning).length,
+    0,
+    `fixture cleanup reaped ${uniqueFixturePids.length} fixture processes`,
+  );
+}
+
+async function waitForGatewayFixturePids(home) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const pids = recordedGatewayFixturePids(home);
+    if (pids.length === 3 && pids.every(processIsRunning)) return pids;
+    await pause(25);
+  }
+  const pids = recordedGatewayFixturePids(home);
+  assert.equal(pids.length, 3, `fixture recorded ${pids.length} of its three gateway processes`);
+  assert.deepEqual(pids.filter(processIsRunning), pids, 'fixture recorded a gateway process that is no longer running');
+  return pids;
+}
+
 function installNodeProxy(home) {
   const proxyBinary = path.join(home, '.claude', 'model-gateway', 'bin', process.platform === 'win32' ? 'claude-code-proxy.exe' : 'claude-code-proxy');
   fs.mkdirSync(path.dirname(proxyBinary), { recursive: true });
@@ -598,9 +650,9 @@ test('two concurrent ensure OS processes never both decide the gateway needs rec
     CODEX_GATEWAY_WORKER_PORT: '0',
   });
   let guardianPid = null;
+  let fixturePids = [];
   t.after(async () => {
-    await runGatewayCli(CLI, 'stop', environment, { cwd: home }).catch(() => {});
-    if (guardianPid) await waitForProcessesToExit([guardianPid], 5000).catch(() => {});
+    await stopGatewayFixture(home, environment, fixturePids);
     fs.rmSync(home, { recursive: true, force: true });
   });
 
@@ -620,6 +672,7 @@ test('two concurrent ensure OS processes never both decide the gateway needs rec
 
   const state = path.join(home, '.claude', 'model-gateway');
   guardianPid = await waitForPidRecord(path.join(state, 'guardian.pid'));
+  fixturePids = await waitForGatewayFixturePids(home);
   assert.equal(processIsRunning(guardianPid), true, 'exactly one guardian ended up running');
 
   const lifecycle = fs.readFileSync(path.join(state, 'logs', 'lifecycle.jsonl'), 'utf8')
@@ -651,9 +704,9 @@ test('ensure reclaims a stale lock left by a pid that is no longer running inste
   fs.writeFileSync(path.join(state, 'ensure.lock'), JSON.stringify({ pid: deadPid, startedAt: new Date(0).toISOString() }));
   const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home });
   let guardianPid = null;
+  let fixturePids = [];
   t.after(async () => {
-    await runGatewayCli(CLI, 'stop', environment, { cwd: home }).catch(() => {});
-    if (guardianPid) await waitForProcessesToExit([guardianPid], 5000).catch(() => {});
+    await stopGatewayFixture(home, environment, fixturePids);
     fs.rmSync(home, { recursive: true, force: true });
   });
 
@@ -675,6 +728,7 @@ test('ensure reclaims a stale lock left by a pid that is no longer running inste
   assert.equal(holder.ok, true, `expected the reclaiming ensure to record a successful outcome: ${JSON.stringify(holder)}`);
 
   guardianPid = await waitForPidRecord(path.join(state, 'guardian.pid'));
+  fixturePids = await waitForGatewayFixturePids(home);
   assert.equal(processIsRunning(guardianPid), true, 'the reclaiming ensure actually started the gateway');
 
   const lifecycle = fs.readFileSync(path.join(state, 'logs', 'lifecycle.jsonl'), 'utf8')
@@ -709,9 +763,9 @@ test('ensure reclaims an old corrupt (unparseable) lock file instead of treating
   fs.utimesSync(lockPath, old, old);
   const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home });
   let guardianPid = null;
+  let fixturePids = [];
   t.after(async () => {
-    await runGatewayCli(CLI, 'stop', environment, { cwd: home }).catch(() => {});
-    if (guardianPid) await waitForProcessesToExit([guardianPid], 5000).catch(() => {});
+    await stopGatewayFixture(home, environment, fixturePids);
     fs.rmSync(home, { recursive: true, force: true });
   });
 
@@ -720,6 +774,7 @@ test('ensure reclaims an old corrupt (unparseable) lock file instead of treating
   assert.equal(fs.existsSync(lockPath), false, 'the lock is released once this ensure finishes');
 
   guardianPid = await waitForPidRecord(path.join(state, 'guardian.pid'));
+  fixturePids = await waitForGatewayFixturePids(home);
   assert.equal(processIsRunning(guardianPid), true, 'the reclaiming ensure actually started the gateway');
 });
 
