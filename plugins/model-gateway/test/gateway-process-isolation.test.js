@@ -551,6 +551,21 @@ test('sibling ensure retires dead records without deleting replacement worker an
     // Use the production ownership budget: this tests confirmed replacement,
     // not timeout refusal. A 100ms lsof deadline can expire before finding the
     // PID on macOS; dedicated ownership tests cover that conservative refusal.
+    //
+    // SQ-61: park the supervisor's periodic proxy recovery so the only writers
+    // of proxy.pid during this test are the one initial proxy start per
+    // supervisor and the sentinel this test plants. CODEX_GATEWAY_PROXY_PORT is
+    // '0' here (the fixture default), so `proxyModelsAnswering(0)` can never
+    // answer and every recovery tick "recovers" a proxy that was never sick:
+    // it spawns a fresh proxy, leaks the previous one, and rewrites proxy.pid
+    // with a live PID. The older sibling's tick lands ~3.6s after the sentinel
+    // is planted, which on a loaded macOS box beats the `ensure` process to the
+    // record and makes it retire a real PID instead of the sentinel
+    // (`pid record proxy retired because PID <real> is gone`). CI's faster
+    // `ensure` usually wins that race, which is why this only ever went red
+    // locally. Each supervisor still starts exactly one proxy, because
+    // runShim() calls monitorProxy() once inline before arming the interval.
+    CODEX_GATEWAY_PROXY_RECOVERY_INTERVAL_MS: '3600000',
   });
   const olderShim = spawn(process.execPath, [olderCli, 'serve-shim'], { cwd: home, env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
   let ensuring = null;
