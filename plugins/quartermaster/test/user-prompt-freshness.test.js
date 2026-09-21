@@ -46,6 +46,38 @@ function reloadPending(directory) {
   };
 }
 
+// SQ-60: production calls decide() without options, so it must follow CLAUDE_CONFIG_DIR rather
+// than os.homedir()/.claude. Both registries differ, making the wrong-tree read observable.
+test('production registry lookup follows CLAUDE_CONFIG_DIR instead of the home tree', (t) => {
+  const fakeHome = tempDirectory();
+  const configDir = tempDirectory();
+  t.after(() => {
+    fs.rmSync(fakeHome, { recursive: true, force: true });
+    fs.rmSync(configDir, { recursive: true, force: true });
+  });
+
+  const homeRegistry = path.join(fakeHome, '.claude', 'plugins', 'installed_plugins.json');
+  const configRegistry = path.join(configDir, 'plugins', 'installed_plugins.json');
+  fs.mkdirSync(path.dirname(homeRegistry), { recursive: true });
+  fs.mkdirSync(path.dirname(configRegistry), { recursive: true });
+  fs.writeFileSync(homeRegistry, JSON.stringify({ plugins: {
+    'model-gateway@loadout': [{ scope: 'user', version: '1.0.0' }],
+  } }));
+  fs.writeFileSync(configRegistry, JSON.stringify({ plugins: {
+    'sidequest@loadout': [{ scope: 'user', version: '1.0.0' }],
+  } }));
+
+  const output = JSON.parse(decide({ prompt: 'continue', cwd: path.join(configDir, 'project'), session_id: 'config-tree' }, {
+    home: fakeHome,
+    environment: { CLAUDE_CONFIG_DIR: configDir },
+    cache: { checkedAt: new Date().toISOString(), manifest: { plugins: [{ name: 'sidequest', version: '2.0.0' }] } },
+    warningStateDirectory: path.join(configDir, 'warnings'),
+    warnedStates: new Set(),
+  }));
+  assert.match(output.hookSpecificOutput.additionalContext, /sidequest 1\.0\.0 → 2\.0\.0/);
+  assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /model-gateway/);
+});
+
 test('a session with no reload pending permits with empty output and never fetches', () => {
   const directory = tempDirectory();
   const registryFile = path.join(directory, 'installed_plugins.json');
