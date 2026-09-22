@@ -182,12 +182,12 @@ function observabilitySetup(env) {
 }
 
 function healStaleStatuslines(instances, options = {}) {
-  const home = options.home || os.homedir();
   const env = options.env || process.env;
   const setup = options.observabilitySetup || observabilitySetup(env);
   if (!setup) return [];
   const { ensureStatuslineShim, statuslineCommand } = setup;
-  const command = statuslineCommand(home);
+  const shimHome = options.shimHome;
+  const command = statuslineCommand(shimHome);
   const userSettingsPath = path.join(claudeDir(env), 'settings.json');
   const user = healStatuslineFile(userSettingsPath, null, command, options.dryRun);
   const userStatusLine = user.settings?.statusLine;
@@ -199,7 +199,7 @@ function healStaleStatuslines(instances, options = {}) {
     const local = healStatuslineFile(path.join(claudeDir, 'settings.local.json'), legacy.settings?.statusLine || userStatusLine, command, options.dryRun);
     results.push(legacy, local);
   }
-  if (results.some((result) => result.healed) && !options.dryRun) ensureStatuslineShim(home);
+  if (results.some((result) => result.healed) && !options.dryRun) ensureStatuslineShim(shimHome);
   return results.filter((result) => result.healed);
 }
 
@@ -620,7 +620,7 @@ function runUpdate({ env = process.env, registryFile = registryPath(env), home =
     report('Gateway wiring is handled by the stable model-gateway updater.');
   }
 
-  const healedStatuslines = options.check ? [] : healStaleStatuslines(instances, { home, env, dryRun: options.dryRun });
+  const healedStatuslines = options.check ? [] : healStaleStatuslines(instances, { env, dryRun: options.dryRun });
   if (healedStatuslines.length > 0) {
     report(`Healed ${healedStatuslines.length} stale managed status-line shim setting(s).`);
   }

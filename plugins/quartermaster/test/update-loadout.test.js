@@ -426,6 +426,7 @@ test('reports a stable gateway updater failure', () => withRegistry(registry, (r
 test('heals stale managed status-line shim pins after updating', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-statusline-'));
   const lines = [];
+  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
   try {
     const registryFile = path.join(home, '.claude', 'plugins', 'installed_plugins.json');
     const settingsFile = path.join(home, '.claude', 'settings.json');
@@ -437,6 +438,7 @@ test('heals stale managed status-line shim pins after updating', () => {
     fs.writeFileSync(settingsFile, JSON.stringify({
       statusLine: { type: 'command', command: 'node "C:/Users/example/.claude/plugins/cache/loadout/workbench/0.20.0/bin/workbench-statusline.js"' },
     }));
+    process.env.CLAUDE_CONFIG_DIR = path.join(home, '.claude');
 
     const result = runUpdate({
       home,
@@ -453,7 +455,48 @@ test('heals stale managed status-line shim pins after updating', () => {
     assert.equal(settings.statusLine.command, `node --no-warnings "${path.join(home, '.claude', 'workbench-statusline.js')}"`);
     assert.ok(fs.existsSync(path.join(home, '.claude', 'workbench-statusline.js')));
   } finally {
+    if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
     fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('heals statuslines into the active config tree instead of the OS home', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-statusline-os-home-'));
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-statusline-config-dir-'));
+  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    const registryFile = path.join(configDir, 'plugins', 'installed_plugins.json');
+    const settingsFile = path.join(configDir, 'settings.json');
+    const observabilityRoot = path.resolve(__dirname, '..', '..', 'observability');
+    const configuredRegistry = structuredClone(registry);
+    configuredRegistry.plugins['observability@loadout'] = [{ scope: 'user', version: '0.30.0', installPath: observabilityRoot }];
+    fs.mkdirSync(path.dirname(registryFile), { recursive: true });
+    fs.writeFileSync(registryFile, JSON.stringify(configuredRegistry));
+    fs.writeFileSync(settingsFile, JSON.stringify({
+      statusLine: { type: 'command', command: 'node "C:/Users/example/.claude/plugins/cache/loadout/workbench/0.20.0/bin/workbench-statusline.js"' },
+    }));
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+
+    runUpdate({
+      home,
+      env: { CLAUDE_CONFIG_DIR: configDir },
+      registryFile,
+      options: { claude: 'claude', dryRun: false, check: false },
+      run: () => ({ ok: true }),
+      report: () => {},
+    });
+
+    const shimPath = path.join(configDir, 'workbench-statusline.js');
+    const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+    assert.equal(settings.statusLine.command, `node --no-warnings "${shimPath}"`);
+    assert.ok(fs.existsSync(shimPath));
+    assert.ok(!fs.existsSync(path.join(home, '.claude', 'workbench-statusline.js')));
+  } finally {
+    if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(configDir, { recursive: true, force: true });
   }
 });
 
