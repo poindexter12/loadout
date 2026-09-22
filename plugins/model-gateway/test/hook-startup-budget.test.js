@@ -19,7 +19,10 @@ test('quiet ensure stops waiting inside its hook budget when the proxy never ans
   });
 
   assert.equal(timeout, 12000);
-  assert.deepEqual(result, { ok: false, timedOut: true });
+  // SQ-63 added probeReason so a startup timeout can say WHY /v1/models never
+  // answered. A probe injected as a bare boolean has no reason to report, so it
+  // stays null here — the exact shape is still asserted, not loosened.
+  assert.deepEqual(result, { ok: false, timedOut: true, probeReason: null });
   assert.equal(now, timeout);
 });
 

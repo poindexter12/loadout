@@ -9,10 +9,30 @@ const path = require('node:path');
 const { CLI_PATH, LOGS, PROXY_BIN, PROXY_PORT, PUBLIC_SHIM_PORT, resolveNewestInstalledCliPath, SHIM_PORT, STATE, WIN } = require('./runtime.js');
 const { recordGatewayLifecycle } = require('./lifecycle-diagnostics.js');
 
+// Every rejection carries the three facts a caller needs to tell one failure from
+// another: how long it took, whether any response headers arrived first, and whether
+// the socket came back out of a keep-alive pool. Without them a `catch` can only
+// report "it failed", which is how an /v1/models probe managed a ~50% false-negative
+// rate for eleven days without anyone being able to name the cause (SQ-63).
+function annotateFetchFailure(error, { url, startedAt, headersReceived, reusedSocket }) {
+  if (!error || typeof error !== 'object') return error;
+  if (error.fetchUrl === undefined) error.fetchUrl = url;
+  if (error.elapsedMs === undefined) error.elapsedMs = Date.now() - startedAt;
+  if (error.reusedSocket === undefined) error.reusedSocket = reusedSocket === true;
+  if (error.phase === undefined) error.phase = headersReceived ? 'reading the response body' : 'before any response headers';
+  return error;
+}
+
 function fetchUrl(url, { timeout = 15000, headers = {} } = {}) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https:') ? https : http;
+    const startedAt = Date.now();
+    let headersReceived = false;
+    const fail = (error) => reject(annotateFetchFailure(error, {
+      url, startedAt, headersReceived, reusedSocket: req?.reusedSocket,
+    }));
     const req = mod.get(url, { headers: { 'user-agent': 'model-gateway', ...headers } }, (res) => {
+      headersReceived = true;
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         return resolve(fetchUrl(res.headers.location, { timeout, headers }));
@@ -20,11 +40,32 @@ function fetchUrl(url, { timeout = 15000, headers = {} } = {}) {
       const chunks = [];
       res.on('data', (chunk) => chunks.push(chunk));
       res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }));
-      res.on('error', reject);
+      res.on('error', fail);
     });
-    req.on('error', reject);
-    req.setTimeout(timeout, () => req.destroy(new Error('timeout: ' + url)));
+    req.on('error', fail);
+    // A timeout must be machine-distinguishable from a refused or reset connection,
+    // so it gets a code and its own budget rather than only a message.
+    req.setTimeout(timeout, () => {
+      const error = new Error('timeout: ' + url);
+      error.code = 'ETIMEDOUT';
+      error.timeoutMs = timeout;
+      req.destroy(error);
+    });
   });
+}
+
+// Renders an annotated fetch rejection as one operator-readable clause. Four different
+// root causes have to read differently here: a probe that ran out of time, a refused
+// connection, a reset mid-body, and anything else.
+function describeFetchFailure(error) {
+  if (!error) return 'failed with no error';
+  const cause = error.code === 'ETIMEDOUT'
+    ? `no answer within ${error.timeoutMs ?? '?'}ms`
+    : `${error.code || error.name || 'Error'}: ${error.message}`;
+  const where = error.phase ? ` ${error.phase}` : '';
+  const socket = error.reusedSocket ? ' on a reused keep-alive socket' : '';
+  const elapsed = typeof error.elapsedMs === 'number' ? ` after ${error.elapsedMs}ms` : '';
+  return `${cause}${where}${socket}${elapsed}`;
 }
 
 function portListening(port, timeout = 700) {
@@ -758,10 +799,26 @@ const PROBE_FAILURE_THRESHOLD = 3;
 // retry `probe` up to `threshold` times (pausing `delayMs` between attempts), and only
 // report "down" once every attempt agrees. A probe that succeeds at any point returns
 // immediately with no added delay, so the common already-healthy path pays nothing.
+// The single /v1/models probe budget. It lived as a bare literal in three separate
+// copies of the probe, so nobody could tell whether "the timeout" was one number or
+// three that happened to agree.
+const PROBE_TIMEOUT_MS = 2000;
+
+// Probes now answer with a detail record rather than a bare boolean, and both shapes
+// have to keep working: callers and tests still inject `async () => true`.
+function probeSucceeded(value) {
+  if (value && typeof value === 'object' && 'ok' in value) return Boolean(value.ok);
+  return Boolean(value);
+}
+
+function probeFailureReason(value) {
+  return value && typeof value === 'object' && value.reason ? String(value.reason) : null;
+}
+
 async function confirmProbeDown(probe, {
   threshold = PROBE_FAILURE_THRESHOLD,
   delayMs = 300,
-  isUp = Boolean,
+  isUp = probeSucceeded,
   pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   let value;
@@ -773,10 +830,38 @@ async function confirmProbeDown(probe, {
   return { down: true, value, attempts: threshold };
 }
 
-async function proxyModelsAnswering(port = PROXY_PORT, fetch = fetchUrl) {
+// The one /v1/models probe. lib/commands.js and lib/request-worker.js used to keep
+// byte-identical private copies whose `catch { return false; }` collapsed a timeout,
+// an ECONNREFUSED, a mid-body reset and a non-200 status into the same unreadable
+// `false` (SQ-63). `reason` is the discriminator those copies threw away; it is the
+// only thing that makes a repeating probe failure diagnosable from a log file.
+async function proxyModelsProbe(port = PROXY_PORT, fetch = fetchUrl, { timeout = PROBE_TIMEOUT_MS } = {}) {
+  const startedAt = Date.now();
   try {
-    return (await fetch(`http://127.0.0.1:${port}/v1/models`, { timeout: 2000 })).status === 200;
-  } catch { return false; }
+    const response = await fetch(`http://127.0.0.1:${port}/v1/models`, { timeout });
+    const elapsedMs = Date.now() - startedAt;
+    if (response.status === 200) return { ok: true, status: 200, code: null, elapsedMs, reason: null };
+    return {
+      ok: false,
+      status: response.status ?? null,
+      code: null,
+      elapsedMs,
+      reason: `answered HTTP ${response.status} after ${elapsedMs}ms`,
+    };
+  } catch (error) {
+    const elapsedMs = typeof error?.elapsedMs === 'number' ? error.elapsedMs : Date.now() - startedAt;
+    return {
+      ok: false,
+      status: null,
+      code: error?.code ?? null,
+      elapsedMs,
+      reason: describeFetchFailure(error),
+    };
+  }
+}
+
+async function proxyModelsAnswering(port = PROXY_PORT, fetch = fetchUrl) {
+  return (await proxyModelsProbe(port, fetch)).ok;
 }
 
 function waitForPortRelease(port, { listening = portListening, attempts = 20, delay = 100 } = {}) {
@@ -802,7 +887,7 @@ function spawnSupervisedProxy({ command = PROXY_BIN, port = PROXY_PORT, logs = L
 function createProxyRecovery({
   proxyBinary = PROXY_BIN,
   proxyPort = PROXY_PORT,
-  probe = () => proxyModelsAnswering(proxyPort),
+  probe = () => proxyModelsProbe(proxyPort),
   listening = portListening,
   probeChildren = createProbeChildRegistry(),
   owner = (port) => processOwningPortAsync(port, { probeChildren }),
@@ -837,16 +922,25 @@ function createProxyRecovery({
     report(`${new Date(now()).toISOString()} model-gateway: ${message}`);
   }
 
+  // Appended rather than spliced in: the "did not answer (N of M consecutive checks)"
+  // prefix is what operators and log-counting greps already key on, so the new
+  // discriminator has to extend those lines without rewriting them.
+  function probeDetail(reason) {
+    return reason ? ` [probe: ${reason}]` : '';
+  }
+
   async function recover() {
     if (recovery) return recovery;
     if (halted) return { ok: false, state: 'foreign-port-owner' };
     recovery = (async () => {
-      if (await probe()) {
+      const firstProbe = await probe();
+      if (probeSucceeded(firstProbe)) {
         restartAttempt = 0;
         nextRestartAt = 0;
         probeFailures = 0;
         return { ok: true, state: 'healthy' };
       }
+      const probeReason = probeFailureReason(firstProbe);
       if (halted) return { ok: false, state: 'stopped' };
       if (now() < nextRestartAt) return { ok: false, state: 'backing-off', nextRestartAt };
 
@@ -856,8 +950,8 @@ function createProxyRecovery({
       probeFailures += 1;
       const portBound = await listening(proxyPort);
       if (portBound && probeFailures < probeFailureThreshold) {
-        log(`proxy /v1/models did not answer (${probeFailures} of ${probeFailureThreshold} consecutive checks) while :${proxyPort} is still bound; leaving it running`);
-        return { ok: false, state: 'probe-unconfirmed', probeFailures, probeFailureThreshold };
+        log(`proxy /v1/models did not answer (${probeFailures} of ${probeFailureThreshold} consecutive checks) while :${proxyPort} is still bound; leaving it running${probeDetail(probeReason)}`);
+        return { ok: false, state: 'probe-unconfirmed', probeFailures, probeFailureThreshold, probeReason };
       }
       probeFailures = 0;
       restartAttempt += 1;
@@ -868,7 +962,7 @@ function createProxyRecovery({
         pid: process.pid,
         outcome: `attempt-${restartAttempt}`,
       });
-      log(`proxy /v1/models unavailable; restart attempt ${restartAttempt}`);
+      log(`proxy /v1/models unavailable; restart attempt ${restartAttempt}${probeDetail(probeReason)}`);
       if (!binaryExists(proxyBinary)) {
         log(`proxy restart skipped because ${proxyBinary} is missing`);
         recordLifecycle('proxy-recovery-finished', { component: 'supervisor', pid: process.pid, outcome: 'binary-missing' });
@@ -941,7 +1035,8 @@ function createProxyRecovery({
           });
         }
       }
-      if (await probe()) {
+      const restartProbe = await probe();
+      if (probeSucceeded(restartProbe)) {
         restartAttempt = 0;
         nextRestartAt = 0;
         probeFailures = 0;
@@ -949,7 +1044,7 @@ function createProxyRecovery({
         recordLifecycle('proxy-recovery-finished', { component: 'supervisor', pid: process.pid, outcome: 'recovered' });
         return { ok: true, state: 'recovered' };
       }
-      log('proxy restart started; /v1/models is not ready yet');
+      log(`proxy restart started; /v1/models is not ready yet${probeDetail(probeFailureReason(restartProbe))}`);
       recordLifecycle('proxy-recovery-finished', { component: 'supervisor', pid: process.pid, outcome: 'starting' });
       return { ok: false, state: 'starting', retryAt: nextRestartAt };
     })();
@@ -971,8 +1066,8 @@ function createProxyRecovery({
 }
 
 module.exports = {
-  commandIncludesFile, commandResultAsync, confirmProbeDown, createProbeChildRegistry, createProxyRecovery, fetchUrl, foreignPortOwner, foreignPortOwnerReason, gatewayInstallRoot, installBelongsToThisPlugin, isDescendantOfAsync, killPid, killPidAsync, pidFile, pidRecordFile, pluginCacheIdentity, portListening, postJson,
-  processInfoAsync, processIsOwnedByThisInstall, processIsOwnedByThisInstallAsync, processOwningPort: processOwningPortSync, processOwningPortAsync, processOwningPortInProcAsync, processTableAsync, resolvePortOwner, portOwnerRefusal, PROBE_FAILURE_THRESHOLD,
-  proxyModelsAnswering, readPid, readPidRecord, recordedGatewayPids, reapGatewayOrphans, removePid, restartWorkerWithDrain, shimHealthy, spawnDetached,
+  commandIncludesFile, commandResultAsync, confirmProbeDown, createProbeChildRegistry, createProxyRecovery, describeFetchFailure, fetchUrl, foreignPortOwner, foreignPortOwnerReason, gatewayInstallRoot, installBelongsToThisPlugin, isDescendantOfAsync, killPid, killPidAsync, pidFile, pidRecordFile, pluginCacheIdentity, portListening, postJson,
+  processInfoAsync, processIsOwnedByThisInstall, processIsOwnedByThisInstallAsync, processOwningPort: processOwningPortSync, processOwningPortAsync, processOwningPortInProcAsync, processTableAsync, resolvePortOwner, portOwnerRefusal, PROBE_FAILURE_THRESHOLD, PROBE_TIMEOUT_MS,
+  probeFailureReason, probeSucceeded, proxyModelsAnswering, proxyModelsProbe, readPid, readPidRecord, recordedGatewayPids, reapGatewayOrphans, removePid, restartWorkerWithDrain, shimHealthy, spawnDetached,
   spawnSupervisedProxy, stopAll, stopProcess, stopRunningSupervisor, stopShimWithDrain, waitForPortRelease, waitForShimExit, writePidRecord, writePidRecordAsync,
 };
