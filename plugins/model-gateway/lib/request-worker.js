@@ -1432,7 +1432,9 @@ function runWorker() {
     if (compatState.hostsDetected && url.hostname.toLowerCase() === COMPAT_HOST) {
       reqOptions.lookup = anthropicBypass.lookup;
     }
-    const upReq = (isHttps ? https : http).request(url, reqOptions, (upRes) => {
+    let upRes;
+    const upReq = (isHttps ? https : http).request(url, reqOptions, (response) => {
+      upRes = response;
       const resHeaders = { ...upRes.headers };
       for (const h of ['transfer-encoding', 'connection', 'keep-alive']) delete resHeaders[h];
       // A compaction retry already committed the SSE status line on an earlier
@@ -1738,6 +1740,11 @@ function runWorker() {
       }
       upRes.pipe(clientRes); // never buffer successful SSE: Claude Code needs the stream live
     });
+    clientRes.once('close', () => {
+      if (clientRes.writableFinished) return;
+      upRes?.destroy();
+      upReq.destroy();
+    });
     upReq.setTimeout(3600000, () => upReq.destroy(new Error('upstream timeout')));
     upReq.on('error', (e) => {
       routeTelemetry?.finish(502, 'upstream_error');
@@ -1767,11 +1774,13 @@ function runWorker() {
     const body = JSON.stringify(upstreamPayload);
     const target = new URL(GROK_ENDPOINT);
     const transport = target.protocol === 'https:' ? https : http;
+    let upstream;
     const request = transport.request(target, {
       method: 'POST',
       headers: { ...grokBackend.grokHeaders(token, model), 'content-length': Buffer.byteLength(body) },
       agent: target.protocol === 'https:' ? httpsAgent : httpAgent,
-    }, (upstream) => {
+    }, (response) => {
+      upstream = response;
       const responseHeaders = { ...upstream.headers };
       for (const header of ['transfer-encoding', 'connection', 'keep-alive']) delete responseHeaders[header];
       const streamed = String(upstream.headers['content-type'] || '').toLowerCase().includes('text/event-stream');
@@ -1844,6 +1853,11 @@ function runWorker() {
         clientRes.end(translatedBody);
       });
       upstream.on('error', () => clientRes.destroy());
+    });
+    clientRes.once('close', () => {
+      if (clientRes.writableFinished) return;
+      upstream?.destroy();
+      request.destroy();
     });
     request.setTimeout(3600000, () => request.destroy(new Error('Grok upstream timeout')));
     request.on('error', (error) => {
