@@ -323,7 +323,7 @@ function releaseEnsureLock(outcome) {
 }
 
 const {
-  confirmProbeDown, createProbeChildRegistry, createProxyRecovery, fetchUrl, foreignPortOwner, killPidAsync, portListening, postJson, processOwningPort, processOwningPortAsync, recordedGatewayPids, reapGatewayOrphans, resolvePortOwner, portOwnerRefusal,
+  confirmProbeDown, createProbeChildRegistry, createProxyRecovery, fetchUrl, foreignPortOwner, killPidAsync, portListening, postJson, probeFailureReason, probeSucceeded, processOwningPort, processOwningPortAsync, proxyModelsProbe, recordedGatewayPids, reapGatewayOrphans, resolvePortOwner, portOwnerRefusal,
   removePid, restartWorkerWithDrain, shimHealthy, spawnDetached, stopAll, stopProcess, stopRunningSupervisor,
   stopShimWithDrain, waitForShimExit, writePidRecordAsync,
 } = require('./process-supervision.js');
@@ -404,7 +404,10 @@ function isAuthed() {
 const CODEX_READINESS_MESSAGES = {
   'binary-missing': () => `Codex dispatch refused: claude-code-proxy is missing. Run \`node "${CLI_PATH}" setup\`, then retry. No Anthropic fallback was used.`,
   'auth-missing': () => `Codex dispatch refused: ChatGPT sign-in is required. Run \`node "${CLI_PATH}" login\`, finish browser OAuth, then run \`node "${CLI_PATH}" setup\` and retry. Credentials live in \`~/.config/claude-code-proxy/\`.`,
-  'proxy-down': () => `Codex dispatch refused: claude-code-proxy is not answering on /v1/models. The running shim supervisor retries recovery with bounded backoff; check ${path.join(LOGS, 'guardian.log')} if it does not recover. No Anthropic fallback was used.`,
+  // The probe reason is the whole point of SQ-63: "not answering" alone sends an
+  // operator to a log file to guess, while "no answer within 2000ms" and
+  // "ECONNREFUSED" point at two different problems.
+  'proxy-down': (checks) => `Codex dispatch refused: claude-code-proxy is not answering on /v1/models${checks?.proxyModelsReason ? ` (${checks.proxyModelsReason})` : ''}. The running shim supervisor retries recovery with bounded backoff; check ${path.join(LOGS, 'guardian.log')} if it does not recover. No Anthropic fallback was used.`,
   'shim-down': () => `Codex dispatch refused: the model-gateway shim is down. Run \`node "${CLI_PATH}" ensure\`, then retry. No Anthropic fallback was used.`,
   'serving-version-mismatch': () => `Codex dispatch refused: model-gateway is serving a stale shim version. Run \`node "${resolveNewestInstalledCliPath()}" ensure\`, then retry. No Anthropic fallback was used.`,
   'upstream-blocked': () => `Codex is blocked by an OpenAI rejection. Run \`node "${CLI_PATH}" setup\`; if it persists, wait for a claude-code-proxy update or explicitly re-route this ticket. Codex tickets remain blocked.`,
@@ -435,12 +438,9 @@ function noteCodexRequestSuccess() {
   clearUpstreamBlocked();
 }
 
-async function proxyModelsAnswering() {
-  try {
-    const response = await fetchUrl(`http://127.0.0.1:${PROXY_PORT}/v1/models`, { timeout: 2000 });
-    return response.status === 200;
-  } catch { return false; }
-}
+// The probe itself now lives in lib/process-supervision.js. This file used to keep a
+// private byte-identical copy whose `catch { return false; }` made a timeout, a
+// refused connection and a non-200 status indistinguishable (SQ-63).
 
 function readinessState(checks, upstreamBlocked) {
   if (!checks.proxyBinary) return 'binary-missing';
@@ -454,22 +454,26 @@ function readinessState(checks, upstreamBlocked) {
 
 async function getCodexReadiness({
   binaryPresent = fs.existsSync(PROXY_BIN),
-  probeProxyModels = proxyModelsAnswering,
+  probeProxyModels = proxyModelsProbe,
   authStatus = isAuthed,
   shimHealth = undefined,
   fetchHealth = fetchShimHealth,
 } = {}) {
   const proxyBinary = Boolean(binaryPresent);
-  const [proxyModels, health] = await Promise.all([
+  const [proxyProbe, health] = await Promise.all([
     proxyBinary ? probeProxyModels() : false,
     shimHealth === undefined ? fetchHealth() : shimHealth,
   ]);
+  // probeSucceeded keeps an injected `async () => true` working alongside the detail
+  // record the real probe returns.
+  const proxyModels = probeSucceeded(proxyProbe);
   const codexAuth = proxyBinary ? Boolean(authStatus()) : false;
   const shimRunning = Boolean(health?.ok);
   const servingVersion = servingShimVersion(health);
   const checks = {
     proxyBinary,
-    proxyModels: Boolean(proxyModels),
+    proxyModels,
+    proxyModelsReason: proxyModels ? null : probeFailureReason(proxyProbe),
     codexAuth,
     shimRunning,
     servingVersion,
@@ -483,7 +487,7 @@ async function getCodexReadiness({
     state,
     message: state === 'ready'
       ? 'Codex readiness confirms local binary, /v1/models, authentication, shim, and serving-version checks. It does not prove a streaming request will succeed.'
-      : CODEX_READINESS_MESSAGES[state](),
+      : CODEX_READINESS_MESSAGES[state](checks),
     checks,
     upstreamBlocked,
     health,
@@ -736,7 +740,7 @@ function startupWaitMsFor(quiet) {
 
 async function waitForStartupReadiness({
   timeout,
-  proxyAnswers = proxyModelsAnswering,
+  proxyAnswers = proxyModelsProbe,
   shimReady = shimHealthy,
   shimFailureExists = () => fs.existsSync(SHIM_FAILURE_PATH),
   readShimFailure = () => fs.readFileSync(SHIM_FAILURE_PATH, 'utf8').trim(),
@@ -744,12 +748,17 @@ async function waitForStartupReadiness({
   pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 } = {}) {
   const deadline = now() + timeout;
+  // The last probe's reason is carried out of the loop so a startup timeout can say
+  // WHY /v1/models never answered instead of only that it never did (SQ-63).
+  let probeReason = null;
   while (now() < deadline) {
-    if ((await proxyAnswers()) && (await shimReady())) return { ok: true };
-    if (shimFailureExists()) return { ok: false, reason: readShimFailure(), timedOut: false };
+    const probe = await proxyAnswers();
+    probeReason = probeFailureReason(probe) ?? probeReason;
+    if (probeSucceeded(probe) && (await shimReady())) return { ok: true };
+    if (shimFailureExists()) return { ok: false, reason: readShimFailure(), timedOut: false, probeReason };
     await pause(300);
   }
-  return { ok: false, timedOut: true };
+  return { ok: false, timedOut: true, probeReason };
 }
 
 function reportSiblingSupervisorReplacement(stopped, quiet) {
@@ -763,7 +772,7 @@ async function startAll({
   proxyExists = () => fs.existsSync(PROXY_BIN),
   probeShimHealth = fetchShimHealth,
   shimReady = shimHealthy,
-  proxyAnswers = proxyModelsAnswering,
+  proxyAnswers = proxyModelsProbe,
   confirmDown = confirmProbeDown,
   isPortBound = portListening,
   startupWaitMs = startupWaitMsFor(quiet),
@@ -856,13 +865,15 @@ async function startAll({
   // last authoritative check of live server state before this reports a false
   // failure: a racer whose own wait timed out but which can observe the gateway now
   // serving must report ready, not failed.
-  if ((await proxyAnswers()) && (await shimReady())) {
+  const finalProbe = await proxyAnswers();
+  if (probeSucceeded(finalProbe) && (await shimReady())) {
     await writeCatalog().catch(() => { /* advisory only; sidequest just won't see fresh models */ });
     return finishRecovery({ ok: true, started, recoveredAfterOwnTimeout: true });
   }
+  const probeReason = probeFailureReason(finalProbe) ?? readiness.probeReason;
   return finishRecovery({
     ok: false,
-    reason: `not healthy after ${Math.ceil(startupWaitMs / 1000)}s (check logs in ${LOGS})`,
+    reason: `not healthy after ${Math.ceil(startupWaitMs / 1000)}s${probeReason ? `; last /v1/models probe: ${probeReason}` : ''} (check logs in ${LOGS})`,
     started,
     waitCutShort: quiet,
   });

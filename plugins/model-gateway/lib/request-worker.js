@@ -14,7 +14,7 @@ const { writeFileAtomically } = require('./atomic-file.js');
 const { createGatewayUsageEmitter, recordRequestBodyHighWater } = require('./usage-observability.js');
 const grokBackend = require('./grok-backend.js');
 const { sanitizeToolSchemas } = require('./tool-schema.js');
-const { fetchUrl } = require('./process-supervision.js');
+const { fetchUrl, probeFailureReason, probeSucceeded, proxyModelsProbe } = require('./process-supervision.js');
 const { effectiveBaseUrl, wiredMode } = require('./settings-wiring.js');
 const { detectHostsCompat } = require('./remote-control.js');
 const { codexBaseFromId, ourBaseUrls } = require('./pins.js');
@@ -54,7 +54,9 @@ function isAuthed() {
 const CODEX_READINESS_MESSAGES = {
   'binary-missing': () => `Codex dispatch refused: claude-code-proxy is missing. Run \`node "${__filename}" setup\`, then retry. No Anthropic fallback was used.`,
   'auth-missing': () => `Codex dispatch refused: ChatGPT sign-in is required. Run \`node "${__filename}" login\`, finish browser OAuth, then run \`node "${__filename}" setup\` and retry. Credentials live in \`~/.config/claude-code-proxy/\`.`,
-  'proxy-down': () => `Codex dispatch refused: claude-code-proxy is not answering on /v1/models. The running shim supervisor retries recovery with bounded backoff; check ${path.join(LOGS, 'guardian.log')} if it does not recover. No Anthropic fallback was used.`,
+  // See lib/commands.js for the same clause: the probe reason is what makes a
+  // "not answering" report diagnosable rather than a prompt to go guess (SQ-63).
+  'proxy-down': (checks) => `Codex dispatch refused: claude-code-proxy is not answering on /v1/models${checks?.proxyModelsReason ? ` (${checks.proxyModelsReason})` : ''}. The running shim supervisor retries recovery with bounded backoff; check ${path.join(LOGS, 'guardian.log')} if it does not recover. No Anthropic fallback was used.`,
   'shim-down': () => `Codex dispatch refused: the model-gateway shim is down. Run \`node "${__filename}" ensure\`, then retry. No Anthropic fallback was used.`,
   'serving-version-mismatch': () => `Codex dispatch refused: model-gateway is serving a stale shim version. Run \`node "${resolveNewestInstalledCliPath()}" ensure\`, then retry. No Anthropic fallback was used.`,
   'upstream-blocked': () => `Codex is blocked by an OpenAI rejection. Run \`node "${__filename}" setup\`; if it persists, wait for a claude-code-proxy update or explicitly re-route this ticket. Codex tickets remain blocked.`,
@@ -85,12 +87,9 @@ function noteCodexRequestSuccess() {
   clearUpstreamBlocked();
 }
 
-async function proxyModelsAnswering() {
-  try {
-    const response = await fetchUrl(`http://127.0.0.1:${PROXY_PORT}/v1/models`, { timeout: 2000 });
-    return response.status === 200;
-  } catch { return false; }
-}
+// The probe itself now lives in lib/process-supervision.js alongside the guardian
+// loop that reads its failure reason. This file used to keep a private
+// byte-identical copy whose `catch { return false; }` threw that reason away (SQ-63).
 
 function readinessState(checks, upstreamBlocked) {
   if (!checks.proxyBinary) return 'binary-missing';
@@ -104,22 +103,26 @@ function readinessState(checks, upstreamBlocked) {
 
 async function getCodexReadiness({
   binaryPresent = fs.existsSync(PROXY_BIN),
-  probeProxyModels = proxyModelsAnswering,
+  probeProxyModels = proxyModelsProbe,
   authStatus = isAuthed,
   shimHealth = undefined,
   fetchHealth = fetchShimHealth,
 } = {}) {
   const proxyBinary = Boolean(binaryPresent);
-  const [proxyModels, health] = await Promise.all([
+  const [proxyProbe, health] = await Promise.all([
     proxyBinary ? probeProxyModels() : false,
     shimHealth === undefined ? fetchHealth() : shimHealth,
   ]);
+  // probeSucceeded keeps an injected `async () => true` working alongside the detail
+  // record the real probe returns.
+  const proxyModels = probeSucceeded(proxyProbe);
   const codexAuth = proxyBinary ? Boolean(authStatus()) : false;
   const shimRunning = Boolean(health?.ok);
   const servingVersion = servingShimVersion(health);
   const checks = {
     proxyBinary,
-    proxyModels: Boolean(proxyModels),
+    proxyModels,
+    proxyModelsReason: proxyModels ? null : probeFailureReason(proxyProbe),
     codexAuth,
     shimRunning,
     servingVersion,
@@ -133,7 +136,7 @@ async function getCodexReadiness({
     state,
     message: state === 'ready'
       ? 'Codex readiness confirms local binary, /v1/models, authentication, shim, and serving-version checks. It does not prove a streaming request will succeed.'
-      : CODEX_READINESS_MESSAGES[state](),
+      : CODEX_READINESS_MESSAGES[state](checks),
     checks,
     upstreamBlocked,
     health,
