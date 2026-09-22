@@ -256,7 +256,7 @@ function deferralNotice(cwd, progress) {
   const kept = Object.values(progress.keptByReason).reduce((total, count) => total + count, 0);
   const reasons = Object.entries(progress.keptByReason).map(([reason, count]) => `${reason} ${count}`).join(", ") || "none";
   const command = `node "${pluginRoot()}/bin/sidequest.js" worktrees sweep --yes --project "${import_node_path3.default.resolve(cwd || ".")}"`;
-  return `${DEFERRAL_NOTICE} Reached planned ${progress.planned}, removed ${progress.removed}, skipped ${kept} (${reasons}). Finish with ${command}.`;
+  return `${DEFERRAL_NOTICE} Progress at the ${deadlineMs()}ms budget, not a final result: planned ${progress.planned}, removed ${progress.removed}, skipped ${kept} (${reasons}). The detached sweep keeps running and reports on the next session start. Finish it sooner with ${command}.`;
 }
 function drainReport(cwd) {
   const file = reportFile(cwd);

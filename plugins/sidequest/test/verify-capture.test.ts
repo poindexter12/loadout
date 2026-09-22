@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 
-const { runVerifyCapture, runCapturedVerification, shellCommand, captureSlotDirectory, fullSuiteCaptureTimeoutMilliseconds } = require('../lib/verify-capture.js');
+const { runVerifyCapture, runCapturedVerification, recordCapture, shellCommand, captureSlotDirectory, fullSuiteCaptureTimeoutMilliseconds } = require('../lib/verify-capture.js');
 const store = require('../lib/store.js');
 const SIDEQUEST_DIR = path.resolve(__dirname, '..');
 
@@ -291,5 +291,111 @@ test('verify capture preserves quoted absolute paths in verify commands', async 
   } finally {
     fs.rmSync(scriptPath, { force: true });
     deleteLog(capture);
+  }
+});
+
+// SQ-70 / issue #18: a re-dispatched executor inherits the worktree a retired
+// agent left behind, and the capture it records at the very end of the run must
+// still find the board the ticket was dispatched from.
+function captureFixtureProject(prefix: string, suiteBody: string) {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({ scripts: { 'test:full': 'node suite.js' } }));
+  fs.writeFileSync(path.join(project, 'suite.js'), suiteBody);
+  execFileSync('git', ['init', '-b', 'main', '--quiet'], { cwd: project, windowsHide: true });
+  execFileSync('git', ['add', '--all'], { cwd: project, windowsHide: true });
+  execFileSync('git', ['-c', 'user.name=Sidequest Tests', '-c', 'user.email=sidequest@example.invalid', 'commit', '--quiet', '-m', 'fixture'], { cwd: project, windowsHide: true });
+  return project;
+}
+
+function syntheticPassedCapture(command: string) {
+  return Object.freeze({ command, status: 'passed', logPath: null, exitCode: 0, shell: 'test' });
+}
+
+test('verification capture resolves a stale worktree --project back to the ticket registered board', async () => {
+  const project = captureFixtureProject('sq-capture-inherited-project-', 'process.exit(0);\n');
+  const worktreeParent = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-capture-inherited-worktrees-'));
+  const agentWorktree = path.join(worktreeParent, 'agent-a340a4f9a8a0e4a15');
+  const observedSlot = path.join(worktreeParent, 'observed-slot');
+  execFileSync('git', ['worktree', 'add', '--detach', '--quiet', agentWorktree, 'HEAD'], { cwd: project, windowsHide: true });
+  const registeredActiveSlot = path.join(captureSlotDirectory(project), 'active');
+  fs.writeFileSync(path.join(agentWorktree, 'suite.js'), `const fs = require('node:fs'); fs.writeFileSync(${JSON.stringify(observedSlot)}, String(fs.existsSync(${JSON.stringify(registeredActiveSlot)})));\n`);
+  const boardProject = store.ensureProject(project);
+  const ticket = store.createTicket(boardProject.slug, {
+    title: 'resolve the board from the ticket, not the inherited worktree',
+    executorVerifyKind: 'command',
+    executorVerify: 'npm run test:full',
+  });
+
+  try {
+    // The inherited worktree hashes to its own slot namespace, so the assertion
+    // below is load-bearing rather than incidentally true.
+    assert.notEqual(captureSlotDirectory(agentWorktree), captureSlotDirectory(project));
+    // The executor's --project carries the worktree it stands in, not the board path.
+    const { capture, recorded } = await runCapturedVerification('npm run test:full', { project: agentWorktree, ticket: ticket.ref }, agentWorktree);
+    try {
+      assert.equal(capture.status, 'passed', capture.evidence);
+      assert.equal(recorded?.ok, true, recorded?.reason);
+      assert.equal(recorded?.capture?.candidate.source, 'git');
+      assert.equal(fs.readFileSync(observedSlot, 'utf8'), 'true', 'the full-suite slot is held in the registered project namespace');
+      const recordedCaptures = store.getTicket(boardProject.slug, ticket.ref).verificationCaptures;
+      assert.ok(recordedCaptures.some((entry: { id: string }) => entry.id === recorded?.capture?.id), 'the capture lands on the ticket registered board');
+    } finally {
+      fs.rmSync(capture.logPath, { force: true });
+    }
+  } finally {
+    fs.rmSync(captureSlotDirectory(project), { recursive: true, force: true });
+    fs.rmSync(worktreeParent, { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('verification capture names the dead checkout when a retired agent worktree has no HEAD', () => {
+  const project = captureFixtureProject('sq-capture-retired-project-', 'process.exit(0);\n');
+  const worktreeParent = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-capture-retired-worktrees-'));
+  const agentWorktree = path.join(worktreeParent, 'agent-retired');
+  execFileSync('git', ['worktree', 'add', '--detach', '--quiet', agentWorktree, 'HEAD'], { cwd: project, windowsHide: true });
+  const boardProject = store.ensureProject(project);
+  const ticket = store.createTicket(boardProject.slug, {
+    title: 'name the dead checkout a retired agent left behind',
+    executorVerifyKind: 'command',
+    executorVerify: 'npm run test:full',
+  });
+
+  try {
+    // Retiring the agent prunes the worktree registration and leaves the directory.
+    fs.rmSync(path.join(project, '.git', 'worktrees', 'agent-retired'), { recursive: true, force: true });
+    const recorded = recordCapture({ project: agentWorktree, ticket: ticket.ref }, syntheticPassedCapture('npm run test:full'), agentWorktree);
+    assert.equal(recorded.ok, false);
+    // The board still resolved — the failure is the checkout, and the message says so.
+    assert.match(recorded.reason, /^verified_revision_unavailable: git resolved no HEAD commit in the verified checkout /);
+    assert.ok(recorded.reason.includes(JSON.stringify(path.resolve(agentWorktree))), recorded.reason);
+    assert.ok(recorded.reason.includes(JSON.stringify(boardProject.slug)), recorded.reason);
+    assert.match(recorded.reason, /retired agent's leftover worktree/);
+
+    // An unregistered, non-repository cwd is the same class of failure.
+    const stranger = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-capture-stranger-cwd-'));
+    try {
+      const strayCwd = recordCapture({ project, ticket: ticket.ref }, syntheticPassedCapture('npm run test:full'), stranger);
+      assert.equal(strayCwd.ok, false);
+      assert.ok(strayCwd.reason.includes(JSON.stringify(path.resolve(stranger))), strayCwd.reason);
+    } finally {
+      fs.rmSync(stranger, { recursive: true, force: true });
+    }
+  } finally {
+    fs.rmSync(worktreeParent, { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('verification capture names the unresolved project and the --project source', () => {
+  const unregistered = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-capture-unregistered-'));
+  try {
+    const recorded = recordCapture({ project: unregistered, ticket: 'SQ-404' }, syntheticPassedCapture('npm run test:full'), unregistered);
+    assert.equal(recorded.ok, false);
+    assert.match(recorded.reason, /^project_not_found: no registered board matched the --project argument for SQ-404\./);
+    assert.ok(recorded.reason.includes(JSON.stringify(unregistered)), recorded.reason);
+    assert.match(recorded.reason, /resolves the board from the dispatched ticket's registered project path, not from the working directory/);
+  } finally {
+    fs.rmSync(unregistered, { recursive: true, force: true });
   }
 });

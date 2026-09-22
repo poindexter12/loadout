@@ -54,12 +54,16 @@ type CaptureRecordResult = Readonly<{
   capture?: Readonly<{ id: string; candidate: Readonly<{ source: string; value: string }> }>;
 }>;
 type VerificationCaptureStore = Readonly<{
-  findProject(project: string): Readonly<{ ok: boolean; slug?: string; meta?: Readonly<{ path?: string }> }>;
+  findProject(project: string): Readonly<{ ok: boolean; slug?: string; reason?: string; meta?: Readonly<{ path?: string }> }>;
+  nearestRepoRoot(start: string): string;
   getTicket(slug: string, ticket: string): unknown;
   workingTreeDeliveryCandidate(slug: string, ticket: unknown): Readonly<{ candidate: Readonly<{ source: string; value: string }> }> | null;
   recordVerificationCapture(slug: string, ticket: string, capture: Readonly<Record<string, unknown>>): CaptureRecordResult;
 }>;
 type CaptureProject = Readonly<{ slug: string; path: string }>;
+type CaptureProjectResolution =
+  | Readonly<{ ok: true; project: CaptureProject }>
+  | Readonly<{ ok: false; reason: string }>;
 type CaptureSlotLease = Readonly<{
   waitedForSlotMs: number;
   queuePosition: number;
@@ -288,15 +292,50 @@ function captureTarget(args: readonly string[]): CaptureTarget | null {
   return project && ticket ? Object.freeze({ project, ticket }) : null;
 }
 
-function captureProject(target: CaptureTarget): CaptureProject | null {
+// The board a capture belongs to comes from the dispatched ticket's registered
+// project, never from whatever checkout the executor happens to stand in. A
+// re-dispatched executor that inherits a retired agent's worktree (SQ-70, issue
+// #18) carries that worktree's path, not the project's: resolving it directly
+// missed, and the bare `project_not_found` it returned pointed the investigation
+// at project registration instead of at worktree reuse. Folding an unregistered
+// argument to the repository root that owns it maps a linked worktree back onto
+// the board that dispatched the ticket. It also keeps captureSlotDirectory
+// hashing the REGISTERED project path, so a stale spelling can no longer strand
+// full-suite captures in a private slot namespace and defeat their serialization.
+function resolveCaptureProject(target: CaptureTarget): CaptureProjectResolution {
   const store = require('./store.js') as VerificationCaptureStore;
-  const project = store.findProject(target.project);
-  const projectPath = String(project.meta?.path || '').trim();
-  return project.ok && project.slug && projectPath ? Object.freeze({ slug: project.slug, path: projectPath }) : null;
+  const requested = String(target.project || '').trim();
+  const candidates = [requested];
+  let repositoryRoot = '';
+  try {
+    repositoryRoot = String(store.nearestRepoRoot(requested) || '').trim();
+  } catch (_) {
+    repositoryRoot = '';
+  }
+  if (repositoryRoot && repositoryRoot !== requested) candidates.push(repositoryRoot);
+  const attempts: string[] = [];
+  for (const candidate of candidates) {
+    const found = store.findProject(candidate);
+    if (found.ok && found.slug) {
+      return Object.freeze({
+        ok: true as const,
+        project: Object.freeze({ slug: found.slug, path: String(found.meta?.path || '').trim() || path.resolve(candidate) }),
+      });
+    }
+    attempts.push(`${JSON.stringify(candidate)} (${found.reason || 'not_found'})`);
+  }
+  return Object.freeze({
+    ok: false as const,
+    reason: `project_not_found: no registered board matched the --project argument for ${target.ticket}. Tried ${attempts.join(', then its repository root ')}. Verification capture resolves the board from the dispatched ticket's registered project path, not from the working directory, so a stale worktree path here means the dispatch named an unregistered project.`,
+  });
 }
 
-function captureWorkingDirectory(target: CaptureTarget, cwd: string): string {
-  const project = captureProject(target);
+function captureProject(target: CaptureTarget): CaptureProject | null {
+  const resolution = resolveCaptureProject(target);
+  return resolution.ok ? resolution.project : null;
+}
+
+function captureWorkingDirectory(target: CaptureTarget, cwd: string, project: CaptureProject | null): string {
   if (!project) return cwd;
   const store = require('./store.js') as VerificationCaptureStore;
   const ticket = store.getTicket(project.slug, target.ticket);
@@ -304,11 +343,13 @@ function captureWorkingDirectory(target: CaptureTarget, cwd: string): string {
 }
 
 async function runCapturedVerification(command: string, target: CaptureTarget | null, cwd = process.cwd(), fileSystem: CaptureSlotFileSystem = fs) {
-  const captureCwd = target ? captureWorkingDirectory(target, cwd) : cwd;
+  const resolution = target ? resolveCaptureProject(target) : null;
+  const project = resolution?.ok ? resolution.project : null;
+  const captureCwd = target ? captureWorkingDirectory(target, cwd, project) : cwd;
   const capture = target && isFullSuiteCommand(command)
-    ? await runFullSuiteCapture(command, target.project, captureCwd, fileSystem)
+    ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem)
     : await runVerifyCapture(command, captureCwd);
-  const recorded = target ? recordCapture(target, capture, captureCwd) : null;
+  const recorded = target ? recordCapture(target, capture, captureCwd, resolution) : null;
   return Object.freeze({ capture, recorded });
 }
 
@@ -318,6 +359,9 @@ function verifiedRevision(cwd: string) {
       cwd,
       encoding: 'utf8',
       windowsHide: true,
+      // git's own "fatal: not a git repository" on a dead worktree used to land
+      // on the wrapper's stderr, competing with the reason the caller is given.
+      stdio: ['ignore', 'pipe', 'ignore'],
     })).trim().toLowerCase();
     return value ? Object.freeze({ source: 'git', value }) : null;
   } catch (_) {
@@ -325,14 +369,23 @@ function verifiedRevision(cwd: string) {
   }
 }
 
-function recordCapture(target: CaptureTarget, capture: VerifyCapture, cwd: string) {
+function recordCapture(target: CaptureTarget, capture: VerifyCapture, cwd: string, resolved?: CaptureProjectResolution | null) {
   const store = require('./store.js') as VerificationCaptureStore;
-  const project = store.findProject(target.project);
-  if (!project.ok || !project.slug) return { ok: false, reason: 'project_not_found' };
+  const resolution = resolved || resolveCaptureProject(target);
+  if (!resolution.ok) return { ok: false, reason: resolution.reason };
+  const project = resolution.project;
   const ticket = store.getTicket(project.slug, target.ticket);
   const workingTreeCandidate = store.workingTreeDeliveryCandidate(project.slug, ticket);
   const candidate = workingTreeCandidate?.candidate || verifiedRevision(cwd);
-  if (!candidate) return { ok: false, reason: 'verified_revision_unavailable' };
+  // A retired agent's worktree keeps its directory after its registration is
+  // pruned, so git there resolves no HEAD. Name the checkout that failed rather
+  // than the subsystem, so the next occurrence is read as worktree reuse.
+  if (!candidate) {
+    return {
+      ok: false,
+      reason: `verified_revision_unavailable: git resolved no HEAD commit in the verified checkout ${JSON.stringify(path.resolve(cwd))} for ${target.ticket} on board ${JSON.stringify(project.slug)}. That checkout is not a live Git worktree, which is what a retired agent's leftover worktree looks like once its registration is pruned; rerun the verify wrapper from the worktree this dispatch owns.`,
+    };
+  }
   return store.recordVerificationCapture(project.slug, target.ticket, {
     command: capture.command || '',
     status: capture.status,
@@ -377,6 +430,6 @@ async function main() {
   process.exitCode = capture.exitCode === 0 && (!target || recorded?.ok) ? 0 : 2;
 }
 
-module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, captureSlotDirectory, isFullSuiteCommand, fullSuiteCaptureTimeoutMilliseconds, recordCapture, verifiedRevision };
+module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, isFullSuiteCommand, fullSuiteCaptureTimeoutMilliseconds, recordCapture, verifiedRevision };
 
 if (require.main === module) void main();

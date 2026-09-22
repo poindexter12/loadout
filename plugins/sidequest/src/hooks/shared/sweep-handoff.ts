@@ -83,7 +83,12 @@ export function deferralNotice(cwd: string, progress: SweepProgress): string {
   const kept = Object.values(progress.keptByReason).reduce((total, count) => total + count, 0);
   const reasons = Object.entries(progress.keptByReason).map(([reason, count]) => `${reason} ${count}`).join(', ') || 'none';
   const command = `node "${pluginRoot()}/bin/sidequest.js" worktrees sweep --yes --project "${path.resolve(cwd || '.')}"`;
-  return `${DEFERRAL_NOTICE} Reached planned ${progress.planned}, removed ${progress.removed}, skipped ${kept} (${reasons}). Finish with ${command}.`;
+  // These are the counts at the moment the budget expired, not the sweep's
+  // result: the detached child keeps collecting and reports on the next session
+  // start. SQ-70's reporter read a deferred "planned 0, removed 0, skipped 0" as
+  // proof that stale agent worktrees are never reaped, and spent the run chasing
+  // that instead of the capture failure in front of them.
+  return `${DEFERRAL_NOTICE} Progress at the ${deadlineMs()}ms budget, not a final result: planned ${progress.planned}, removed ${progress.removed}, skipped ${kept} (${reasons}). The detached sweep keeps running and reports on the next session start. Finish it sooner with ${command}.`;
 }
 
 export function writeReport(cwd: string, notices: string[]): void {
