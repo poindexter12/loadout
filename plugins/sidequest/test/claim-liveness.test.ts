@@ -1185,6 +1185,10 @@ test('a dispatched claim far past the advertised idle threshold is skipped with 
   assert.equal(swept.released.some((entry?: any) => entry.ref === ticket.ref), false, 'board quiet time is not process liveness');
   assert.equal(store.getTicket(slug, ticket.ref).claim.by, by);
 
+  // Assert the shape before reaching into it. Without this the regression is a
+  // TypeError on undefined rather than a named assertion, which proves only
+  // that a property vanished and not that this test catches wrong behavior.
+  assert.ok(Array.isArray(swept.skipped), 'the sweep reports a skipped[] for every claim it left alone');
   const skip = swept.skipped.find((entry?: any) => entry.ref === ticket.ref);
   assert.ok(skip, 'every claim the sweep leaves alone owes a reason line');
   assert.equal(skip.kind, 'dispatched');
@@ -1213,6 +1217,7 @@ test('an undispatched claim under the idle threshold is left alone and says whic
   assert.equal(swept.released.some((entry?: any) => entry.ref === ticket.ref), false);
   assert.equal(store.getTicket(slug, ticket.ref).claim.by, 'sq69-fresh-executor');
 
+  assert.ok(Array.isArray(swept.skipped), 'the sweep reports a skipped[] for every claim it left alone');
   const skip = swept.skipped.find((entry?: any) => entry.ref === ticket.ref);
   assert.ok(skip, 'an under-threshold claim is still a skipped claim and owes a reason');
   assert.equal(skip.kind, 'undispatched');
@@ -1231,6 +1236,7 @@ test('an undispatched claim past the idle threshold is reclaimed by the sweep an
   assert.ok(released, 'the threshold that governs an undispatched claim must actually fire');
   assert.equal(released.kind, 'idle');
   assert.equal(store.getTicket(slug, ticket.ref).claim, null);
+  assert.ok(Array.isArray(swept.skipped), 'the sweep reports a skipped[] for every claim it left alone');
   assert.equal(swept.skipped.some((entry?: any) => entry.ref === ticket.ref), false, 'a reclaimed claim is not a skipped claim');
 });
 
