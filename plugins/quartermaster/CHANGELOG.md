@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.4 (2026-09-21)
+
+Released in v3.542.0, up from 0.8.3.
+
+### Fixes
+
+- Heal statuslines in active account tree (SQ-52)
+  Quartermaster now repairs managed statusline shims in the active Claude account tree.
+
 ## 0.8.3 (2026-09-21)
 
 Released in v3.541.0, up from 0.8.2.
