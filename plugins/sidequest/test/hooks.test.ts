@@ -3334,7 +3334,7 @@ test('session-start: a sweep past its deadline still injects the full block and 
     { SIDEQUEST_HOME: home, SIDEQUEST_SWEEP_DEADLINE_MS: '0', CLAUDE_PROJECT_DIR: cwd, CLAUDE_PLUGIN_ROOT: path.join(__dirname, '..') }
   );
   assert.match(context, /worktree sweep exceeded its SessionStart budget/);
-  assert.match(context, /Reached planned 0, removed 0, skipped 0 \(none\)/);
+  assert.match(context, /Progress at the \d+ms budget, not a final result: planned 0, removed 0, skipped 0 \(none\)/);
   assert.match(context, /worktrees sweep --yes --project/);
   assert.ok(context.includes('=== sidequest (active) ==='), 'a deferred sweep must not cost the session its orchestrator block');
   assert.ok(context.includes('YOUR EXECUTORS'), 'a deferred sweep must not cost the session its workforce');

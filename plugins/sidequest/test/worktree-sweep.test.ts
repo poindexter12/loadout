@@ -79,6 +79,10 @@ test('deferred SessionStart sweep reports reached counts and the finishing comma
     keptByReason: { legacy_unreclaimed: 1, active_ticket: 3 },
   });
 
-  assert.match(notice, /Reached planned 4, removed 2, skipped 4 \(legacy_unreclaimed 1, active_ticket 3\)/);
+  assert.match(notice, /planned 4, removed 2, skipped 4 \(legacy_unreclaimed 1, active_ticket 3\)/);
+  // SQ-70: the counts are a snapshot at the budget, and the notice has to say so
+  // rather than read as the sweep's final result.
+  assert.match(notice, /Progress at the \d+ms budget, not a final result/);
+  assert.match(notice, /keeps running and reports on the next session start/);
   assert.match(notice, /worktrees sweep --yes --project/);
 });

@@ -228,23 +228,49 @@ function captureTarget(args) {
   const ticket = ticketIndex >= 0 ? String(args[ticketIndex + 1] || "").trim() : "";
   return project && ticket ? Object.freeze({ project, ticket }) : null;
 }
-function captureProject(target) {
+function resolveCaptureProject(target) {
   const store = require("./store.js");
-  const project = store.findProject(target.project);
-  const projectPath = String(project.meta?.path || "").trim();
-  return project.ok && project.slug && projectPath ? Object.freeze({ slug: project.slug, path: projectPath }) : null;
+  const requested = String(target.project || "").trim();
+  const candidates = [requested];
+  let repositoryRoot = "";
+  try {
+    repositoryRoot = String(store.nearestRepoRoot(requested) || "").trim();
+  } catch (_) {
+    repositoryRoot = "";
+  }
+  if (repositoryRoot && repositoryRoot !== requested) candidates.push(repositoryRoot);
+  const attempts = [];
+  for (const candidate of candidates) {
+    const found = store.findProject(candidate);
+    if (found.ok && found.slug) {
+      return Object.freeze({
+        ok: true,
+        project: Object.freeze({ slug: found.slug, path: String(found.meta?.path || "").trim() || path.resolve(candidate) })
+      });
+    }
+    attempts.push(`${JSON.stringify(candidate)} (${found.reason || "not_found"})`);
+  }
+  return Object.freeze({
+    ok: false,
+    reason: `project_not_found: no registered board matched the --project argument for ${target.ticket}. Tried ${attempts.join(", then its repository root ")}. Verification capture resolves the board from the dispatched ticket's registered project path, not from the working directory, so a stale worktree path here means the dispatch named an unregistered project.`
+  });
 }
-function captureWorkingDirectory(target, cwd) {
-  const project = captureProject(target);
+function captureProject(target) {
+  const resolution = resolveCaptureProject(target);
+  return resolution.ok ? resolution.project : null;
+}
+function captureWorkingDirectory(target, cwd, project) {
   if (!project) return cwd;
   const store = require("./store.js");
   const ticket = store.getTicket(project.slug, target.ticket);
   return store.workingTreeDeliveryCandidate(project.slug, ticket) ? project.path : cwd;
 }
 async function runCapturedVerification(command, target, cwd = process.cwd(), fileSystem = fs) {
-  const captureCwd = target ? captureWorkingDirectory(target, cwd) : cwd;
-  const capture = target && isFullSuiteCommand(command) ? await runFullSuiteCapture(command, target.project, captureCwd, fileSystem) : await runVerifyCapture(command, captureCwd);
-  const recorded = target ? recordCapture(target, capture, captureCwd) : null;
+  const resolution = target ? resolveCaptureProject(target) : null;
+  const project = resolution?.ok ? resolution.project : null;
+  const captureCwd = target ? captureWorkingDirectory(target, cwd, project) : cwd;
+  const capture = target && isFullSuiteCommand(command) ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem) : await runVerifyCapture(command, captureCwd);
+  const recorded = target ? recordCapture(target, capture, captureCwd, resolution) : null;
   return Object.freeze({ capture, recorded });
 }
 function verifiedRevision(cwd) {
@@ -252,21 +278,30 @@ function verifiedRevision(cwd) {
     const value = String(execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], {
       cwd,
       encoding: "utf8",
-      windowsHide: true
+      windowsHide: true,
+      // git's own "fatal: not a git repository" on a dead worktree used to land
+      // on the wrapper's stderr, competing with the reason the caller is given.
+      stdio: ["ignore", "pipe", "ignore"]
     })).trim().toLowerCase();
     return value ? Object.freeze({ source: "git", value }) : null;
   } catch (_) {
     return null;
   }
 }
-function recordCapture(target, capture, cwd) {
+function recordCapture(target, capture, cwd, resolved) {
   const store = require("./store.js");
-  const project = store.findProject(target.project);
-  if (!project.ok || !project.slug) return { ok: false, reason: "project_not_found" };
+  const resolution = resolved || resolveCaptureProject(target);
+  if (!resolution.ok) return { ok: false, reason: resolution.reason };
+  const project = resolution.project;
   const ticket = store.getTicket(project.slug, target.ticket);
   const workingTreeCandidate = store.workingTreeDeliveryCandidate(project.slug, ticket);
   const candidate = workingTreeCandidate?.candidate || verifiedRevision(cwd);
-  if (!candidate) return { ok: false, reason: "verified_revision_unavailable" };
+  if (!candidate) {
+    return {
+      ok: false,
+      reason: `verified_revision_unavailable: git resolved no HEAD commit in the verified checkout ${JSON.stringify(path.resolve(cwd))} for ${target.ticket} on board ${JSON.stringify(project.slug)}. That checkout is not a live Git worktree, which is what a retired agent's leftover worktree looks like once its registration is pruned; rerun the verify wrapper from the worktree this dispatch owns.`
+    };
+  }
   return store.recordVerificationCapture(project.slug, target.ticket, {
     command: capture.command || "",
     status: capture.status,
@@ -314,5 +349,5 @@ async function main() {
   report(capture, recorded);
   process.exitCode = capture.exitCode === 0 && (!target || recorded?.ok) ? 0 : 2;
 }
-module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, captureSlotDirectory, isFullSuiteCommand, fullSuiteCaptureTimeoutMilliseconds, recordCapture, verifiedRevision };
+module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, isFullSuiteCommand, fullSuiteCaptureTimeoutMilliseconds, recordCapture, verifiedRevision };
 if (require.main === module) void main();
