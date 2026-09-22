@@ -20,7 +20,9 @@ export type VerificationProcessPort = Readonly<{
   run(requirement: VerificationRequirement, options?: ProcessVerificationOptions): VerificationResult;
 }>;
 
-const DEFAULT_TIMEOUT_MILLISECONDS = 10 * 60 * 1_000;
+// Ordinary verification commands retain a short failure backstop. Full-suite capture opts into
+// its capacity-derived timeout explicitly because that suite owns a calibrated phase budget.
+export const defaultVerificationTimeoutMilliseconds = 10 * 60 * 1_000;
 const DEFAULT_OUTPUT_TAIL_BYTES = 16 * 1024;
 const COMMAND_NOT_FOUND_EXIT_CODES = new Set([127, 9009]);
 
@@ -168,7 +170,7 @@ export function runProcessVerification(requirement: VerificationRequirement, opt
     });
   }
   const logPath = options.logPath || defaultLogPath();
-  const timeoutMilliseconds = options.timeoutMilliseconds || DEFAULT_TIMEOUT_MILLISECONDS;
+  const timeoutMilliseconds = options.timeoutMilliseconds || defaultVerificationTimeoutMilliseconds;
   const outputTailBytes = options.outputTailBytes || DEFAULT_OUTPUT_TAIL_BYTES;
   const temporary = temporaryScript(command);
   const { scriptPath, shell } = temporary;

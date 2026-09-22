@@ -19,6 +19,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var process_exports = {};
 __export(process_exports, {
   createProcessPort: () => createProcessPort,
+  defaultVerificationTimeoutMilliseconds: () => defaultVerificationTimeoutMilliseconds,
   runProcessVerification: () => runProcessVerification,
   shellCommand: () => shellCommand
 });
@@ -28,7 +29,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { spawnSync } = require("node:child_process");
-const DEFAULT_TIMEOUT_MILLISECONDS = 10 * 60 * 1e3;
+const defaultVerificationTimeoutMilliseconds = 10 * 60 * 1e3;
 const DEFAULT_OUTPUT_TAIL_BYTES = 16 * 1024;
 const COMMAND_NOT_FOUND_EXIT_CODES = /* @__PURE__ */ new Set([127, 9009]);
 function windowsPosixShell() {
@@ -153,7 +154,7 @@ function runProcessVerification(requirement, options = {}) {
     });
   }
   const logPath = options.logPath || defaultLogPath();
-  const timeoutMilliseconds = options.timeoutMilliseconds || DEFAULT_TIMEOUT_MILLISECONDS;
+  const timeoutMilliseconds = options.timeoutMilliseconds || defaultVerificationTimeoutMilliseconds;
   const outputTailBytes = options.outputTailBytes || DEFAULT_OUTPUT_TAIL_BYTES;
   const temporary = temporaryScript(command);
   const { scriptPath, shell } = temporary;
@@ -205,6 +206,7 @@ function createProcessPort() {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   createProcessPort,
+  defaultVerificationTimeoutMilliseconds,
   runProcessVerification,
   shellCommand
 });

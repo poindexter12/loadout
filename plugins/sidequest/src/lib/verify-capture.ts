@@ -7,7 +7,7 @@ const os = require('node:os') as typeof import('node:os');
 const path = require('node:path') as typeof import('node:path');
 const { createHash, randomUUID } = require('node:crypto') as typeof import('node:crypto');
 const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
-const { runProcessVerification, shellCommand } = require('./ports/process.js') as typeof import('./ports/process.js');
+const { defaultVerificationTimeoutMilliseconds, runProcessVerification, shellCommand } = require('./ports/process.js') as typeof import('./ports/process.js');
 
 type CaptureSlotFileSystem = Pick<typeof fs, 'existsSync' | 'mkdirSync' | 'readdirSync' | 'renameSync' | 'rmSync' | 'writeFileSync'>;
 
@@ -15,6 +15,31 @@ const captureSlotTimeoutMilliseconds = 30 * 60 * 1_000;
 const captureSlotRetryMilliseconds = 50;
 const captureSlotOperationRetryLimit = 20;
 const captureSlotContentionErrorCodes = new Set(['EEXIST', 'EPERM', 'EBUSY', 'ENOTEMPTY']);
+// Keep the outer capture deadline in lockstep with test-full's capacity model. The suite has
+// its own phase deadline; the ordinary verification timeout is a setup allowance before it.
+const minimumTestConcurrency = 2;
+const maximumTestConcurrency = 8;
+const baselineTestPhaseDurationMilliseconds = 480_000;
+const testPhaseBudgetSafetyFactor = 1.5;
+const maximumTestPhaseTimeoutMilliseconds = 2_400_000;
+const minimumEffectiveTestWorkers = 0.5;
+const phaseBudgetOverrideVariable = 'SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS';
+
+function fullSuiteCaptureTimeoutMilliseconds(availableParallelism = os.availableParallelism(), loadAverage = os.loadavg()[0] || 0, rawOverride = process.env[phaseBudgetOverrideVariable]): number {
+  const testConcurrency = Math.min(maximumTestConcurrency, Math.max(minimumTestConcurrency, availableParallelism));
+  const otherRunnableThreads = typeof loadAverage === 'number' && Number.isFinite(loadAverage) && loadAverage > 0 ? loadAverage : 0;
+  const effectiveTestWorkers = Math.min(
+    testConcurrency,
+    Math.max(minimumEffectiveTestWorkers, (availableParallelism * testConcurrency) / (testConcurrency + otherRunnableThreads)),
+  );
+  const measuredPhaseTimeoutMilliseconds = Math.min(
+    maximumTestPhaseTimeoutMilliseconds,
+    Math.round((baselineTestPhaseDurationMilliseconds * maximumTestConcurrency / effectiveTestWorkers) * testPhaseBudgetSafetyFactor),
+  );
+  const requested = typeof rawOverride === 'string' && /^\d+$/.test(rawOverride.trim()) ? Number(rawOverride.trim()) : 0;
+  const phaseTimeoutMilliseconds = requested > measuredPhaseTimeoutMilliseconds ? requested : measuredPhaseTimeoutMilliseconds;
+  return defaultVerificationTimeoutMilliseconds + phaseTimeoutMilliseconds;
+}
 
 type VerifyCapture = VerificationResult & Readonly<{
   exitCode: number | null;
@@ -240,7 +265,7 @@ async function runFullSuiteCapture(command: string, project: string, cwd: string
   let capture: VerifyCapture;
   let releaseFailure: CaptureSlotFailure | null = null;
   try {
-    capture = await runVerifyCapture(command, cwd, undefined, {
+    capture = await runVerifyCapture(command, cwd, fullSuiteCaptureTimeoutMilliseconds(), {
       ...process.env,
       SIDEQUEST_FULL_SUITE_SIBLING_CAPTURE_COUNT: String(slot.queuePosition - 1),
     });
@@ -352,6 +377,6 @@ async function main() {
   process.exitCode = capture.exitCode === 0 && (!target || recorded?.ok) ? 0 : 2;
 }
 
-module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, captureSlotDirectory, isFullSuiteCommand, recordCapture, verifiedRevision };
+module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, captureSlotDirectory, isFullSuiteCommand, fullSuiteCaptureTimeoutMilliseconds, recordCapture, verifiedRevision };
 
 if (require.main === module) void main();

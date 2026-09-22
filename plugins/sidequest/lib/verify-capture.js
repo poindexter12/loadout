@@ -4,11 +4,33 @@ const os = require("node:os");
 const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { execFileSync } = require("node:child_process");
-const { runProcessVerification, shellCommand } = require("./ports/process.js");
+const { defaultVerificationTimeoutMilliseconds, runProcessVerification, shellCommand } = require("./ports/process.js");
 const captureSlotTimeoutMilliseconds = 30 * 60 * 1e3;
 const captureSlotRetryMilliseconds = 50;
 const captureSlotOperationRetryLimit = 20;
 const captureSlotContentionErrorCodes = /* @__PURE__ */ new Set(["EEXIST", "EPERM", "EBUSY", "ENOTEMPTY"]);
+const minimumTestConcurrency = 2;
+const maximumTestConcurrency = 8;
+const baselineTestPhaseDurationMilliseconds = 48e4;
+const testPhaseBudgetSafetyFactor = 1.5;
+const maximumTestPhaseTimeoutMilliseconds = 24e5;
+const minimumEffectiveTestWorkers = 0.5;
+const phaseBudgetOverrideVariable = "SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS";
+function fullSuiteCaptureTimeoutMilliseconds(availableParallelism = os.availableParallelism(), loadAverage = os.loadavg()[0] || 0, rawOverride = process.env[phaseBudgetOverrideVariable]) {
+  const testConcurrency = Math.min(maximumTestConcurrency, Math.max(minimumTestConcurrency, availableParallelism));
+  const otherRunnableThreads = typeof loadAverage === "number" && Number.isFinite(loadAverage) && loadAverage > 0 ? loadAverage : 0;
+  const effectiveTestWorkers = Math.min(
+    testConcurrency,
+    Math.max(minimumEffectiveTestWorkers, availableParallelism * testConcurrency / (testConcurrency + otherRunnableThreads))
+  );
+  const measuredPhaseTimeoutMilliseconds = Math.min(
+    maximumTestPhaseTimeoutMilliseconds,
+    Math.round(baselineTestPhaseDurationMilliseconds * maximumTestConcurrency / effectiveTestWorkers * testPhaseBudgetSafetyFactor)
+  );
+  const requested = typeof rawOverride === "string" && /^\d+$/.test(rawOverride.trim()) ? Number(rawOverride.trim()) : 0;
+  const phaseTimeoutMilliseconds = requested > measuredPhaseTimeoutMilliseconds ? requested : measuredPhaseTimeoutMilliseconds;
+  return defaultVerificationTimeoutMilliseconds + phaseTimeoutMilliseconds;
+}
 function captureRequirement(command) {
   return Object.freeze({ kind: "command", command, evidenceContract: "command output" });
 }
@@ -185,7 +207,7 @@ async function runFullSuiteCapture(command, project, cwd, fileSystem = fs) {
   let capture;
   let releaseFailure = null;
   try {
-    capture = await runVerifyCapture(command, cwd, void 0, {
+    capture = await runVerifyCapture(command, cwd, fullSuiteCaptureTimeoutMilliseconds(), {
       ...process.env,
       SIDEQUEST_FULL_SUITE_SIBLING_CAPTURE_COUNT: String(slot.queuePosition - 1)
     });
@@ -292,5 +314,5 @@ async function main() {
   report(capture, recorded);
   process.exitCode = capture.exitCode === 0 && (!target || recorded?.ok) ? 0 : 2;
 }
-module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, captureSlotDirectory, isFullSuiteCommand, recordCapture, verifiedRevision };
+module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, captureSlotDirectory, isFullSuiteCommand, fullSuiteCaptureTimeoutMilliseconds, recordCapture, verifiedRevision };
 if (require.main === module) void main();

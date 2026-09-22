@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 
-const { runVerifyCapture, runCapturedVerification, shellCommand, captureSlotDirectory } = require('../lib/verify-capture.js');
+const { runVerifyCapture, runCapturedVerification, shellCommand, captureSlotDirectory, fullSuiteCaptureTimeoutMilliseconds } = require('../lib/verify-capture.js');
 const store = require('../lib/store.js');
 const SIDEQUEST_DIR = path.resolve(__dirname, '..');
 
@@ -62,6 +62,13 @@ function readRecordedCaptures(project: string, ticket: string) {
   const reader = `const store = require(${JSON.stringify(path.join(SIDEQUEST_DIR, 'lib', 'store.js'))}); const target = store.findProject(process.argv.at(-2)); console.log(JSON.stringify(store.getTicket(target.slug, process.argv.at(-1)).verificationCaptures));`;
   return JSON.parse(execFileSync(process.execPath, ['--eval', reader, project, ticket], { encoding: 'utf8', env: process.env, windowsHide: true }));
 }
+
+test('full-suite capture uses the capacity phase budget plus ordinary setup allowance', () => {
+  assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0), 1_320_000);
+  assert.equal(fullSuiteCaptureTimeoutMilliseconds(10, 27), 3_000_000);
+  assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0, '5000000'), 5_600_000);
+  assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0, '1'), 1_320_000);
+});
 
 test('full-suite capture serializes sibling captures and records the queue wait', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-capture-slot-'));
