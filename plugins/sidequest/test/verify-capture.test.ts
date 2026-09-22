@@ -35,8 +35,23 @@ function runCaptureProcess(command: string, project: string, ticket: string): Pr
   });
 }
 
+// SQ-58 scaled the identical wait in hooks.test.ts and this copy was never reached. 100
+// attempts at 20ms is a fixed 2000ms deadline for a spawned child to write a sentinel, and
+// SQ-62's 29-minute full-suite measurement failed exactly here: at concurrency 8 on a
+// 10-core machine holding ~2.2 workers of real capacity, a node spawn plus a file write does
+// not reliably land inside 2 seconds. The deadline has to scale with the workers competing
+// for the machine, which is what SQ-58 established.
+const WAIT_FOR_FILE_PER_TEST_WORKER_MS = 2_000;
+
+function testWorkerConcurrency(): number {
+  const argument = process.execArgv.find((value: string) => value.startsWith('--test-concurrency='));
+  const requested = Number(argument?.slice('--test-concurrency='.length));
+  return Number.isInteger(requested) && requested > 0 ? requested : os.availableParallelism();
+}
+
 async function waitForFile(filePath: string): Promise<void> {
-  for (let attempts = 0; attempts < 100; attempts += 1) {
+  const deadline = Date.now() + WAIT_FOR_FILE_PER_TEST_WORKER_MS * testWorkerConcurrency();
+  while (Date.now() < deadline) {
     if (fs.existsSync(filePath)) return;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
