@@ -369,7 +369,7 @@ const tools = [
   },
   {
     name: "sweepClaims",
-    description: "Audit residual reclaimable claims. Observed terminal executor failures release their exact claim immediately; this only handles unobserved idle/abandoned backstops and missing worktrees.",
+    description: "Audit residual reclaimable claims. Observed terminal executor failures release their exact claim immediately; this only handles unobserved idle/abandoned backstops and missing worktrees. Returns skipped[]: every claim it left alone, which threshold governed it, and its board-quiet time — a dispatched or verifying claim is governed by the abandon backstop, not the idle one.",
     inputSchema: {
       type: "object",
       properties: { project: PROJECT_PROP }
@@ -519,7 +519,7 @@ const tools = [
   },
   {
     name: "release",
-    description: "Release a held claim, or surrender this worker’s token-validated unbound dispatch with kind technical_blocker. Use kind oracle with an oracle ask to park it as awaiting-oracle for a human verdict, then exit. The oracle handoff stays visible while the ticket remains awaiting-oracle.",
+    description: "Release a held claim, or surrender this worker’s token-validated unbound dispatch with kind technical_blocker. Use kind oracle with an oracle ask to park it as awaiting-oracle for a human verdict, then exit. The oracle handoff stays visible while the ticket remains awaiting-oracle. The control plane reclaims a dead executor’s claim with force:true under its own by, never the holder’s id.",
     inputSchema: {
       type: "object",
       properties: {
@@ -534,6 +534,7 @@ const tools = [
         oracle: { type: "string" },
         candidate: { type: "string" },
         deliverable: { type: "string" },
+        force: { type: "boolean", description: 'Take over another holder’s claim under your own by. Requires a reason naming the death evidence; records claimRelease.kind "forced" with takenFrom.' },
         status: { type: "string", enum: store.VALID_STATUS },
         session: { type: "string" }
       },
@@ -547,6 +548,10 @@ const tools = [
       const evidence = store.technicalBlockerRelease(Object.assign({}, args, { releaseKind: args.kind }));
       if (!evidence.ok) return mutationAck(slug, { ok: false, ticket, reason: evidence.reason, message: evidence.message });
       const res = store.releaseTicket(slug, args.ref, by, {
+        // Takeover only. CLI `--force` additionally bypasses the done guard and
+        // drops a parked candidate; reclaiming a dead executor's claim must not
+        // quietly do either of those.
+        forceClaimTakeover: args.force === true,
         status: args.kind === "oracle" ? "awaiting-oracle" : args.status,
         oracle: args.oracle,
         candidate: args.candidate,

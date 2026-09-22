@@ -1944,7 +1944,11 @@ test('closure refusals name the next legal action instead of only their precondi
     reason: 'The work already shipped in a manual commit.',
   });
   assert.equal(grooming.reason, 'active_dispatch');
-  assert.ok(grooming.message.includes(`sidequest release ${ticket.ref} --by sq826-worker`), 'names the release that unblocks it');
+  // Still names the release that unblocks it, but no longer one run under the
+  // claim holder's identity — that was the board teaching impersonation (SQ-69).
+  assert.ok(grooming.message.includes('Release it first'), 'names the release that unblocks it');
+  assert.ok(grooming.message.includes(`mcp__plugin_sidequest_board__release({ ref: "${ticket.ref}"`), 'names a release the control plane can run as itself');
+  assert.ok(!grooming.message.includes('--by sq826-worker'), 'never instructs a release under the claim holder identity');
 
   const integration = store.completeTicketAsControlPlane(slug, ticket.ref, {
     by: 'orchestrator',

@@ -40,7 +40,16 @@ function notOwnerRecovery(ref: string, context: ClaimContext): string {
   if (context.submission?.by && !context.claim?.by) {
     return `${ref} has a parked submission from "${context.submission.by}". Its producer is terminal: do not ask it to release or resume. The control plane must publish it, use \`sidequest rework ${ref}\` when an unbound candidate needs repair, or follow the bound review's oracle and repair flow.`;
   }
-  return `This is a live claim. Ask the claim holder to release it with \`sidequest release ${ref}\`.`;
+  return `This is a live claim. Ask the claim holder to release it with \`sidequest release ${ref}\`. ${forcedClaimReleaseGuidance(ref, refusalOwner(context))}`;
+}
+
+// The one path an operator used to have to discover for themselves, because no
+// refusal named it: passing the holder's own id. That works, and it records the
+// departed executor as the actor for something the control plane did. Say so
+// wherever a claim refuses, and name the sanctioned alternative (SQ-69).
+export function forcedClaimReleaseGuidance(ref: string, holder?: string): string {
+  const who = holder && holder !== 'another executor' ? `"${holder}"` : 'that holder';
+  return `Do NOT release under ${who}'s identity to get around this: the board would record ${who} as the actor for your action, indistinguishable from a live agent handing back its own work. If you have evidence that holder is gone, reclaim it under your OWN identity and say why: \`mcp__plugin_sidequest_board__release({ ref: ${JSON.stringify(ref)}, by: "<your control-plane id>", kind: "handback", reason: "<the observed death evidence>", force: true })\` (CLI \`sidequest release ${ref} --by <your-id> --force --reason "<evidence>"\`). The reason is required and it is the whole point: the release records \`claimRelease.kind: "forced"\` with \`takenFrom\` naming the dispossessed holder, so a takeover can never read as a self-release. Forcing without a recorded reason still refuses, because an unevidenced takeover of a live claim is claim theft. If you have no such evidence, the holder may simply be working quietly: run \`sidequest claims sweep --json\` and read this claim's \`skipped\` entry, which names the threshold that actually governs it and how long it has been board-quiet.`;
 }
 
 export const CLAIM_REFUSAL_MESSAGES: Readonly<Record<string, RefusalMessage>> = Object.freeze({
