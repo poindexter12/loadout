@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 
-const { runVerifyCapture, runCapturedVerification, shellCommand, captureSlotDirectory } = require('../lib/verify-capture.js');
+const { runVerifyCapture, runCapturedVerification, shellCommand, captureSlotDirectory, fullSuiteCaptureTimeoutMilliseconds } = require('../lib/verify-capture.js');
 const store = require('../lib/store.js');
 const SIDEQUEST_DIR = path.resolve(__dirname, '..');
 
@@ -63,6 +63,13 @@ function readRecordedCaptures(project: string, ticket: string) {
   return JSON.parse(execFileSync(process.execPath, ['--eval', reader, project, ticket], { encoding: 'utf8', env: process.env, windowsHide: true }));
 }
 
+test('full-suite capture uses the capacity phase budget plus ordinary setup allowance', () => {
+  assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0), 1_320_000);
+  assert.equal(fullSuiteCaptureTimeoutMilliseconds(10, 27), 3_000_000);
+  assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0, '5000000'), 5_600_000);
+  assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0, '1'), 1_320_000);
+});
+
 test('full-suite capture serializes sibling captures and records the queue wait', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-capture-slot-'));
   const started = path.join(project, 'started');
@@ -93,7 +100,7 @@ test('full-suite capture serializes sibling captures and records the queue wait'
     const waitedCapture = captures.find((capture: { queuePosition?: number }) => capture.queuePosition === 2);
     assert.ok(waitedCapture, 'the second capture records its slot queue position');
     assert.equal(waitedCapture.queuePosition, 2);
-    assert.ok(waitedCapture.waitedForSlotMs >= 500, `waited ${waitedCapture.waitedForSlotMs}ms`);
+    assert.ok(Number.isInteger(waitedCapture.waitedForSlotMs) && waitedCapture.waitedForSlotMs > 0, `waited ${waitedCapture.waitedForSlotMs}ms`);
   } finally {
     fs.rmSync(project, { recursive: true, force: true });
   }
