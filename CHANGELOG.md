@@ -8,6 +8,25 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v3.543.0 (2026-09-22)
+
+### sidequest 5.1.3 → 5.1.4
+
+#### Fixes
+
+- Scale Sidequest full-suite capture timeouts to machine capacity (SQ-64) [`acc2954`](https://github.com/poindexter12/loadout/commit/acc2954427421122ed53e24bde4a94d898fc4527)
+  `runFullSuiteCapture` in `plugins/sidequest/lib/verify-capture.js` called `runVerifyCapture(command, cwd, void 0, ...)`, so the full-suite capture fell through to the ordinary `DEFAULT_TIMEOUT_MILLISECONDS` of 600000ms. That default is a sane backstop for a hung one-shot verification command; it is not a budget for a suite of 1624 tests. No CLI flag and no environment variable reached that parameter, so on any machine where the suite runs longer than ten minutes the submission gate could not be passed and had no supported way to be widened. SQ-62 had already corrected the suite's own internal phase budget, but the capture wrapper that gates submission kept its own fixed cap, so the gate stayed tighter than the thing it gates.
+
+  The failure mode is worse than a slow gate, because a timeout is not a test result. A suite that is entirely green reports as `exited 2 after 600374ms; Verification timed out after 600000ms; partial output captured`, which is indistinguishable at the board from a suite that genuinely failed. Work that passed was refused, and the refusal carried no signal about whether anything was actually wrong.
+
+  The full-suite path now derives its deadline from the same effective-capacity model `scripts/test-full.mjs` uses: `defaultVerificationTimeoutMilliseconds` as a bounded setup allowance, plus a phase budget of `480_000 * (maximumTestConcurrency / effectiveTestWorkers) * 1.5`, capped at 2400000ms. Eight workers on an idle machine yield 1320000ms; ten cores at load 27 saturate the cap and yield 3000000ms. `SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS` is honored only when it widens, so it cannot become a route to pass the gate without running it. Ordinary non-suite verification keeps the 600000ms default unchanged, which is why the constant was renamed and exported rather than raised: a hung one-shot command should still be cut off promptly.
+
+  Measured on the machine that motivated the ticket, the suite runs 665535ms green. That is 1.1x the old cap, so the gate refused a passing suite by a margin no retry could close.
+
+  One test assertion was repaired in the same change. `test/verify-capture.test.ts` asserted `waitedForSlotMs >= 500` against a fixture whose blocker holds for 700ms, leaving roughly 200ms of slack that process spawn consumed; observed waits were 351, 402, 432 and 462ms. The floor was redundant, because the same test already proves capture serialization three ways that never read the clock — the sibling-count `deepEqual` of `['0', '1']`, the `waiting for 1 sibling capture to finish (queue position 2)` output match, and `queuePosition === 2` — so it now asserts only that the recorded wait is a real measurement rather than an unset field.
+
+  Test-infrastructure change with no runtime behavior difference, but user-visible to anyone whose sidequest full suite exceeds ten minutes, where submission was previously impossible rather than merely slow.
+
 ## v3.542.0 (2026-09-21)
 
 ### model-gateway 0.51.3 → 0.51.4
