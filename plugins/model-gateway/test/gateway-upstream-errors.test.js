@@ -174,3 +174,60 @@ test('SQ-21 e2e: an unreachable local proxy produces the named-component 502', a
   assert.match(parsed.error.message, /temporarily unreachable \(ECONNREFUSED\)/);
   assert.match(parsed.error.message, /recovery is automatic/i);
 });
+
+test('SQ-29 e2e: aborting a streaming client destroys the upstream socket promptly', async (t) => {
+  let signalUpstreamReady;
+  const upstreamReady = new Promise((resolve) => { signalUpstreamReady = resolve; });
+  let signalUpstreamClosed;
+  const upstreamClosed = new Promise((resolve) => { signalUpstreamClosed = resolve; });
+  const proxy = http.createServer((req, res) => {
+    req.socket.once('close', () => {
+      res.end();
+      signalUpstreamClosed({
+        requestDestroyed: req.destroyed,
+        socketDestroyed: req.socket.destroyed,
+      });
+    });
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.flushHeaders();
+    signalUpstreamReady();
+  });
+  const proxyPort = await listen(proxy);
+  t.after(() => {
+    proxy.closeAllConnections?.();
+    proxy.close();
+  });
+
+  const { gatewayTestEnvironment } = require('./support.js');
+  const environment = gatewayTestEnvironment(t);
+  const { port: shimPort } = await startGateway(t, 'serve-shim', environment, {
+    isolatedOverrides: {
+      CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
+      CODEX_GATEWAY_REQUEST_LOG: '0',
+    },
+  });
+
+  const body = Buffer.from(JSON.stringify({
+    model: 'claude-gpt-5.6-terra', messages: [], max_tokens: 1,
+  }));
+  let signalClientAborted;
+  const clientAborted = new Promise((resolve) => { signalClientAborted = resolve; });
+  const client = http.request({
+    host: '127.0.0.1', port: shimPort, method: 'POST', path: '/v1/messages', agent: false,
+    headers: { 'content-type': 'application/json', 'content-length': body.length },
+  });
+  client.once('response', () => {
+    client.socket.destroy();
+    signalClientAborted();
+  });
+  client.once('error', () => {});
+  client.end(body);
+  await upstreamReady;
+  await clientAborted;
+
+  const closed = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('upstream socket remained open after the client aborted')), 1000);
+    upstreamClosed.then((result) => { clearTimeout(timeout); resolve(result); }, reject);
+  });
+  assert.equal(closed.socketDestroyed, true, 'client abort must destroy the upstream socket');
+});
