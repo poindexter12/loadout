@@ -195,7 +195,20 @@ const LABELS_PROP = { type: 'array', items: { type: 'string' } };
 const CONTRACT_PROP = (verb: string) => ({ type: 'array', items: { type: 'string' }, description: `Named contracts or interfaces this ticket ${verb}.` });
 const MODEL_FILTER_PROP = { type: 'string', description: 'Filter by resolved model slug.' };
 
-const TOOL_DESCRIPTION_OVERRIDES: Record<string, string> = {
+// Tools whose name and schema already say everything a caller needs. They were
+// suppressed with an empty string, which still serializes as `"description":""`
+// in every tools/list payload — 18 bytes of nothing each, against a budget that
+// had six bytes of slack left (SQ-69). `undefined` is dropped by JSON.stringify,
+// so the same suppression costs nothing and no description loses meaning.
+const UNDESCRIBED_TOOLS = [
+  'archive_board', 'category_add', 'category_detach', 'category_edit', 'category_relink', 'category_rm',
+  'global_fallback', 'models', 'new_board_profile', 'profile_create', 'profile_edit', 'profile_get',
+  'profile_list', 'profile_promote', 'profile_repoint', 'profile_retire', 'profile_use', 'projects',
+  'route_recipe', 'unarchive', 'unarchive_board',
+];
+
+const TOOL_DESCRIPTION_OVERRIDES: Record<string, string | undefined> = {
+  ...Object.fromEntries(UNDESCRIBED_TOOLS.map((name) => [name, undefined])),
   context_page: 'Continue.',
   list: 'List; poll via changes/pulse.',
   pulse: 'Liveness.',
@@ -205,7 +218,7 @@ const TOOL_DESCRIPTION_OVERRIDES: Record<string, string> = {
   story_contract: 'Story contract.',
   story_log: 'Story log.',
   checkpoint: 'Hold.',
-  sweepClaims: 'Sweep dead claims.',
+  sweepClaims: 'Sweep dead claims; skipped[] says which threshold kept each survivor.',
   next: 'Next.',
   scopeRequest: 'Scope.',
   commit: 'Commit scope.',
@@ -223,33 +236,12 @@ const TOOL_DESCRIPTION_OVERRIDES: Record<string, string> = {
   claim: 'Claim before work; proceed only on ok:true.',
   dispatch: 'Dispatch; token and spawn spec.',
   done: 'Finish; declared external needs current capture.',
-  release: 'Release; reason required. oracle handoff needs ask until verdict.',
+  release: 'Release; reason required. oracle handoff needs ask until verdict. force takes a foreign claim under your own by and needs that reason: reasonless force refuses not_owner; a forced take stamps kind forced and takenFrom.',
   groomClose: 'Frozen ticket target; abandonSubmission:true; reset/working-tree/manual; reviewed interaction.',
   native_agent: 'Get native Agent spawn spec.',
   archive: 'Archive.',
-  archive_board: '',
   assign: 'Assignee.',
-  category_add: '',
   category_list: 'Taxonomy.',
-  category_detach: '',
-  category_edit: '',
-  category_relink: '',
-  category_rm: '',
-  route_recipe: '',
-  global_fallback: '',
-  profile_list: '',
-  profile_get: '',
-  profile_create: '',
-  profile_edit: '',
-  profile_retire: '',
-  profile_use: '',
-  profile_repoint: '',
-  profile_promote: '',
-  new_board_profile: '',
-  models: '',
-  projects: '',
-  unarchive: '',
-  unarchive_board: '',
   unlink: 'Unlink tickets.',
 };
 

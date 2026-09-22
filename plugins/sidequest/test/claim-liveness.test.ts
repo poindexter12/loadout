@@ -899,6 +899,9 @@ test('the sweep refuses to release a shared-tree claim while the checkout is dir
       paths: ['lib/fixture.js'],
       preExistingPaths: [],
       newlyChangedPaths: ['lib/fixture.js'],
+      // A blocked claim is a claim the sweep left held, so it owes the same
+      // reason line every other skipped claim now carries (SQ-69).
+      reason: 'its verdict said reclaim, but the shared checkout has paths changed after this dispatch baseline: lib/fixture.js. Commit or restore them, then sweep again.',
     },
   );
   assert.equal(store.getTicket(slug, ticket.ref).claim.by, 'dirty-shared-tree-executor');
@@ -1151,4 +1154,182 @@ test('an unbound claimed dispatch reports a binding fault and stays claimed with
   assert.equal(pulse.liveness, 'binding_fault');
   assert.equal(pulse.claim.reclaimable, null);
   assert.equal(store.getTicket(slug, ticket.ref).claim.by, 'unbound-executor');
+});
+
+/* ------------------------------------------------------------------ *
+ *  SQ-69: the sweep says why it left a claim alone, and the control
+ *  plane reclaims a dead one under its own name.
+ *
+ *  A dispatched claim four hours idle against an advertised 60 minute
+ *  threshold was skipped in silence, and an orchestrator-identity release
+ *  answered not_owner, so the only thing that worked was releasing under
+ *  the dead executor's own id. Nothing was wrong with the eligibility
+ *  test: a claim carrying a dispatch is governed by the ABANDON backstop,
+ *  and the idle threshold that both `list` and the sweep result advertise
+ *  only ever governs a claim with no dispatch at all. The bug was that
+ *  nothing said so, and that no refusal named a permitted alternative.
+ * ------------------------------------------------------------------ */
+
+test('a dispatched claim far past the advertised idle threshold is skipped with the threshold that actually governs it', () => {
+  const ticket = addRouted('sq69 dispatched claim past the idle threshold');
+  const by = 'sq69-dispatched-executor';
+  claimRouted(ticket, by);
+  backdateClaim(ticket.ref, 4 * HOUR);
+
+  const idleThreshold = store.claimIdleMs();
+  const abandonThreshold = store.claimAbandonMs();
+  assert.ok(4 * HOUR > idleThreshold, 'fixture must be past the threshold an operator reads off `list`');
+  assert.ok(4 * HOUR < abandonThreshold, 'fixture must be short of the backstop that actually governs it');
+
+  const swept = store.sweepStaleClaims({ project: slug, source: 'test' });
+  assert.equal(swept.released.some((entry?: any) => entry.ref === ticket.ref), false, 'board quiet time is not process liveness');
+  assert.equal(store.getTicket(slug, ticket.ref).claim.by, by);
+
+  // Assert the shape before reaching into it. Without this the regression is a
+  // TypeError on undefined rather than a named assertion, which proves only
+  // that a property vanished and not that this test catches wrong behavior.
+  assert.ok(Array.isArray(swept.skipped), 'the sweep reports a skipped[] for every claim it left alone');
+  const skip = swept.skipped.find((entry?: any) => entry.ref === ticket.ref);
+  assert.ok(skip, 'every claim the sweep leaves alone owes a reason line');
+  assert.equal(skip.kind, 'dispatched');
+  assert.equal(skip.by, by);
+  assert.equal(skip.threshold, 'abandon');
+  assert.equal(skip.thresholdMs, abandonThreshold);
+  assert.ok(skip.idleMs >= 4 * HOUR, 'the reported idle age is the measured one');
+  // The whole diagnosis: the reason names the governing backstop AND the
+  // threshold it is not, because reading the wrong one is what cost the hours.
+  assert.match(skip.reason, new RegExp(`${Math.round(abandonThreshold / 60000)}m unobserved-death backstop`));
+  assert.match(skip.reason, new RegExp(`not the ${Math.round(idleThreshold / 60000)}m idle threshold`));
+  assert.match(skip.reason, /never release it under `sq69-dispatched-executor`/);
+
+  // The result must stop advertising one threshold as if it governed the whole
+  // board; both are reported, and each skip names which one applied.
+  assert.equal(swept.thresholds.idleMs, idleThreshold);
+  assert.equal(swept.thresholds.abandonMs, abandonThreshold);
+});
+
+test('an undispatched claim under the idle threshold is left alone and says which threshold governs it', () => {
+  const ticket = addRouted('sq69 fresh undispatched claim');
+  assert.equal(store.claimTicket(slug, ticket.ref, 'sq69-fresh-executor', { direct: true, reason: 'inline-safe fixture for the claim sweep' }).ok, true);
+  backdateClaim(ticket.ref, Math.round(store.claimIdleMs() / 2));
+
+  const swept = store.sweepStaleClaims({ project: slug, source: 'test' });
+  assert.equal(swept.released.some((entry?: any) => entry.ref === ticket.ref), false);
+  assert.equal(store.getTicket(slug, ticket.ref).claim.by, 'sq69-fresh-executor');
+
+  assert.ok(Array.isArray(swept.skipped), 'the sweep reports a skipped[] for every claim it left alone');
+  const skip = swept.skipped.find((entry?: any) => entry.ref === ticket.ref);
+  assert.ok(skip, 'an under-threshold claim is still a skipped claim and owes a reason');
+  assert.equal(skip.kind, 'undispatched');
+  assert.equal(skip.threshold, 'idle');
+  assert.equal(skip.thresholdMs, store.claimIdleMs());
+  assert.match(skip.reason, new RegExp(`under the ${Math.round(store.claimIdleMs() / 60000)}m idle threshold that governs it`));
+});
+
+test('an undispatched claim past the idle threshold is reclaimed by the sweep and leaves no skip reason behind', () => {
+  const ticket = addRouted('sq69 stale undispatched claim');
+  assert.equal(store.claimTicket(slug, ticket.ref, 'sq69-stale-executor', { direct: true, reason: 'inline-safe fixture for the claim sweep' }).ok, true);
+  backdateClaim(ticket.ref, store.claimIdleMs() + HOUR);
+
+  const swept = store.sweepStaleClaims({ project: slug, source: 'test' });
+  const released = swept.released.find((entry?: any) => entry.ref === ticket.ref);
+  assert.ok(released, 'the threshold that governs an undispatched claim must actually fire');
+  assert.equal(released.kind, 'idle');
+  assert.equal(store.getTicket(slug, ticket.ref).claim, null);
+  assert.ok(Array.isArray(swept.skipped), 'the sweep reports a skipped[] for every claim it left alone');
+  assert.equal(swept.skipped.some((entry?: any) => entry.ref === ticket.ref), false, 'a reclaimed claim is not a skipped claim');
+});
+
+test('a control-plane release of a live dispatched claim refuses with the permitted path instead of a bare not_owner', () => {
+  const ticket = addRouted('sq69 orchestrator release refusal');
+  const by = 'sq69-refusal-executor';
+  claimRouted(ticket, by);
+  backdateClaim(ticket.ref, 4 * HOUR);
+
+  const refused = store.releaseTicket(slug, ticket.ref, 'orchestrator-sq69', { status: 'todo', source: 'test' });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.reason, 'not_owner');
+  // The refusal used to carry no message at all, which is how impersonation came
+  // to be discovered rather than named.
+  assert.ok(refused.message, 'a refusal that names no permitted path teaches the wrong one');
+  assert.match(refused.message, /Do NOT release under "sq69-refusal-executor"'s identity/);
+  assert.match(refused.message, /force: true/);
+  assert.match(refused.message, /sidequest claims sweep --json/);
+  // It also explains the state rather than leaving the operator to guess.
+  assert.match(refused.message, /unobserved-death backstop/);
+  assert.equal(store.getTicket(slug, ticket.ref).claim.by, by, 'a refused release changes nothing');
+});
+
+test('a forced control-plane release reclaims a live dispatched claim under the forcing identity and records the takeover', () => {
+  const ticket = addRouted('sq69 orchestrator forced release');
+  const by = 'sq69-departed-executor';
+  claimRouted(ticket, by);
+  backdateClaim(ticket.ref, 4 * HOUR);
+
+  const evidence = 'its Agent task reported a terminal failure and its process is gone';
+  const forced = store.releaseTicket(slug, ticket.ref, 'orchestrator-sq69', {
+    status: 'todo',
+    source: 'test',
+    forceClaimTakeover: true,
+    releaseKind: 'handback',
+    releaseReason: evidence,
+  });
+  assert.equal(forced.ok, true, 'the control plane must be able to clean up after its own dispatch');
+
+  const after = store.getTicket(slug, ticket.ref);
+  assert.equal(after.claim, null);
+  assert.equal(after.status, 'todo');
+  // The audit trail is the point: the actor is the orchestrator, and the
+  // dispossessed holder is named rather than impersonated.
+  assert.equal(after.claimRelease.kind, 'forced');
+  assert.equal(after.claimRelease.by, 'orchestrator-sq69');
+  assert.equal(after.claimRelease.takenFrom, by);
+  assert.equal(after.claimRelease.reason, evidence);
+  assert.ok(after.claimRelease.idleMs >= 4 * HOUR, 'the takeover records the idle age it was taken on');
+});
+
+// SQ-1711 hardened `force` so it could never release a foreign live claim, and
+// that hardening stays: an unevidenced takeover is claim theft between peers.
+// The reason is what separates the two, so the reasonless call must keep
+// refusing exactly as it did, with nothing written.
+test('a forced release without recorded evidence still refuses as not_owner and writes nothing', () => {
+  const ticket = addRouted('sq69 forced release without evidence');
+  const by = 'sq69-live-executor';
+  claimRouted(ticket, by);
+
+  for (const opts of [
+    { status: 'todo', source: 'test', force: true },
+    { status: 'todo', source: 'test', forceClaimTakeover: true },
+  ]) {
+    const refused = store.releaseTicket(slug, ticket.ref, 'orchestrator-sq69', opts);
+    assert.equal(refused.ok, false);
+    assert.equal(refused.reason, 'not_owner');
+    const stored = store.getTicket(slug, ticket.ref);
+    assert.equal(stored.claim.by, by);
+    assert.equal(stored.status, 'doing');
+    assert.equal(stored.claimRelease, undefined);
+  }
+});
+
+test('a claim holder releasing its own work records no takeover, which is what makes a forced one distinguishable', () => {
+  const ticket = addRouted('sq69 holder release');
+  const by = 'sq69-holder-executor';
+  claimRouted(ticket, by);
+
+  const released = store.releaseTicket(slug, ticket.ref, by, { status: 'todo', source: 'test' });
+  assert.equal(released.ok, true);
+  assert.equal(store.getTicket(slug, ticket.ref).claimRelease, undefined);
+});
+
+test('a grooming closure refusal names the forced path instead of a release under the claim holder identity', () => {
+  const ticket = addWriteRouted('sq69 groom close refusal');
+  const by = 'sq69-groom-executor';
+  claimRouted(ticket, by);
+
+  const groomed = store.closeTicketForGrooming(slug, ticket.ref, { by: 'orchestrator-sq69', reason: 'shipped elsewhere; closing as grooming with the shipped commit as evidence' });
+  assert.equal(groomed.ok, false);
+  assert.equal(groomed.reason, 'active_dispatch');
+  assert.equal(/--by sq69-groom-executor/.test(groomed.message), false, 'the board must not instruct impersonation in its own refusal');
+  assert.match(groomed.message, /Do NOT release under "sq69-groom-executor"'s identity/);
+  assert.match(groomed.message, /force: true/);
 });

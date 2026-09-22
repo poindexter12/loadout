@@ -2287,7 +2287,13 @@ test('MCP groomClose abandons an unconsumed prepared dispatch without waiting fo
     project, ref: liveTicket.ref, by: 'groomer', reason: 'The live ticket is obsolete.',
   });
   assert.equal(refused.reason, 'active_dispatch');
-  assert.match(refused.message, new RegExp(`sidequest release ${liveTicket.ref} --by ${holder}`));
+  // This refusal used to print `sidequest release <ref> --by <holder>`, which is
+  // the board instructing the caller to act under the holder's identity. It must
+  // still name a release that unblocks the closure, but not that one (SQ-69).
+  assert.doesNotMatch(refused.message, new RegExp(`--by ${holder}`));
+  assert.match(refused.message, /Release it first/);
+  assert.match(refused.message, new RegExp(`mcp__plugin_sidequest_board__release\\(\\{ ref: "${liveTicket.ref}"`));
+  assert.match(refused.message, /force: true/);
 });
 
 test('MCP delivery closure points live claims at the owning release command', async () => {
@@ -2304,7 +2310,12 @@ test('MCP delivery closure points live claims at the owning release command', as
     project, ref: ticket.ref, by: 'integrator', reason: 'Delivered the candidate by hand.', deliveryCommit: gitAt(worktree, ['rev-parse', 'HEAD']),
   });
   assert.equal(refused.reason, 'active_dispatch');
-  assert.match(refused.message, new RegExp(`sidequest release ${ticket.ref} --by ${by}`));
+  // Same as grooming: name a release the caller may actually run as itself, not
+  // one that borrows the claim holder's identity (SQ-69).
+  assert.doesNotMatch(refused.message, new RegExp(`--by ${by}`));
+  assert.match(refused.message, /Release it first/);
+  assert.match(refused.message, new RegExp(`mcp__plugin_sidequest_board__release\\(\\{ ref: "${ticket.ref}"`));
+  assert.match(refused.message, /force: true/);
   assert.doesNotMatch(refused.message, /recoverDispatch/);
 });
 

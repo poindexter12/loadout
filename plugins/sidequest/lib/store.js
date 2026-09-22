@@ -23,7 +23,7 @@ const { reviewLockMessage } = require("./kernel/review-binding.js");
 const { migrateIfNeeded } = require("./migrate.js");
 const { catalogStateFingerprint, configuredExternalModelProvider, discoverExternalModels, providerReadiness } = require("./discovery.js");
 const telemetry = require("./telemetry.js");
-const { negativeControlRecoveryGuidance, routingDisabledMessage } = require("./refusal-guidance.js");
+const { forcedClaimReleaseGuidance, negativeControlRecoveryGuidance, routingDisabledMessage } = require("./refusal-guidance.js");
 const { canonicalPreparedDispatchExecutor, normalizePreparedDispatch } = require("./prepared-dispatch.js");
 const { assertSidequestInstall, checkSidequestInstall, assertDispatchTransport, ensurePythonIoEncoding, localAheadOfUpstreamWarning } = require("./dispatch-preflight.js");
 const { prepareAttempt, prepareDirectAttempt, transitionAttempt, attemptDiagnostic, VERIFICATION_KINDS } = require("./kernel/index.js");
@@ -2133,8 +2133,18 @@ function releaseTicket(slug, idOrRef, by, opts) {
     if (!bypassOwnership && submissionOwner && submissionOwner !== by) {
       return { ok: false, reason: "not_owner", ticket: t, submission: t.submission, ...held ? { claim: held } : {} };
     }
-    if (!bypassOwnership && heldOwner && heldOwner !== by && !claimReclaimable(t)) {
-      return { ok: false, reason: "not_owner", ticket: t, claim: held };
+    const forcedTakeoverEvidence = String(opts.releaseReason || "").trim();
+    const forcedTakeover = Boolean(opts.force || opts.forceClaimTakeover) && Boolean(forcedTakeoverEvidence) && heldOwner && heldOwner !== by && !claimReclaimable(t);
+    const forcedTakeoverIdleMs = forcedTakeover ? claimIdleAge(t, Date.now()) : Number.NaN;
+    if (!bypassOwnership && !forcedTakeover && heldOwner && heldOwner !== by && !claimReclaimable(t)) {
+      const skip = claimSkipReason(t);
+      return {
+        ok: false,
+        reason: "not_owner",
+        ticket: t,
+        claim: held,
+        message: `${t.ref} is claimed by "${heldOwner}" rather than you, and the board does not call that claim reclaimable: ${skip ? skip.reason : "it is live."} ${forcedClaimReleaseGuidance(t.ref, heldOwner)}`
+      };
     }
     const oracleRequested = nullableText(opts.oracle);
     const oracleRelease = opts.releaseKind === "oracle";
@@ -2205,6 +2215,17 @@ function releaseTicket(slug, idOrRef, by, opts) {
     if (noOpRelease && dispatch2) dispatch2.noOpRelease = { by, at: now, claimAt: held?.at || null };
     if (opts.claimRelease) {
       t.claimRelease = Object.assign({ by, at: now, source: opts.source || "store" }, opts.claimRelease);
+    } else if (forcedTakeover) {
+      t.claimRelease = {
+        by,
+        at: now,
+        source: opts.source || "store",
+        kind: "forced",
+        reason: forcedTakeoverEvidence,
+        takenFrom: heldOwner,
+        claimAt: held?.at || null,
+        idleMs: Number.isFinite(forcedTakeoverIdleMs) ? forcedTakeoverIdleMs : null
+      };
     }
     const terminalOutcome = opts.status === "done" ? "done" : dispatch2?.outcome === "died" || opts.claimRelease?.kind === "session_ended" ? "died" : "released";
     const release = opts.releaseKind ? {
@@ -2669,7 +2690,7 @@ function completeTicketAsControlPlane(slug, idOrRef, opts) {
       return {
         ok: false,
         reason: "active_dispatch",
-        message: `${ticket.ref} still has a live claim or an open dispatch, so grooming cannot close it. Release it first: \`sidequest release ${ticket.ref} --by ${holder}\`, then re-run this closure with the same evidence. Releasing does not discard work already committed.`,
+        message: `${ticket.ref} still has a live claim or an open dispatch, so grooming cannot close it. Release it first, then re-run this closure with the same evidence. Releasing does not discard work already committed. If ${holder} is still working, ask it to release. ${forcedClaimReleaseGuidance(ticket.ref, holder)}`,
         ticket
       };
     }
@@ -2679,7 +2700,7 @@ function completeTicketAsControlPlane(slug, idOrRef, opts) {
       return {
         ok: false,
         reason: "active_dispatch",
-        message: `${ticket.ref} still has a live claim or an open dispatch, so hand delivery cannot close it. Release it first: \`sidequest release ${ticket.ref} --by ${ticket.claim?.by ? String(ticket.claim.by) : "<claim holder>"}\`, then re-run this closure with the same evidence. Releasing does not discard work already committed.`,
+        message: `${ticket.ref} still has a live claim or an open dispatch, so hand delivery cannot close it. Release it first, then re-run this closure with the same evidence. Releasing does not discard work already committed. ${forcedClaimReleaseGuidance(ticket.ref, ticket.claim?.by ? String(ticket.claim.by) : void 0)}`,
         ticket
       };
     }
@@ -2787,7 +2808,7 @@ function completeTicketAsControlPlane(slug, idOrRef, opts) {
 function closeTicketForGrooming(slug, idOrRef, opts) {
   return completeTicketAsControlPlane(slug, idOrRef, Object.assign({}, opts, { purpose: "grooming" }));
 }
-const { sweepStaleDispatches, sweepStaleClaims } = createSweeps({
+const { sweepStaleDispatches, sweepStaleClaims: sweepReclaimableClaims } = createSweeps({
   addComment,
   claimAbandonMs,
   claimIdleMs,
@@ -2806,6 +2827,82 @@ const { sweepStaleDispatches, sweepStaleClaims } = createSweeps({
   stampDispatchEvent,
   withTicketLock
 });
+function minuteLabel(ms) {
+  return Number.isFinite(Number(ms)) ? `${Math.round(Number(ms) / 6e4)}m` : "an unknown time";
+}
+function claimSkipReason(ticket, now) {
+  const claim = ticket && ticket.claim;
+  if (!claim || !claim.by) return null;
+  const atMs = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+  const idleMs = claimIdleAge(ticket, atMs);
+  const quiet = minuteLabel(idleMs);
+  const idleThresholdMs = claimIdleMs();
+  const abandonThresholdMs = claimAbandonMs();
+  const verdict = claimReleaseVerdict(ticket, atMs);
+  const base = { by: claim.by, at: claim.at || null, idleMs: Number.isFinite(idleMs) ? idleMs : null };
+  if (verdict) {
+    return Object.assign(base, {
+      kind: "release_refused",
+      threshold: null,
+      thresholdMs: null,
+      reclaimable: verdict.kind,
+      reason: `\`${claim.by}\` is reclaimable (${verdict.kind}: ${verdict.reason}) but its release did not go through. Re-run the sweep, and check whether its worktree blocked the release.`
+    });
+  }
+  const dispatch2 = dispatchState(ticket);
+  if (claimVerification(ticket)) {
+    return Object.assign(base, {
+      kind: "verifying",
+      threshold: "abandon",
+      thresholdMs: abandonThresholdMs,
+      reclaimable: null,
+      reason: `\`${claim.by}\` has an open verification marker, so it is governed by the ${minuteLabel(abandonThresholdMs)} unobserved-death backstop, not the ${minuteLabel(idleThresholdMs)} idle threshold. It has been board-quiet ${quiet}. A long verify run is quiet and alive.`
+    });
+  }
+  if (dispatch2) {
+    return Object.assign(base, {
+      kind: "dispatched",
+      threshold: "abandon",
+      thresholdMs: abandonThresholdMs,
+      reclaimable: null,
+      reason: `\`${claim.by}\` holds a dispatched claim, so it is governed by the ${minuteLabel(abandonThresholdMs)} unobserved-death backstop, not the ${minuteLabel(idleThresholdMs)} idle threshold — that one only governs a claim with no executor dispatch. It has been board-quiet ${quiet}, which is not process liveness. To reclaim it now, the control plane must force-release it under its own identity with recorded death evidence; never release it under \`${claim.by}\`.`
+    });
+  }
+  return Object.assign(base, {
+    kind: "undispatched",
+    threshold: "idle",
+    thresholdMs: idleThresholdMs,
+    reclaimable: null,
+    reason: `\`${claim.by}\` holds an undispatched claim board-quiet for ${quiet}, under the ${minuteLabel(idleThresholdMs)} idle threshold that governs it.`
+  });
+}
+function sweepStaleClaims(opts) {
+  const result = sweepReclaimableClaims(opts);
+  const accountedFor = new Set([
+    ...Array.isArray(result.released) ? result.released : [],
+    ...Array.isArray(result.blocked) ? result.blocked : []
+  ].map((entry) => `${entry.project}\0${entry.ref}`));
+  for (const entry of Array.isArray(result.blocked) ? result.blocked : []) {
+    if (entry.reason) continue;
+    entry.reason = entry.kind === "dirty_shared_tree" ? `its verdict said reclaim, but the shared checkout has paths changed after this dispatch baseline: ${(entry.newlyChangedPaths || entry.paths || []).join(", ") || "none"}. Commit or restore them, then sweep again.` : "its verdict said reclaim, but the shared checkout could not be inspected for uncommitted changes, so the sweep refused to release work it could not see.";
+  }
+  const skipped = [];
+  for (const project of listProjects({ all: true })) {
+    if (opts && opts.project && project.slug !== opts.project) continue;
+    for (const ticket of listTickets(project.slug)) {
+      if (ticket.archived || ticket.status === "done") continue;
+      if (accountedFor.has(`${project.slug}\0${ticket.ref}`)) continue;
+      const skip = claimSkipReason(ticket);
+      if (skip) skipped.push(Object.assign({ project: project.slug, ref: ticket.ref }, skip));
+    }
+  }
+  return Object.assign(result, {
+    skipped,
+    // Both thresholds, because neither one alone governs the whole board: each
+    // skipped entry names which of the two applied to it.
+    thresholds: { idleMs: claimIdleMs(), abandonMs: claimAbandonMs() }
+  });
+}
 function modelMatches(ticketModel, want) {
   return !want || ticketModel === want;
 }
@@ -3239,6 +3336,7 @@ module.exports = {
   claimReclaimable,
   claimMaySubmit,
   claimReleaseVerdict,
+  claimSkipReason,
   claimActivityMs,
   releaseCommentBody,
   technicalBlockerRelease,

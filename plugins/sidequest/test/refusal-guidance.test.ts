@@ -48,6 +48,24 @@ test('not-owner guidance separates a live claim from a parked submission', () =>
   assert.doesNotMatch(parkedSubmission, /sidequest release SQ-42/i);
 });
 
+// SQ-69: a live-claim refusal that names no permitted alternative leaves the
+// caller to discover the one that works — passing the holder's own id, which
+// records a departed executor as the actor. The guidance must name the holder
+// as off limits, name the evidenced takeover, and say the reason is mandatory.
+test('not-owner guidance forbids borrowing the holder identity and names the evidenced takeover', () => {
+  const liveClaim = claimRefusalMessage('not_owner', 'SQ-42', { by: 'other-worker', claim: { by: 'other-worker' } });
+  assert.match(liveClaim, /Do NOT release under "other-worker"'s identity/);
+  assert.match(liveClaim, /indistinguishable from a live agent handing back its own work/i);
+  assert.match(liveClaim, /mcp__plugin_sidequest_board__release\(\{ ref: "SQ-42"/);
+  assert.match(liveClaim, /force: true/);
+  assert.match(liveClaim, /reason is required/i);
+  assert.match(liveClaim, /claimRelease\.kind: "forced"/);
+  assert.match(liveClaim, /takenFrom/);
+  // And it points at the diagnosis for the case where the holder is simply quiet.
+  assert.match(liveClaim, /sidequest claims sweep --json/);
+  assert.match(liveClaim, /skipped/);
+});
+
 test('unbound dispatch guidance tells an executor to present its prepared token', () => {
   const message = claimRefusalMessage('unbound_dispatch', 'SQ-42');
   assert.match(message, /dispatched token file/i);
