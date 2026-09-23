@@ -50,6 +50,7 @@ const MUTATING_TOOLS = /* @__PURE__ */ new Set([
   "plan",
   "link",
   "unlink",
+  "issue_link",
   "assign",
   "dispatch",
   "category_add",
