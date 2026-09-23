@@ -8,6 +8,17 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v3.545.0 (2026-09-22)
+
+### sidequest 5.2.0 → 5.2.1
+
+#### Fixes
+
+- Preflight pinned verification commands (SQ-78)
+  Verification capture now rejects a mismatched pinned command before running the suite and explains that commands run verbatim from the worktree root.
+- Make worktree sweep handle internal symlinks (SQ-79)
+  Worktree sweep now removes npm-installed worktrees while reporting external symlink safety guards during dry runs.
+
 ## v3.544.0 (2026-09-22)
 
 ### sidequest 5.1.4 → 5.2.0
