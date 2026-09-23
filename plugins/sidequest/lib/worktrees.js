@@ -1023,25 +1023,60 @@ async function quarantineCandidate(entry, message, options) {
     return { ok: true, destination, stderr: "", stripFailure };
   }
 }
-async function hasReparsePoint(pathname) {
-  let status;
+async function unsafeWorktreeSymlink(worktree) {
+  let root;
   try {
-    status = await fs.lstat(pathname);
+    root = await fs.realpath(worktree);
   } catch (_) {
-    return true;
+    return { path: ".", target: "unresolvable worktree root" };
   }
-  if (status.isSymbolicLink()) return true;
-  if (!status.isDirectory()) return false;
-  let entries;
-  try {
-    entries = await fs.readdir(pathname, { withFileTypes: true });
-  } catch (_) {
-    return true;
+  async function inspect(pathname) {
+    let status;
+    try {
+      status = await fs.lstat(pathname);
+    } catch (_) {
+      return { path: path.relative(worktree, pathname) || ".", target: "unreadable path" };
+    }
+    if (status.isSymbolicLink()) {
+      try {
+        const target = await fs.realpath(pathname);
+        if (!pathIsInside(root, target)) {
+          return { path: path.relative(worktree, pathname) || ".", target };
+        }
+      } catch (_) {
+      }
+      return null;
+    }
+    if (!status.isDirectory()) return null;
+    let entries;
+    try {
+      entries = await fs.readdir(pathname, { withFileTypes: true });
+    } catch (_) {
+      return { path: path.relative(worktree, pathname) || ".", target: "unreadable directory" };
+    }
+    for (const entry of entries) {
+      const unsafe = await inspect(path.join(pathname, entry.name));
+      if (unsafe) return unsafe;
+    }
+    return null;
   }
-  for (const entry of entries) {
-    if (entry.isSymbolicLink() || await hasReparsePoint(path.join(pathname, entry.name))) return true;
-  }
-  return false;
+  return inspect(worktree);
+}
+function blockedByUnsafeSymlink(entry, unsafe) {
+  entry.classification = entry.reason;
+  entry.action = "keep";
+  entry.reason = "symlink_outside_worktree:" + unsafe.path;
+  entry.guard = "symlink_outside_worktree";
+  entry.evidence = unsafe;
+}
+function skippedSweepEntries(entries) {
+  return entries.filter((entry) => entry.action === "keep").map((entry) => ({
+    path: entry.path,
+    classification: entry.classification || entry.reason,
+    guard: entry.guard || null,
+    evidence: entry.evidence || null,
+    reason: entry.reason
+  }));
 }
 async function removeCandidate(repo, entry) {
   const remove = async (pathname) => git(repo, entry.clean ? ["worktree", "remove", pathname] : ["worktree", "remove", "--force", pathname]);
@@ -1417,6 +1452,11 @@ async function sweep(repo, tickets, options = {}) {
   const boundedCandidates = allCandidates.slice(0, maxCandidates);
   const livePaths = Array.isArray(options.livePaths) ? options.livePaths.map((pathname) => String(pathname)) : [];
   const entries = await Promise.all(boundedCandidates.map((entry) => entry.orphanDirectory ? classifyOrphanDirectory(tickets, entry, livePaths, minAgeMs) : classifyWorktree(repo, tickets, entry, options.currentPath || process.cwd(), minAgeMs, upstream, livePaths, notIntegratedSalvageAgeMs, [...registered])));
+  await Promise.all(entries.map(async (entry) => {
+    if (entry.action !== "remove" && entry.action !== "salvage") return;
+    const unsafe = await unsafeWorktreeSymlink(entry.path);
+    if (unsafe) blockedByUnsafeSymlink(entry, unsafe);
+  }));
   const execute = !!options.execute;
   const removed = [];
   reportSweepProgress(options, entries, removed);
@@ -1431,12 +1471,6 @@ async function sweep(repo, tickets, options = {}) {
       if (shouldSkipKnownFailure(entry.path)) {
         entry.action = "keep";
         entry.reason = "known_permanent_failure";
-        reportSweepProgress(options, entries, removed);
-        continue;
-      }
-      if (await hasReparsePoint(entry.path)) {
-        entry.action = "keep";
-        entry.reason = "reparse_point";
         reportSweepProgress(options, entries, removed);
         continue;
       }
@@ -1535,7 +1569,8 @@ async function sweep(repo, tickets, options = {}) {
       prunedOrphanBranches: prunedOrphanBranches.length,
       ...recoveryCounts(recovery)
     },
-    failures
+    failures,
+    skipped: skippedSweepEntries(entries)
   };
 }
 module.exports = { DEFAULT_MIN_AGE_MS, DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_MS, DEFAULT_RECOVERY_RETENTION_AGE_MS, DEFAULT_RECOVERY_RETENTION_MAX_PER_AGENT, gitBashPath, canonicalPath, worktreeRoot, legacyWorktreeRoot, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, namedWorktreePath, agentWorktreeRoots, parseWorktreeList, isAgentWorktree, ignoredPathsMissingFromWorktree, provisionWorktree, preferredWorktreeIntegrationTarget, classifyWorktree, advanceIntegrationBranch, reclaimUnclaimedDispatchWorktree, quarantineCandidate, storageStatus, sweep };
