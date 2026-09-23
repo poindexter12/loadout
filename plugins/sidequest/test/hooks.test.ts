@@ -4857,3 +4857,22 @@ test('pre-tool hook: dispatch executor requires an exact briefing and legacy exe
   assert.equal(legacy.hookSpecificOutput.permissionDecision, 'deny');
   assert.match(legacy.hookSpecificOutput.permissionDecisionReason, /invalid or retired/);
 });
+
+test('session-start audit report is quiet at zero, surfaces carried summaries, and defers at budget', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-audit-handoff-home-'));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-audit-handoff-cwd-'));
+  registerProject(home, cwd);
+  const env = { SIDEQUEST_HOME: home, CLAUDE_PROJECT_DIR: cwd, CLAUDE_PLUGIN_ROOT: path.join(__dirname, '..') };
+
+  const quiet = runHook(SESSION, { session_id: 'audit-quiet', source: 'startup', cwd }, env);
+  assert.doesNotMatch(quiet, /sidequest audit:/);
+
+  const auditReport = path.join(home, 'audit-reports', `${crypto.createHash('sha1').update(path.resolve(cwd)).digest('hex').slice(0, 16)}.json`);
+  fs.mkdirSync(path.dirname(auditReport), { recursive: true });
+  fs.writeFileSync(auditReport, JSON.stringify({ summary: 'sidequest audit: 2 untracked issues. Run `sidequest audit` for detail.' }));
+  const carried = runHook(SESSION, { session_id: 'audit-carried', source: 'startup', cwd }, env);
+  assert.match(carried, /sidequest audit: 2 untracked issues/);
+
+  const deferred = runHook(SESSION, { session_id: 'audit-deferred', source: 'startup', cwd }, { ...env, SIDEQUEST_AUDIT_DEADLINE_MS: '0' });
+  assert.match(deferred, /audit report exceeded its SessionStart budget/);
+});
