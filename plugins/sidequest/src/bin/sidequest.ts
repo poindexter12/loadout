@@ -11,10 +11,12 @@ const { cmdClaim, cmdCheckpoint, cmdVerdict, cmdRelease, cmdDone, cmdGroomClose,
 const { cmdSweepClaims, cmdWorktrees, cmdRecoverShared, cmdNext, cmdWork, cmdReconcile, cmdAssign, cmdRemind, cmdUnremind, cmdComment, cmdComments, cmdLink, cmdUnlink, cmdReady, cmdArchive, cmdUnarchive } = require('./sidequest-cmd-collaboration');
 const { cmdDispatch, cmdBriefing, cmdTempCleanup, cmdNativeAgent, cmdModels, cmdRoute, cmdBoardConfig, cmdProjects, cmdRouting, cmdArchiveBoard, cmdUnarchiveBoard, cmdMerge } = require('./sidequest-cmd-dispatch');
 const { cmdStory } = require('./sidequest-cmd-story');
+const { cmdAudit } = require('./sidequest-cmd-audit');
+const { cmdIssue } = require('./sidequest-cmd-issue');
 
 const ARRAY_FLAGS = new Set(['image', 'label', 'file', 'always-in-scope', 'read-only-denied-tool', 'auto-approve-scope', 'produces', 'changes', 'consumes', 'changed-surface', 'dependency']);
 const ARRAY_FLAG_ALIASES: Record<string, string> = { files: 'file', labels: 'label' };
-const BOOLEAN_FLAGS = new Set(['json', 'brief', 'open', 'help', 'force', 'done', 'archived', 'all', 'dry-run', 'yolo', 'wave', 'unclassified', 'enabled', 'disabled', 'no-fallback', 'global', 'clear', 'steal', 'shared-tree', 'direct', 'sweep', 'yes', 'integration', 'skip-verify', 'contract-waiver', 'full', 'rotate', 'worktree-isolation', 'auto-approve-test-scope', 'high-stakes', 'working-tree-delivery', 'external-deliverable', 'unverified-transport', 'allow-repeat-failure', 'allow-unscoped', 'no-process', 'no-worktree', 'review', 'abandon-submission']);
+const BOOLEAN_FLAGS = new Set(['json', 'brief', 'open', 'help', 'force', 'done', 'archived', 'all', 'dry-run', 'yolo', 'wave', 'unclassified', 'enabled', 'disabled', 'no-fallback', 'global', 'clear', 'steal', 'shared-tree', 'direct', 'sweep', 'yes', 'integration', 'skip-verify', 'contract-waiver', 'full', 'rotate', 'worktree-isolation', 'auto-approve-test-scope', 'high-stakes', 'working-tree-delivery', 'external-deliverable', 'unverified-transport', 'allow-repeat-failure', 'allow-unscoped', 'no-process', 'no-worktree', 'review', 'abandon-submission', 'apply']);
 const COMMON_FLAGS = new Set(['help', 'json', 'project', 'source']);
 const COMMAND_FLAGS: Record<string, string[]> = {
   add: ['title', 'desc', 'description', 'body', 'body-file', 'priority', 'status', 'category', 'unclassified', 'complexity', 'why', 'high-stakes', 'label', 'image', 'file', 'produces', 'changes', 'consumes', 'contract-waiver', 'readonly', 'working-tree-delivery', 'external-deliverable', 'anchors', 'verify-kind', 'attestation-artifact', 'verify', 'story', 'route-model', 'route-effort', 'route', 'model', 'effort', 'review-ref', 'review-commit', 'review-source', 'review-revision', 'dry-run', 'name'],
@@ -34,7 +36,8 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   'recover-shared': ['project', 'stash', 'yes'],
   next: ['by', 'priority', 'model', 'category', 'direct', 'reason'],
   reconcile: ['session', 'reason', 'ref'],
-  work: ['ref'],
+  audit: ['apply'],
+  issue: [],  work: ['ref'],
   drain: ['ref'],
   'groom-close': ['by', 'reason', 'integration', 'abandon-submission', 'delivery-commit', 'delivery-interaction-commit', 'delivery-method', 'recovery-evidence'],
   verdict: ['text', 'outcome', 'why', 'constraint'],
@@ -91,6 +94,7 @@ const MUTATING_COMMANDS = new Set([
 function commandMutates(command: string, opts: any, positional: any[]): boolean {
   if (MUTATING_COMMANDS.has(command)) return true;
   if (command === 'claims') return positional[0] === 'sweep';
+  if (command === 'issue') return positional[0] === 'link' || positional[0] === 'unlink';
   if (command === 'native-agent' || command === 'native_agent') return positional[0] !== 'cleanup';
   if (command === 'profile' || command === 'profiles' || command === 'category' || command === 'categories') {
     return positional.length > 0 && !['list', 'ls', 'get', 'show'].includes(String(positional[0]).toLowerCase());
@@ -217,6 +221,8 @@ const HELP_COMMANDS: any = {
   worktrees: 'sidequest worktrees <status|sweep> [--dry-run] [--yes] [--min-age-hours N] [--recovery-retention-age-hours N] [--recovery-retention-max-per-agent N] [--project <path-or-slug>]  report worktree, backup, and quarantine storage; sweep plans stale worktree and recovery-entry cleanup',
   next: 'sidequest next [--by who] [-p priority] [--model <model>] [--category <id>] [--direct --reason "why"]',
   reconcile: 'sidequest reconcile [--session <id>] [--reason "..."]',
+  audit: 'sidequest audit [--apply] [--json] [--project <path-or-slug>]  report board, git, and linked GitHub issue drift; --apply changes linked GitHub issues only',
+  issue: 'sidequest issue <link|unlink|list> [REF] [<url|#N>] [--json] [--project <path-or-slug>]  link GitHub issues to tickets for audit status mirroring',
   work: 'sidequest work|drain',
   'groom-close': 'sidequest groom-close <id|SQ-n> --reason <evidence> [--by who] [--integration | --delivery-commit <sha> [--delivery-method reset|working-tree|manual] [--recovery-evidence "terminal-agent evidence"] | --abandon-submission]. Delivery uses the ticket\'s prepared integration target when one was recorded; changing the board target or checkout does not retarget that ticket.',
   done: 'sidequest done <id|SQ-n> [--by who] [--model tier] [--effort level] [--body-file path]',
@@ -363,6 +369,8 @@ Native Agent dispatch (routed work stays in this conversation):
     (the SessionEnd hook calls this automatically on the session id it's given, so a crashed/ended worker's
     tickets recover immediately; safe — it only touches that session's claims).
     Defaults to \$CLAUDE_CODE_SESSION_ID when --session is omitted.
+  sidequest audit [--apply] [--json] [--project <path-or-slug>]   report stale board tickets, untracked GitHub issues, and linked issue drift; --apply changes only explicitly linked GitHub issues
+  sidequest issue <link|unlink|list> [REF] [<url|#N>]   link GitHub issues to a ticket; use \`issue_link\` from MCP
   sidequest claims sweep [--project <path-or-slug>]  audit residual claims after terminal failures already release their exact claim,
     then two activity-based backstops: no board activity for SIDEQUEST_CLAIM_IDLE_MIN (default 60m) with no live executor
     associated, or SIDEQUEST_CLAIM_ABANDON_MIN (default 1440m) for a death nothing observed. A running executor's claim is
@@ -518,6 +526,12 @@ async function main() {
       break;
     case 'reconcile':
       await cmdReconcile(opts);
+      break;
+    case 'audit':
+      await cmdAudit(opts);
+      break;
+    case 'issue':
+      await cmdIssue(opts, positional);
       break;
     case 'work':
     case 'drain':
