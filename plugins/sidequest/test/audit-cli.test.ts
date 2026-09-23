@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { auditReport, formatAudit } = require('../src/lib/audit/report');
+const { auditReport, formatAudit, ghExecutor, gitExecutor } = require('../src/lib/audit/report');
 
 const ticket = { id: 'tk_one', ref: 'SQ-72', title: 'Audit command reports board drift', status: 'todo', createdAt: '2020-01-01T00:00:00.000Z' };
 const linkedTicket = { id: 'tk_two', ref: 'SQ-73', title: 'Active linked change', status: 'doing', createdAt: '2020-01-01T00:00:00.000Z' };
@@ -69,4 +69,28 @@ test('audit turns offline GitHub access into a warning without throwing', () => 
   const report = auditReport({ tickets: [ticket], links: [], git, gh: gh({ [list]: new Error('offline') }), repo: 'owner/repo' });
   assert.equal(report.untrackedIssues.length, 0);
   assert.match(report.warnings.join('\n'), /GitHub sections skipped/);
+});
+
+test('audit turns a timed-out GitHub executor into a warning without throwing', () => {
+  const calls: Record<string, unknown>[] = [];
+  const timeout = Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' });
+  const timedGh = ghExecutor(((program: string, args: string[], options: Record<string, unknown>) => {
+    calls.push(options);
+    throw timeout;
+  }) as any);
+  const report = auditReport({ tickets: [ticket], links: [], git, gh: timedGh, repo: 'owner/repo' });
+  assert.equal(report.untrackedIssues.length, 0);
+  assert.match(formatAudit(report), /WARNINGS \(2\).*gh unavailable for owner\/repo; GitHub sections skipped\./s);
+  assert.deepEqual(calls[0], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 15_000, killSignal: 'SIGKILL' });
+});
+
+test('audit Git executor bounds timed-out commands and returns null', () => {
+  const calls: Record<string, unknown>[] = [];
+  const timeout = Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' });
+  const timedGit = gitExecutor('/repo', ((program: string, args: string[], options: Record<string, unknown>) => {
+    calls.push(options);
+    throw timeout;
+  }) as any);
+  assert.equal(timedGit(['remote', 'get-url', 'origin']), null);
+  assert.deepEqual(calls[0], { cwd: '/repo', encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 15_000, killSignal: 'SIGKILL' });
 });
