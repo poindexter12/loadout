@@ -331,21 +331,22 @@ var require_report = __commonJS({
     var import_node_child_process2 = require("node:child_process");
     var { findLandedFixes, releasedIn } = require_local();
     var { planGithub: planGithub2, applyGithub: applyGithub2 } = (init_github(), __toCommonJS(github_exports));
+    var AUDIT_COMMAND_TIMEOUT_MS = 15e3;
     function githubRepo(remote) {
       const match = /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(String(remote || "").trim());
       return match ? match[1].replace(/\.git$/i, "").toLowerCase() : null;
     }
-    function gitExecutor(cwd) {
+    function gitExecutor(cwd, execute = import_node_child_process2.execFileSync) {
       return (args) => {
         try {
-          return String((0, import_node_child_process2.execFileSync)("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true }));
+          return String(execute("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: AUDIT_COMMAND_TIMEOUT_MS, killSignal: "SIGKILL" }));
         } catch (_) {
           return null;
         }
       };
     }
-    function ghExecutor() {
-      return (program, arguments_, options = {}) => (0, import_node_child_process2.execFileSync)(program, arguments_, options);
+    function ghExecutor(execute = import_node_child_process2.execFileSync) {
+      return (program, arguments_, options = {}) => execute(program, arguments_, { ...options, timeout: AUDIT_COMMAND_TIMEOUT_MS, killSignal: "SIGKILL" });
     }
     function auditReport(input, apply = false) {
       const tickets = input.tickets.filter((ticket) => ticket && ticket.id && ticket.ref);
