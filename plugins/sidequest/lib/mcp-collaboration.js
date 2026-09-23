@@ -224,6 +224,31 @@ const tools = [
     }
   },
   {
+    name: "issue_link",
+    description: "Link a ticket to a GitHub ISSUE. Linked issues will have their status mirrored and be closed on release by sidequest audit --apply.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["link", "unlink", "list"] },
+        ref: { type: "string" },
+        issue: { type: "string", description: "GitHub issue URL, owner/repo#N, or #N for the origin GitHub remote." },
+        project: PROJECT_PROP
+      },
+      required: ["action"]
+    },
+    handler(args) {
+      const { slug } = resolveProject(args.project);
+      if (args.action === "list") {
+        const links = store.listExternalLinks(slug, args.ref ? { ticketId: args.ref } : {});
+        return { ok: true, project: slug, links };
+      }
+      if (!args.ref || !args.issue) throw new Error("issue_link: ref and issue are required for link and unlink.");
+      const issue = store.parseGitHubIssue(slug, args.issue);
+      if (args.action === "link") return { ok: true, project: slug, link: store.addExternalLink(slug, args.ref, issue) };
+      return Object.assign({ project: slug }, store.removeExternalLink(slug, args.ref, issue));
+    }
+  },
+  {
     name: "unlink",
     description: "Remove every link between two tickets (both directions).",
     inputSchema: {

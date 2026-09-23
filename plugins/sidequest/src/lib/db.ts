@@ -21,7 +21,7 @@ try {
   process.emitWarning = originalEmitWarning;
 }
 
-export const CURRENT_SCHEMA_VERSION = 7;
+export const CURRENT_SCHEMA_VERSION = 8;
 // Board writers normally finish in milliseconds; fifteen-second SQLite waits avoid failing on ordinary handoffs without hiding a wedged writer forever.
 export const SQLITE_BUSY_TIMEOUT_MS = 15_000;
 const SQLITE_BUSY_RETRY_ATTEMPTS = 3;
@@ -432,6 +432,16 @@ export function openDb(homeRoot: string): SidequestDatabase {
       data TEXT
     );
     CREATE INDEX IF NOT EXISTS stories_project_idx ON stories(project);
+    CREATE TABLE IF NOT EXISTS external_links (
+      ticket_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      repo TEXT NOT NULL,
+      number INTEGER NOT NULL,
+      url TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(ticket_id, provider, repo, number)
+    );
+    CREATE INDEX IF NOT EXISTS external_links_provider_repo_number_idx ON external_links(provider, repo, number);
     CREATE TABLE IF NOT EXISTS globals (
       key TEXT PRIMARY KEY,
       data TEXT
@@ -768,6 +778,24 @@ export function openDb(homeRoot: string): SidequestDatabase {
       prepareCached(database, "UPDATE meta SET value = ? WHERE key = 'schema_version'").run(JSON.stringify(7));
     });
     schemaVersion = 7;
+  }
+  if (schemaVersion < 8) {
+    txn(database, () => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS external_links (
+          ticket_id TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          repo TEXT NOT NULL,
+          number INTEGER NOT NULL,
+          url TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(ticket_id, provider, repo, number)
+        );
+        CREATE INDEX IF NOT EXISTS external_links_provider_repo_number_idx ON external_links(provider, repo, number);
+      `);
+      prepareCached(database, "UPDATE meta SET value = ? WHERE key = 'schema_version'").run(JSON.stringify(8));
+    });
+    schemaVersion = 8;
   }
   database.exec('PRAGMA foreign_keys=ON');
   const sidequestDatabase = database as SidequestDatabase;

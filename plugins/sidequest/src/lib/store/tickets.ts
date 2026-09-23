@@ -1251,6 +1251,7 @@ function deleteTicket(slug?: any, idOrRef?: any, options: { allowLiveClaimDeleti
   let ok = false;
   try {
     ok = deleteCachedRow(database(), 'tickets', found.id);
+    if (ok) database().prepare('DELETE FROM external_links WHERE ticket_id = ?').run(found.id);
     if (ok) {
       try {
         fs.rmSync(assetsDir(slug, found.id), { recursive: true, force: true });

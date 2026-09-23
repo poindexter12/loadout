@@ -82,7 +82,7 @@ const TOOL_BY_NAME = new Map(TOOLS
 
 const MUTATING_TOOLS = new Set([
   'add', 'update', 'remove', 'archive', 'unarchive', 'claim', 'sweepClaims', 'next',
-  'done', 'groomClose', 'release', 'commit', 'submit', 'supersede_submission', 'comment', 'plan', 'link', 'unlink', 'assign', 'dispatch',
+  'done', 'groomClose', 'release', 'commit', 'submit', 'supersede_submission', 'comment', 'plan', 'link', 'unlink', 'issue_link', 'assign', 'dispatch',
   'category_add', 'category_edit', 'category_detach', 'category_relink', 'category_rm',
   'profile_create', 'profile_edit', 'profile_retire', 'profile_use', 'profile_repoint', 'profile_promote',
   'archive_board', 'unarchive_board',

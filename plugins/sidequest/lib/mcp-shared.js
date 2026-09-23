@@ -310,6 +310,8 @@ function bodyContextRetrieval(options) {
 }
 function ticketWithContextHandles(project, ticket) {
   const visible = Object.assign({}, ticket);
+  const externalLinks = store.listExternalLinks(project, { ticketId: ticket.id }).map((link) => ({ repo: link.repo, number: link.number, url: link.url }));
+  if (externalLinks.length) visible.externalLinks = externalLinks;
   const description = String(ticket.description || "");
   if (utf8ByteLength(description) > TICKET_BODY_EXCERPT_BYTES) {
     const excerpt = utf8Excerpt(description, TICKET_BODY_EXCERPT_BYTES);

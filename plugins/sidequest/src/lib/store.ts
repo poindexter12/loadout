@@ -3383,6 +3383,60 @@ const { boundedExcerpt, changesPayload, commentHistory, pulsePayload } = createP
   submissionProjection,
 });
 
+function externalLinkTicket(slug?: any, idOrRef?: any) {
+  const ticket = getTicket(slug, idOrRef);
+  if (!ticket) throw new Error(`no ticket "${idOrRef}"`);
+  return ticket;
+}
+
+function addExternalLink(slug?: any, idOrRef?: any, link?: any) {
+  const ticket = externalLinkTicket(slug, idOrRef);
+  const provider = String(link?.provider || '').trim().toLowerCase();
+  const repo = String(link?.repo || '').trim().toLowerCase();
+  const number = Number(link?.number);
+  const url = String(link?.url || '').trim();
+  if (provider !== 'github' || !repo || !Number.isInteger(number) || number < 1 || !url) throw new Error('invalid external link');
+  transaction(() => {
+    database().prepare('INSERT OR IGNORE INTO external_links (ticket_id, provider, repo, number, url, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(ticket.id, provider, repo, number, url, new Date().toISOString());
+  });
+  return listExternalLinks(slug, { ticketId: ticket.id }).find((row?: any) => row.provider === provider && row.repo === repo && row.number === number);
+}
+
+function removeExternalLink(slug?: any, idOrRef?: any, link?: any) {
+  const ticket = externalLinkTicket(slug, idOrRef);
+  const provider = String(link?.provider || '').trim().toLowerCase();
+  const repo = String(link?.repo || '').trim().toLowerCase();
+  const number = Number(link?.number);
+  if (provider !== 'github' || !repo || !Number.isInteger(number) || number < 1) throw new Error('invalid external link');
+  database().prepare('DELETE FROM external_links WHERE ticket_id = ? AND provider = ? AND repo = ? AND number = ?')
+    .run(ticket.id, provider, repo, number);
+  return { ok: true, ticketId: ticket.id };
+}
+
+function listExternalLinks(slug?: any, options: any = {}) {
+  const ticketId = options.ticketId == null ? null : externalLinkTicket(slug, options.ticketId).id;
+  const rows = database().prepare(`SELECT e.ticket_id AS ticketId, t.ref AS ref, e.provider AS provider, e.repo AS repo, e.number AS number, e.url AS url, e.created_at AS createdAt FROM external_links e JOIN tickets t ON t.id = e.ticket_id WHERE t.project = ?${ticketId ? ' AND e.ticket_id = ?' : ''} ORDER BY e.created_at, e.repo, e.number`).all(...(ticketId ? [String(slug || ''), ticketId] : [String(slug || '')]));
+  return rows.map((row?: any) => Object.assign({}, row, { number: Number(row.number) }));
+}
+
+function parseGitHubIssue(slug?: any, input?: any) {
+  const value = String(input || '').trim();
+  let repo = ''; let number = 0;
+  let match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/issues\/(\d+)\/?$/i.exec(value) || /^([^/\s]+\/[^/#\s]+)#(\d+)$/i.exec(value);
+  if (match) { repo = match[1]!.toLowerCase(); number = Number(match[2]!); }
+  else if (/^#\d+$/.test(value)) {
+    const meta = readMeta(slug);
+    let origin = '';
+    try { origin = String(execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: meta?.path, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).trim(); } catch (_) { throw new Error('issue: #N requires an origin GitHub remote.'); }
+    const remote = /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?$/i.exec(origin);
+    if (!remote) throw new Error('issue: #N requires an origin GitHub remote.');
+    repo = remote[1]!.replace(/\.git$/i, '').toLowerCase(); number = Number(value.slice(1));
+  } else throw new Error('issue: expected a GitHub issue URL, owner/repo#N, or #N.');
+  if (!Number.isInteger(number) || number < 1) throw new Error('issue: expected a positive issue number.');
+  return { provider: 'github', repo, number, url: `https://github.com/${repo}/issues/${number}` };
+}
+
 module.exports = {
   VALID_STATUS,
   VALID_PRIORITY,
@@ -3518,6 +3572,10 @@ module.exports = {
   worktreeGcProjects,
   listAllProjectTickets,
   getTicket,
+  addExternalLink,
+  removeExternalLink,
+  listExternalLinks,
+  parseGitHubIssue,
   createTicket,
   updateTicket,
   deleteTicket,
