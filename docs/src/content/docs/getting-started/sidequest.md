@@ -114,6 +114,22 @@ For substantial changes, Claude can turn the request into a story with linked ti
 
 Sidequest keeps ticket activity visible in the board. Ask Claude to check active work after a restart or when you need help with a ticket that was started in another session.
 
+## Keep GitHub issues aligned
+
+Link a GitHub issue to its execution ticket when that issue should follow the delivery lifecycle. Agents use the `issue_link` MCP tool; the CLI equivalent is:
+
+```text
+sidequest issue link SQ-123 https://github.com/owner/repo/issues/42
+```
+
+Use `sidequest issue list SQ-123` to see the links and `sidequest issue unlink SQ-123 <url|#N>` to remove one. A link is explicit: Sidequest never treats a ticket title, a comment, or a `TRACKS` convention as permission to change an issue.
+
+`sidequest audit` is report-only by default. It summarizes four things: board tickets whose fix looks landed, open GitHub issues with no ticket, linked issues whose state or labels differ from the board, and any unavailable GitHub or Git evidence. `sidequest audit --apply` performs only the proposed actions for **linked** issues. It never changes unlinked issues, creates tickets, or closes board tickets.
+
+For a linked issue, todo tickets leave it open with no Sidequest status label. Doing, awaiting-oracle, and pending-submission work is open with `status:in-progress`; done but unreleased work is open with `status:in-testing`. When every linked ticket is released, Sidequest removes those status labels, posts one release marker comment, and closes the issue. Applying the same audit again is safe: existing labels and release comments are not duplicated.
+
+SessionStart runs the audit in report-only mode with a short background budget. When it finds something, the session context contains one summary line such as `sidequest audit: 2 untracked issues. Run sidequest audit for detail.` It stays quiet when every count is zero and never blocks startup. A release cut with `--push` runs `sidequest audit --apply` after publishing its tag; `--dry-run` runs the report mode only. Audit failures are warnings and never roll back a release cut.
+
 ## If something stops working
 
 **The board does not open.** Reload Claude Code after installing Sidequest, then ask Claude to open the board again. If the browser still does not open, ask Claude to start the Sidequest dashboard and report its local URL.

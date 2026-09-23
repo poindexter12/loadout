@@ -6,6 +6,7 @@ import { writeContext } from './shared/output.js';
 import { pluginRoot, runtimeModule } from './shared/paths.js';
 import { initializeCompactionState, isPrimarySession } from './shared/compaction.js';
 import { runSweep } from './shared/sweep-handoff.js';
+import { runAuditHandoff } from './shared/audit-handoff.js';
 import { registerSweepSession } from './shared/worktree-sweep.js';
 import { diagnosticWorktreeWarning } from './diagnostic-worktree-warning.js';
 import { reportLoadedSidequestVersion, sidequestReloadWarning } from '../lib/plugin-freshness.js';
@@ -184,16 +185,17 @@ async function main(): Promise<void> {
   const freshnessNotice = sidequestReloadWarning(stringField(data, 'cwd', 'project_dir', 'projectDir') || process.env.CLAUDE_PROJECT_DIR || process.cwd(), { pluginRoot: pluginRoot() });
   registerSweepSession(data);
   let sweepNotices: string[] = [];
-  try {
-    sweepNotices = await runSweep(data);
-  } catch (error: unknown) {
-    sweepNotices = [`sidequest: worktree sweep failed: ${error instanceof Error ? error.message : String(error)}`];
-  }
+  let auditNotices: string[] = [];
+  [sweepNotices, auditNotices] = await Promise.all([
+    runSweep(data).catch((error: unknown) => [`sidequest: worktree sweep failed: ${error instanceof Error ? error.message : String(error)}`]),
+    runAuditHandoff(data).catch(() => []),
+  ]);
   const source = stringField(data, 'source');
   const restartNotice = [
     freshnessNotice,
     source === 'compact' || source === 'resume' ? '' : diagnosticWorktreeWarning(data),
     ...sweepNotices,
+    ...auditNotices,
   ].filter(Boolean).join('\n');
 
   if (nudgeOff()) return;

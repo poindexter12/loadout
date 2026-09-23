@@ -138,6 +138,31 @@ export function defaultSuiteRunner(repoRoot, { log = console.log, tag = 'release
   };
 }
 
+export function runSidequestAudit(repoRoot, { apply = false } = {}) {
+  const cli = path.join(repoRoot, 'plugins', 'sidequest', 'bin', 'sidequest.js');
+  const result = spawnSync(process.execPath, [cli, 'audit', '--project', repoRoot, ...(apply ? ['--apply'] : [])], {
+    cwd: repoRoot,
+    stdio: 'inherit',
+    windowsHide: true,
+  });
+  return { ok: result.status === 0 && !result.error, error: result.error?.message || (result.status === 0 ? '' : `exited ${result.status ?? 'unknown'}`) };
+}
+
+function auditWarning(log, error) {
+  log(`warning: sidequest audit failed after release activity: ${error || 'unknown failure'}`);
+}
+
+async function runReleaseAudit(repoRoot, apply, log, auditRunner) {
+  try {
+    const result = await auditRunner(repoRoot, { apply });
+    if (!result?.ok) auditWarning(log, result?.error);
+    return result;
+  } catch (error) {
+    auditWarning(log, error instanceof Error ? error.message : String(error));
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 function assertNoStaleTags(git, plan, { remote, force }) {
   const localTags = new Set(git.localTags());
   const remoteTags = new Set(git.remoteTags(remote));
@@ -352,6 +377,7 @@ export async function cut(options = {}) {
     force = false,
     ciOverrideReason = null,
     log = console.log,
+    auditRunner = runSidequestAudit,
   } = options;
 
   if (!repoRoot) throw new UsageError('cut() needs a repoRoot');
@@ -450,7 +476,8 @@ export async function cut(options = {}) {
   if (dryRun) {
     const pushCommands = publishCommands(plan, { remote, commit: null });
     log(formatPlan(plan).replace(/^publish:.*$/m, `publish:     ${pushCommands.join('\n             ')}`));
-    return { status: 'dry-run', plan, pushCommands };
+    const audit = await runReleaseAudit(repoRoot, false, log, auditRunner);
+    return { status: 'dry-run', plan, pushCommands, audit };
   }
 
   let publishLock = null;
@@ -548,6 +575,7 @@ export async function cut(options = {}) {
       const pushCommands = publishCommands(plan, { remote, commit });
       let pushed = false;
       let githubRelease = null;
+      let audit = null;
       if (push) {
         git.pushAtomic(remote, marketplacePush);
         marketplacePublished = true;
@@ -560,6 +588,7 @@ export async function cut(options = {}) {
         }
         pushed = true;
         log(`published ${plan.tag} (${commit})`);
+        audit = await runReleaseAudit(repoRoot, true, log, auditRunner);
       } else {
         log(`built ${plan.tag} locally as ${commit}; publish it with:`);
         if (ci?.status === 'passed') {
@@ -572,7 +601,7 @@ export async function cut(options = {}) {
 
       return {
         status: 'cut', plan, commit, message, pushed, refspecs, marketplacePush, pluginPush,
-        pushCommands, touched, consumed, ci, githubRelease,
+        pushCommands, touched, consumed, ci, githubRelease, audit,
       };
     } catch (error) {
       throw new Error(`${error.message}\n${releaseRecoveryInstructions(plan, basePin, remote, marketplacePublished)}`, { cause: error });

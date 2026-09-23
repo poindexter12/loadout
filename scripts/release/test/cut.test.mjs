@@ -501,3 +501,35 @@ test('a failing default suite writes its output and names the log', async (t) =>
   assert.ok(match, `the failure names the suite log: ${failure.message}`);
   assert.equal(context.read(match[1]), 'suite stdoutsuite stderr');
 });
+
+test('a failed post-publish audit warns without failing the release cut', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  context.commit('integrate');
+  const logs = [];
+  const git = { ...createGit({ cwd: context.root }), remoteUrl: () => 'git@github.com:poindexter12/loadout.git' };
+  const result = await cut({
+    repoRoot: context.root,
+    git,
+    push: true,
+    skipTests: true,
+    log: (message) => logs.push(message),
+    publishLock: { acquire: async () => ({ ok: true }), release: async () => ({ ok: true }) },
+    assertParentCiPassed: () => ({ conclusion: 'success' }),
+    assertGitHubReleasePublished: async (repoRoot, tag) => ({ tag, status: 'published' }),
+    auditRunner: async () => { throw new Error('audit stub failed'); },
+  });
+  assert.equal(result.status, 'cut');
+  assert.equal(result.pushed, true);
+  assert.equal(result.audit.ok, false);
+  assert.ok(logs.some((line) => /sidequest audit failed.*audit stub failed/.test(line)));
+});
+
+test('a dry-run cut invokes report-only audit mode', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  context.commit('integrate');
+  const calls = [];
+  await cut({ repoRoot: context.root, dryRun: true, log: () => {}, auditRunner: async (root, options) => { calls.push({ root, options }); return { ok: true }; } });
+  assert.deepEqual(calls, [{ root: context.root, options: { apply: false } }]);
+});
