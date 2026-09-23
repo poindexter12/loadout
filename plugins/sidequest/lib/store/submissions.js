@@ -502,6 +502,10 @@ Expires: ${checkpoint.expiresAt}`;
     return `Pinned command: ${JSON.stringify(pinnedCommand)}
 Captured command: ${JSON.stringify(capturedCommand)}`;
   }
+  function captureCommandMismatchMessage(ticket, pinnedCommand, capturedCommand) {
+    return `Verification capture for ${ticket.ref} must use its declared command pinned at dispatch. The command is matched verbatim and expected to run from the worktree root; preserve any \`cd ...\` segment in the pinned command rather than running it from a subdirectory.
+${captureCommandDetails(pinnedCommand, capturedCommand)}`;
+  }
   function amendedVerifierCaptureMessage(ticket, pinnedCommand, capturedCommand) {
     return `Verification capture for ${ticket.ref} used the live ticket verifier, but the verify was amended after dispatch. This dispatch still requires its pinned command.
 ${captureCommandDetails(pinnedCommand, capturedCommand)}
@@ -524,8 +528,7 @@ Checkpoint current work, release the claim, and re-dispatch; the recovery dispat
       const candidateValue = String(capture?.candidate?.value || "").trim().toLowerCase();
       if (!expectedCommand || command !== expectedCommand) {
         const liveCommand = String(ticket.executorVerify || "").trim();
-        const message = pinnedAtDispatch && expectedCommand && liveCommand && command === liveCommand ? amendedVerifierCaptureMessage(ticket, pinnedCommand, capturedCommand) : `Verification capture for ${ticket.ref} must use its declared command pinned at dispatch.
-${captureCommandDetails(pinnedCommand, capturedCommand)}`;
+        const message = pinnedAtDispatch && expectedCommand && liveCommand && command === liveCommand ? amendedVerifierCaptureMessage(ticket, pinnedCommand, capturedCommand) : captureCommandMismatchMessage(ticket, pinnedCommand, capturedCommand);
         return { ok: false, reason: "verification_capture_command_mismatch", ticket, message };
       }
       if (!["passed", "failed_suite", "toolchain_missing", "could_not_run", "timeout", "manual", "attestation", "skipped", "failed_check"].includes(status)) {
@@ -2700,6 +2703,6 @@ ${verify.outputTail}` : null
     }));
     return { tickets, count: tickets.length, delivery: boardConfig(slug)?.delivery || "merge" };
   }
-  return { DEFAULT_CHECKPOINT_TTL_MIN, MAX_CHECKPOINT_TTL_MIN, checkpointTtlMs, checkpointProjection, oracleProjection, checkpointTicket, submissionReadiness, submissionProjection, pendingSubmission, submissionUsesGit, workingTreeVerification, verifyIntegration, validateIntegrationSubmission, recordDeliveredSubmission, recordAbandonedSubmission, integrateSubmission, integrateSubmissionWave, closeSubmissionAsSuperseded, submissionOwnershipFailure, submitTicket, recordVerificationCapture, recordSubmissionRejection, reconcileSubmissionRejections, reworkSubmission, clearSubmission, assembleSubmissionWave, recordSubmissionWaveDelivery, submissionsPayload };
+  return { DEFAULT_CHECKPOINT_TTL_MIN, MAX_CHECKPOINT_TTL_MIN, checkpointTtlMs, checkpointProjection, oracleProjection, checkpointTicket, submissionReadiness, submissionProjection, pendingSubmission, submissionUsesGit, workingTreeVerification, verifyIntegration, validateIntegrationSubmission, recordDeliveredSubmission, recordAbandonedSubmission, integrateSubmission, integrateSubmissionWave, closeSubmissionAsSuperseded, submissionOwnershipFailure, submitTicket, recordVerificationCapture, captureCommandMismatchMessage, recordSubmissionRejection, reconcileSubmissionRejections, reworkSubmission, clearSubmission, assembleSubmissionWave, recordSubmissionWaveDelivery, submissionsPayload };
 }
 module.exports = { createSubmissions };

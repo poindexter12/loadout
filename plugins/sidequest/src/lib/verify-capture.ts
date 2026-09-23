@@ -51,6 +51,7 @@ type CaptureTarget = Readonly<{ project: string; ticket: string }>;
 type CaptureRecordResult = Readonly<{
   ok: boolean;
   reason?: string;
+  message?: string;
   capture?: Readonly<{ id: string; candidate: Readonly<{ source: string; value: string }> }>;
 }>;
 type VerificationCaptureStore = Readonly<{
@@ -59,6 +60,7 @@ type VerificationCaptureStore = Readonly<{
   getTicket(slug: string, ticket: string): unknown;
   workingTreeDeliveryCandidate(slug: string, ticket: unknown): Readonly<{ candidate: Readonly<{ source: string; value: string }> }> | null;
   recordVerificationCapture(slug: string, ticket: string, capture: Readonly<Record<string, unknown>>): CaptureRecordResult;
+  captureCommandMismatchMessage(ticket: unknown, pinnedCommand: string, capturedCommand: string): string;
 }>;
 type CaptureProject = Readonly<{ slug: string; path: string }>;
 type CaptureProjectResolution =
@@ -342,13 +344,49 @@ function captureWorkingDirectory(target: CaptureTarget, cwd: string, project: Ca
   return store.workingTreeDeliveryCandidate(project.slug, ticket) ? project.path : cwd;
 }
 
+function pinnedCaptureCommand(target: CaptureTarget, project: CaptureProject | null): Readonly<{ ticket: unknown; command: string }> | null {
+  if (!project) return null;
+  try {
+    const store = require('./store.js') as VerificationCaptureStore;
+    const ticket: any = store.getTicket(project.slug, target.ticket);
+    const requirement = ticket?.dispatch?.verificationRequirement
+      || ticket?.dispatch?.lifecycleAttempt?.verificationRequirement
+      || ticket?.lifecycleAttempt?.verificationRequirement;
+    const command = typeof requirement?.command === 'string' ? requirement.command.trim() : '';
+    return command ? Object.freeze({ ticket, command }) : null;
+  } catch (_) {
+    // The submission-time check remains authoritative when the wrapper cannot
+    // read the dispatched pin, so an unavailable board never rejects a run.
+    return null;
+  }
+}
+
+function preflightCapture(command: string, target: CaptureTarget, project: CaptureProject | null): VerifyCapture | null {
+  const pinned = pinnedCaptureCommand(target, project);
+  if (!pinned || command.trim() === pinned.command) return null;
+  const store = require('./store.js') as VerificationCaptureStore;
+  const reason = store.captureCommandMismatchMessage(pinned.ticket, pinned.command, command);
+  return Object.freeze({
+    kind: 'command',
+    status: 'failed_check',
+    evidence: reason,
+    command,
+    logPath: null,
+    exitCode: 2,
+    outputTail: null,
+    failureIdentities: Object.freeze(['failed_check:verification-capture-command-mismatch']),
+    reason,
+  });
+}
+
 async function runCapturedVerification(command: string, target: CaptureTarget | null, cwd = process.cwd(), fileSystem: CaptureSlotFileSystem = fs) {
   const resolution = target ? resolveCaptureProject(target) : null;
   const project = resolution?.ok ? resolution.project : null;
-  const captureCwd = target ? captureWorkingDirectory(target, cwd, project) : cwd;
-  const capture = target && isFullSuiteCommand(command)
+  const preflight = target ? preflightCapture(command, target, project) : null;
+  const captureCwd = target && !preflight ? captureWorkingDirectory(target, cwd, project) : cwd;
+  const capture = preflight || (target && isFullSuiteCommand(command)
     ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem)
-    : await runVerifyCapture(command, captureCwd);
+    : await runVerifyCapture(command, captureCwd));
   const recorded = target ? recordCapture(target, capture, captureCwd, resolution) : null;
   return Object.freeze({ capture, recorded });
 }
