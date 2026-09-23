@@ -64,10 +64,17 @@ function readRecordedCaptures(project: string, ticket: string) {
 }
 
 test('full-suite capture uses the capacity phase budget plus ordinary setup allowance', () => {
-  assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0), 1_320_000);
-  assert.equal(fullSuiteCaptureTimeoutMilliseconds(10, 27), 3_000_000);
-  assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0, '5000000'), 5_600_000);
-  assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0, '1'), 1_320_000);
+  const originalOverride = process.env.SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS;
+  process.env.SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS = '5000000';
+  try {
+    assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0, ''), 1_320_000);
+    assert.equal(fullSuiteCaptureTimeoutMilliseconds(10, 27, ''), 3_000_000);
+    assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0, '5000000'), 5_600_000);
+    assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0, '1'), 1_320_000);
+  } finally {
+    if (originalOverride === undefined) delete process.env.SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS;
+    else process.env.SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS = originalOverride;
+  }
 });
 
 test('full-suite capture serializes sibling captures and records the queue wait', async () => {
@@ -310,6 +317,39 @@ function captureFixtureProject(prefix: string, suiteBody: string) {
 function syntheticPassedCapture(command: string) {
   return Object.freeze({ command, status: 'passed', logPath: null, exitCode: 0, shell: 'test' });
 }
+
+test('verification capture refuses a mismatched pinned command before spawning the suite', async () => {
+  const project = captureFixtureProject('sq-capture-command-preflight-', `const fs = require('node:fs'); fs.writeFileSync('suite-ran', 'unexpected');`);
+  const boardProject = store.ensureProject(project);
+  const ticket = store.createTicket(boardProject.slug, {
+    title: 'refuse mismatched command before running the suite',
+    files: ['suite.js'],
+    category: 'coding.normal',
+    executorVerifyKind: 'command',
+    executorVerify: 'npm run test:full',
+  });
+  store.prepareDispatch(boardProject.slug, ticket.ref, {
+    sessionId: 'mismatched-command-preflight',
+    sharedTree: true,
+  });
+
+  try {
+    const capturedCommand = 'npm run test:full --unexpected';
+    const { capture, recorded } = await runCapturedVerification(capturedCommand, { project, ticket: ticket.ref }, project);
+    assert.deepEqual({ status: capture.status, exitCode: capture.exitCode }, { status: 'failed_check', exitCode: 2 });
+    assert.match(capture.reason || '', /matched verbatim and expected to run from the worktree root/);
+    assert.match(capture.reason || '', /Pinned command: "npm run test:full"/);
+    assert.match(capture.reason || '', /Captured command: "npm run test:full --unexpected"/);
+    assert.equal(fs.existsSync(path.join(project, 'suite-ran')), false, 'the mismatched command never spawns the suite');
+    assert.equal(recorded?.reason, 'verification_capture_command_mismatch');
+    assert.match(recorded?.message || '', /matched verbatim and expected to run from the worktree root/);
+    assert.match(recorded?.message || '', /Pinned command: "npm run test:full"/);
+    assert.match(recorded?.message || '', /Captured command: "npm run test:full --unexpected"/);
+  } finally {
+    fs.rmSync(captureSlotDirectory(project), { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
 
 test('verification capture resolves a stale worktree --project back to the ticket registered board', async () => {
   const project = captureFixtureProject('sq-capture-inherited-project-', 'process.exit(0);\n');

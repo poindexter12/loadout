@@ -622,6 +622,10 @@ function captureCommandDetails(pinnedCommand: string, capturedCommand: string) {
   return `Pinned command: ${JSON.stringify(pinnedCommand)}\nCaptured command: ${JSON.stringify(capturedCommand)}`;
 }
 
+function captureCommandMismatchMessage(ticket: any, pinnedCommand: string, capturedCommand: string) {
+  return `Verification capture for ${ticket.ref} must use its declared command pinned at dispatch. The command is matched verbatim and expected to run from the worktree root; preserve any \`cd ...\` segment in the pinned command rather than running it from a subdirectory.\n${captureCommandDetails(pinnedCommand, capturedCommand)}`;
+}
+
 function amendedVerifierCaptureMessage(ticket: any, pinnedCommand: string, capturedCommand: string) {
   return `Verification capture for ${ticket.ref} used the live ticket verifier, but the verify was amended after dispatch. This dispatch still requires its pinned command.\n${captureCommandDetails(pinnedCommand, capturedCommand)}\nCheckpoint current work, release the claim, and re-dispatch; the recovery dispatch resumes the retained worktree and pins the amended verify. If the work is already verified by other evidence, release the claim and use orchestrator groomClose with deliveryCommit.`;
 }
@@ -647,7 +651,7 @@ function recordVerificationCapture(slug: any, idOrRef: any, capture: any) {
       const liveCommand = String(ticket.executorVerify || '').trim();
       const message = pinnedAtDispatch && expectedCommand && liveCommand && command === liveCommand
         ? amendedVerifierCaptureMessage(ticket, pinnedCommand, capturedCommand)
-        : `Verification capture for ${ticket.ref} must use its declared command pinned at dispatch.\n${captureCommandDetails(pinnedCommand, capturedCommand)}`;
+        : captureCommandMismatchMessage(ticket, pinnedCommand, capturedCommand);
       return { ok: false, reason: 'verification_capture_command_mismatch', ticket, message };
     }
     if (!['passed', 'failed_suite', 'toolchain_missing', 'could_not_run', 'timeout', 'manual', 'attestation', 'skipped', 'failed_check'].includes(status)) {

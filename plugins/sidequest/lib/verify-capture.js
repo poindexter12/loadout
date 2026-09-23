@@ -265,11 +265,45 @@ function captureWorkingDirectory(target, cwd, project) {
   const ticket = store.getTicket(project.slug, target.ticket);
   return store.workingTreeDeliveryCandidate(project.slug, ticket) ? project.path : cwd;
 }
+function pinnedCaptureCommand(target, project) {
+  if (!project) return null;
+  try {
+    const store = require("./store.js");
+    const ticket = store.getTicket(project.slug, target.ticket);
+    const requirement = ticket?.dispatch?.verificationRequirement || ticket?.dispatch?.lifecycleAttempt?.verificationRequirement || ticket?.lifecycleAttempt?.verificationRequirement;
+    const command = typeof requirement?.command === "string" ? requirement.command.trim() : "";
+    return command ? Object.freeze({ ticket, command }) : null;
+  } catch (_) {
+    return null;
+  }
+}
+function captureCommandMismatchMessage(ticket, pinnedCommand, capturedCommand) {
+  return `Verification capture for ${ticket.ref} must use its declared command pinned at dispatch. The command is matched verbatim and expected to run from the worktree root; preserve any \`cd ...\` segment in the pinned command rather than running it from a subdirectory.
+Pinned command: ${JSON.stringify(pinnedCommand)}
+Captured command: ${JSON.stringify(capturedCommand)}`;
+}
+function preflightCapture(command, target, project) {
+  const pinned = pinnedCaptureCommand(target, project);
+  if (!pinned || command.trim() === pinned.command) return null;
+  const reason = captureCommandMismatchMessage(pinned.ticket, pinned.command, command);
+  return Object.freeze({
+    kind: "command",
+    status: "failed_check",
+    evidence: reason,
+    command,
+    logPath: null,
+    exitCode: 2,
+    outputTail: null,
+    failureIdentities: Object.freeze(["failed_check:verification-capture-command-mismatch"]),
+    reason
+  });
+}
 async function runCapturedVerification(command, target, cwd = process.cwd(), fileSystem = fs) {
   const resolution = target ? resolveCaptureProject(target) : null;
   const project = resolution?.ok ? resolution.project : null;
-  const captureCwd = target ? captureWorkingDirectory(target, cwd, project) : cwd;
-  const capture = target && isFullSuiteCommand(command) ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem) : await runVerifyCapture(command, captureCwd);
+  const preflight = target ? preflightCapture(command, target, project) : null;
+  const captureCwd = target && !preflight ? captureWorkingDirectory(target, cwd, project) : cwd;
+  const capture = preflight || (target && isFullSuiteCommand(command) ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem) : await runVerifyCapture(command, captureCwd));
   const recorded = target ? recordCapture(target, capture, captureCwd, resolution) : null;
   return Object.freeze({ capture, recorded });
 }
