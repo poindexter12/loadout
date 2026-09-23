@@ -60,7 +60,6 @@ type VerificationCaptureStore = Readonly<{
   getTicket(slug: string, ticket: string): unknown;
   workingTreeDeliveryCandidate(slug: string, ticket: unknown): Readonly<{ candidate: Readonly<{ source: string; value: string }> }> | null;
   recordVerificationCapture(slug: string, ticket: string, capture: Readonly<Record<string, unknown>>): CaptureRecordResult;
-  captureCommandMismatchMessage(ticket: unknown, pinnedCommand: string, capturedCommand: string): string;
 }>;
 type CaptureProject = Readonly<{ slug: string; path: string }>;
 type CaptureProjectResolution =
@@ -361,11 +360,14 @@ function pinnedCaptureCommand(target: CaptureTarget, project: CaptureProject | n
   }
 }
 
+function captureCommandMismatchMessage(ticket: any, pinnedCommand: string, capturedCommand: string): string {
+  return `Verification capture for ${ticket.ref} must use its declared command pinned at dispatch. The command is matched verbatim and expected to run from the worktree root; preserve any \`cd ...\` segment in the pinned command rather than running it from a subdirectory.\nPinned command: ${JSON.stringify(pinnedCommand)}\nCaptured command: ${JSON.stringify(capturedCommand)}`;
+}
+
 function preflightCapture(command: string, target: CaptureTarget, project: CaptureProject | null): VerifyCapture | null {
   const pinned = pinnedCaptureCommand(target, project);
   if (!pinned || command.trim() === pinned.command) return null;
-  const store = require('./store.js') as VerificationCaptureStore;
-  const reason = store.captureCommandMismatchMessage(pinned.ticket, pinned.command, command);
+  const reason = captureCommandMismatchMessage(pinned.ticket, pinned.command, command);
   return Object.freeze({
     kind: 'command',
     status: 'failed_check',

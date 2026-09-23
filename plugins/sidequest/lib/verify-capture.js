@@ -277,11 +277,15 @@ function pinnedCaptureCommand(target, project) {
     return null;
   }
 }
+function captureCommandMismatchMessage(ticket, pinnedCommand, capturedCommand) {
+  return `Verification capture for ${ticket.ref} must use its declared command pinned at dispatch. The command is matched verbatim and expected to run from the worktree root; preserve any \`cd ...\` segment in the pinned command rather than running it from a subdirectory.
+Pinned command: ${JSON.stringify(pinnedCommand)}
+Captured command: ${JSON.stringify(capturedCommand)}`;
+}
 function preflightCapture(command, target, project) {
   const pinned = pinnedCaptureCommand(target, project);
   if (!pinned || command.trim() === pinned.command) return null;
-  const store = require("./store.js");
-  const reason = store.captureCommandMismatchMessage(pinned.ticket, pinned.command, command);
+  const reason = captureCommandMismatchMessage(pinned.ticket, pinned.command, command);
   return Object.freeze({
     kind: "command",
     status: "failed_check",
