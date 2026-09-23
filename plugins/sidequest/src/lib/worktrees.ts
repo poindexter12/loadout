@@ -1231,25 +1231,70 @@ async function quarantineCandidate(entry: any, message: string, options: any): P
   }
 }
 
-async function hasReparsePoint(pathname: string): Promise<boolean> {
-  let status: import('node:fs').Stats;
+type UnsafeWorktreeSymlink = { path: string; target: string };
+
+async function unsafeWorktreeSymlink(worktree: string): Promise<UnsafeWorktreeSymlink | null> {
+  let root: string;
   try {
-    status = await fs.lstat(pathname);
+    root = await fs.realpath(worktree);
   } catch (_) {
-    return true;
+    return { path: '.', target: 'unresolvable worktree root' };
   }
-  if (status.isSymbolicLink()) return true;
-  if (!status.isDirectory()) return false;
-  let entries: import('node:fs').Dirent[];
-  try {
-    entries = await fs.readdir(pathname, { withFileTypes: true });
-  } catch (_) {
-    return true;
+
+  async function inspect(pathname: string): Promise<UnsafeWorktreeSymlink | null> {
+    let status: import('node:fs').Stats;
+    try {
+      status = await fs.lstat(pathname);
+    } catch (_) {
+      return { path: path.relative(worktree, pathname) || '.', target: 'unreadable path' };
+    }
+    if (status.isSymbolicLink()) {
+      try {
+        const target = await fs.realpath(pathname);
+        if (!pathIsInside(root, target)) {
+          return { path: path.relative(worktree, pathname) || '.', target };
+        }
+      } catch (_) {
+        // A dangling symlink is removed as a link; it cannot cause deletion outside the worktree.
+      }
+      return null;
+    }
+    if (!status.isDirectory()) return null;
+
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await fs.readdir(pathname, { withFileTypes: true });
+    } catch (_) {
+      return { path: path.relative(worktree, pathname) || '.', target: 'unreadable directory' };
+    }
+    for (const entry of entries) {
+      const unsafe = await inspect(path.join(pathname, entry.name));
+      if (unsafe) return unsafe;
+    }
+    return null;
   }
-  for (const entry of entries) {
-    if (entry.isSymbolicLink() || await hasReparsePoint(path.join(pathname, entry.name))) return true;
-  }
-  return false;
+
+  return inspect(worktree);
+}
+
+function blockedByUnsafeSymlink(entry: any, unsafe: UnsafeWorktreeSymlink): void {
+  entry.classification = entry.reason;
+  entry.action = 'keep';
+  entry.reason = 'symlink_outside_worktree:' + unsafe.path;
+  entry.guard = 'symlink_outside_worktree';
+  entry.evidence = unsafe;
+}
+
+function skippedSweepEntries(entries: readonly any[]): Array<{ path: string; classification: string; guard: string | null; evidence: UnsafeWorktreeSymlink | null; reason: string }> {
+  return entries
+    .filter((entry) => entry.action === 'keep')
+    .map((entry) => ({
+      path: entry.path,
+      classification: entry.classification || entry.reason,
+      guard: entry.guard || null,
+      evidence: entry.evidence || null,
+      reason: entry.reason,
+    }));
 }
 
 async function removeCandidate(repo: string, entry: any): Promise<{ ok: boolean; stderr: string }> {
@@ -1694,6 +1739,11 @@ async function sweep(repo: string, tickets: any[], options: any = {}): Promise<a
       ? classifyOrphanDirectory(tickets, entry, livePaths, minAgeMs)
       : classifyWorktree(repo, tickets, entry, options.currentPath || process.cwd(), minAgeMs, upstream, livePaths, notIntegratedSalvageAgeMs, [...registered])
   )));
+  await Promise.all(entries.map(async (entry) => {
+    if (entry.action !== 'remove' && entry.action !== 'salvage') return;
+    const unsafe = await unsafeWorktreeSymlink(entry.path);
+    if (unsafe) blockedByUnsafeSymlink(entry, unsafe);
+  }));
   const execute = !!options.execute;
   const removed: string[] = [];
   reportSweepProgress(options, entries, removed);
@@ -1709,12 +1759,6 @@ async function sweep(repo: string, tickets: any[], options: any = {}): Promise<a
       if (shouldSkipKnownFailure(entry.path)) {
         entry.action = 'keep';
         entry.reason = 'known_permanent_failure';
-        reportSweepProgress(options, entries, removed);
-        continue;
-      }
-      if (await hasReparsePoint(entry.path)) {
-        entry.action = 'keep';
-        entry.reason = 'reparse_point';
         reportSweepProgress(options, entries, removed);
         continue;
       }
@@ -1820,6 +1864,7 @@ async function sweep(repo: string, tickets: any[], options: any = {}): Promise<a
       ...recoveryCounts(recovery),
     },
     failures,
+    skipped: skippedSweepEntries(entries),
   };
 }
 

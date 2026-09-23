@@ -156,6 +156,58 @@ test('sweep removes only the terminal bound registered worktree', async () => {
   }
 });
 
+test('sweep plans and removes worktrees with internal dependency symlinks', async () => {
+  const { repository, baseCommit, worktreeRoot } = repositoryFixture();
+  const worktree = createAgentWorktree(repository, worktreeRoot, 'internal-symlink');
+  const ticket = integratedTicket('SQ-INTERNAL-SYMLINK', 'internal-symlink', worktree, baseCommit);
+  fs.mkdirSync(path.join(worktree, 'node_modules', '.bin'), { recursive: true });
+  fs.writeFileSync(path.join(worktree, 'node_modules', 'tool.js'), 'tool\n');
+  fs.symlinkSync('../tool.js', path.join(worktree, 'node_modules', '.bin', 'tool'));
+  try {
+    const dryRun = await worktrees.sweep(repository, [ticket], { execute: false, minAgeMs: 0, integrationTarget });
+    const planned = dryRun.entries.find((candidate: any) => worktrees.canonicalPath(candidate.path) === worktrees.canonicalPath(worktree));
+    assert.equal(planned.action, 'remove');
+    assert.equal(dryRun.skipped.some((candidate: any) => worktrees.canonicalPath(candidate.path) === worktrees.canonicalPath(worktree)), false);
+
+    const result = await worktrees.sweep(repository, [ticket], { execute: true, minAgeMs: 0, integrationTarget });
+    assert.deepEqual(result.removed.map((candidate: string) => worktrees.canonicalPath(candidate)), [worktrees.canonicalPath(worktree)]);
+    assert.equal(fs.existsSync(worktree), false);
+  } finally {
+    if (fs.existsSync(worktree)) git(repository, ['worktree', 'remove', '--force', worktree]);
+    fs.rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test('sweep reports an external symlink during planning and execution', async () => {
+  const { repository, baseCommit, worktreeRoot } = repositoryFixture();
+  const worktree = createAgentWorktree(repository, worktreeRoot, 'external-symlink');
+  const ticket = integratedTicket('SQ-EXTERNAL-SYMLINK', 'external-symlink', worktree, baseCommit);
+  const outside = path.join(repository, 'outside');
+  fs.mkdirSync(outside);
+  fs.symlinkSync(outside, path.join(worktree, 'escape'));
+  try {
+    const planned = await worktrees.sweep(repository, [ticket], { execute: false, minAgeMs: 0, integrationTarget });
+    const plannedEntry = planned.entries.find((candidate: any) => worktrees.canonicalPath(candidate.path) === worktrees.canonicalPath(worktree));
+    assert.equal(plannedEntry.action, 'keep');
+    assert.equal(plannedEntry.reason, 'symlink_outside_worktree:escape');
+    const skipped = planned.skipped.find((candidate: any) => worktrees.canonicalPath(candidate.path) === worktrees.canonicalPath(worktree));
+    assert.equal(skipped.path, worktrees.canonicalPath(worktree));
+    assert.equal(skipped.classification, 'ticket_done');
+    assert.equal(skipped.guard, 'symlink_outside_worktree');
+    assert.deepEqual(skipped.evidence, { path: 'escape', target: await fs.promises.realpath(outside) });
+    assert.equal(skipped.reason, 'symlink_outside_worktree:escape');
+
+    const executed = await worktrees.sweep(repository, [ticket], { execute: true, minAgeMs: 0, integrationTarget });
+    const executedEntry = executed.entries.find((candidate: any) => worktrees.canonicalPath(candidate.path) === worktrees.canonicalPath(worktree));
+    assert.equal(executedEntry.reason, plannedEntry.reason);
+    assert.deepEqual(executed.removed, []);
+    assert.equal(fs.existsSync(worktree), true);
+  } finally {
+    if (fs.existsSync(worktree)) git(repository, ['worktree', 'remove', '--force', worktree]);
+    fs.rmSync(repository, { recursive: true, force: true });
+  }
+});
+
 test('sweep preserves an exact completed binding without terminal lifecycle authority', async () => {
   const { repository, baseCommit, worktreeRoot } = repositoryFixture();
   const worktree = createAgentWorktree(repository, worktreeRoot, 'bound-nonterminal');
