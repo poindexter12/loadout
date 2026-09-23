@@ -5,6 +5,8 @@ import { execFileSync } from 'node:child_process';
 const { findLandedFixes, releasedIn } = require('./local');
 const { planGithub, applyGithub } = require('./github');
 
+const AUDIT_COMMAND_TIMEOUT_MS = 15_000;
+
 type GitExecutor = (args: string[]) => string | null;
 type GitHubExecutor = (program: string, arguments_: string[], options?: Record<string, unknown>) => unknown;
 type Ticket = { id?: string; ref?: string; title?: string; status?: string; archived?: boolean | number; createdAt?: string; submission?: Record<string, unknown>; completion?: Record<string, unknown> };
@@ -25,18 +27,18 @@ function githubRepo(remote: unknown): string | null {
   return match ? match[1]!.replace(/\.git$/i, '').toLowerCase() : null;
 }
 
-function gitExecutor(cwd: string): GitExecutor {
+function gitExecutor(cwd: string, execute: typeof execFileSync = execFileSync): GitExecutor {
   return (args) => {
     try {
-      return String(execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }));
+      return String(execute('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: AUDIT_COMMAND_TIMEOUT_MS, killSignal: 'SIGKILL' }));
     } catch (_) {
       return null;
     }
   };
 }
 
-function ghExecutor(): GitHubExecutor {
-  return (program, arguments_, options = {}) => execFileSync(program, arguments_, options as any);
+function ghExecutor(execute: typeof execFileSync = execFileSync): GitHubExecutor {
+  return (program, arguments_, options = {}) => execute(program, arguments_, { ...options, timeout: AUDIT_COMMAND_TIMEOUT_MS, killSignal: 'SIGKILL' } as any);
 }
 
 function auditReport(input: AuditInput, apply = false): AuditReport {

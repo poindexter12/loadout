@@ -502,6 +502,38 @@ test('a failing default suite writes its output and names the log', async (t) =>
   assert.equal(context.read(match[1]), 'suite stdoutsuite stderr');
 });
 
+test('a timed-out post-publish audit warns without rolling back the cut', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  context.write('plugins/sidequest/bin/sidequest.js', 'setTimeout(() => {}, 1_000);\n');
+  context.commit('integrate');
+  const logs = [];
+  const git = { ...createGit({ cwd: context.root }), remoteUrl: () => 'git@github.com:poindexter12/loadout.git' };
+  const previousTimeout = process.env.SIDEQUEST_RELEASE_AUDIT_TIMEOUT_MS;
+  process.env.SIDEQUEST_RELEASE_AUDIT_TIMEOUT_MS = '50';
+  t.after(() => {
+    if (previousTimeout === undefined) delete process.env.SIDEQUEST_RELEASE_AUDIT_TIMEOUT_MS;
+    else process.env.SIDEQUEST_RELEASE_AUDIT_TIMEOUT_MS = previousTimeout;
+  });
+
+  const result = await cut({
+    repoRoot: context.root,
+    git,
+    push: true,
+    skipTests: true,
+    log: (message) => logs.push(message),
+    publishLock: { acquire: async () => ({ ok: true }), release: async () => ({ ok: true }) },
+    assertParentCiPassed: () => ({ conclusion: 'success' }),
+    assertGitHubReleasePublished: async (repoRoot, tag) => ({ tag, status: 'published' }),
+  });
+
+  assert.equal(result.status, 'cut');
+  assert.equal(result.pushed, true);
+  assert.equal(result.audit.ok, false);
+  assert.equal(context.exists('.release/unreleased/SQ-1.md'), false, 'the published cut remains committed');
+  assert.ok(logs.some((line) => /sidequest audit failed.*timed out after 50ms/.test(line)));
+});
+
 test('a failed post-publish audit warns without failing the release cut', async (t) => {
   const context = setup(t);
   context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });

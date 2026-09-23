@@ -48,6 +48,7 @@ const GITHUB_RELEASE_WORKFLOW = 'Publish GitHub Release';
 const GITHUB_RELEASE_DEFERRED_MESSAGE = 'GitHub Release deferred by the daily cap; the scheduled publish will cover this tag.';
 const GITHUB_RELEASE_POLL_INTERVAL_MS = 2_000;
 const GITHUB_RELEASE_TIMEOUT_MS = 10 * 60 * 1_000;
+const RELEASE_AUDIT_TIMEOUT_MS = 60 * 1_000;
 
 const SUITE_CREDENTIAL_DENYLIST = [
   'GITHUB_TOKEN', 'GH_TOKEN', 'GH_ENTERPRISE_TOKEN', 'RELEASE_TOKEN', 'GITHUB_ACTIONS_TOKEN',
@@ -138,14 +139,25 @@ export function defaultSuiteRunner(repoRoot, { log = console.log, tag = 'release
   };
 }
 
+function releaseAuditTimeoutMs(environment = process.env) {
+  const timeout = Number(environment.SIDEQUEST_RELEASE_AUDIT_TIMEOUT_MS);
+  return Number.isFinite(timeout) && timeout > 0 ? Math.floor(timeout) : RELEASE_AUDIT_TIMEOUT_MS;
+}
+
 export function runSidequestAudit(repoRoot, { apply = false } = {}) {
+  const timeout = releaseAuditTimeoutMs();
   const cli = path.join(repoRoot, 'plugins', 'sidequest', 'bin', 'sidequest.js');
   const result = spawnSync(process.execPath, [cli, 'audit', '--project', repoRoot, ...(apply ? ['--apply'] : [])], {
     cwd: repoRoot,
     stdio: 'inherit',
     windowsHide: true,
+    timeout,
+    killSignal: 'SIGKILL',
   });
-  return { ok: result.status === 0 && !result.error, error: result.error?.message || (result.status === 0 ? '' : `exited ${result.status ?? 'unknown'}`) };
+  const error = result.error?.code === 'ETIMEDOUT'
+    ? `timed out after ${timeout}ms`
+    : result.error?.message || (result.status === 0 ? '' : `exited ${result.status ?? 'unknown'}`);
+  return { ok: result.status === 0 && !result.error, error };
 }
 
 function auditWarning(log, error) {
