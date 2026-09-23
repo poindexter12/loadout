@@ -144,10 +144,10 @@ export function planGithub({ links, tickets, released, gh, repo: projectRepo }: 
       const actions: IssueAction[] = [];
       for (const label of desired.labels.filter((label) => !issue.labels.includes(label))) actions.push(Object.freeze({ type: 'addLabel', label }));
       for (const label of issue.labels.filter((label) => label.startsWith('status:') && !desired.labels.includes(label))) actions.push(Object.freeze({ type: 'removeLabel', label }));
-      if (issue.state !== desired.state && desired.state === 'CLOSED') {
+      if (desired.state === 'CLOSED') {
         const comment = releaseComment(ticketIds, refs, desired.releasedVersion!);
-        actions.push(Object.freeze({ type: 'comment', ...comment }));
-        actions.push(Object.freeze({ type: 'close' }));
+        if (!commentsContain(gh, repo, issue.number, comment.marker)) actions.push(Object.freeze({ type: 'comment', ...comment }));
+        if (issue.state !== desired.state) actions.push(Object.freeze({ type: 'close' }));
       }
       if (issue.state !== desired.state && desired.state === 'OPEN') actions.push(Object.freeze({ type: 'reopen' }));
       if (actions.length) linkedDrift.push(Object.freeze({ repo, number: issue.number, ticketIds: Object.freeze(ticketIds), refs: Object.freeze(refs), current: Object.freeze({ state: issue.state, labels: Object.freeze([...issue.labels]) }), desired: Object.freeze({ state: desired.state, labels: Object.freeze(desired.labels) }), actions: Object.freeze(actions) }));
@@ -156,10 +156,52 @@ export function planGithub({ links, tickets, released, gh, repo: projectRepo }: 
   return Object.freeze({ linkedDrift: Object.freeze(linkedDrift), untrackedIssues: Object.freeze(untrackedIssues), warnings: Object.freeze(warnings) });
 }
 
+function paginatedArrays(output: string): unknown[] | null {
+  try {
+    const payload = JSON.parse(output);
+    return Array.isArray(payload) ? payload : null;
+  } catch (_error: unknown) {
+    const values: unknown[] = [];
+    let offset = 0;
+    while (offset < output.length) {
+      while (/\s/.test(output[offset] || '')) offset += 1;
+      if (output[offset] !== '[') return null;
+      let depth = 0;
+      let quoted = false;
+      let escaped = false;
+      let end = offset;
+      for (; end < output.length; end += 1) {
+        const character = output[end]!;
+        if (quoted) {
+          if (escaped) escaped = false;
+          else if (character === '\\') escaped = true;
+          else if (character === '"') quoted = false;
+          continue;
+        }
+        if (character === '"') quoted = true;
+        else if (character === '[') depth += 1;
+        else if (character === ']') {
+          depth -= 1;
+          if (depth === 0) break;
+        }
+      }
+      if (depth !== 0) return null;
+      try {
+        const page = JSON.parse(output.slice(offset, end + 1));
+        if (!Array.isArray(page)) return null;
+        values.push(...page);
+      } catch (_error: unknown) { return null; }
+      offset = end + 1;
+    }
+    return values;
+  }
+}
+
 function commentsContain(gh: GitHubExecutor, repo: string, number: number, marker: string): boolean | null {
-  const payload = jsonCommand(gh, ['issue', 'view', String(number), '--repo', repo, '--json', 'comments']);
-  if (!payload || typeof payload !== 'object' || !Array.isArray((payload as { comments?: unknown }).comments)) return null;
-  return (payload as { comments: unknown[] }).comments.some((comment) => String((comment as { body?: unknown })?.body || '').includes(marker));
+  const output = command(gh, ['api', `repos/${repo}/issues/${number}/comments`, '--paginate']);
+  const comments = output === null ? null : paginatedArrays(output);
+  if (comments === null) return null;
+  return comments.some((comment) => String((comment as { body?: unknown })?.body || '').includes(marker));
 }
 
 export type GitHubApplyResult = Readonly<{ repo: string; number: number; action: string; ok: boolean; skipped?: boolean; error?: string }>;
