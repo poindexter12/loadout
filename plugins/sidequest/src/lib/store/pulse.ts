@@ -2,6 +2,7 @@
 
 const { execFileSync } = require('node:child_process');
 const { canonicalPreparedDispatchExecutor } = require('../prepared-dispatch.js');
+const { readPrWatchState } = require('./project-watch.js');
 
 function createGitHubCiRunsProvider(projectPath: string, execute = execFileSync) {
   const command = (program: string, arguments_: string[]) => execute(program, arguments_, {
@@ -57,6 +58,7 @@ function createPulse(dependencies: any) {
     dispatchState,
     effectiveScope,
     execFileSync,
+    findAwaitingMergeWaves,
     getTicket,
     listTickets,
     normalizeRoute,
@@ -252,6 +254,22 @@ function createPulse(dependencies: any) {
     );
   }
 
+  function awaitingMergeWavesPulse(slug?: any) {
+    return (findAwaitingMergeWaves?.(slug) || []).map((wave: any) => {
+      const pr = wave.pr || {};
+      const observed = (wave.participants || [])
+        .map((ref: string) => readPrWatchState(getTicket(slug, ref), pr.number))
+        .filter(Boolean)
+        .sort((left: any, right: any) => String(right.observedAt).localeCompare(String(left.observedAt)))[0] || null;
+      return {
+        participants: [...(wave.participants || [])],
+        pr: { number: pr.number, url: pr.url },
+        checks: observed?.checks || 'not yet observed',
+        ...(observed?.observedAt ? { observedAt: observed.observedAt } : {}),
+      };
+    });
+  }
+
   function pulsePayload(slug?: any, idOrRef?: any) {
     const ticket = getTicket(slug, idOrRef);
     if (!ticket) return null;
@@ -303,6 +321,7 @@ function createPulse(dependencies: any) {
       ...(oracleProjection(ticket) ? { oracle: oracleProjection(ticket) } : {}),
       ...(warnings.length ? { warnings } : {}),
       submission: submissionProjection(ticket.submission),
+      awaitingMergeWaves: awaitingMergeWavesPulse(slug),
       delivery: boardConfig(slug)?.delivery || 'merge',
       git,
     };
@@ -459,14 +478,17 @@ function createBoardWatch(dependencies: any) {
         if (!status) continue;
         const failed = status.state === 'CLOSED' || status.checks === 'failure';
         const terminal = status.state === 'MERGED' || failed;
-        const stateKey = `${status.number}|${status.state}|${status.checks}|${(status.failingChecks || []).join(',')}`;
-        if (wave.recorded) seenPrStates.add(stateKey);
-        if (!terminal || seenPrStates.has(stateKey)) continue;
-        seenPrStates.add(stateKey);
-        const refs = (wave.participants || []).join(', ');
-        if (status.state === 'MERGED') writeLine(`PR #${status.number} merged: run integrate to close ${refs}`);
-        else writeLine(`PR #${status.number} failed: ${(status.failingChecks || []).join(', ') || 'closed'}`);
-        result.recordState?.(wave, status.state);
+        const alertKey = status.state === 'MERGED' ? `${status.number}|MERGED`
+          : status.state === 'CLOSED' ? `${status.number}|CLOSED`
+            : `${status.number}|failure`;
+        if (wave.terminalRecorded) seenPrStates.add(alertKey);
+        if (terminal && !seenPrStates.has(alertKey)) {
+          seenPrStates.add(alertKey);
+          const refs = (wave.participants || []).join(', ');
+          if (status.state === 'MERGED') writeLine(`PR #${status.number} merged: run integrate to close ${refs}`);
+          else writeLine(`PR #${status.number} failed: ${(status.failingChecks || []).join(', ') || 'closed'}`);
+        }
+        result.recordState?.(wave, status);
       }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);

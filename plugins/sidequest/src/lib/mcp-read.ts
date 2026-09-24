@@ -167,7 +167,7 @@ const tools: ToolDefinition[] = [
       const pulse = store.pulsePayload(slug, args.ref);
       if (!pulse) throw new Error(`pulse: no ticket "${args.ref}" in ${meta.name}`);
       const payload = args.full ? withoutCategories(pulse) : compactPulse(pulse);
-      return Object.assign({ project: slug }, payload);
+      return Object.assign({ project: slug }, payload, { awaitingMergeWaves: pulse.awaitingMergeWaves });
     },
   },
   {

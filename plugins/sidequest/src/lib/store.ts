@@ -3377,6 +3377,7 @@ const { boundedExcerpt, changesPayload, commentHistory, pulsePayload } = createP
   dispatchState,
   effectiveScope,
   execFileSync,
+  findAwaitingMergeWaves,
   getTicket,
   listTickets,
   normalizeRoute,
