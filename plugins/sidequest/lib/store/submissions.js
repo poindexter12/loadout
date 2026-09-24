@@ -2484,7 +2484,8 @@ ${verify.outputTail}` : null
         waveId: `delivery-${ticket.ref}-${crypto.randomBytes(6).toString("hex")}`,
         verification: ticket.submission?.verificationResult,
         skipVerify: true,
-        verificationWaiver: opts.verificationWaiver
+        verificationWaiver: opts.verificationWaiver,
+        target: opts.target
       });
       if (!assembled2.ok) return assembled2;
       return assembledWaveForDelivery(slug, getTicket(slug, ticket.id));
@@ -2496,7 +2497,8 @@ ${verify.outputTail}` : null
       waveId: `delivery-${ticket.ref}-${crypto.randomBytes(6).toString("hex")}`,
       verification: ticket.submission?.verificationResult,
       skipVerify: opts?.skipVerify === true,
-      verificationWaiver: opts?.verificationWaiver
+      verificationWaiver: opts?.verificationWaiver,
+      target: opts?.target
     });
     if (!assembled.ok) return assembled;
     return assembledWaveForDelivery(slug, getTicket(slug, ticket.id));
@@ -2519,10 +2521,10 @@ ${verify.outputTail}` : null
       verification: submission.verificationResult
     };
   }
-  function currentIntegrationWaveBaseline(slug, fallback) {
+  function currentIntegrationWaveBaseline(slug, fallback, targetOverride) {
     if (fallback?.revision?.source !== "git") return fallback;
     const projectPath = String(readMeta(slug)?.path || "").trim();
-    const target = integrationTarget(slug);
+    const target = targetOverride || integrationTarget(slug);
     const commit = integrationTargetCommit(projectPath, target);
     return Object.freeze({
       revision: Object.freeze({ source: "git", value: commit, observedAt: (/* @__PURE__ */ new Date()).toISOString() }),
@@ -2581,7 +2583,7 @@ ${verify.outputTail}` : null
     if (!firstCandidate) return { ok: false, reason: "wave_baseline_required", message: "Wave assembly requires a candidate baseline." };
     const omittedPendingOverlaps = omittedPendingSubmissionOverlaps(slug, tickets);
     const opened = openWave({
-      baseline: currentIntegrationWaveBaseline(slug, firstCandidate.baseline),
+      baseline: currentIntegrationWaveBaseline(slug, firstCandidate.baseline, opts?.target),
       participants: tickets.map((ticket) => ({
         ref: ticket.ref,
         dependencies: Array.isArray(dependencies2[ticket.ref]) ? dependencies2[ticket.ref] : [],
