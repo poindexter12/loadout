@@ -8,6 +8,22 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v3.546.0 (2026-09-23)
+
+### sidequest 5.2.1 → 5.3.0
+
+#### Features
+
+- Add Sidequest audit reporting (SQ-72)
+- Link tickets to GitHub issues (SQ-87) [`ba6170a`](https://github.com/poindexter12/loadout/commit/ba6170ace21ccf372543a8c631727e62a46f7200)
+- US-2 W2a: local evidence module — which tickets' fixes landed on main, and which release first shipped them (SQ-88)
+- Mirror linked GitHub issue status (SQ-89)
+
+#### Fixes
+
+- Fix released issue markers and pagination (SQ-91)
+- Bound post-push release audit (SQ-92)
+
 ## v3.545.0 (2026-09-22)
 
 ### sidequest 5.2.0 → 5.2.1
