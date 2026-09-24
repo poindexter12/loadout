@@ -162,3 +162,26 @@ jobs:
           cd "${{ matrix.path }}"
           if [ -n "$SETUP" ]; then eval "$SETUP"; fi
           if [ -n "$COMMAND" ]; then eval "$COMMAND"; fi
+
+  test-gate:
+    needs: [release-engine, plugin-matrix, affected-plugin]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_ENGINE_RESULT: ${{ needs.release-engine.result }}
+      PLUGIN_MATRIX_RESULT: ${{ needs.plugin-matrix.result }}
+      AFFECTED_PLUGIN_RESULT: ${{ needs.affected-plugin.result }}
+      PLUGIN_MATRIX: ${{ needs.plugin-matrix.outputs.matrix }}
+    steps:
+      - name: Check required test jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'release-engine: %s\n' "$RELEASE_ENGINE_RESULT"
+          printf 'plugin-matrix: %s\n' "$PLUGIN_MATRIX_RESULT"
+          printf 'affected-plugin: %s\n' "$AFFECTED_PLUGIN_RESULT"
+
+          [ "$RELEASE_ENGINE_RESULT" = success ] || exit 1
+          [ "$PLUGIN_MATRIX_RESULT" = success ] || exit 1
+          if [ "$AFFECTED_PLUGIN_RESULT" = success ]; then exit 0; fi
+          [ "$AFFECTED_PLUGIN_RESULT" = skipped ] && [ "$PLUGIN_MATRIX" = '{"include":[]}' ]
