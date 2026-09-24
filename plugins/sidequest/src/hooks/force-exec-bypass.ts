@@ -229,6 +229,29 @@ function agentDenyReason(type: string, classification: ExecutorClassification): 
     'For a tiny lookup, use Read, Glob, Grep, or WebFetch inline, not WebSearch. A usable route needs a fresh Board MCP dispatch and its exact returned executor. Board MCP is the lifecycle authority: reload or reconnect Sidequest, then re-dispatch. Do not use a raw Agent or Sidequest CLI fallback. Any delegated work, including a quick investigation, needs a ticket: file a spike (usually codebase-exploration), route it, dispatch it, then spawn the returned executor. The blocked work still gates any dependent action: do not proceed to a PR, merge, publish, or ship until its ticket is filed, dispatched, and closed; rerouting around this block is a violation.';
 }
 
+// dispatchAdmission has four statuses and only 'routed' can carry a dispatch. The generic-Agent guard
+// below used to enumerate 'routing-disabled' and 'no-usable-route' by hand, so 'no-project' - what an
+// unregistered project returns on every call before its first Board MCP call - skipped it and fell
+// through to agentDenyReason. That message ends "do not proceed to a PR, merge, publish, or ship until
+// its ticket is filed, dispatched, and closed", which on an unregistered project is unsatisfiable: the
+// remedy it names needs the route that does not exist, while session-start tells the same session
+// "substantive work may stay inline". Both messages deny; only the guidance differed, and it was wrong.
+//
+// The isCurrentExecutor guard above deliberately still enumerates the two, and must NOT be widened to
+// !== 'routed': dispatchAdmission also returns 'no-project' when the store module fails to load, so
+// widening it refuses every prepared dispatch executor on a transient store error instead of letting it
+// reach dispatch validation. Verified - widening it fails 14 tests, among them the exact-executor
+// bypass cases.
+function unroutedGenericDenyReason(status: DispatchAdmission['status']): string {
+  if (status === 'no-project') {
+    return 'sidequest: this project is not registered on a Sidequest board, so there is no executor route. ' +
+      'Continue bounded inline work with direct tools; do not create a fake Sidequest or raw Agent lifecycle ' +
+      'fallback. Nothing here gates a PR, merge, publish, or ship - no ticket is required for this work. The ' +
+      'first Board MCP call registers the project if you want one.';
+  }
+  return 'sidequest: this project has no usable executor route. Continue bounded inline work with direct tools; do not create a fake Sidequest or raw Agent lifecycle fallback.';
+}
+
 // Explore needs no prepared dispatch, so it is the open door next to every generic-Agent deny: a live
 // session relaunched a denied general-purpose job as Explore and fanned four of them out on the session
 // model (SQ-2214). On a routed board this guard closes that door. Denied generic work is remembered per
@@ -983,8 +1006,8 @@ function main(): void {
     writeDeny('PreToolUse', 'sidequest: this project has no usable executor route. Continue only bounded inline work, or restore routing and an available category route before a fresh Board MCP dispatch.');
     return;
   }
-  if (!isCurrentExecutor(classification) && !type.startsWith('sidequest-') && (admission.status === 'routing-disabled' || admission.status === 'no-usable-route')) {
-    writeDeny('PreToolUse', 'sidequest: this project has no usable executor route. Continue bounded inline work with direct tools; do not create a fake Sidequest or raw Agent lifecycle fallback.');
+  if (!isCurrentExecutor(classification) && !type.startsWith('sidequest-') && admission.status !== 'routed') {
+    writeDeny('PreToolUse', unroutedGenericDenyReason(admission.status));
     return;
   }
   const dispatchValidation = preparedDispatchValidation(input);
