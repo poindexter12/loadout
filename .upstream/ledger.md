@@ -21,9 +21,9 @@ Tracking is useful for now, not a permanent commitment. As the fork diverges, pa
 | fork_branch | main |
 | integration_baseline | a2e44fb353388b4c958015b50cf73c8a8cb8fb55 |
 | reviewed_through | a314af2338a933d58609b29ffe26f33d1e572a5e |
-| observed_upstream_tip | 8ca47bb0273ce1752bcfa8fa6eab7efa221ce992 |
-| observed_fork_tip | 82cc64a0030d5a98dbd10b041767d6acd33a2df8 |
-| last_fetched | 2026-09-14 |
+| observed_upstream_tip | 2e0f2bbc36a8fb18c628f25407f57aab56ee6914 |
+| observed_fork_tip | 69d5a0a46873da07d979c7d908f8a39a3838634c |
+| last_fetched | 2026-09-24 |
 | last_reviewed | 2026-09-14 |
 
 `tracking` is `active`, `paused`, or `retired`. Paused/retired checks do not fetch or review until explicitly resumed. Record transitions and their reasons under History.
@@ -137,10 +137,25 @@ Use stable sequential IDs (`UP-001`, etc.), distinct from ticket numbers. Add en
 - Revisit: next declared no-commit deliverable with legitimate commandless verification, or a dispatch hitting the capture-only dead end. Confirm acceptance of executor-supplied evidence for the selected kind before implementation; verify on fork main before closing.
 - History: 2026-09-14: reviewed all three commits, full first-parent diff, tests, and contract surfaces. Remerge diff contains no resolution changes; first-parent patch matches the feature plus release fragment. `SQ-2594` requests a Sidequest minor release but adds no independent behavior or manifest bump; use fork-local release metadata if implemented. Initial disposition deferred.
 
+### UP-004: The recursive-delete guard should judge the target path, not how it is spelled
+
+- Upstream: no upstream fix for this need. The defect is present at upstream tip `2e0f2bbc36a8fb18c628f25407f57aab56ee6914` (v3.578.0). A related upstream change to the same hook, `983d470e726a34fdb88725c6074a656e30768b6c` (2026-09-14, "Fix home delete recursion flag parsing": the recursive flag must be a whole argument, and quotes are stripped first), is **not** in fork main and lies beyond `reviewed_through`, so it is unreviewed here and only noted.
+- Reviewed: 2026-09-24; fork snapshot: `69d5a0a46873da07d979c7d908f8a39a3838634c`. This entry is fork-originated (board `SQ-121`), not the result of a batch review, and it does not move the cursor.
+- Intent / need: `plugins/sidequest/src/hooks/guard-home-delete.ts` decides with two mechanisms that disagree. Absolute paths get a resolve-then-root/ancestor check. `~`, `$HOME` and `%USERPROFILE%` hit a blanket regex (upstream `:25`) that returns protected for any tilde path. The command splitter (`:8`) includes `\n` in its separator class, so a line inside a quoted ssh payload is scanned as a local command, while the same command written inline is not matched at all. As a result, `ssh host 'rm -rf ~'` (a real remote profile-root wipe) is allowed, and harmless `~/subdir` deletes are denied with refusal text that wrongly says the target is the profile or `.claude` root.
+- Local applicability: the need exists in both trees. The probe below was run on 2026-09-24 against upstream's built `hooks/guard-home-delete.js` at the tip, with payloads piped as JSON: DENY `rm -rf ~/mainsail`; allow `rm -rf $HOME/mainsail` (same path, absolute); DENY `~`; DENY `~/.claude`; allow `ssh host 'rm -rf ~/mainsail'`; **allow** `ssh host 'rm -rf ~'`; DENY multi-line `ssh host '\nrm -rf ~/mainsail\n'`; allow `echo 'rm -rf ~'`. Fork verdicts match the peer session's report in `SQ-121`. Neither tree has a test for this guard.
+- Disposition: deferred
+- Approach: independent
+- Rationale: upstream offers no implementation of this need to copy. The fork fix (SQ-121) expands tilde, `$HOME` and `%USERPROFILE%` into the existing root/ancestor check, scans remote payloads consistently and fails closed only on a remote profile-root target, parses shell structure instead of scanning text, and adds a table test. Consider `983d470e`'s flag-parsing intent when that range is reviewed; it is compatible, but not required for this need.
+- Local evidence: none yet. `SQ-121` is dispatched with a candidate not yet submitted.
+- Acceptance check: on fork main, `test/guard-home-delete.test.ts` covers every row above. `~/sub` and its absolute spelling get the same verdict (allow); `~`, `~/.claude` and remote `~` are denied with accurate refusal text; inline and multi-line ssh payloads agree; a delete literal passed as data to a non-shell program does not trigger.
+- Revisit: when `SQ-121` lands on fork main (move to adapted with its commit and test run). Also consider reporting the defect upstream; this ledger does not file upstream issues.
+- History: 2026-09-24: recorded from the SQ-121 handoff. Fetched upstream main without tags and probed its built hook. The upstream defect is confirmed present. Initial disposition deferred.
+
 ## Open items
 
 - [UP-001](#up-001-seed-reuse-first-rules-without-encouraging-unsolicited-work): uncommitted implementation retained in `.claude/worktrees/agent-a5a082059278cc84b`; tests blocked by disposable-HOME guard denial. Needs approved isolated testing, assigned board ref/release fragment, and fork-main verification.
 - [UP-003](#up-003-close-declared-uncommitted-deliverables-with-typed-verification-evidence): commandless working-tree closeout; proposed adaptation, pending acceptance of executor-supplied evidence for the relevant verifier kind.
+- [UP-004](#up-004-the-recursive-delete-guard-should-judge-the-target-path-not-how-it-is-spelled): fork-originated guard fix `SQ-121`, in flight; upstream still carries the defect at `2e0f2bbc`.
 
 Maintain links here to every deferred decision; remove an item when its decision is settled, not the decision itself.
 
@@ -153,3 +168,4 @@ Maintain links here to every deferred decision; remove an item when its decision
   - Classification evidence, which contradicts the heuristic `SQ-28` was filed with. Reachability from fork `main` does **not** identify a foreign tag. Upstream tags cut before the fork point (`v3.536.0`, `sidequest-v5.0.41`) are reachable from fork `main`, and seven of the fork's own tags were reachable but absent from `origin`. The reliable discriminator is the annotated tag's **tagger identity** (`Joe Seymour` = fork; `Eigenwise` and `Kenny Vaneetvelde` = upstream) combined with presence on `origin`.
   - Separately discovered and repaired: the fork's entire `v3.537.0` release — the marketplace tag plus all six plugin tags (`codebase-mapper-v2.16.0`, `live-rules-v2.11.0`, `model-gateway-v0.51.0`, `observability-v0.8.0`, `quartermaster-v0.8.0`, `sidequest-v5.1.0`) — had been cut locally on 2026-09-10 but never pushed. The release commit was on `origin/main`; only the tags were missing. All seven are now pushed. Local and `origin` tag namespaces are exactly in sync.
 - 2026-09-19, UP-002 settled: no fetch, no review, no cursor movement — the upstream checkpoint is unchanged. Moved UP-002 from deferred to **integrated (adapted)** and removed it from Open items, on the evidence recorded under that entry: the previously-uncommitted candidate is now `5b1a5858` on `origin/main` (PR #10, merged 2026-09-15), and its acceptance checks were re-run directly here rather than accepted as executor testimony (`node --test test/gateway-ownership.test.js`, 20 pass / 0 fail / 0 skipped). This is the first entry in this ledger to move a disposition off deferred; the standard applied was the one CLAUDE.md sets — verified on fork main, not merely present in a worktree. UP-001 and UP-003 remain deferred and untouched. Note for future closeouts: the 2026-09-14 closeout recorded both retained worktrees as "lost if pruned", and UP-002's did in fact get committed while its ledger entry still described it as uncommitted, so a disposition can go stale without any upstream movement at all. Re-check retained-worktree claims against `main` before trusting them.
+- 2026-09-24, UP-004 recorded: fetched upstream main without tags (new observed tip `2e0f2bbc`, fork tip `69d5a0a4`), with no batch review and no cursor movement. A fork-originated defect (`SQ-121`, guard-home-delete) was checked against upstream's built hook at the tip and is present there unchanged. Noted, without reviewing it, the unmerged upstream flag-parsing fix `983d470e` to the same hook. `SQ-115` (another fork-found Sidequest defect reported present upstream at v3.571.0) has no entry yet.
