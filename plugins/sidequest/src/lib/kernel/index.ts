@@ -9,6 +9,8 @@ export { captureVerificationResult, classifyVerificationKind, commandVerificatio
 export type { CompletedVerificationCapture, VerificationKind, VerificationRequirement, VerificationResult, VerificationStatus, VerificationWaiver } from './verification.js';
 export { assembleWave, dependentReleaseDecision, openWave, recordAssembledWaveGate, recordWaveDelivery } from './wave.js';
 export type { AssembledWave, CandidateInvalidation, DeliveryResult, Wave, WaveAssemblyDecision, WaveCandidate, WaveGateResult, WaveParticipant } from './wave.js';
+export { AWAITING_MERGE_OUTCOME, DEFAULT_DELIVERY_CHANNEL_MODE, DEFAULT_DELIVERY_REMOTE, DELIVERY_CHANNEL_MODES, WAVE_BRANCH_PREFIX, isSafeBranchName, isSafeRefComponent, normalizeDeliveryChannel, resolveDeliveryChannel, validateWavePullRequest, waveBranchName } from './pr-delivery.js';
+export type { DeliveryChannel, DeliveryChannelMode, ResolvedDeliveryChannel, WavePullRequest } from './pr-delivery.js';
 
 export type SourceRevision = Readonly<{ source: string; value: string; observedAt: string }>;
 export type Baseline = Readonly<{ revision: SourceRevision; purpose: 'dispatch' | 'wave' | 'submission' }>;

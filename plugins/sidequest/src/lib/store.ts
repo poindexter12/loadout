@@ -96,6 +96,8 @@ function generatedPathFor(...args: any[]) { return configLayer.generatedPathFor(
 function trackedGeneratedPaths(...args: any[]) { return configLayer.trackedGeneratedPaths(...args); }
 function defaultAlwaysInScope(...args: any[]) { return configLayer.defaultAlwaysInScope(...args); }
 function normalizeDeliveryMode(...args: any[]) { return configLayer.normalizeDeliveryMode(...args); }
+function normalizeDeliveryChannel(...args: any[]) { return configLayer.normalizeDeliveryChannel(...args); }
+function resolveDeliveryConfig(...args: any[]) { return configLayer.resolveDeliveryConfig(...args); }
 function normalizeIntegrationMode(...args: any[]) { return configLayer.normalizeIntegrationMode(...args); }
 function normalizeIntegrationBranch(...args: any[]) { return configLayer.normalizeIntegrationBranch(...args); }
 function normalizeWorktreeIsolation(...args: any[]) { return configLayer.normalizeWorktreeIsolation(...args); }
@@ -1184,6 +1186,9 @@ const {
   clearSubmission,
   assembleSubmissionWave,
   recordSubmissionWaveDelivery,
+  markWaveAwaitingMerge,
+  findAwaitingMergeWaves,
+  readWavePr,
   submissionsPayload,
 } = createSubmissions({
   EXECUTOR_VERIFY_MAX,
@@ -3530,6 +3535,8 @@ module.exports = {
   setBoardConfig,
   integrationTarget,
   normalizeDeliveryMode,
+  normalizeDeliveryChannel,
+  resolveDeliveryConfig,
   validateIntegrationSubmission,
   recordDeliveredSubmission,
   recordAbandonedSubmission,
@@ -3640,6 +3647,9 @@ module.exports = {
   clearSubmission,
   assembleSubmissionWave,
   recordSubmissionWaveDelivery,
+  markWaveAwaitingMerge,
+  findAwaitingMergeWaves,
+  readWavePr,
   pendingSubmission,
   submissionReadiness,
   submissionsPayload,
