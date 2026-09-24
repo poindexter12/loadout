@@ -247,6 +247,8 @@ test('PR title and body carry ticket titles only: a conventional type, no board 
   const port = fakePort();
   const result = await withPort(port, () => store.integrateSubmissionWave(board.slug, [first.ref, second.ref], { target: store.integrationTarget(board.slug) }));
   assert.equal(result.ok, true, result.message || result.reason);
+  assert.equal(result.state, 'awaiting-merge');
+  assert.equal(port.creates().length, 1, 'the wave opened one PR');
   const { title, body } = port.creates()[0]!;
   assert.match(title!, /^feat: /, 'the highest-priority conventional type wins');
   assert.match(title!, /\(\+1 more\)$/);
