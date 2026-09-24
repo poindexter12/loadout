@@ -444,6 +444,58 @@ test('one passing wave delivers its exact Git participant set before recording d
   }
 });
 
+test('sequential singleton waves use the selected local integration branch after it advances past origin', () => {
+  const fixture = makeRepo('sequential-local-wave');
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-advance-bare-'));
+  execFileSync('git', ['init', '-b', 'main', '--bare', bare], { encoding: 'utf8', windowsHide: true });
+  git(['remote', 'add', 'origin', bare], fixture.repo);
+  git(['push', '-u', 'origin', 'main'], fixture.repo);
+  const { slug } = store.ensureProject(fixture.repo);
+  const target = { mode: 'local', branch: 'main', upstream: 'main' };
+  const first = store.createTicket(slug, {
+    title: 'first sequential local candidate',
+    category: 'codebase-exploration',
+    description: 'Advances local main without pushing origin.',
+    files: ['feature.txt'],
+  });
+  submitFixture(slug, first, fixture);
+  const firstDelivery = store.integrateSubmission(slug, first.ref, { mode: 'merge', target });
+  assert.equal(firstDelivery.ok, true, JSON.stringify(firstDelivery));
+  assert.notEqual(head(fixture.repo, 'main'), head(fixture.repo, 'origin/main'));
+
+  const secondWorktree = path.join(fixture.repo, '.claude', 'worktrees', 'agent-sequential-second');
+  git(['worktree', 'add', '-b', 'worktree-agent-sequential-second', secondWorktree, 'main'], fixture.repo);
+  const secondCommit = commitFile(secondWorktree, 'second.txt', 'second sequential executor work\n');
+  const second = store.createTicket(slug, {
+    title: 'second sequential local candidate',
+    category: 'codebase-exploration',
+    description: 'Must assemble against the advanced local integration branch.',
+    files: ['second.txt'],
+  });
+  const secondRef = `refs/sidequest/${second.ref}`;
+  git(['update-ref', secondRef, secondCommit], secondWorktree);
+  const secondRange = commitScope.submissionRange(secondWorktree, {
+    commit: secondCommit,
+    gitRef: secondRef,
+    upstream: target.upstream,
+    integrationBranch: target.branch,
+  });
+  assert.equal(secondRange.ok, true, JSON.stringify(secondRange));
+  assert.equal(store.claimTicket(slug, second.ref, 'sequential-second-worker', { direct: true, reason: 'The sequential local integration fixture needs a direct claim.' }).ok, true);
+  assert.equal(store.submitTicket(slug, second.ref, 'sequential-second-worker', {
+    commit: secondCommit,
+    gitRef: secondRef,
+    range: secondRange,
+    worktree: secondWorktree,
+  }).ok, true);
+
+  const secondBase = head(fixture.repo, 'main');
+  const secondDelivery = store.integrateSubmission(slug, second.ref, { mode: 'merge', target });
+  assert.equal(secondDelivery.ok, true, JSON.stringify(secondDelivery));
+  assert.equal(secondDelivery.ticket.submission.wave.baseline.revision.value, secondBase);
+  assert.equal(fs.readFileSync(path.join(fixture.repo, 'second.txt'), 'utf8'), 'second sequential executor work\n');
+});
+
 test('an assembled wave preserves candidates, refuses unrelated grooming delivery, and refuses singleton integration', () => {
   const fixture = makeRepo('refused-wave-keeps-candidates');
   const secondWorktree = path.join(fixture.repo, '.claude', 'worktrees', 'agent-conflict');

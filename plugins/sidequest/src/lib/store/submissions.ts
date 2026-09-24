@@ -2772,6 +2772,7 @@ function ensureSingletonAssembledWave(slug: any, idOrRef: any, opts?: any) {
       verification: ticket.submission?.verificationResult,
       skipVerify: true,
       verificationWaiver: opts.verificationWaiver,
+      target: opts.target,
     });
     if (!assembled.ok) return assembled;
     return assembledWaveForDelivery(slug, getTicket(slug, ticket.id));
@@ -2784,6 +2785,7 @@ function ensureSingletonAssembledWave(slug: any, idOrRef: any, opts?: any) {
     verification: ticket.submission?.verificationResult,
     skipVerify: opts?.skipVerify === true,
     verificationWaiver: opts?.verificationWaiver,
+    target: opts?.target,
   });
   if (!assembled.ok) return assembled;
   return assembledWaveForDelivery(slug, getTicket(slug, ticket.id));
@@ -2811,10 +2813,10 @@ function submissionWaveCandidate(ticket: any) {
   };
 }
 
-function currentIntegrationWaveBaseline(slug: any, fallback: any) {
+function currentIntegrationWaveBaseline(slug: any, fallback: any, targetOverride?: any) {
   if (fallback?.revision?.source !== 'git') return fallback;
   const projectPath = String(readMeta(slug)?.path || '').trim();
-  const target = integrationTarget(slug);
+  const target = targetOverride || integrationTarget(slug);
   const commit = integrationTargetCommit(projectPath, target);
   return Object.freeze({
     revision: Object.freeze({ source: 'git', value: commit, observedAt: new Date().toISOString() }),
@@ -2876,7 +2878,7 @@ function assembleSubmissionWave(slug?: any, refs?: any, opts?: any) {
   if (!firstCandidate) return { ok: false, reason: 'wave_baseline_required', message: 'Wave assembly requires a candidate baseline.' };
   const omittedPendingOverlaps = omittedPendingSubmissionOverlaps(slug, tickets);
   const opened = openWave({
-    baseline: currentIntegrationWaveBaseline(slug, firstCandidate.baseline),
+    baseline: currentIntegrationWaveBaseline(slug, firstCandidate.baseline, opts?.target),
     participants: tickets.map((ticket) => ({
       ref: ticket.ref,
       dependencies: Array.isArray(dependencies[ticket.ref]) ? dependencies[ticket.ref] : [],
