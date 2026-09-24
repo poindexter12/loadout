@@ -101,6 +101,12 @@ function defaultAlwaysInScope(...args) {
 function normalizeDeliveryMode(...args) {
   return configLayer.normalizeDeliveryMode(...args);
 }
+function normalizeDeliveryChannel(...args) {
+  return configLayer.normalizeDeliveryChannel(...args);
+}
+function resolveDeliveryConfig(...args) {
+  return configLayer.resolveDeliveryConfig(...args);
+}
 function normalizeIntegrationMode(...args) {
   return configLayer.normalizeIntegrationMode(...args);
 }
@@ -1216,6 +1222,9 @@ const {
   clearSubmission,
   assembleSubmissionWave,
   recordSubmissionWaveDelivery,
+  markWaveAwaitingMerge,
+  findAwaitingMergeWaves,
+  readWavePr,
   submissionsPayload
 } = createSubmissions({
   EXECUTOR_VERIFY_MAX,
@@ -3226,6 +3235,8 @@ module.exports = {
   setBoardConfig,
   integrationTarget,
   normalizeDeliveryMode,
+  normalizeDeliveryChannel,
+  resolveDeliveryConfig,
   validateIntegrationSubmission,
   recordDeliveredSubmission,
   recordAbandonedSubmission,
@@ -3336,6 +3347,9 @@ module.exports = {
   clearSubmission,
   assembleSubmissionWave,
   recordSubmissionWaveDelivery,
+  markWaveAwaitingMerge,
+  findAwaitingMergeWaves,
+  readWavePr,
   pendingSubmission,
   submissionReadiness,
   submissionsPayload,
