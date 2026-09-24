@@ -20,6 +20,10 @@ const DESTRUCTIVE_PHRASE = /\bgit\s+(?:push[^\n]*(?:\s--force(?:\b|=)|\s-f\b)|re
 const ARBITRARY_EXECUTION = /^(?:node|nodejs|deno|bun|python|python2|python3|py|ruby|perl|php|sh|bash|zsh|dash|pwsh|powershell|cmd|wsl|ssh|eval|exec|npx|pnpx|uvx|env|sudo|doas|xargs|start|call)$/i;
 const NEEDS_SUBCOMMAND = /^(?:git|docker|podman|kubectl|helm|terraform|aws|gcloud|az|npm|pnpm|yarn|cargo|go|dotnet|gh|systemctl|sc|net)$/i;
 const DESTRUCTIVE_FAMILY = /^(?:git\s+(?:push|reset|clean|branch|rm|checkout|restore)|docker\s+\S+|podman\s+\S+|kubectl\s+\S+|npm\s+(?:publish|unpublish|version))$/i;
+const CHAIN_UNSAFE_EXECUTION = /^(?:cd|source|\.|export)$/i;
+const COMMAND_FRAGMENT = /^(?:&&|\|\||[;|])/;
+const VERSION_PINNED_PATH = /(?:^|\/)quartermaster\/\d+\.\d+\.\d+(?:\/|$)/i;
+const SESSION_SCRATCHPAD_PATH = /(?:^|\/)(?:scratchpad|claude-[^/]+)(?:\/|$)/i;
 
 function settingsFile(projectDir) {
   return path.join(projectDir, '.claude', 'settings.local.json');
@@ -43,7 +47,9 @@ function normalizedCommandPrefix(command) {
   const words = String(command ?? '').trim().replace(/\s+/g, ' ').replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)+/, '').split(' ');
   if (!words[0]) return null;
   const executable = words[0].replace(/^.*[\\/]/, '').replace(/\.exe$/i, '').toLowerCase();
-  const subcommand = words[1] && !words[1].startsWith('-') ? words[1].toLowerCase() : null;
+  const subcommand = words[1] && !words[1].startsWith('-')
+    ? (/[\\/]/.test(words[1]) ? words[1] : words[1].toLowerCase())
+    : null;
   return subcommand ? `${executable} ${subcommand}` : executable;
 }
 
@@ -77,12 +83,32 @@ function isDestructive(input) {
 // own veto: anything that runs caller-supplied code, a bare tool whose
 // subcommands differ wildly in blast radius, or a family with a destructive
 // sibling the wildcard would cover.
+function hasUnmatchedQuote(value) {
+  let quote = null;
+  let escaped = false;
+  for (const character of value) {
+    if (escaped) {
+      escaped = false;
+    } else if (character === '\\') {
+      escaped = true;
+    } else if (quote === character) {
+      quote = null;
+    } else if (!quote && (character === '"' || character === "'")) {
+      quote = character;
+    }
+  }
+  return quote !== null;
+}
+
 function ruleTooBroadReason(fingerprint) {
+  if (fingerprint === 'permission:Agent') return 'intercepted by Sidequest routing';
   const match = /^permission:Bash:(.+)$/.exec(fingerprint);
   if (!match) return null;
   const prefix = match[1];
   const [executable] = prefix.split(' ');
-  if (ARBITRARY_EXECUTION.test(executable)) return 'arbitrary execution';
+  if (COMMAND_FRAGMENT.test(prefix) || hasUnmatchedQuote(prefix)) return 'command fragment';
+  if (CHAIN_UNSAFE_EXECUTION.test(executable) || ARBITRARY_EXECUTION.test(executable)) return 'arbitrary execution';
+  if (VERSION_PINNED_PATH.test(prefix) || SESSION_SCRATCHPAD_PATH.test(prefix)) return 'ephemeral or version-pinned path';
   if (!prefix.includes(' ') && NEEDS_SUBCOMMAND.test(executable)) return 'bare tool';
   if (DESTRUCTIVE_FAMILY.test(prefix)) return 'wildcard would cover destructive siblings';
   return null;

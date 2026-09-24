@@ -14,12 +14,12 @@ function temporaryProject() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'quartermaster-allowlist-'));
 }
 
-function permissionTranscript(command, outcome = 'approved') {
+function permissionTranscript(command, outcome = 'approved', name = 'Bash') {
   const identifier = `tool-${Math.random()}`;
   const assistant = {
     type: 'assistant',
     timestamp: '2026-08-12T12:00:00.000Z',
-    message: { content: [{ type: 'tool_use', id: identifier, name: 'Bash', input: { command } }] },
+    message: { content: [{ type: 'tool_use', id: identifier, name, input: { command } }] },
   };
   const user = {
     type: 'user',
@@ -149,6 +149,76 @@ test('an interpreter never earns a rule, because its wildcard runs arbitrary cod
 
   assert.equal(result.additions.length, 0);
   assert.match(result.blocked[0].fingerprint, /^permission:Bash:node\b/);
+});
+
+test('chain-unsafe shell prefixes never earn wildcard rules', async () => {
+  const projectDir = temporaryProject();
+  enablePermissionAutomation(projectDir);
+  const environment = writeWindow(projectDir, [
+    ...Array.from({ length: 3 }, () => permissionTranscript('cd /Users/joese/Code/github.com/poindexter12/loadout')),
+    ...Array.from({ length: 3 }, () => permissionTranscript('source /private/tmp/claude-session/scratchpad/muximus-env.sh')),
+    ...Array.from({ length: 3 }, () => permissionTranscript('export CLAUDE_PLUGIN_ROOT=/Users/joese/Code/github.com/poindexter12/loadout;')),
+  ]);
+
+  const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
+
+  assert.equal(result.additions.length, 0);
+  assert.deepEqual(result.blocked.map((entry) => entry.vetoReason), Array(3).fill('arbitrary execution'));
+});
+
+test('compound-command fragments never earn wildcard rules', async () => {
+  const projectDir = temporaryProject();
+  enablePermissionAutomation(projectDir);
+  const environment = writeWindow(projectDir, [
+    ...Array.from({ length: 3 }, () => permissionTranscript('&& printf ready')),
+    ...Array.from({ length: 3 }, () => permissionTranscript('echo "---')),
+  ]);
+
+  const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
+
+  assert.equal(result.additions.length, 0);
+  assert.deepEqual(result.blocked.map((entry) => entry.vetoReason), Array(2).fill('command fragment'));
+});
+
+test('path-shaped command arguments retain their case in the fingerprint', async () => {
+  const projectDir = temporaryProject();
+  const environment = writeWindow(projectDir, Array.from(
+    { length: 3 },
+    () => permissionTranscript('cd /Users/joese/Code/github.com/poindexter12/loadout'),
+  ));
+
+  const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
+
+  assert.equal(result.blocked[0].fingerprint, 'permission:Bash:cd /Users/joese/Code/github.com/poindexter12/loadout');
+});
+
+test('ephemeral and version-pinned paths never earn wildcard rules', async () => {
+  const projectDir = temporaryProject();
+  enablePermissionAutomation(projectDir);
+  const environment = writeWindow(projectDir, [
+    ...Array.from({ length: 3 }, () => permissionTranscript('printf /Users/joese/.claude/plugins/cache/quartermaster/0.8.1/lib/index.js')),
+    ...Array.from({ length: 3 }, () => permissionTranscript('printf /private/tmp/claude-session/scratchpad/muximus-env.sh')),
+  ]);
+
+  const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
+
+  assert.equal(result.additions.length, 0);
+  assert.deepEqual(result.blocked.map((entry) => entry.vetoReason), Array(2).fill('ephemeral or version-pinned path'));
+});
+
+test('a bare Agent permission never bypasses Sidequest routing', async () => {
+  const projectDir = temporaryProject();
+  enablePermissionAutomation(projectDir);
+  const environment = writeWindow(projectDir, Array.from(
+    { length: 3 },
+    () => permissionTranscript('', 'approved', 'Agent'),
+  ));
+
+  const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
+
+  assert.equal(result.additions.length, 0);
+  assert.equal(result.blocked[0].fingerprint, 'permission:Agent');
+  assert.equal(result.blocked[0].vetoReason, 'intercepted by Sidequest routing');
 });
 
 test('enabling automation writes only the project-local opt-in marker', () => {
