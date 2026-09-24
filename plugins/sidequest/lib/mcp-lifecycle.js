@@ -166,6 +166,34 @@ function combinedRefusal(ticket, failures) {
     failures
   };
 }
+function prDeliveryMode(slug) {
+  try {
+    return store.resolveDeliveryConfig(slug)?.mode === "pr";
+  } catch (_) {
+    return false;
+  }
+}
+const PR_DELIVERY_REFUSAL_KEYS = ["cause", "pr", "waveId", "branch", "conflictedPaths"];
+function prDeliveryRefusalFields(delivery) {
+  const fields = {};
+  for (const key of PR_DELIVERY_REFUSAL_KEYS) {
+    if (delivery?.[key] !== void 0) fields[key] = delivery[key];
+  }
+  return fields;
+}
+function awaitingMergeAck(slug, delivery) {
+  const tickets = Array.isArray(delivery.tickets) ? delivery.tickets : [];
+  return mutationAck(slug, delivery, {
+    action: "awaiting_merge",
+    state: delivery.state,
+    pr: delivery.pr,
+    waveId: delivery.waveId,
+    participantRefs: delivery.participants,
+    tickets: tickets.map((entry) => entry ? { ref: entry.ref, status: entry.status } : null),
+    ...delivery.existing ? { existing: true } : {},
+    message: delivery.message
+  });
+}
 function dispatchBaseMessage(ticket) {
   const dispatchBase = String(ticket.dispatch?.baseCommit || "").trim();
   return dispatchBase ? `the pinned dispatch base commit ${dispatchBase}` : "the pinned dispatch base commit recorded in the dispatch";
@@ -894,7 +922,8 @@ const tools = [
       const ticket = store.getTicket(slug, refs[0]);
       if (refs.length > 1) {
         const groupUsesGit = store.submissionUsesGit(ticket);
-        if (groupUsesGit) {
+        const groupPrDelivery = groupUsesGit && prDeliveryMode(slug);
+        if (groupUsesGit && !groupPrDelivery) {
           const lock = await publish.publishLockStatus(meta.path);
           if (lock.locked && !publish.publishLockOwnedBySession(meta.path, sessionOf(args))) {
             return mutationAck(slug, combinedRefusal(ticket, [{
@@ -905,13 +934,16 @@ const tools = [
         }
         const target2 = groupUsesGit ? store.integrationTarget(slug) : void 0;
         const mode2 = args.mode == null ? store.boardConfig(slug).delivery : args.mode;
-        const delivery2 = store.integrateSubmissionWave(slug, refs, {
+        const delivery2 = await store.integrateSubmissionWave(slug, refs, {
           mode: mode2,
           target: target2,
           skipVerify: args.skipVerify === true,
           verificationWaiver: args.verificationWaiver
         });
-        if (!delivery2.ok) return mutationAck(slug, delivery2);
+        if (!delivery2.ok) {
+          return groupPrDelivery ? Object.assign(mutationAck(slug, delivery2), prDeliveryRefusalFields(delivery2)) : mutationAck(slug, delivery2);
+        }
+        if (delivery2.state === "awaiting-merge") return awaitingMergeAck(slug, delivery2);
         const reason2 = `Delivered assembled wave ${refs.join(", ")} via ${delivery2.integration.mode}.`;
         const ticketsBeforeClosure = refs.map((ref) => store.getTicket(slug, ref));
         const closures = refs.map((ref) => store.completeTicketAsControlPlane(slug, ref, { by, reason: reason2, purpose: "integration" }));
@@ -927,7 +959,7 @@ const tools = [
         });
       }
       if (!ticket) {
-        const delivery2 = store.integrateSubmission(slug, args.ref, {
+        const delivery2 = await store.integrateSubmission(slug, args.ref, {
           mode: args.mode == null ? store.boardConfig(slug).delivery : args.mode,
           skipVerify: args.skipVerify === true,
           verificationWaiver: args.verificationWaiver
@@ -937,7 +969,8 @@ const tools = [
         return Object.assign(mutationAck(slug, delivery2), failure);
       }
       const usesGit = store.submissionUsesGit(ticket);
-      if (usesGit) {
+      const prDelivery = usesGit && prDeliveryMode(slug);
+      if (usesGit && !prDelivery) {
         const lock = await publish.publishLockStatus(meta.path);
         if (lock.locked && !publish.publishLockOwnedBySession(meta.path, sessionOf(args))) {
           failures.push({
@@ -992,7 +1025,7 @@ const tools = [
         });
       }
       const mode = args.mode == null ? store.boardConfig(slug).delivery : args.mode;
-      const delivery = store.integrateSubmission(slug, args.ref, {
+      const delivery = await store.integrateSubmission(slug, args.ref, {
         mode,
         target,
         skipVerify: args.skipVerify === true,
@@ -1001,8 +1034,10 @@ const tools = [
       if (!delivery.ok) {
         const failure = delivery.outside?.length ? { strayPaths: delivery.outside } : {};
         if (delivery.verify && /^verification_[a-z_]+_post_merge(?:_rollback_failed)?$/.test(String(delivery.reason))) failure.verifyFailed = delivery.verify;
+        if (prDelivery) Object.assign(failure, prDeliveryRefusalFields(delivery));
         return Object.assign(mutationAck(slug, delivery), failure);
       }
+      if (delivery.state === "awaiting-merge") return awaitingMergeAck(slug, delivery);
       const integration = delivery.integration;
       const verification = store.verifyIntegration(slug, args.ref, {
         by,

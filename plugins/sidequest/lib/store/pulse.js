@@ -1,6 +1,7 @@
 "use strict";
 const { execFileSync } = require("node:child_process");
 const { canonicalPreparedDispatchExecutor } = require("../prepared-dispatch.js");
+const { readPrWatchState } = require("./project-watch.js");
 function createGitHubCiRunsProvider(projectPath, execute = execFileSync) {
   const command = (program, arguments_) => execute(program, arguments_, {
     cwd: projectPath,
@@ -54,6 +55,7 @@ function createPulse(dependencies) {
     dispatchState,
     effectiveScope,
     execFileSync: execFileSync2,
+    findAwaitingMergeWaves,
     getTicket,
     listTickets,
     normalizeRoute,
@@ -222,6 +224,18 @@ function createPulse(dependencies) {
       dispatch.worktree && dispatch.worktreeGitDirectory && dispatch.worktreeCommonGitDirectory && dispatch.worktreeCheckoutInstance && dispatch.worktreeObservedRevision
     );
   }
+  function awaitingMergeWavesPulse(slug) {
+    return (findAwaitingMergeWaves?.(slug) || []).map((wave) => {
+      const pr = wave.pr || {};
+      const observed = (wave.participants || []).map((ref) => readPrWatchState(getTicket(slug, ref), pr.number)).filter(Boolean).sort((left, right) => String(right.observedAt).localeCompare(String(left.observedAt)))[0] || null;
+      return {
+        participants: [...wave.participants || []],
+        pr: { number: pr.number, url: pr.url },
+        checks: observed?.checks || "not yet observed",
+        ...observed?.observedAt ? { observedAt: observed.observedAt } : {}
+      };
+    });
+  }
   function pulsePayload(slug, idOrRef) {
     const ticket = getTicket(slug, idOrRef);
     if (!ticket) return null;
@@ -273,6 +287,7 @@ function createPulse(dependencies) {
       ...oracleProjection(ticket) ? { oracle: oracleProjection(ticket) } : {},
       ...warnings.length ? { warnings } : {},
       submission: submissionProjection(ticket.submission),
+      awaitingMergeWaves: awaitingMergeWavesPulse(slug),
       delivery: boardConfig(slug)?.delivery || "merge",
       git
     };
@@ -329,6 +344,7 @@ function createPulse(dependencies) {
 function createBoardWatch(dependencies) {
   const {
     board,
+    awaitingMergeWavesProvider,
     changesPayload,
     ciRunsProvider,
     includeAllTickets = false,
@@ -346,6 +362,8 @@ function createBoardWatch(dependencies) {
   const seen = /* @__PURE__ */ new Set();
   const seenCiRuns = /* @__PURE__ */ new Set();
   const seenUncheckedHeads = /* @__PURE__ */ new Set();
+  const seenPrStates = /* @__PURE__ */ new Set();
+  const seenPrDegraded = /* @__PURE__ */ new Set();
   let cursor = (/* @__PURE__ */ new Date()).toISOString();
   const commentPattern = /\b(?:out[- ]of[- ]scope|widen scope|scope request|technical_blocker|blocked|handback)\b/i;
   const markerPattern = /^\[sidequest:/i;
@@ -398,7 +416,39 @@ function createBoardWatch(dependencies) {
       writeLine(`CI ${ci.headSha} unchecked - -`);
     }
   }
+  async function pollDelivery() {
+    if (!awaitingMergeWavesProvider) return;
+    try {
+      const result = await awaitingMergeWavesProvider();
+      if (result?.degraded && !seenPrDegraded.has(result.degraded)) {
+        seenPrDegraded.add(result.degraded);
+        writeLine(`PR delivery degraded: ${result.degraded}`);
+      }
+      for (const wave of result?.waves || []) {
+        const status = wave.status;
+        if (!status) continue;
+        const failed = status.state === "CLOSED" || status.checks === "failure";
+        const terminal = status.state === "MERGED" || failed;
+        const alertKey = status.state === "MERGED" ? `${status.number}|MERGED` : status.state === "CLOSED" ? `${status.number}|CLOSED` : `${status.number}|failure`;
+        if (wave.terminalRecorded) seenPrStates.add(alertKey);
+        if (terminal && !seenPrStates.has(alertKey)) {
+          seenPrStates.add(alertKey);
+          const refs = (wave.participants || []).join(", ");
+          if (status.state === "MERGED") writeLine(`PR #${status.number} merged: run integrate to close ${refs}`);
+          else writeLine(`PR #${status.number} failed: ${(status.failingChecks || []).join(", ") || "closed"}`);
+        }
+        result.recordState?.(wave, status);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!seenPrDegraded.has(message)) {
+        seenPrDegraded.add(message);
+        writeLine(`PR delivery degraded: ${message}`);
+      }
+    }
+  }
   function poll() {
+    let delivery = Promise.resolve();
     try {
       const changes = changesPayload(boardIdentity, cursor);
       if (changes?.project !== boardIdentity) throw new Error("watch received changes for a different board identity.");
@@ -413,10 +463,11 @@ function createBoardWatch(dependencies) {
         writeLine(`${ticket.ref} ${ticket.status} ${event.type} ${event.author || "-"} ${event.excerpt || "-"}`);
       }
       pollCi();
-      return;
+      delivery = pollDelivery();
     } catch (error) {
       writeError(`sidequest watch: ${error instanceof Error ? error.message : String(error)}`);
     }
+    return delivery;
   }
   function start(intervalSeconds = 30) {
     const intervalMs = Math.max(1, Number(intervalSeconds) || 30) * 1e3;

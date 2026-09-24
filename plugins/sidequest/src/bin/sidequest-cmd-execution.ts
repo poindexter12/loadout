@@ -672,7 +672,15 @@ async function cmdIntegrate(opts: any, positional: any) {
   const usesGit = store.submissionUsesGit(ticket);
   const publish = require('../lib/publish');
   const runtimeSessionId = sessionId(opts);
-  if (usesGit) {
+  // deliveryChannel mode "pr" opens a PR instead of moving local main, so the
+  // publish lock does not apply. An unreadable channel keeps the lock.
+  let prDelivery = false;
+  try {
+    prDelivery = usesGit && store.resolveDeliveryConfig(slug)?.mode === 'pr';
+  } catch (_) {
+    prDelivery = false;
+  }
+  if (usesGit && !prDelivery) {
     const lock = await publish.publishLockStatus(meta.path);
     if (lock.locked && !publish.publishLockOwnedBySession(meta.path, runtimeSessionId)) {
       fail(publishLockRefusal(lock.holder, by, runtimeSessionId));
@@ -714,7 +722,7 @@ async function cmdIntegrate(opts: any, positional: any) {
     return;
   }
   const mode = opts.mode == null ? store.boardConfig(slug).delivery : opts.mode;
-  const delivery = refs.length > 1
+  const delivery = await (refs.length > 1
     ? store.integrateSubmissionWave(slug, refs, {
       mode,
       target,
@@ -726,7 +734,7 @@ async function cmdIntegrate(opts: any, positional: any) {
       target,
       skipVerify: !!opts['skip-verify'],
       verificationWaiver,
-    });
+    }));
   if (!delivery.ok) {
     if (delivery.verify && /^verification_[a-z_]+_post_merge(?:_rollback_failed)?$/.test(String(delivery.reason))) {
       const payload = { project: slug, delivery: null, verifyFailed: delivery.verify };
@@ -744,6 +752,28 @@ async function cmdIntegrate(opts: any, positional: any) {
       return;
     }
     fail(`integrate: ${(delivery.message || delivery.reason)}.`);
+  }
+  if (delivery.state === 'awaiting-merge') {
+    // PR delivery: the participants stay doing until the merge is reconciled.
+    const participants: string[] = Array.isArray(delivery.participants) ? delivery.participants : refs;
+    if (opts.json) {
+      const tickets = (Array.isArray(delivery.tickets) ? delivery.tickets : []).map((entry: any) => (entry ? { ref: entry.ref, status: entry.status } : null));
+      process.stdout.write(JSON.stringify({
+        project: slug,
+        ok: true,
+        state: delivery.state,
+        pr: delivery.pr,
+        waveId: delivery.waveId,
+        participants,
+        tickets,
+        ...(delivery.existing ? { existing: true } : {}),
+        message: delivery.message,
+      }, null, 2) + '\n');
+      return;
+    }
+    const opened = delivery.existing ? 'already awaiting merge' : 'awaiting merge';
+    console.log(`✓ ${participants.join(', ')} ${opened}: PR #${delivery.pr.number} ${delivery.pr.url} — ${meta.name}`);
+    return;
   }
   const integration = delivery.integration;
   const verification = refs.length > 1
