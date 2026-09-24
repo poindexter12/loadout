@@ -691,7 +691,7 @@ test('pre-tool hook: arbitrary implementation agents are denied and directed to 
     ['implementation-agent', 'Implement the new flow.'],
   ]) {
     const out = runHookOutput(FORCE_BYPASS, {
-      tool_name: 'Agent',
+      cwd: BOARD_PATH, tool_name: 'Agent',
       tool_input: { subagent_type, isolation: 'worktree', prompt },
     });
     const reason = out.hookSpecificOutput.permissionDecisionReason;
@@ -834,6 +834,7 @@ test('pre-tool hook: executor helpers reject review work and model defaults', ()
   assert.equal(chained.hookSpecificOutput.updatedInput.run_in_background, true);
 
   const mainThread = runHookOutput(FORCE_BYPASS, {
+    cwd: BOARD_PATH,
     agent_type: 'sidequest-exec-dispatch',
     tool_name: 'Agent',
     tool_input: { subagent_type: 'general-purpose', prompt: 'Quick lookup.' },
@@ -1330,8 +1331,29 @@ test('pre-tool hook: ordinary subagents without a dispatch stay outside the help
   assert.equal(out, null);
 });
 
+test('pre-tool hook: an unregistered project gets inline guidance, not a ship-gating deny', () => {
+  // dispatchAdmission returns 'no-project' for any cwd with no registered board, which is every
+  // project before its first Board MCP call. The guard used to enumerate only 'routing-disabled' and
+  // 'no-usable-route', so this case fell through to agentDenyReason and was told not to ship until a
+  // ticket it cannot file is closed - while session-start told the same session inline work is fine.
+  const unregistered = runHookOutput(FORCE_BYPASS, {
+    cwd: path.join(os.tmpdir(), 'sq-hooks-fixtures', 'never-registered'),
+    tool_name: 'Agent',
+    tool_input: { subagent_type: 'general-purpose', prompt: 'Look at the two config files.' },
+  }, { CLAUDE_PROJECT_DIR: '' });
+  const reason = unregistered.hookSpecificOutput.permissionDecisionReason;
+  assert.equal(unregistered.hookSpecificOutput.permissionDecision, 'deny', 'generic agents stay denied');
+  assert.match(reason, /not registered on a Sidequest board/);
+  assert.match(reason, /Continue bounded inline work with direct tools/);
+  assert.doesNotMatch(reason, /until its ticket is filed, dispatched, and closed/,
+    'an unregistered project must not be told its unfileable ticket gates a PR or ship');
+  assert.doesNotMatch(reason, /file a spike/,
+    'the remedy it names would need the route that does not exist');
+});
+
 test('pre-tool hook: a marked arbitrary agent is still denied', () => {
   const marked = runHookOutput(FORCE_BYPASS, {
+    cwd: BOARD_PATH,
     tool_name: 'Agent',
     tool_input: {
       subagent_type: 'implementation-agent',

@@ -365,6 +365,12 @@ function agentDenyReason(type, classification) {
   }
   return `sidequest: ${type || "custom"} is a generic Agent, not a Sidequest ticket executor. For a tiny lookup, use Read, Glob, Grep, or WebFetch inline, not WebSearch. A usable route needs a fresh Board MCP dispatch and its exact returned executor. Board MCP is the lifecycle authority: reload or reconnect Sidequest, then re-dispatch. Do not use a raw Agent or Sidequest CLI fallback. Any delegated work, including a quick investigation, needs a ticket: file a spike (usually codebase-exploration), route it, dispatch it, then spawn the returned executor. The blocked work still gates any dependent action: do not proceed to a PR, merge, publish, or ship until its ticket is filed, dispatched, and closed; rerouting around this block is a violation.`;
 }
+function unroutedGenericDenyReason(status) {
+  if (status === "no-project") {
+    return "sidequest: this project is not registered on a Sidequest board, so there is no executor route. Continue bounded inline work with direct tools; do not create a fake Sidequest or raw Agent lifecycle fallback. Nothing here gates a PR, merge, publish, or ship - no ticket is required for this work. The first Board MCP call registers the project if you want one.";
+  }
+  return "sidequest: this project has no usable executor route. Continue bounded inline work with direct tools; do not create a fake Sidequest or raw Agent lifecycle fallback.";
+}
 var EXPLORE_FREE_SPAWNS = 2;
 var DENIED_WORK_PROMPT_PREFIX_CHARS = 160;
 var DENIED_WORK_MAX_RECORDS = 20;
@@ -1010,8 +1016,8 @@ function main() {
     writeDeny("PreToolUse", "sidequest: this project has no usable executor route. Continue only bounded inline work, or restore routing and an available category route before a fresh Board MCP dispatch.");
     return;
   }
-  if (!isCurrentExecutor(classification) && !type.startsWith("sidequest-") && (admission.status === "routing-disabled" || admission.status === "no-usable-route")) {
-    writeDeny("PreToolUse", "sidequest: this project has no usable executor route. Continue bounded inline work with direct tools; do not create a fake Sidequest or raw Agent lifecycle fallback.");
+  if (!isCurrentExecutor(classification) && !type.startsWith("sidequest-") && admission.status !== "routed") {
+    writeDeny("PreToolUse", unroutedGenericDenyReason(admission.status));
     return;
   }
   const dispatchValidation = preparedDispatchValidation(input);
