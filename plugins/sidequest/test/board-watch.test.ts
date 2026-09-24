@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 
 const { createPulse, createBoardWatch, createGitHubCiRunsProvider } = require('../lib/store/pulse');
-const { createProjectBoardWatch } = require('../lib/store/project-watch');
+const { createProjectBoardWatch, prWatchMarker } = require('../lib/store/project-watch');
 const store = require('../lib/store');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -588,4 +588,129 @@ test('watch reports poll failures and keeps polling', () => {
 
   assert.deepEqual(errors, ['sidequest watch: database busy']);
   assert.deepEqual(lines, ['SQ-1 doing dead - executor died']);
+});
+
+
+test('pulse lists awaiting PRs before and after watch observes their checks', () => {
+  const pr = { number: 42, url: 'https://github.com/example/repo/pull/42' };
+  const tickets = new Map<string, any>([
+    ['SQ-1', { ref: 'SQ-1', title: 'first', status: 'doing', files: [], comments: [] }],
+    ['SQ-2', { ref: 'SQ-2', title: 'second', status: 'doing', files: [], comments: [] }],
+  ]);
+  const pulse = createPulse({
+    boardConfig: () => ({}),
+    checkpointProjection: () => null,
+    claimIdleMs: () => 0,
+    claimPulse: () => null,
+    commitScope: { ticketCommitScope: () => [] },
+    dispatchState: () => null,
+    effectiveScope: () => [],
+    findAwaitingMergeWaves: () => [{ waveId: 'wave-1', participants: ['SQ-1', 'SQ-2'], pr }],
+    getTicket: (_slug: string, ref: string) => tickets.get(ref),
+    listTickets: () => [...tickets.values()],
+    normalizeRoute: (route: any) => route,
+    oracleProjection: () => null,
+    pulseDispatchState: () => null,
+    readMeta: () => null,
+    storyContractDriftWarnings: () => [],
+    storyDecisionLogWarnings: () => [],
+    submissionProjection: () => null,
+  });
+
+  assert.deepEqual(pulse.pulsePayload('board-a', 'SQ-1').awaitingMergeWaves, [{
+    participants: ['SQ-1', 'SQ-2'], pr, checks: 'not yet observed',
+  }]);
+
+  tickets.get('SQ-2').comments.push({
+    body: prWatchMarker({ number: 42, state: 'OPEN', checks: 'pending', failingChecks: [] }, '2026-09-24T12:00:00.000Z'),
+  });
+  assert.deepEqual(pulse.pulsePayload('board-a', 'SQ-1').awaitingMergeWaves, [{
+    participants: ['SQ-1', 'SQ-2'], pr, checks: 'pending', observedAt: '2026-09-24T12:00:00.000Z',
+  }]);
+});
+
+test('watch emits each terminal PR delivery transition once', async () => {
+  const lines: string[] = [];
+  const recorded: any[] = [];
+  const statuses = [
+    { number: 42, state: 'OPEN', checks: 'pending', failingChecks: [] },
+    { number: 42, state: 'MERGED', checks: 'success', failingChecks: [] },
+    { number: 42, state: 'MERGED', checks: 'success', failingChecks: [] },
+  ];
+  const boardWatch = createBoardWatch({
+    board: 'board-a',
+    changesPayload: () => ({ project: 'board-a', serverTime: new Date().toISOString(), tickets: [] }),
+    awaitingMergeWavesProvider: async () => ({
+      waves: [{ participants: ['SQ-1', 'SQ-2'], status: statuses.shift(), recorded: false }],
+      recordState: (_wave: unknown, state: string) => recorded.push(state),
+    }),
+    writeLine: (line: string) => lines.push(line),
+  });
+
+  await boardWatch.poll();
+  await boardWatch.poll();
+  await boardWatch.poll();
+
+  assert.deepEqual(lines, ['PR #42 merged: run integrate to close SQ-1, SQ-2']);
+  assert.deepEqual(recorded.map((status: any) => status.state), ['OPEN', 'MERGED', 'MERGED']);
+});
+
+test('project watch persists observed PR state across restarts', async () => {
+  const ticket = { ref: 'SQ-1', comments: [] as any[] };
+  const pr = { number: 42, url: 'https://github.com/example/repo/pull/42' };
+  let status: any = { number: 42, state: 'OPEN', checks: 'pending', failingChecks: [] };
+  const fakeStore = {
+    changesPayload: () => ({ serverTime: new Date().toISOString(), tickets: [] }),
+    findAwaitingMergeWaves: () => [{ waveId: 'wave-1', participants: ['SQ-1'], pr }],
+    readWavePr: () => pr,
+    getTicket: () => ticket,
+    addComment: (_slug: string, _ref: string, comment: any) => ticket.comments.push(comment),
+  };
+  const fakeGitHubPrPort = { viewPr: async () => status };
+  const initialLines: string[] = [];
+  const initialPoll = createProjectBoardWatch({ slug: 'board-a', meta: { path: '/project' } }, {}, {
+    store: fakeStore,
+    createBoardWatch: (options: any) => createBoardWatch({ ...options, writeLine: (line: string) => initialLines.push(line) }),
+    createGitHubCiRunsProvider: () => null,
+    createGitHubPrPort: () => fakeGitHubPrPort,
+  });
+  await initialPoll.poll();
+  assert.deepEqual(initialLines, []);
+  assert.match(ticket.comments[0].body, /"checks":"pending"/);
+
+  status = { number: 42, state: 'MERGED', checks: 'success', failingChecks: [] };
+  const mergedLines: string[] = [];
+  const merged = createProjectBoardWatch({ slug: 'board-a', meta: { path: '/project' } }, {}, {
+    store: fakeStore,
+    createBoardWatch: (options: any) => createBoardWatch({ ...options, writeLine: (line: string) => mergedLines.push(line) }),
+    createGitHubCiRunsProvider: () => null,
+    createGitHubPrPort: () => fakeGitHubPrPort,
+  });
+  await merged.poll();
+  assert.deepEqual(mergedLines, ['PR #42 merged: run integrate to close SQ-1']);
+
+  const restartLines: string[] = [];
+  const restarted = createProjectBoardWatch({ slug: 'board-a', meta: { path: '/project' } }, {}, {
+    store: fakeStore,
+    createBoardWatch: (options: any) => createBoardWatch({ ...options, writeLine: (line: string) => restartLines.push(line) }),
+    createGitHubCiRunsProvider: () => null,
+    createGitHubPrPort: () => fakeGitHubPrPort,
+  });
+  await restarted.poll();
+  assert.deepEqual(restartLines, []);
+});
+
+test('watch reports a degraded PR provider once without interrupting polling', async () => {
+  const lines: string[] = [];
+  const boardWatch = createBoardWatch({
+    board: 'board-a',
+    changesPayload: () => ({ project: 'board-a', serverTime: new Date().toISOString(), tickets: [] }),
+    awaitingMergeWavesProvider: async () => ({ waves: [], degraded: 'gh unavailable' }),
+    writeLine: (line: string) => lines.push(line),
+  });
+
+  await boardWatch.poll();
+  await boardWatch.poll();
+
+  assert.deepEqual(lines, ['PR delivery degraded: gh unavailable']);
 });
