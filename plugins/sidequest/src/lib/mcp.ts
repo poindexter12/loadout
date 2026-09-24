@@ -52,7 +52,8 @@ const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 // (SQ-1955): +432 bytes, about 110 tokens per session, against three tickets in a row refused for the
 // attestation grammar alone. Everything that can wait for the second call went to the skill instead.
 // Raised from 23600 for recovery-retention board configuration (SQ-2453) while preserving the 2.5KB reserve.
-const MCP_TOOLS_LIST_MAX_BYTES = 23800;
+// Raised from 23800 for the issue_link tool (external tracker links, 276 bytes) while preserving the 2.5KB reserve.
+const MCP_TOOLS_LIST_MAX_BYTES = 24100;
 const MCP_TOOLS_LIST_HEADROOM_BYTES = 2500;
 
 function serverVersion() {

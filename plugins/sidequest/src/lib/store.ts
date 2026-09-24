@@ -3428,7 +3428,7 @@ function parseGitHubIssue(slug?: any, input?: any) {
   else if (/^#\d+$/.test(value)) {
     const meta = readMeta(slug);
     let origin = '';
-    try { origin = String(execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: meta?.path, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).trim(); } catch (_) { throw new Error('issue: #N requires an origin GitHub remote.'); }
+    try { origin = String(execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: meta?.path, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })).trim(); } catch (_) { throw new Error('issue: #N requires an origin GitHub remote.'); }
     const remote = /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?$/i.exec(origin);
     if (!remote) throw new Error('issue: #N requires an origin GitHub remote.');
     repo = remote[1]!.replace(/\.git$/i, '').toLowerCase(); number = Number(value.slice(1));

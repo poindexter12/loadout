@@ -231,7 +231,7 @@ test('schema v7 rows reopen and preserve legacy question comments as plain comme
   const reopened = spawnSync(process.execPath, ['-e', reopenScript], { encoding: 'utf8', windowsHide: true, env: { ...process.env, ...env } });
   assert.equal(reopened.status, 0, reopened.stderr);
   assert.deepEqual(JSON.parse(reopened.stdout), {
-    schema: 7,
+    schema: 8,
     comments: [{ id: 'legacy-question', at: '2026-01-01T00:00:00.000Z', by: 'legacy', body: 'old question row', kind: 'question' }],
   });
 });
@@ -265,7 +265,7 @@ test('configured MCP and hook entrypoints exist and spawn from the committed tre
   }
 });
 
-test('marketplace-shaped copy runs without source or node_modules and keeps a schema-v7 board', () => {
+test('marketplace-shaped copy runs without source or node_modules and keeps a schema-v8 board', () => {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-installed-copy-'));
   copyMarketplaceFiles(copy);
   assert.equal(fs.existsSync(path.join(copy, 'src')), false);
@@ -284,5 +284,5 @@ test('marketplace-shaped copy runs without source or node_modules and keeps a sc
   assert.equal(add.status, 0, add.stderr);
   const schema = spawnSync(process.execPath, ['-e', `const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(${JSON.stringify(path.join(home, 'sidequest.db'))});process.stdout.write(String(JSON.parse(d.prepare(\"SELECT value FROM meta WHERE key='schema_version'\").get().value)));d.close();`], { encoding: 'utf8', windowsHide: true, env: { ...process.env, ...env } });
   assert.equal(schema.status, 0, schema.stderr);
-  assert.equal(schema.stdout, '7');
+  assert.equal(schema.stdout, '8');
 });

@@ -129,7 +129,7 @@ test('v6 realistic category migration preserves effective taxonomy and refuses o
   assert.equal(seeded.status, 0, seeded.stderr);
 
   const migrated = db.openDb(home);
-  assert.equal(db.getRow(migrated, 'meta', 'schema_version'), 7);
+  assert.equal(db.getRow(migrated, 'meta', 'schema_version'), 8);
   assert.deepEqual(migrated.prepare("SELECT profile_id FROM project_routing_profiles WHERE project = 'fixture-board'").get()?.profile_id, 'coding');
   assert.deepEqual(migrated.prepare('SELECT kind, base_profile_id FROM project_categories WHERE project = ? ORDER BY id').all('fixture-board').map((row: any) => [row.kind, row.base_profile_id]), [
     ['ADD', null], ['DETACH', 'coding'], ['DISABLE', 'coding'], ['OVERRIDE', 'coding'],
@@ -151,7 +151,7 @@ test('v6 realistic category migration preserves effective taxonomy and refuses o
     const Module = require('node:module');
     const { DatabaseSync } = require('node:sqlite');
     const filename = ${JSON.stringify(path.join(ROOT, 'lib', 'db.js'))};
-    const source = fs.readFileSync(filename, 'utf8').replace('const CURRENT_SCHEMA_VERSION = 7;', 'const CURRENT_SCHEMA_VERSION = 6;');
+    const source = fs.readFileSync(filename, 'utf8').replace('const CURRENT_SCHEMA_VERSION = 8;', 'const CURRENT_SCHEMA_VERSION = 7;');
     const legacy = new Module(filename); legacy.filename = filename; legacy.paths = Module._nodeModulePaths(path.dirname(filename)); legacy._compile(source, filename);
     const database = new DatabaseSync(${JSON.stringify(dbPath)});
     try { legacy.exports.putRow(database, 'globals', { key: 'legacy-write', data: true }); process.exitCode = 2; }
@@ -160,7 +160,7 @@ test('v6 realistic category migration preserves effective taxonomy and refuses o
   `;
   const refused = spawnSync(process.execPath, ['-e', legacy], { encoding: 'utf8', windowsHide: true });
   assert.equal(refused.status, 0, refused.stderr);
-  assert.match(refused.stdout, /schema 7 is newer than supported schema 6; refusing write/);
+  assert.match(refused.stdout, /schema 8 is newer than supported schema 7; refusing write/);
 });
 
 test('profile edits propagate, repoint previews report drift, and prepared dispatch attempts stamp policy changes', () => {

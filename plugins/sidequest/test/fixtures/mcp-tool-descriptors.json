@@ -1435,6 +1435,35 @@
     }
   },
   {
+    "name": "issue_link",
+    "description": "Link a ticket to a GitHub ISSUE.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "link",
+            "unlink",
+            "list"
+          ]
+        },
+        "ref": {
+          "type": "string"
+        },
+        "issue": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ]
+    }
+  },
+  {
     "name": "unlink",
     "description": "Unlink tickets.",
     "inputSchema": {

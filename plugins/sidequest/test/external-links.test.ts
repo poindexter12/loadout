@@ -10,7 +10,7 @@ const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-external-links-'));
 const PROJECT = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-external-links-project-'));
 process.env.SIDEQUEST_HOME = HOME;
 process.env.CLAUDE_PROJECT_DIR = PROJECT;
-execFileSync('git', ['init'], { cwd: PROJECT });
+execFileSync('git', ['init', '-b', 'main'], { cwd: PROJECT });
 execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:Owner/Repo.git'], { cwd: PROJECT });
 const store = require('../lib/store.js');
 const meta = store.ensureProject(PROJECT);

@@ -3121,7 +3121,7 @@ function parseGitHubIssue(slug, input) {
     const meta = readMeta(slug);
     let origin = "";
     try {
-      origin = String(execFileSync("git", ["remote", "get-url", "origin"], { cwd: meta?.path, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })).trim();
+      origin = String(execFileSync("git", ["remote", "get-url", "origin"], { cwd: meta?.path, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true })).trim();
     } catch (_) {
       throw new Error("issue: #N requires an origin GitHub remote.");
     }

@@ -119,7 +119,7 @@ test('schema v7 migrates a v3 category table into a profile', () => {
   assert.equal(spawnSync(process.execPath, ['-e', seed], { encoding: 'utf8' }).status, 0);
 
   const database = db.openDb(homeRoot);
-  assert.equal(db.getRow(database, 'meta', 'schema_version'), 7);
+  assert.equal(db.getRow(database, 'meta', 'schema_version'), 8);
   assert.deepEqual(db.getRow<{ id: string }>(database, 'categories', 'fixture')?.id, 'fixture');
   assert.equal(database.prepare("SELECT source FROM routing_profiles WHERE id = 'coding'").get()?.source, 'migrated');
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM routing_profiles").get()?.count, 4);
@@ -149,7 +149,7 @@ test('schema v4 through v6 migration refreshes only uncustomized codebase explor
     assert.equal(spawnSync(process.execPath, ['-e', seed], { encoding: 'utf8' }).status, 0);
 
     const database = db.openDb(homeRoot);
-    assert.equal(db.getRow(database, 'meta', 'schema_version'), 7);
+    assert.equal(db.getRow(database, 'meta', 'schema_version'), 8);
     const category = db.getRow<{ description: string; contract: string; artifactRoots?: string[] }>(database, 'categories', 'codebase-exploration');
     if (customized) {
       assert.equal(category?.description, oldText.description);
@@ -188,7 +188,7 @@ test('schema v7 migrates local category kinds with profile provenance and snapsh
   assert.equal(spawnSync(process.execPath, ['-e', seed], { encoding: 'utf8' }).status, 0);
 
   const database = db.openDb(homeRoot);
-  assert.equal(db.getRow(database, 'meta', 'schema_version'), 7);
+  assert.equal(db.getRow(database, 'meta', 'schema_version'), 8);
   assert.equal(database.prepare("SELECT profile_id FROM project_routing_profiles WHERE project = 'board'").get()?.profile_id, 'coding');
   assert.equal(database.prepare('SELECT new_project_profile_id FROM routing_profile_settings WHERE singleton = 1').get()?.new_project_profile_id, 'coding');
   const rows = database.prepare('SELECT id, kind, base_profile_id, base_data FROM project_categories WHERE project = ? ORDER BY id').all('board');
@@ -223,7 +223,7 @@ test('schema v7 drops orphan project category rows left behind by deleted boards
   assert.equal(spawnSync(process.execPath, ['-e', seed], { encoding: 'utf8' }).status, 0);
 
   const database = db.openDb(homeRoot);
-  assert.equal(db.getRow(database, 'meta', 'schema_version'), 7);
+  assert.equal(db.getRow(database, 'meta', 'schema_version'), 8);
   assert.deepEqual(
     database.prepare('SELECT project, id FROM project_categories ORDER BY project, id').all().map((row) => [row.project, row.id]),
     [['board', 'board-only']],
@@ -242,7 +242,7 @@ test('a schema-v6 session refuses writes after a schema-v7 process migrates the 
     const Module = require('node:module');
     const { DatabaseSync } = require('node:sqlite');
     const filename = ${JSON.stringify(dbModule)};
-    const source = fs.readFileSync(filename, 'utf8').replace('const CURRENT_SCHEMA_VERSION = 7;', 'const CURRENT_SCHEMA_VERSION = 6;');
+    const source = fs.readFileSync(filename, 'utf8').replace('const CURRENT_SCHEMA_VERSION = 8;', 'const CURRENT_SCHEMA_VERSION = 7;');
     const legacy = new Module(filename);
     legacy.filename = filename;
     legacy.paths = Module._nodeModulePaths(path.dirname(filename));
@@ -259,7 +259,7 @@ test('a schema-v6 session refuses writes after a schema-v7 process migrates the 
   `;
   const result = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /schema 7 is newer than supported schema 6; refusing write/);
+  assert.match(result.stdout, /schema 8 is newer than supported schema 7; refusing write/);
 });
 
 test('migrates a JSON tree into SQLite without deleting its rollback copy', () => {
