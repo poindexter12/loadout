@@ -6,12 +6,15 @@ const { decideSubmissionAdmission } = require('../kernel/submission');
 const { isSourceRevisionAdapterFacts, sourceRevisionBaseline } = require('../source-revision-capability.js');
 const { reviewCandidateFromSubmission, reviewRelationFor, reviewRelationRef, reviewRelationOutcome, reviewLockMessage, reviewProvenance } = require('../kernel/review-binding');
 const { assembleWave, openWave, recordAssembledWaveGate, recordWaveDelivery } = require('../kernel/wave');
-const { AWAITING_MERGE_OUTCOME, validateWavePullRequest } = require('../kernel/pr-delivery.js');
+const { AWAITING_MERGE_OUTCOME, isSafeBranchName, isSafeRefComponent, validateWavePullRequest, waveBranchName } = require('../kernel/pr-delivery.js');
+const { createGhPrPort, PrDeliveryUnavailableError } = require('../ports/github-pr.js');
 const { isInScope, scopedPaths } = require('../scope-match');
+const os = require('node:os');
 import type { VerificationResult } from '../kernel/verification.js';
+import type { GitHubPrPort } from '../ports/github-pr.js';
 
 function createSubmissions(dependencies: any) {
-  const { EXECUTOR_VERIFY_MAX, INTEGRATION_VERIFY_OUTPUT_TAIL_BYTES, MANUAL_VERIFY_PREFIX, acquireLock, addComment, appendReworkEvent, artifactWorkingState, autoReleasedClaimMessage, attestationErrors, boardConfig, boundedExcerptForSubmission, commitScope, completionTreeCheck, coerceStatus, createComment, crypto, dirtyPathKey, dispatchState, executionScope, ensureDir, execFileSync, fs, getTicket, integrationTarget, integrationTargetCommit, listTickets, manualVerify, normalizeDeliveryMode, normalizeIntegrationBranch, normalizeIntegrationVerifyTimeoutMs, nullableText, path, prepareComment, projectDir, putTicket, queueEventNotification, readMeta, recordedReviewPass, recordLifecycleAttempt, releaseLock, setDispatchTerminal, spawnSync, stampDispatchEvent, ticketLockPath, transaction, unregisterClaim, verifyCommandErrors, verifyCommandError, withTicketLock, transitionAttempt, attemptDiagnostic } = dependencies;
+  const { EXECUTOR_VERIFY_MAX, INTEGRATION_VERIFY_OUTPUT_TAIL_BYTES, MANUAL_VERIFY_PREFIX, acquireLock, addComment, appendReworkEvent, artifactWorkingState, autoReleasedClaimMessage, attestationErrors, boardConfig, boundedExcerptForSubmission, commitScope, completionTreeCheck, coerceStatus, createComment, crypto, dirtyPathKey, dispatchState, executionScope, ensureDir, execFileSync, fs, getTicket, integrationTarget, integrationTargetCommit, listTickets, manualVerify, normalizeDeliveryMode, normalizeIntegrationBranch, normalizeIntegrationVerifyTimeoutMs, nullableText, path, prepareComment, projectDir, putTicket, queueEventNotification, readMeta, recordedReviewPass, recordLifecycleAttempt, releaseLock, resolveDeliveryConfig, setDispatchTerminal, spawnSync, stampDispatchEvent, ticketLockPath, transaction, unregisterClaim, verifyCommandErrors, verifyCommandError, withTicketLock, transitionAttempt, attemptDiagnostic } = dependencies;
   const boundedExcerpt = boundedExcerptForSubmission;
 
 const SUBMISSION_COMMIT_RE = /^[0-9a-f]{7,64}$/i;
@@ -64,6 +67,7 @@ type WaveDeliveryOptions = {
     observedAt?: string;
   };
   deliveryVerification?: VerificationResult;
+  prPort?: GitHubPrPort;
 };
 
 type ExactWaveAdmission =
@@ -1469,6 +1473,8 @@ function integrateSubmission(slug?: any, idOrRef?: any, opts?: any) {
     const admitted = validateIntegrationSubmission(slug, idOrRef, { requireAssembledWave: true });
     return admitted.ok ? integrateArtifactSubmission(slug, admitted.ticket, opts) : admitted;
   }
+  const channel = deliveryChannelFor(slug);
+  if (channel.mode === 'pr') return integrateSubmissionPr(slug, [ticket.ref], channel, opts);
   const project = readMeta(slug);
   const repo = project?.path;
   const target = opts.target;
@@ -1562,6 +1568,8 @@ function integrateSubmissionWave(slug?: string, refs?: string | readonly string[
       integration: { mode: 'source-revision', sourceRevision: revision, verify: verification, participants: assembled.participantRefs },
     };
   }
+  const channel = deliveryChannelFor(slug);
+  if (channel.mode === 'pr') return integrateSubmissionPr(slug, assembled.participantRefs, channel, opts);
   const project = readMeta(slug);
   const repo = project?.path;
   const target = opts.target;
@@ -1668,6 +1676,367 @@ function integrateSubmissionWave(slug?: string, refs?: string | readonly string[
     };
   } catch (error: any) {
     return { ok: false, reason: 'wave_delivery_error', tickets: assembled.tickets, message: integrationGitError(error) };
+  } finally {
+    lockLease.refresh();
+    releaseLock(lock, lockLease);
+  }
+}
+
+// PR delivery (US-3 "Open"). With deliveryChannel mode "pr", integrate never
+// moves the local checkout or the remote target branch. It builds the wave in
+// a temporary worktree from <remote>/<target>, pushes sidequest/wave/<waveId>,
+// opens one PR with auto-merge, and records awaiting-merge on every
+// participant. CI on that PR is the wave gate, so no local full suite runs here
+// and callers skip the publish lock. Tickets stay doing until the merge is
+// reconciled.
+let gitHubPrPort: GitHubPrPort | null = null;
+
+// Test and embedding seam: replaces the gh-backed port and returns the previous
+// one. Pass null to go back to the default gh port.
+function setGitHubPrPort(port?: GitHubPrPort | null) {
+  const previous = gitHubPrPort;
+  gitHubPrPort = port || null;
+  return previous;
+}
+
+type PrDeliveryChannel = { mode: string; remote?: string; target?: string; invalid?: string };
+
+function deliveryChannelFor(slug: any): PrDeliveryChannel {
+  try {
+    return resolveDeliveryConfig(slug) || { mode: 'local' };
+  } catch (error: any) {
+    // A board that asked for PR delivery must never fall back to moving local main.
+    let requested = false;
+    try {
+      requested = readMeta(slug)?.deliveryChannel?.mode === 'pr';
+    } catch (_) {
+      requested = false;
+    }
+    return { mode: requested ? 'pr' : 'local', invalid: error?.message || String(error) };
+  }
+}
+
+function prDeliveryUnavailable(cause: string, extra: any = {}) {
+  const text = String(cause || 'unknown failure').replace(/\s+/g, ' ').trim();
+  return Object.assign({ ok: false, reason: 'pr_delivery_unavailable', cause: text, message: `PR delivery unavailable: ${text}` }, extra);
+}
+
+// PrDeliveryUnavailableError carries the gh cause; anything else reports its message.
+function prPortFailureCause(error: any) {
+  if (error instanceof PrDeliveryUnavailableError || typeof error?.cause === 'string') return String(error.cause);
+  return String(error?.message || error || 'gh failed');
+}
+
+// Git against the delivery remote: never prompts for credentials, so a missing
+// login fails fast into pr_delivery_unavailable instead of hanging.
+function remoteGit(repo: string, args: string[]) {
+  return execFileSync('git', args, {
+    cwd: repo,
+    encoding: 'utf8',
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    timeout: 120_000,
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
+
+const PR_CONVENTIONAL_TYPES = ['feat', 'fix', 'perf', 'refactor', 'revert', 'docs', 'test', 'build', 'ci', 'style', 'chore'];
+const PR_CONVENTIONAL_TITLE_RE = /^(feat|fix|perf|refactor|revert|docs|test|build|ci|style|chore)(?:\([^)]*\))?!?:\s*/i;
+const PR_BOARD_REF_RE = /\b(?:SQ|US)-\d+\b/g;
+const PR_LOCAL_PATH_RE = /(^|[\s("'`])(?:~|[A-Za-z]:)?[\\/](?:[^\s\\/]+[\\/])+[^\s]*/g;
+const PR_SUMMARY_MAX = 100;
+const PR_BODY_TITLE_MAX = 200;
+
+// GitHub text stands alone: no board refs, no local paths, no control characters.
+function githubText(value: any, repo: string) {
+  let text = String(value || '').replace(/[\u0000-\u001f\u007f]+/g, ' ');
+  if (repo) text = text.split(repo).join('[path]');
+  return text
+    .replace(/\[path\][\\/][^\s]*/g, '[path]')
+    .replace(PR_BOARD_REF_RE, '')
+    .replace(PR_LOCAL_PATH_RE, '$1[path]')
+    .replace(/\(\s*[,;:]*\s*\)|\[\s*[,;:]*\s*\]/g, '')
+    .replace(/\s+([,;:.)\]])/g, '$1')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/^[\s,;:.\-–—]+|[\s,;:\-–—]+$/g, '')
+    .trim();
+}
+
+function clipText(value: string, max: number) {
+  return value.length <= max ? value : `${value.slice(0, max - 1).trimEnd()}…`;
+}
+
+function wavePullRequestText(repo: string, tickets: any[]) {
+  const titles = tickets.map((ticket: any) => githubText(ticket.title, repo) || 'Untitled change');
+  const types = new Set(titles.map((title: string) => PR_CONVENTIONAL_TITLE_RE.exec(title)?.[1]?.toLowerCase()).filter(Boolean));
+  const type = PR_CONVENTIONAL_TYPES.find((candidate) => types.has(candidate)) || 'chore';
+  const summaries = titles.map((title: string) => title.replace(PR_CONVENTIONAL_TITLE_RE, '').trim() || 'Untitled change');
+  const more = summaries.length > 1 ? ` (+${summaries.length - 1} more)` : '';
+  const title = `${type}: ${clipText(summaries[0]!, PR_SUMMARY_MAX - more.length)}${more}`;
+  const body = [
+    `Wave delivery of ${titles.length} change${titles.length === 1 ? '' : 's'}:`,
+    '',
+    ...titles.map((entry: string) => `- ${clipText(entry, PR_BODY_TITLE_MAX)}`),
+    '',
+    'Auto-merge is enabled; the required checks gate the merge.',
+    '',
+  ].join('\n');
+  return { title, body };
+}
+
+// SQ-106 reconcile hooks here: today an integrate on a wave that already
+// awaits merge returns the recorded PR unchanged, with no git or gh call.
+function existingWavePr(slug: any, refs: string[]) {
+  const tickets = refs.map((ref) => getTicket(slug, ref)).filter(Boolean);
+  const holder = tickets.find((ticket: any) => pendingSubmission(ticket)
+    && ticket.submission.integration?.outcome === AWAITING_MERGE_OUTCOME
+    && ticket.submission.integration?.pr);
+  if (!holder) return null;
+  const waveId = String(holder.submission.wave?.id || '');
+  const pr = readWavePr(slug, waveId) || { ...holder.submission.integration.pr };
+  const participants = waveRecordRefs(holder);
+  if (!waveId || !sameRefs(participants, refs.slice().sort())) {
+    return {
+      ok: false,
+      reason: 'assembled_wave_delivery_required',
+      ticket: holder,
+      tickets,
+      waveId,
+      pr,
+      message: `${holder.ref} is awaiting merge of PR #${pr.number} (${pr.url}) for wave ${waveId}; integrate that wave's exact participant set (${participants.join(', ')}).`,
+    };
+  }
+  const current = participants.map((ref: string) => getTicket(slug, ref));
+  return {
+    ok: true,
+    state: AWAITING_MERGE_OUTCOME,
+    existing: true,
+    waveId,
+    participants,
+    pr,
+    tickets: current,
+    ...(current.length === 1 ? { ticket: current[0] } : {}),
+    message: `Wave ${waveId} is already awaiting merge of PR #${pr.number} (${pr.url}); no new PR was opened.`,
+  };
+}
+
+// Builds the wave merge on a throwaway worktree at base. The worktree is always
+// removed; the resulting commit stays in the shared object store for the push.
+function buildPrWave(repo: string, base: string, candidates: any[]) {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'sidequest-wave-'));
+  const worktree = path.join(parent, 'wave');
+  let added = false;
+  try {
+    integrationGit(repo, ['worktree', 'add', '--detach', worktree, base]);
+    added = true;
+    for (const candidate of candidates) {
+      if (candidate.submission.noOp) continue;
+      try {
+        integrationGit(worktree, ['merge', '--no-ff', '--no-edit', candidate.pinnedCommit]);
+      } catch (error: any) {
+        const conflictedPaths = unmergedIntegrationPaths(worktree);
+        return { ok: false as const, conflict: true, candidate, conflictedPaths, message: integrationConflictMessage(error, conflictedPaths) };
+      }
+    }
+    return { ok: true as const, headSha: integrationGit(worktree, ['rev-parse', 'HEAD']).toLowerCase() };
+  } catch (error: any) {
+    return { ok: false as const, conflict: false, conflictedPaths: [] as string[], message: integrationGitError(error) };
+  } finally {
+    if (added) {
+      try {
+        integrationGit(repo, ['worktree', 'remove', '--force', worktree]);
+      } catch (_) {
+        // rmSync and prune below still clear it.
+      }
+    }
+    try {
+      fs.rmSync(parent, { recursive: true, force: true });
+    } catch (_) {
+      // Best effort: a leftover temp dir is harmless once git forgets it.
+    }
+    try {
+      integrationGit(repo, ['worktree', 'prune']);
+    } catch (_) {
+      // Best effort.
+    }
+  }
+}
+
+// Undoes this attempt's push so a failed open leaves no remote state. The
+// lease deletes the branch only while it still holds the commit pushed here;
+// deleting a PR's head branch also closes that PR.
+function withdrawWaveBranch(repo: string, remote: string, branch: string, headSha: string) {
+  try {
+    remoteGit(repo, ['push', `--force-with-lease=refs/heads/${branch}:${headSha}`, remote, `:refs/heads/${branch}`]);
+    return { withdrawn: true, note: ` The pushed branch ${branch} was deleted from ${remote}.` };
+  } catch (error: any) {
+    return { withdrawn: false, note: ` The pushed branch ${branch} is still on ${remote} (delete failed: ${integrationGitError(error)}); delete it before retrying.` };
+  }
+}
+
+async function integrateSubmissionPr(slug: any, refs: string[], channel: PrDeliveryChannel, opts?: any) {
+  opts = opts || {};
+  const requested = Array.from(new Set(refs.map((ref) => String(ref || '').trim()).filter(Boolean)));
+  if (!requested.length) return { ok: false, reason: 'wave_participants_required', message: 'Delivery requires one or more assembled participant refs.' };
+  const existing = existingWavePr(slug, requested);
+  if (existing) return existing;
+  const firstTicket = getTicket(slug, requested[0]);
+  if (channel.invalid) return prDeliveryUnavailable(`the board deliveryChannel cannot be resolved: ${channel.invalid}`, { ticket: firstTicket });
+  const remote = String(channel.remote || '');
+  const target = String(channel.target || '');
+  if (!isSafeRefComponent(remote)) return prDeliveryUnavailable(`remote ${JSON.stringify(remote)} is not a safe remote name.`, { ticket: firstTicket });
+  if (!isSafeBranchName(target)) return prDeliveryUnavailable(`target ${JSON.stringify(target)} is not a safe branch name.`, { ticket: firstTicket });
+
+  let tickets: any[];
+  let wave: any;
+  if (requested.length > 1) {
+    const assembled = exactAssembledWave(slug, requested);
+    if (!assembled.ok) return assembled;
+    tickets = assembled.tickets;
+    wave = assembled.wave;
+  } else {
+    const assembled = ensureSingletonAssembledWave(slug, requested[0], opts);
+    if (!assembled.ok) return assembled;
+    const admitted = validateIntegrationSubmission(slug, requested[0], { requireAssembledWave: true });
+    if (!admitted.ok) return admitted;
+    tickets = [admitted.ticket];
+    wave = admitted.ticket.submission.wave;
+  }
+  const singleton = tickets.length === 1;
+  const branch = waveBranchName(wave?.id);
+  const scope: any = singleton ? { ticket: tickets[0] } : { ticket: tickets[0], tickets };
+  if (typeof branch !== 'string') return Object.assign({ ok: false, reason: branch.code, message: branch.message }, scope);
+  Object.assign(scope, { waveId: wave.id, branch });
+  // The same checks markWaveAwaitingMerge runs, before anything leaves this machine.
+  const markable = awaitingMergeParticipants(slug, wave.id, { number: 0 });
+  if (!markable.ok) return Object.assign({}, markable, scope);
+
+  const repo = String(readMeta(slug)?.path || '');
+  if (!repo) return Object.assign({ ok: false, reason: 'integration_target_unavailable' }, scope);
+  let lock: string;
+  try {
+    lock = deliveryLockPath(repo);
+  } catch (error: any) {
+    return Object.assign({ ok: false, reason: 'integration_target_unavailable', message: integrationGitError(error) }, scope);
+  }
+  const lockLease = acquireLock(lock, { wait: false });
+  if (!lockLease) return deliveryInProgress(tickets[0]);
+  try {
+    lockLease.refresh();
+    // A concurrent integrate may have opened the PR between the check above and this lock.
+    const raced = existingWavePr(slug, requested);
+    if (raced) return raced;
+
+    const candidates: any[] = [];
+    for (const ticket of tickets) {
+      const submission = ticket.submission;
+      const gitRef = String(submission.gitRef || submissionGitRef(ticket));
+      let pinnedCommit: string;
+      try {
+        pinnedCommit = integrationGit(repo, ['rev-parse', '--verify', `${gitRef}^{commit}`]).toLowerCase();
+      } catch (error: any) {
+        return Object.assign({}, scope, { ok: false, reason: 'pinned_ref_missing', ticket, message: `${gitRef} is unavailable: ${integrationGitError(error)}` });
+      }
+      if (pinnedCommit !== String(submission.commit).toLowerCase()) {
+        return Object.assign({}, scope, { ok: false, reason: 'pinned_ref_mismatch', ticket, message: `${gitRef} points to ${pinnedCommit}, not submitted ${submission.commit}.` });
+      }
+      candidates.push({ ticket, submission, gitRef, pinnedCommit });
+    }
+
+    try {
+      remoteGit(repo, ['remote', 'get-url', remote]);
+    } catch (error: any) {
+      return prDeliveryUnavailable(`remote ${remote} is not configured: ${integrationGitError(error)}`, scope);
+    }
+    let base: string;
+    try {
+      remoteGit(repo, ['fetch', '--no-tags', remote, `+refs/heads/${target}:refs/remotes/${remote}/${target}`]);
+      lockLease.refresh();
+      base = integrationGit(repo, ['rev-parse', '--verify', `refs/remotes/${remote}/${target}^{commit}`]).toLowerCase();
+      const branchOnRemote = remoteGit(repo, ['ls-remote', '--heads', remote, `refs/heads/${branch}`]);
+      lockLease.refresh();
+      if (branchOnRemote) {
+        return prDeliveryUnavailable(`branch ${branch} already exists on ${remote} and no board record holds its PR; integrate never force-pushes. Close any PR from that branch and delete it, then retry.`, scope);
+      }
+    } catch (error: any) {
+      return prDeliveryUnavailable(`cannot read ${remote}/${target}: ${integrationGitError(error)}`, scope);
+    }
+
+    const built = buildPrWave(repo, base, candidates);
+    lockLease.refresh();
+    if (!built.ok) {
+      if (!built.conflict) return Object.assign({}, scope, { ok: false, reason: 'wave_delivery_error', message: built.message });
+      if (singleton) {
+        return integrationFailure(slug, tickets[0], {
+          reason: 'merge_failed',
+          conflictedPaths: built.conflictedPaths,
+          message: `${built.message} If the conflict is resolved and delivered outside this integration attempt, record that exact delivery with integrate deliveryCommit and reason; it still requires the bound review and a passing merged-tree gate.`,
+          before: base,
+          waveId: wave.id,
+          branch,
+        });
+      }
+      return Object.assign({}, scope, { ok: false, reason: 'wave_delivery_failed', before: base, conflictedPaths: built.conflictedPaths, message: built.message });
+    }
+    const headSha = built.headSha;
+    if (headSha === base) {
+      return prDeliveryUnavailable(`wave ${wave.id} adds no commits over ${remote}/${target}, so there is nothing to open a PR for. If its candidates already landed, record that delivery with integrate deliveryCommit.`, scope);
+    }
+
+    try {
+      remoteGit(repo, ['push', remote, `${headSha}:refs/heads/${branch}`]);
+    } catch (error: any) {
+      return prDeliveryUnavailable(`push of ${branch} to ${remote} failed: ${integrationGitError(error)}`, scope);
+    }
+    lockLease.refresh();
+
+    const port: GitHubPrPort = opts.prPort || gitHubPrPort || createGhPrPort();
+    const text = wavePullRequestText(repo, tickets);
+    let created: { number: number; url: string };
+    try {
+      created = await port.createPr({ cwd: repo, head: branch, base: target, title: text.title, body: text.body });
+    } catch (error: any) {
+      const withdrawal = withdrawWaveBranch(repo, remote, branch, headSha);
+      return prDeliveryUnavailable(`gh pr create failed: ${prPortFailureCause(error)}.${withdrawal.note}`, scope);
+    }
+    lockLease.refresh();
+    const pr = { number: Number(created?.number), url: String(created?.url || ''), branch, headSha, base: target, openedAt: new Date().toISOString() };
+    const opened = { number: pr.number, url: pr.url };
+    const record = validateWavePullRequest(wave.id, pr);
+    if ('code' in record) {
+      const withdrawal = withdrawWaveBranch(repo, remote, branch, headSha);
+      return prDeliveryUnavailable(`gh pr create returned an unusable PR (${record.message}).${withdrawal.note}`, Object.assign({}, scope, { pr: opened }));
+    }
+    try {
+      await port.enableAutoMerge({ cwd: repo, number: pr.number });
+    } catch (error: any) {
+      const withdrawal = withdrawWaveBranch(repo, remote, branch, headSha);
+      const orphan = withdrawal.withdrawn
+        ? ` PR #${pr.number} closed with its branch.`
+        : ` PR #${pr.number} (${pr.url}) is open without auto-merge and the board did not record it; close it before retrying.`;
+      return prDeliveryUnavailable(`gh pr merge --auto failed for PR #${pr.number}: ${prPortFailureCause(error)}.${withdrawal.note}${orphan}`, Object.assign({}, scope, { pr: opened }));
+    }
+    lockLease.refresh();
+    const marked = markWaveAwaitingMerge(slug, wave.id, pr);
+    if (!marked.ok) {
+      const withdrawal = withdrawWaveBranch(repo, remote, branch, headSha);
+      const orphan = withdrawal.withdrawn
+        ? ` PR #${pr.number} closed with its branch.`
+        : ` PR #${pr.number} (${pr.url}) is open with auto-merge enabled and the board did not record it; disable auto-merge or close it before retrying.`;
+      return Object.assign({}, marked, scope, { pr: opened, message: `${(marked as any).message || (marked as any).reason}${withdrawal.note}${orphan}` });
+    }
+    const participants: string[] = (marked as any).participants;
+    const current = participants.map((ref: string) => getTicket(slug, ref));
+    return {
+      ok: true,
+      state: AWAITING_MERGE_OUTCOME,
+      waveId: wave.id,
+      participants,
+      pr: (marked as any).pr,
+      tickets: current,
+      ...(singleton ? { ticket: current[0] } : {}),
+      message: `Opened PR #${pr.number} (${pr.url}) for wave ${wave.id} with auto-merge; ${participants.join(', ')} stay doing until the merge is reconciled by integrate.`,
+    };
   } finally {
     lockLease.refresh();
     releaseLock(lock, lockLease);
@@ -3123,7 +3492,7 @@ function submissionsPayload(slug?: any) {
 }
 
 
-  return { DEFAULT_CHECKPOINT_TTL_MIN, MAX_CHECKPOINT_TTL_MIN, checkpointTtlMs, checkpointProjection, oracleProjection, checkpointTicket, submissionReadiness, submissionProjection, pendingSubmission, submissionUsesGit, workingTreeVerification, verifyIntegration, validateIntegrationSubmission, recordDeliveredSubmission, recordAbandonedSubmission, integrateSubmission, integrateSubmissionWave, closeSubmissionAsSuperseded, submissionOwnershipFailure, submitTicket, recordVerificationCapture, recordSubmissionRejection, reconcileSubmissionRejections, reworkSubmission, clearSubmission, assembleSubmissionWave, recordSubmissionWaveDelivery, markWaveAwaitingMerge, findAwaitingMergeWaves, readWavePr, submissionsPayload };
+  return { DEFAULT_CHECKPOINT_TTL_MIN, MAX_CHECKPOINT_TTL_MIN, checkpointTtlMs, checkpointProjection, oracleProjection, checkpointTicket, submissionReadiness, submissionProjection, pendingSubmission, submissionUsesGit, workingTreeVerification, verifyIntegration, validateIntegrationSubmission, recordDeliveredSubmission, recordAbandonedSubmission, integrateSubmission, integrateSubmissionWave, closeSubmissionAsSuperseded, submissionOwnershipFailure, submitTicket, recordVerificationCapture, recordSubmissionRejection, reconcileSubmissionRejections, reworkSubmission, clearSubmission, assembleSubmissionWave, recordSubmissionWaveDelivery, markWaveAwaitingMerge, findAwaitingMergeWaves, readWavePr, setGitHubPrPort, submissionsPayload };
 }
 
 module.exports = { createSubmissions };

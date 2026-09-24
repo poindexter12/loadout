@@ -1189,6 +1189,7 @@ const {
   markWaveAwaitingMerge,
   findAwaitingMergeWaves,
   readWavePr,
+  setGitHubPrPort,
   submissionsPayload,
 } = createSubmissions({
   EXECUTOR_VERIFY_MAX,
@@ -1236,6 +1237,7 @@ const {
   recordedReviewPass,
   recordLifecycleAttempt,
   releaseLock,
+  resolveDeliveryConfig,
   setDispatchTerminal,
   spawnSync,
   stampDispatchEvent,
@@ -3650,6 +3652,7 @@ module.exports = {
   markWaveAwaitingMerge,
   findAwaitingMergeWaves,
   readWavePr,
+  setGitHubPrPort,
   pendingSubmission,
   submissionReadiness,
   submissionsPayload,
