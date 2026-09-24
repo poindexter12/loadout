@@ -8,6 +8,17 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v3.547.0 (2026-09-23)
+
+### sidequest 5.3.0 → 5.3.1
+
+#### Fixes
+
+- Make audit evidence fast and explicit (SQ-96)
+  Sidequest audit release detection is now bounded (seconds instead of minutes on repositories with many tags), and audit reports unavailable git or GitHub evidence with its cause and a non-zero exit instead of an empty clean-looking report.
+- Keep wave baselines on the delivery target (SQ-97)
+  Sidequest now assembles singleton delivery waves against the selected integration branch, so sequential local deliveries continue when local main is ahead of origin.
+
 ## v3.546.0 (2026-09-23)
 
 ### sidequest 5.2.1 → 5.3.0
