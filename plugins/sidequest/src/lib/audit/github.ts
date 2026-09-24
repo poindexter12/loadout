@@ -1,7 +1,9 @@
 'use strict';
 
 /** GitHub is intentionally injected: planning and applying must be testable offline. */
-export type GitHubExecutor = ((program: string, arguments_: string[], options?: Record<string, unknown>) => unknown) & { lastError?: string };
+export type GhExecutor = ((program: string, arguments_: string[], options?: Record<string, unknown>) => unknown) & { lastError?: string };
+/** @deprecated Use GhExecutor for new GitHub ports. */
+export type GitHubExecutor = GhExecutor;
 
 type Link = Readonly<{ ticketId: string; ref: string; provider: string; repo: string; number: number }>;
 type Ticket = Readonly<{ id: string; ref: string; status: string; submission?: { integratedAt?: string | null } | null }>;

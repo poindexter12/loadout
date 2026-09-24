@@ -5,6 +5,7 @@ const { decideSubmissionAdmission } = require("../kernel/submission");
 const { isSourceRevisionAdapterFacts, sourceRevisionBaseline } = require("../source-revision-capability.js");
 const { reviewCandidateFromSubmission, reviewRelationFor, reviewRelationRef, reviewRelationOutcome, reviewLockMessage, reviewProvenance } = require("../kernel/review-binding");
 const { assembleWave, openWave, recordAssembledWaveGate, recordWaveDelivery } = require("../kernel/wave");
+const { AWAITING_MERGE_OUTCOME, validateWavePullRequest } = require("../kernel/pr-delivery.js");
 const { isInScope, scopedPaths } = require("../scope-match");
 function createSubmissions(dependencies) {
   const { EXECUTOR_VERIFY_MAX, INTEGRATION_VERIFY_OUTPUT_TAIL_BYTES, MANUAL_VERIFY_PREFIX, acquireLock, addComment, appendReworkEvent, artifactWorkingState, autoReleasedClaimMessage, attestationErrors, boardConfig, boundedExcerptForSubmission, commitScope, completionTreeCheck, coerceStatus, createComment, crypto, dirtyPathKey, dispatchState, executionScope, ensureDir, execFileSync, fs, getTicket, integrationTarget, integrationTargetCommit, listTickets, manualVerify, normalizeDeliveryMode, normalizeIntegrationBranch, normalizeIntegrationVerifyTimeoutMs, nullableText, path, prepareComment, projectDir, putTicket, queueEventNotification, readMeta, recordedReviewPass, recordLifecycleAttempt, releaseLock, setDispatchTerminal, spawnSync, stampDispatchEvent, ticketLockPath, transaction, unregisterClaim, verifyCommandErrors, verifyCommandError, withTicketLock, transitionAttempt, attemptDiagnostic } = dependencies;
@@ -2694,6 +2695,88 @@ ${verify.outputTail}` : null
     });
     return { ok: delivery.state === "delivered", delivery };
   }
+  const AWAITING_MERGE_PRIOR_OUTCOMES = /* @__PURE__ */ new Set([void 0, null, "", "pending", "failed", AWAITING_MERGE_OUTCOME]);
+  function waveRecordRefs(ticket) {
+    const refs = ticket?.submission?.wave?.participants;
+    return Array.isArray(refs) ? refs.map((ref) => String(ref || "").trim()).filter(Boolean).sort() : [];
+  }
+  function byTicketRef(a, b) {
+    const left = String(a?.ref);
+    const right = String(b?.ref);
+    return left < right ? -1 : left > right ? 1 : 0;
+  }
+  function sameRefs(left, right) {
+    return left.length === right.length && left.every((ref, index) => ref === right[index]);
+  }
+  function awaitingMergeParticipants(slug, waveId, pr) {
+    const members = listTickets(slug).filter((ticket) => ticket?.submission?.wave?.id === waveId);
+    if (!members.length) {
+      return { ok: false, reason: "wave_not_found", message: `No submission belongs to wave ${waveId}. Assemble the wave before recording its PR.` };
+    }
+    const participants = waveRecordRefs(members[0]);
+    const memberRefs = members.map((ticket) => String(ticket.ref)).sort();
+    if (!participants.length || !sameRefs(participants, memberRefs) || members.some((ticket) => !sameRefs(waveRecordRefs(ticket), participants))) {
+      return {
+        ok: false,
+        reason: "wave_participants_changed",
+        message: `Wave ${waveId} no longer holds its assembled participant set (recorded ${participants.join(", ") || "none"}; still in the wave ${memberRefs.join(", ")}). Reassemble the wave before recording a PR.`,
+        participants,
+        members: memberRefs
+      };
+    }
+    const tickets = members.slice().sort(byTicketRef);
+    const notPending = tickets.filter((ticket) => !pendingSubmission(ticket)).map((ticket) => ticket.ref);
+    if (notPending.length) {
+      return { ok: false, reason: "wave_participant_not_pending", message: `Wave ${waveId} participant(s) ${notPending.join(", ")} no longer hold a pending submission; a PR cannot be recorded for them.`, refs: notPending };
+    }
+    for (const ticket of tickets) {
+      const integration = ticket.submission.integration || {};
+      if (!AWAITING_MERGE_PRIOR_OUTCOMES.has(integration.outcome) || integration.deliveredAt || integration.resultingHead) {
+        return { ok: false, reason: "wave_integration_settled", message: `${ticket.ref} already records integration outcome ${JSON.stringify(integration.outcome || "delivered")}; wave ${waveId} cannot move to awaiting-merge.`, ref: ticket.ref };
+      }
+      if (integration.outcome === AWAITING_MERGE_OUTCOME && integration.pr && integration.pr.number !== pr.number) {
+        return { ok: false, reason: "wave_pr_mismatch", message: `Wave ${waveId} is already awaiting PR #${integration.pr.number}; refusing to record PR #${pr.number} over it.`, pr: integration.pr };
+      }
+    }
+    return { ok: true, tickets };
+  }
+  function markWaveAwaitingMerge(slug, waveId, pr) {
+    const id = typeof waveId === "string" ? waveId.trim() : "";
+    const record = validateWavePullRequest(id, pr);
+    if ("code" in record) return { ok: false, reason: record.code, message: record.message };
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    return transaction(() => {
+      const checked = awaitingMergeParticipants(slug, id, record);
+      if (!checked.ok) return checked;
+      const tickets = checked.tickets;
+      for (const ticket of tickets) {
+        const previous = ticket.submission.integration || {};
+        const awaitingMergeAt = previous.outcome === AWAITING_MERGE_OUTCOME && previous.awaitingMergeAt ? previous.awaitingMergeAt : now;
+        ticket.submission.integration = Object.assign({}, previous, { outcome: AWAITING_MERGE_OUTCOME, pr: { ...record }, awaitingMergeAt });
+        ticket.updatedAt = now;
+        putTicket(slug, ticket);
+        queueEventNotification(slug, ticket, "status", "integration");
+      }
+      return { ok: true, waveId: id, participants: tickets.map((ticket) => ticket.ref), pr: { ...record } };
+    });
+  }
+  function findAwaitingMergeWaves(slug) {
+    const waves = /* @__PURE__ */ new Map();
+    const tickets = listTickets(slug).filter((ticket) => pendingSubmission(ticket) && ticket.submission.integration?.outcome === AWAITING_MERGE_OUTCOME && ticket.submission.wave?.id).sort(byTicketRef);
+    for (const ticket of tickets) {
+      const waveId = String(ticket.submission.wave.id);
+      const wave = waves.get(waveId) || { waveId, participants: [], pr: ticket.submission.integration.pr || null };
+      wave.participants.push(ticket.ref);
+      waves.set(waveId, wave);
+    }
+    return Array.from(waves.values()).sort((a, b) => String(a.pr?.openedAt || "").localeCompare(String(b.pr?.openedAt || "")) || a.waveId.localeCompare(b.waveId));
+  }
+  function readWavePr(slug, waveId) {
+    const id = typeof waveId === "string" ? waveId.trim() : "";
+    if (!id) return null;
+    const holders = listTickets(slug).filter((ticket) => ticket?.submission?.wave?.id === id && ticket.submission.integration?.pr).sort((a, b) => Number(pendingSubmission(b)) - Number(pendingSubmission(a)) || byTicketRef(a, b));
+    return holders.length ? { ...holders[0].submission.integration.pr } : null;
+  }
   function submissionsPayload(slug) {
     const tickets = listTickets(slug).filter((t) => !t.archived && t.status !== "done" && pendingSubmission(t)).sort((a, b) => String(a.submission.at).localeCompare(String(b.submission.at))).map((t) => ({
       ref: t.ref,
@@ -2705,6 +2788,6 @@ ${verify.outputTail}` : null
     }));
     return { tickets, count: tickets.length, delivery: boardConfig(slug)?.delivery || "merge" };
   }
-  return { DEFAULT_CHECKPOINT_TTL_MIN, MAX_CHECKPOINT_TTL_MIN, checkpointTtlMs, checkpointProjection, oracleProjection, checkpointTicket, submissionReadiness, submissionProjection, pendingSubmission, submissionUsesGit, workingTreeVerification, verifyIntegration, validateIntegrationSubmission, recordDeliveredSubmission, recordAbandonedSubmission, integrateSubmission, integrateSubmissionWave, closeSubmissionAsSuperseded, submissionOwnershipFailure, submitTicket, recordVerificationCapture, recordSubmissionRejection, reconcileSubmissionRejections, reworkSubmission, clearSubmission, assembleSubmissionWave, recordSubmissionWaveDelivery, submissionsPayload };
+  return { DEFAULT_CHECKPOINT_TTL_MIN, MAX_CHECKPOINT_TTL_MIN, checkpointTtlMs, checkpointProjection, oracleProjection, checkpointTicket, submissionReadiness, submissionProjection, pendingSubmission, submissionUsesGit, workingTreeVerification, verifyIntegration, validateIntegrationSubmission, recordDeliveredSubmission, recordAbandonedSubmission, integrateSubmission, integrateSubmissionWave, closeSubmissionAsSuperseded, submissionOwnershipFailure, submitTicket, recordVerificationCapture, recordSubmissionRejection, reconcileSubmissionRejections, reworkSubmission, clearSubmission, assembleSubmissionWave, recordSubmissionWaveDelivery, markWaveAwaitingMerge, findAwaitingMergeWaves, readWavePr, submissionsPayload };
 }
 module.exports = { createSubmissions };

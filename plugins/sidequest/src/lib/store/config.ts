@@ -1,5 +1,7 @@
 'use strict';
 
+const { isSafeBranchName, normalizeDeliveryChannel: normalizeDeliveryChannelRecord, resolveDeliveryChannel } = require('../kernel/pr-delivery.js');
+
 const DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_HOURS = 7 * 24;
 const DEFAULT_WORKTREE_RECOVERY_RETENTION_AGE_HOURS = 14 * 24;
 const DEFAULT_WORKTREE_RECOVERY_RETENTION_MAX_PER_AGENT = 3;
@@ -138,6 +140,25 @@ function normalizeDeliveryMode(mode?: any) {
     throw new Error('delivery must be "merge", "replay", or "apply".');
   }
   return value;
+}
+
+// PR delivery channel (US-3). Separate from `delivery`, which stays the git
+// method. A stored value always passed this check on write.
+function normalizeDeliveryChannel(value?: any) {
+  const normalized = normalizeDeliveryChannelRecord(value);
+  if ('code' in normalized) throw new Error(normalized.message);
+  return normalized;
+}
+
+// The one resolver later tickets read: { mode, remote, target } with defaults
+// local / origin / the board's integrationBranch. Accepts a board slug, the
+// stored project meta, or a boardConfig result. Returns null for an unknown
+// slug, like boardConfig.
+function resolveDeliveryConfig(board?: any) {
+  const source = typeof board === 'string' ? readMeta(board) : board;
+  if (!source || typeof source !== 'object') return null;
+  const channel = source.deliveryChannel == null ? null : normalizeDeliveryChannel(source.deliveryChannel);
+  return resolveDeliveryChannel(channel, normalizeIntegrationBranch(source.integrationBranch));
 }
 
 function normalizeIntegrationMode(mode?: any) {
@@ -335,6 +356,7 @@ function boardConfig(slug?: any) {
     integrationMode: normalizeIntegrationMode(meta.integrationMode),
     integrationBranch: normalizeIntegrationBranch(meta.integrationBranch),
     delivery: normalizeDeliveryMode(meta.delivery),
+    deliveryChannel: resolveDeliveryConfig(meta),
     integrationVerifyTimeoutMs: normalizeIntegrationVerifyTimeoutMs(meta.integrationVerifyTimeoutMs),
     worktreeIsolation: normalizeWorktreeIsolation(meta.worktreeIsolation),
     worktreeBase: normalizeWorktreeBase(meta.worktreeBase),
@@ -387,6 +409,11 @@ function setBoardConfig(slug?: any, patch?: any) {
     if (Object.prototype.hasOwnProperty.call(patch, 'delivery')) {
       meta.delivery = normalizeDeliveryMode(patch.delivery);
     }
+    if (Object.prototype.hasOwnProperty.call(patch, 'deliveryChannel')) {
+      // Replaces the whole channel; null clears it back to the local default.
+      if (patch.deliveryChannel == null) delete meta.deliveryChannel;
+      else meta.deliveryChannel = normalizeDeliveryChannel(patch.deliveryChannel);
+    }
     if (Object.prototype.hasOwnProperty.call(patch, 'integrationVerifyTimeoutMs')) {
       meta.integrationVerifyTimeoutMs = normalizeIntegrationVerifyTimeoutMs(patch.integrationVerifyTimeoutMs);
     }
@@ -417,6 +444,10 @@ function setBoardConfig(slug?: any, patch?: any) {
     if (Object.prototype.hasOwnProperty.call(patch, 'worktreeDependencyPaths')) {
       meta.worktreeDependencyPaths = normalizeWorktreeDependencyPaths(patch.worktreeDependencyPaths);
     }
+    const channel = resolveDeliveryConfig(meta);
+    if (channel.mode === 'pr' && !isSafeBranchName(channel.target)) {
+      throw new Error(`deliveryChannel mode "pr" needs a PR base branch that does not start with "-"; set deliveryChannel.target or integrationBranch (resolved target: ${JSON.stringify(channel.target)}).`);
+    }
     putProject(slug, meta);
     return { ok: true, config: boardConfig(slug) };
   });
@@ -434,7 +465,7 @@ function effectiveScope(slug?: any, filesOrTicket?: any) {
 }
 
 
-  return { defaultProjectName, normalizeAlwaysInScope, normalizeReadOnlyDeniedTools, normalizeGeneratedPairPath, normalizeGeneratedPairs, generatedPathFor, trackedGeneratedPaths, derivedGeneratedPairs, defaultAlwaysInScope, normalizeDeliveryMode, normalizeIntegrationMode, normalizeIntegrationBranch, normalizeWorktreeIsolation, normalizeWorktreeBase, normalizeNotIntegratedSalvageAgeHours, normalizeWorktreeRecoveryRetentionAgeHours, normalizeWorktreeRecoveryRetentionMaxPerAgent, normalizeAutoApproveTestScope, normalizeAutoApproveScope, normalizeWorktreeSetup, normalizeWorktreeDependencyPaths, normalizeIntegrationVerifyTimeoutMs, hasOriginRemote, integrationBranchExists, integrationTarget, integrationTargetCommit, normalizeBoardName, boardConfig, setBoardConfig, effectiveScope };
+  return { defaultProjectName, normalizeAlwaysInScope, normalizeReadOnlyDeniedTools, normalizeGeneratedPairPath, normalizeGeneratedPairs, generatedPathFor, trackedGeneratedPaths, derivedGeneratedPairs, defaultAlwaysInScope, normalizeDeliveryMode, normalizeDeliveryChannel, resolveDeliveryConfig, normalizeIntegrationMode, normalizeIntegrationBranch, normalizeWorktreeIsolation, normalizeWorktreeBase, normalizeNotIntegratedSalvageAgeHours, normalizeWorktreeRecoveryRetentionAgeHours, normalizeWorktreeRecoveryRetentionMaxPerAgent, normalizeAutoApproveTestScope, normalizeAutoApproveScope, normalizeWorktreeSetup, normalizeWorktreeDependencyPaths, normalizeIntegrationVerifyTimeoutMs, hasOriginRemote, integrationBranchExists, integrationTarget, integrationTargetCommit, normalizeBoardName, boardConfig, setBoardConfig, effectiveScope };
 }
 
 module.exports = { createConfig };
