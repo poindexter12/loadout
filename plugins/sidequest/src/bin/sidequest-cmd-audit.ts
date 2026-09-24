@@ -9,9 +9,10 @@ async function cmdAudit(opts: any) {
   const report = auditProject(project, store, Boolean(opts.apply));
   if (opts.json) {
     console.log(JSON.stringify(report, null, 2));
-    return report;
+  } else {
+    console.log(formatAudit(report));
   }
-  console.log(formatAudit(report));
+  if (report.evidenceUnavailable) process.exitCode = 2;
   return report;
 }
 

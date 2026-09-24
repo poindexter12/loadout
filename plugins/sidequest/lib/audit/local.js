@@ -20,7 +20,7 @@ function refPattern(ref) {
 function commitsFromLog(log) {
   return log.split("").flatMap((record) => {
     if (!record.trim()) return [];
-    const [sha, date, subject, ...body] = record.split("");
+    const [sha, date, subject, ...body] = record.trim().split("");
     if (!sha || !date || subject === void 0) return [];
     return [{ sha, date, subject, body: body.join("") }];
   });
@@ -74,13 +74,9 @@ function releasedIn(ticket, git) {
   if (ticket.status !== "done") return null;
   const commit = deliveryCommit(ticket);
   if (!commit) return { version: null, tag: null, reason: "delivery_commit_unavailable" };
-  const tags = execute(git, ["tag", "--list", "v*", "--sort=creatordate"]);
-  if (tags === null) return null;
-  for (const tag of tags.split(/\r?\n/).filter(Boolean)) {
-    if (execute(git, ["merge-base", "--is-ancestor", commit, tag]) !== null) {
-      return { version: tag.slice(1), tag };
-    }
-  }
-  return null;
+  const tags = execute(git, ["tag", "--contains", commit, "--list", "v*", "--sort=creatordate"]);
+  if (tags === null) return { version: null, tag: null, reason: "git_evidence_unavailable" };
+  const tag = tags.split(/\r?\n/).find(Boolean);
+  return tag ? { version: tag.slice(1), tag } : null;
 }
-module.exports = { findLandedFixes, releasedIn };
+module.exports = { deliveryCommit, findLandedFixes, releasedIn };

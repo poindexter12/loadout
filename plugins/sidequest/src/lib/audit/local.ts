@@ -14,6 +14,7 @@ type Ticket = {
 
 type CommitEvidence = { sha: string; subject: string; date: string };
 type LoggedCommit = CommitEvidence & { body: string };
+type ReleaseResult = { version: string | null; tag: string | null; reason?: 'delivery_commit_unavailable' | 'git_evidence_unavailable' };
 
 type LandedFix = {
   ticketId: string;
@@ -49,7 +50,7 @@ function refPattern(ref: string) {
 function commitsFromLog(log: string): LoggedCommit[] {
   return log.split('\x1e').flatMap((record) => {
     if (!record.trim()) return [];
-    const [sha, date, subject, ...body] = record.split('\x1f');
+    const [sha, date, subject, ...body] = record.trim().split('\x1f');
     if (!sha || !date || subject === undefined) return [];
     return [{ sha, date, subject, body: body.join('\x1f') }];
   });
@@ -110,22 +111,16 @@ function findLandedFixes(tickets: Ticket[], git: GitExecutor): LandedFix[] | nul
   });
 }
 
-/**
- * Reports the first release tag containing a done ticket's recorded delivery commit.
- */
-function releasedIn(ticket: Ticket, git: GitExecutor) {
+/** Reports the first release tag containing a done ticket's recorded delivery commit. */
+function releasedIn(ticket: Ticket, git: GitExecutor): ReleaseResult | null {
   if (ticket.status !== 'done') return null;
   const commit = deliveryCommit(ticket);
   if (!commit) return { version: null, tag: null, reason: 'delivery_commit_unavailable' };
 
-  const tags = execute(git, ['tag', '--list', 'v*', '--sort=creatordate']);
-  if (tags === null) return null;
-  for (const tag of tags.split(/\r?\n/).filter(Boolean)) {
-    if (execute(git, ['merge-base', '--is-ancestor', commit, tag]) !== null) {
-      return { version: tag.slice(1), tag };
-    }
-  }
-  return null;
+  const tags = execute(git, ['tag', '--contains', commit, '--list', 'v*', '--sort=creatordate']);
+  if (tags === null) return { version: null, tag: null, reason: 'git_evidence_unavailable' };
+  const tag = tags.split(/\r?\n/).find(Boolean);
+  return tag ? { version: tag.slice(1), tag } : null;
 }
 
-module.exports = { findLandedFixes, releasedIn };
+module.exports = { deliveryCommit, findLandedFixes, releasedIn };
