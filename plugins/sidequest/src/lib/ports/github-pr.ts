@@ -48,7 +48,7 @@ type GhPrPayload = Readonly<{
 type RollupEntry = Readonly<{ name?: unknown; context?: unknown; workflowName?: unknown; conclusion?: unknown; state?: unknown; status?: unknown }>;
 
 function defaultExecutor(program: string, arguments_: string[], options?: Record<string, unknown>): unknown {
-  return execFileSync(program, arguments_, options as import('node:child_process').ExecFileSyncOptions);
+  return execFileSync(program, arguments_, { ...options, windowsHide: true } as import('node:child_process').ExecFileSyncOptions);
 }
 
 function errorCause(error: unknown): string {

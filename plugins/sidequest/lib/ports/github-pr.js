@@ -34,7 +34,7 @@ class PrDeliveryUnavailableError extends Error {
 const FAILURE_STATES = /* @__PURE__ */ new Set(["FAILURE", "CANCELLED", "TIMED_OUT", "ERROR"]);
 const PENDING_STATES = /* @__PURE__ */ new Set(["PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "EXPECTED", "ACTION_REQUIRED"]);
 function defaultExecutor(program, arguments_, options) {
-  return execFileSync(program, arguments_, options);
+  return execFileSync(program, arguments_, { ...options, windowsHide: true });
 }
 function errorCause(error) {
   return String(error?.message || error || "gh command failed").replace(/\s+/g, " ").trim();
