@@ -16,7 +16,7 @@ function localGit(options: { log?: string; fragments?: string; changelog?: strin
     if (args[0] === 'log') return options.log ?? '';
     if (args[0] === 'ls-tree') return options.fragments ?? '';
     if (args[0] === 'show') return options.changelog ?? '';
-    if (args.join(' ') === 'tag --list v* --sort=creatordate') return options.tags ?? '';
+    if (args.join(' ') === 'tag --contains abc1234 --list v* --sort=creatordate') return options.tags ?? '';
     if (args[0] === 'merge-base') return options.ancestors?.[args[args.length - 1] || ''] ?? null;
     throw new Error(`unexpected git command: ${args.join(' ')}`);
   };
@@ -74,21 +74,19 @@ test('findLandedFixes returns null when git evidence cannot be read', () => {
 });
 
 test('releasedIn returns null for a done ticket whose delivery has no release tag', () => {
-  const { git } = localGit({ tags: 'v3.1.0\n', ancestors: { 'v3.1.0': null } });
+  const { git } = localGit({ tags: '' });
   const ticket = activeTicket({ status: 'done', submission: { integration: { deliveryCommit: 'abc1234' } } });
 
   assert.equal(releasedIn(ticket, git), null);
 });
 
-test('releasedIn returns the earliest tag that contains the recorded delivery', () => {
-  const { git, calls } = localGit({
-    tags: 'v3.1.0\nv3.2.0\nv3.3.0\n',
-    ancestors: { 'v3.1.0': null, 'v3.2.0': '' },
-  });
+test('releasedIn returns the earliest containing tag with one bounded lookup', () => {
+  const { git, calls } = localGit({ tags: 'v3.2.0\nv3.3.0\n' });
   const ticket = activeTicket({ status: 'done', completion: { delivery: { commit: 'abc1234' } } });
 
   assert.deepEqual(releasedIn(ticket, git), { version: '3.2.0', tag: 'v3.2.0' });
-  assert.deepEqual(calls.filter((args) => args[0] === 'merge-base').map((args) => args.at(-1)), ['v3.1.0', 'v3.2.0']);
+  assert.deepEqual(calls.filter((args) => args[0] === 'tag'), [['tag', '--contains', 'abc1234', '--list', 'v*', '--sort=creatordate']]);
+  assert.equal(calls.some((args) => args[0] === 'merge-base'), false);
 });
 
 test('releasedIn explains a done ticket without a recoverable delivery commit', () => {
@@ -105,5 +103,9 @@ test('releasedIn explains a done ticket without a recoverable delivery commit', 
 test('releasedIn returns null rather than throwing when tag lookup fails', () => {
   const ticket = activeTicket({ status: 'done', submission: { integration: { deliveryCommit: 'abc1234' } } });
 
-  assert.equal(releasedIn(ticket, () => null), null);
+  assert.deepEqual(releasedIn(ticket, () => null), {
+    version: null,
+    tag: null,
+    reason: 'git_evidence_unavailable',
+  });
 });

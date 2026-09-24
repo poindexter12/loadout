@@ -18,14 +18,13 @@ async function resolveProject(opts) {
       fail(`--project "${arg}" matches ${res.matches.length} boards named "${arg}" — pass the path to disambiguate:
 ${lines}`);
     }
-    if (path.isAbsolute(arg)) {
-      let isDir = false;
-      try {
-        isDir = (await fs.stat(arg)).isDirectory();
-      } catch (_) {
-      }
-      if (isDir) return store.ensureProject(store.nearestRepoRoot(path.resolve(arg)), opts.name);
+    const resolvedPath = path.resolve(arg);
+    let isDir = false;
+    try {
+      isDir = (await fs.stat(resolvedPath)).isDirectory();
+    } catch (_) {
     }
+    if (isDir) return store.ensureProject(store.nearestRepoRoot(resolvedPath), opts.name);
     const known = Array.from(new Set(res.known || []));
     fail(
       `--project "${arg}" does not match any registered board.` + (known.length ? ` Known projects: ${known.join(", ")}` : " No projects are registered yet.")

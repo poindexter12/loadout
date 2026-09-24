@@ -26,7 +26,8 @@ function command(gh, arguments_) {
   try {
     const output = gh("gh", arguments_, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
     return String(output).trim();
-  } catch (_error) {
+  } catch (error) {
+    if (!gh.lastError) gh.lastError = String(error?.message || error || "gh command failed").replace(/\s+/g, " ").trim();
     return null;
   }
 }
@@ -109,15 +110,17 @@ function planGithub({ links, tickets, released, gh, repo: projectRepo }) {
   const repos = [...new Set([...linksByIssue.values()].flat().map((link) => link.repo).concat(typeof projectRepo === "string" && projectRepo.trim() ? [projectRepo.trim().toLowerCase()] : []))].sort();
   const issuesByRepo = /* @__PURE__ */ new Map();
   const warnings = [];
+  let evidenceUnavailable = false;
   for (const repo of repos) {
     const payload = jsonCommand(gh, ["issue", "list", "--repo", repo, "--state", "all", "--limit", "1000", "--json", "number,state,labels,title"]);
     if (!Array.isArray(payload)) {
-      warnings.push(`gh unavailable for ${repo}; GitHub sections skipped.`);
+      evidenceUnavailable = true;
+      warnings.push(`gh unavailable for ${repo}; GitHub sections skipped: ${gh.lastError || "invalid GitHub response"}.`);
       continue;
     }
     issuesByRepo.set(repo, payload.map(normalizedIssue).filter((issue) => issue !== null));
   }
-  if (repos.length && !issuesByRepo.size) return Object.freeze({ linkedDrift: [], untrackedIssues: [], warnings: Object.freeze(["gh not authenticated; GitHub sections skipped.", ...warnings]) });
+  if (repos.length && !issuesByRepo.size) return Object.freeze({ linkedDrift: [], untrackedIssues: [], warnings: Object.freeze(["gh not authenticated; GitHub sections skipped.", ...warnings]), evidenceUnavailable });
   const linkedDrift = [];
   const untrackedIssues = [];
   for (const repo of repos) {
@@ -145,7 +148,7 @@ function planGithub({ links, tickets, released, gh, repo: projectRepo }) {
       if (actions.length) linkedDrift.push(Object.freeze({ repo, number: issue.number, ticketIds: Object.freeze(ticketIds), refs: Object.freeze(refs), current: Object.freeze({ state: issue.state, labels: Object.freeze([...issue.labels]) }), desired: Object.freeze({ state: desired.state, labels: Object.freeze(desired.labels) }), actions: Object.freeze(actions) }));
     }
   }
-  return Object.freeze({ linkedDrift: Object.freeze(linkedDrift), untrackedIssues: Object.freeze(untrackedIssues), warnings: Object.freeze(warnings) });
+  return Object.freeze({ linkedDrift: Object.freeze(linkedDrift), untrackedIssues: Object.freeze(untrackedIssues), warnings: Object.freeze(warnings), evidenceUnavailable });
 }
 function paginatedArrays(output) {
   try {

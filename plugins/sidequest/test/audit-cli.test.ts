@@ -13,8 +13,7 @@ function git(args: string[]) {
   if (command.startsWith('log origin/main ')) return 'abcdef123456\x1f2025-01-01T00:00:00.000Z\x1fFix audit SQ-72\x1fFix audit SQ-72\x1e';
   if (command === 'ls-tree -r --name-only origin/main -- .release/unreleased') return '.release/unreleased/SQ-72.md\n';
   if (command === 'show origin/main:CHANGELOG.md') return '# Changelog\n';
-  if (command === 'tag --list v* --sort=creatordate') return 'v3.600.0\n';
-  if (command === 'merge-base --is-ancestor delivery v3.600.0') return '';
+  if (command === 'tag --contains delivery --list v* --sort=creatordate') return 'v3.600.0\n';
   if (command === 'remote get-url origin') return 'git@github.com:owner/repo.git';
   throw new Error(`unexpected git ${command}`);
 }
@@ -80,7 +79,7 @@ test('audit turns a timed-out GitHub executor into a warning without throwing', 
   }) as any);
   const report = auditReport({ tickets: [ticket], links: [], git, gh: timedGh, repo: 'owner/repo' });
   assert.equal(report.untrackedIssues.length, 0);
-  assert.match(formatAudit(report), /WARNINGS \(2\).*gh unavailable for owner\/repo; GitHub sections skipped\./s);
+  assert.match(formatAudit(report), /WARNINGS \(2\).*gh unavailable for owner\/repo; GitHub sections skipped: timed out \(ETIMEDOUT\)\./s);
   assert.deepEqual(calls[0], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 15_000, killSignal: 'SIGKILL' });
 });
 
@@ -92,5 +91,33 @@ test('audit Git executor bounds timed-out commands and returns null', () => {
     throw timeout;
   }) as any);
   assert.equal(timedGit(['remote', 'get-url', 'origin']), null);
-  assert.deepEqual(calls[0], { cwd: '/repo', encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 15_000, killSignal: 'SIGKILL' });
+  assert.match(timedGit.lastError || '', /timed out.*ETIMEDOUT/);
+  assert.deepEqual(calls[0], { cwd: '/repo', encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 15_000, maxBuffer: 16 * 1024 * 1024, killSignal: 'SIGKILL' });
+});
+
+test('audit deduplicates release tag lookups by delivery commit', () => {
+  const calls: string[] = [];
+  const sharedDelivery = { submission: { integration: { deliveryCommit: 'delivery' } } };
+  const report = auditReport({
+    tickets: [
+      { ...linkedTicket, id: 'tk_three', ref: 'SQ-74', status: 'done', ...sharedDelivery },
+      { ...linkedTicket, id: 'tk_four', ref: 'SQ-75', status: 'done', ...sharedDelivery },
+    ],
+    links: [
+      { ticketId: 'tk_three', ref: 'SQ-74', provider: 'github', repo: 'owner/repo', number: 3 },
+      { ticketId: 'tk_four', ref: 'SQ-75', provider: 'github', repo: 'owner/repo', number: 3 },
+    ],
+    git: (args: string[]) => { calls.push(args.join(' ')); return git(args); },
+    gh: gh({ [list]: [{ number: 3, state: 'OPEN', labels: [] }] }), repo: 'owner/repo',
+  });
+  assert.equal(report.evidenceUnavailable, false);
+  assert.equal(calls.filter((command) => command.startsWith('tag --contains delivery ')).length, 1);
+});
+
+test('audit marks unavailable evidence and includes the underlying failure', () => {
+  const unavailableGit: any = () => null;
+  unavailableGit.lastError = 'spawn git ENOENT';
+  const report = auditReport({ tickets: [ticket], links: [], git: unavailableGit, gh: gh({}), repo: null });
+  assert.equal(report.evidenceUnavailable, true);
+  assert.match(formatAudit(report), /spawn git ENOENT/);
 });

@@ -22,11 +22,14 @@ async function resolveProject(opts: any) {
     // idempotent keying means this can never produce a duplicate of an existing
     // board. Anything non-absolute (a name, a relative ref) falls through to the
     // registered-only error below.
-    if (path.isAbsolute(arg)) {
-      let isDir = false;
-      try { isDir = (await fs.stat(arg)).isDirectory(); } catch (_: any) { /* missing/unreadable -> not a dir */ }
-      if (isDir) return store.ensureProject(store.nearestRepoRoot(path.resolve(arg)), opts.name);
-    }
+    // A filesystem directory identifies its board, whether supplied as an absolute
+    // path or as a shell-relative path such as --project .. This keeps CLI
+    // invocations anchored to the repository instead of treating `.` as a board
+    // name.
+    const resolvedPath = path.resolve(arg);
+    let isDir = false;
+    try { isDir = (await fs.stat(resolvedPath)).isDirectory(); } catch (_: any) { /* missing/unreadable -> not a dir */ }
+    if (isDir) return store.ensureProject(store.nearestRepoRoot(resolvedPath), opts.name);
     const known = Array.from(new Set(res.known || []));
     fail(
       `--project "${arg}" does not match any registered board.` +
