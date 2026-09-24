@@ -370,6 +370,7 @@ function createPulse(dependencies: any) {
 function createBoardWatch(dependencies: any) {
   const {
     board,
+    awaitingMergeWavesProvider,
     changesPayload,
     ciRunsProvider,
     includeAllTickets = false,
@@ -385,6 +386,8 @@ function createBoardWatch(dependencies: any) {
   const seen = new Set<string>();
   const seenCiRuns = new Set<string>();
   const seenUncheckedHeads = new Set<string>();
+  const seenPrStates = new Set<string>();
+  const seenPrDegraded = new Set<string>();
   let cursor = new Date().toISOString();
   const commentPattern = /\b(?:out[- ]of[- ]scope|widen scope|scope request|technical_blocker|blocked|handback)\b/i;
   const markerPattern = /^\[sidequest:/i;
@@ -443,7 +446,39 @@ function createBoardWatch(dependencies: any) {
     }
   }
 
-  function poll(): void {
+  async function pollDelivery(): Promise<void> {
+    if (!awaitingMergeWavesProvider) return;
+    try {
+      const result = await awaitingMergeWavesProvider();
+      if (result?.degraded && !seenPrDegraded.has(result.degraded)) {
+        seenPrDegraded.add(result.degraded);
+        writeLine(`PR delivery degraded: ${result.degraded}`);
+      }
+      for (const wave of result?.waves || []) {
+        const status = wave.status;
+        if (!status) continue;
+        const failed = status.state === 'CLOSED' || status.checks === 'failure';
+        const terminal = status.state === 'MERGED' || failed;
+        const stateKey = `${status.number}|${status.state}|${status.checks}|${(status.failingChecks || []).join(',')}`;
+        if (wave.recorded) seenPrStates.add(stateKey);
+        if (!terminal || seenPrStates.has(stateKey)) continue;
+        seenPrStates.add(stateKey);
+        const refs = (wave.participants || []).join(', ');
+        if (status.state === 'MERGED') writeLine(`PR #${status.number} merged: run integrate to close ${refs}`);
+        else writeLine(`PR #${status.number} failed: ${(status.failingChecks || []).join(', ') || 'closed'}`);
+        result.recordState?.(wave, status.state);
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!seenPrDegraded.has(message)) {
+        seenPrDegraded.add(message);
+        writeLine(`PR delivery degraded: ${message}`);
+      }
+    }
+  }
+
+  function poll(): Promise<void> {
+    let delivery: Promise<void> = Promise.resolve();
     try {
       const changes = changesPayload(boardIdentity, cursor);
       if (changes?.project !== boardIdentity) throw new Error('watch received changes for a different board identity.');
@@ -460,10 +495,11 @@ function createBoardWatch(dependencies: any) {
         writeLine(`${ticket.ref} ${ticket.status} ${event.type} ${event.author || '-'} ${event.excerpt || '-'}`);
       }
       pollCi();
-      return;
+      delivery = pollDelivery();
     } catch (error: unknown) {
       writeError(`sidequest watch: ${error instanceof Error ? error.message : String(error)}`);
     }
+    return delivery;
   }
 
   function start(intervalSeconds = 30): void {

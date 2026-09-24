@@ -589,3 +589,45 @@ test('watch reports poll failures and keeps polling', () => {
   assert.deepEqual(errors, ['sidequest watch: database busy']);
   assert.deepEqual(lines, ['SQ-1 doing dead - executor died']);
 });
+
+
+test('watch emits each terminal PR delivery transition once', async () => {
+  const lines: string[] = [];
+  const recorded: string[] = [];
+  const statuses = [
+    { number: 42, state: 'OPEN', checks: 'pending', failingChecks: [] },
+    { number: 42, state: 'MERGED', checks: 'success', failingChecks: [] },
+    { number: 42, state: 'MERGED', checks: 'success', failingChecks: [] },
+  ];
+  const boardWatch = createBoardWatch({
+    board: 'board-a',
+    changesPayload: () => ({ project: 'board-a', serverTime: new Date().toISOString(), tickets: [] }),
+    awaitingMergeWavesProvider: async () => ({
+      waves: [{ participants: ['SQ-1', 'SQ-2'], status: statuses.shift(), recorded: false }],
+      recordState: (_wave: unknown, state: string) => recorded.push(state),
+    }),
+    writeLine: (line: string) => lines.push(line),
+  });
+
+  await boardWatch.poll();
+  await boardWatch.poll();
+  await boardWatch.poll();
+
+  assert.deepEqual(lines, ['PR #42 merged: run integrate to close SQ-1, SQ-2']);
+  assert.deepEqual(recorded, ['MERGED']);
+});
+
+test('watch reports a degraded PR provider once without interrupting polling', async () => {
+  const lines: string[] = [];
+  const boardWatch = createBoardWatch({
+    board: 'board-a',
+    changesPayload: () => ({ project: 'board-a', serverTime: new Date().toISOString(), tickets: [] }),
+    awaitingMergeWavesProvider: async () => ({ waves: [], degraded: 'gh unavailable' }),
+    writeLine: (line: string) => lines.push(line),
+  });
+
+  await boardWatch.poll();
+  await boardWatch.poll();
+
+  assert.deepEqual(lines, ['PR delivery degraded: gh unavailable']);
+});
