@@ -181,6 +181,7 @@ test('local tags from an unpublished attempt explain how to recover', async (t) 
   const integration = context.commit('integrate');
   // Annotated and stamped by this clone's identity, exactly as a cut makes its tags.
   context.git('tag', '-a', 'v3.208.0', '-m', 'v3.208.0', integration);
+  context.git('tag', '-a', 'sidequest-v3.6.18', '-m', 'sidequest-v3.6.18', integration);
 
   await assert.rejects(
     () => cut({ repoRoot: context.root, skipTests: true, log: () => {} }),
@@ -188,6 +189,12 @@ test('local tags from an unpublished attempt explain how to recover', async (t) 
   );
   assert.equal(context.version('sidequest'), '3.6.17');
   assert.equal(context.git('rev-list', '-n', '1', 'refs/tags/v3.208.0'), integration, 'the existing tag did not move');
+
+  const forced = await cut({ repoRoot: context.root, skipTests: true, force: true, log: () => {} });
+  assert.equal(forced.status, 'cut');
+  for (const tag of forced.plan.tags) {
+    assert.equal(context.git('rev-list', '-n', '1', `refs/tags/${tag}`), forced.commit, `${tag} moved to the new release commit`);
+  }
 });
 
 test('a local-only tag another remote fetched is named as foreign, with the tagOpt fix instead of the leftover advice', async (t) => {

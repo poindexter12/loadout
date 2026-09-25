@@ -88,7 +88,7 @@ export function createGit({ cwd, run = spawnRunner(cwd), dryRun = false, onComma
     cherryPick: (rev) => invoke(['cherry-pick', '-x', rev], { skipOnDryRun: true }),
     add: (paths) => invoke(['add', '--', ...paths], { skipOnDryRun: true }),
     commit: (message) => invoke(['commit', '-m', message], { skipOnDryRun: true }),
-    tag: (name, message) => invoke(['tag', '-a', name, '-m', message], { skipOnDryRun: true }),
+    tag: (name, message, { force = false } = {}) => invoke(['tag', ...(force ? ['-f'] : []), '-a', name, '-m', message], { skipOnDryRun: true }),
     pushAtomic: (remote, refspecs) => invoke(['push', '--atomic', remote, ...refspecs], { skipOnDryRun: true }),
   };
 }
