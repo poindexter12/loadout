@@ -281,10 +281,59 @@ test('verify capture returns a timeout with partial output', async () => {
       { status: capture.status, exitCode: capture.exitCode },
       { status: 'timeout', exitCode: 2 },
     );
-    assert.equal(capture.reason, `Verification timed out after ${timeoutMilliseconds}ms; partial output captured.`);
+    assert.ok(
+      capture.reason.startsWith(`Verification timed out after ${timeoutMilliseconds}ms; partial output captured.`),
+      capture.reason,
+    );
     assert.match(fs.readFileSync(capture.logPath, 'utf8'), /partial-output/);
   } finally {
     deleteLog(capture);
+  }
+});
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error: any) {
+    return error?.code === 'EPERM';
+  }
+}
+
+// SQ-124: spawnSync's timeout only signalled the shell, so a verify command's own children (per-file
+// `node --test` runners in the field) kept running and starved the next verification. Both the executor
+// capture path and the merged-tree integration path (store/submissions.ts) reach runProcessVerification,
+// so each entry point is exercised with a long-sleeping grandchild that must not survive the timeout.
+test('verify timeout kills the whole process tree, not just the shell', { skip: process.platform === 'win32' }, async () => {
+  const { runProcessVerification } = require('../lib/ports/process.js');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sidequest-verify-tree-'));
+  const entryPoints: Record<string, (command: string) => Promise<{ status: string; reason?: string; evidence?: string; logPath: string }>> = {
+    'executor verify capture': (command) => runVerifyCapture(command, directory, 1500),
+    'integration verify port': async (command) => runProcessVerification(
+      { kind: 'command', command, evidenceContract: 'command output' },
+      { cwd: directory, timeoutMilliseconds: 1500, logPath: path.join(directory, 'integration-verify.log') },
+    ),
+  };
+  const survivors: number[] = [];
+  try {
+    for (const [label, run] of Object.entries(entryPoints)) {
+      const pidFile = path.join(directory, `${label.replace(/\s+/g, '-')}.pid`);
+      const result = await run(`sh -c 'sleep 300 & echo $! > "${pidFile}"; wait'`);
+      const grandchild = Number(fs.readFileSync(pidFile, 'utf8').trim());
+      assert.ok(Number.isInteger(grandchild) && grandchild > 1, `${label}: grandchild pid recorded`);
+      const alive = processAlive(grandchild);
+      if (alive) survivors.push(grandchild);
+      assert.equal(result.status, 'timeout', label);
+      assert.equal(alive, false, `${label}: grandchild ${grandchild} survived the verification timeout`);
+      assert.match(result.reason ?? result.evidence ?? '', /Killed process group \d+ \(SIGTERM[^)]*\); no descendants survived\./, label);
+      assert.match(fs.readFileSync(result.logPath, 'utf8'), /\[sidequest\] Verification timed out\. Killed process group \d+ /, `${label}: log records the tree kill`);
+      fs.rmSync(result.logPath, { force: true });
+    }
+  } finally {
+    for (const pid of survivors) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 

@@ -127,6 +127,62 @@ function shellCannotParsePosixSyntax(logPath, exitCode, shell) {
 function processTimedOut(error) {
   return error instanceof Error && "code" in error && error.code === "ETIMEDOUT";
 }
+const PROCESS_GROUP_TERMINATE_GRACE_MILLISECONDS = 5e3;
+const PROCESS_GROUP_KILL_SETTLE_MILLISECONDS = 1e3;
+const PROCESS_GROUP_POLL_MILLISECONDS = 50;
+const ownsProcessGroup = process.platform !== "win32";
+function sleepSynchronously(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+function processGroupAlive(groupId) {
+  try {
+    process.kill(-groupId, 0);
+    return true;
+  } catch (error) {
+    return error instanceof Error && "code" in error && error.code === "EPERM";
+  }
+}
+function waitForProcessGroupExit(groupId, milliseconds) {
+  const deadline = Date.now() + milliseconds;
+  while (processGroupAlive(groupId)) {
+    if (Date.now() >= deadline) return false;
+    sleepSynchronously(PROCESS_GROUP_POLL_MILLISECONDS);
+  }
+  return true;
+}
+function signalProcessGroup(groupId, signal) {
+  try {
+    process.kill(-groupId, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function terminateProcessGroup(groupId) {
+  if (!ownsProcessGroup || typeof groupId !== "number" || !Number.isInteger(groupId) || groupId <= 1 || groupId === process.pid) return null;
+  const signals = [];
+  if (!signalProcessGroup(groupId, "SIGTERM")) return Object.freeze({ groupId, signals: Object.freeze(signals), survivors: false });
+  signals.push("SIGTERM");
+  if (!waitForProcessGroupExit(groupId, PROCESS_GROUP_TERMINATE_GRACE_MILLISECONDS) && signalProcessGroup(groupId, "SIGKILL")) {
+    signals.push("SIGKILL");
+    waitForProcessGroupExit(groupId, PROCESS_GROUP_KILL_SETTLE_MILLISECONDS);
+  }
+  return Object.freeze({ groupId, signals: Object.freeze(signals), survivors: processGroupAlive(groupId) });
+}
+function processGroupTerminationNote(termination) {
+  if (termination === null) return "The verify process tree was not signalled beyond the shell (no owned process group on this platform).";
+  if (termination.signals.length === 0) return `Process group ${termination.groupId} had already exited; no descendants survived.`;
+  const sequence = termination.signals.includes("SIGKILL") ? `SIGTERM, then SIGKILL after a ${PROCESS_GROUP_TERMINATE_GRACE_MILLISECONDS}ms grace period` : "SIGTERM";
+  return termination.survivors ? `Killed process group ${termination.groupId} (${sequence}), but descendants were still present afterwards.` : `Killed process group ${termination.groupId} (${sequence}); no descendants survived.`;
+}
+function recordProcessGroupTermination(logPath, note) {
+  try {
+    fs.appendFileSync(logPath, `
+[sidequest] Verification timed out. ${note}
+`);
+  } catch {
+  }
+}
 function failedResult(requirement, status, command, logPath, reason, exitCode, tail, timeoutMilliseconds, shell) {
   const identity = exitCode == null ? status : `${status}:exit-${exitCode}`;
   return Object.freeze({
@@ -166,6 +222,7 @@ function runProcessVerification(requirement, options = {}) {
         cwd: options.cwd || process.cwd(),
         env: options.environment,
         windowsHide: true,
+        detached: ownsProcessGroup,
         timeout: timeoutMilliseconds,
         stdio: ["ignore", log, log]
       });
@@ -178,10 +235,12 @@ function runProcessVerification(requirement, options = {}) {
   } finally {
     fs.rmSync(scriptPath, { force: true });
   }
-  const tail = outputTail(logPath, outputTailBytes);
   if (processTimedOut(outcome?.error)) {
-    return failedResult(requirement, "timeout", command, logPath, `Verification timed out after ${timeoutMilliseconds}ms; partial output captured.`, 2, tail, timeoutMilliseconds, shell.label);
+    const note = processGroupTerminationNote(terminateProcessGroup(outcome?.pid));
+    recordProcessGroupTermination(logPath, note);
+    return failedResult(requirement, "timeout", command, logPath, `Verification timed out after ${timeoutMilliseconds}ms; partial output captured. ${note}`, 2, outputTail(logPath, outputTailBytes), timeoutMilliseconds, shell.label);
   }
+  const tail = outputTail(logPath, outputTailBytes);
   const exitCode = markerExitCode(logPath);
   if (exitCode === null) {
     const shellExitCode = outcome?.status ?? (outcome?.error ? 2 : null);

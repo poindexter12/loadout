@@ -142,6 +142,84 @@ function processTimedOut(error: unknown): boolean {
   return error instanceof Error && 'code' in error && error.code === 'ETIMEDOUT';
 }
 
+// spawnSync's timeout signals only the shell it started. A verify command's own children (for
+// example per-file `node --test` runners) share the shell's process group, so they would keep
+// running after the timeout and starve the next verification. POSIX verification therefore runs
+// in its own process group, and a timeout terminates that whole group.
+const PROCESS_GROUP_TERMINATE_GRACE_MILLISECONDS = 5_000;
+const PROCESS_GROUP_KILL_SETTLE_MILLISECONDS = 1_000;
+const PROCESS_GROUP_POLL_MILLISECONDS = 50;
+const ownsProcessGroup = process.platform !== 'win32';
+
+type ProcessGroupTermination = Readonly<{
+  groupId: number;
+  signals: readonly NodeJS.Signals[];
+  survivors: boolean;
+}>;
+
+function sleepSynchronously(milliseconds: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function processGroupAlive(groupId: number): boolean {
+  try {
+    process.kill(-groupId, 0);
+    return true;
+  } catch (error: unknown) {
+    return error instanceof Error && 'code' in error && error.code === 'EPERM';
+  }
+}
+
+function waitForProcessGroupExit(groupId: number, milliseconds: number): boolean {
+  const deadline = Date.now() + milliseconds;
+  while (processGroupAlive(groupId)) {
+    if (Date.now() >= deadline) return false;
+    sleepSynchronously(PROCESS_GROUP_POLL_MILLISECONDS);
+  }
+  return true;
+}
+
+function signalProcessGroup(groupId: number, signal: NodeJS.Signals): boolean {
+  try {
+    process.kill(-groupId, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function terminateProcessGroup(groupId: number | undefined): ProcessGroupTermination | null {
+  // A group id of 0 or 1 would address this process's own group or every process; never signal it.
+  if (!ownsProcessGroup || typeof groupId !== 'number' || !Number.isInteger(groupId) || groupId <= 1 || groupId === process.pid) return null;
+  const signals: NodeJS.Signals[] = [];
+  if (!signalProcessGroup(groupId, 'SIGTERM')) return Object.freeze({ groupId, signals: Object.freeze(signals), survivors: false });
+  signals.push('SIGTERM');
+  if (!waitForProcessGroupExit(groupId, PROCESS_GROUP_TERMINATE_GRACE_MILLISECONDS) && signalProcessGroup(groupId, 'SIGKILL')) {
+    signals.push('SIGKILL');
+    waitForProcessGroupExit(groupId, PROCESS_GROUP_KILL_SETTLE_MILLISECONDS);
+  }
+  return Object.freeze({ groupId, signals: Object.freeze(signals), survivors: processGroupAlive(groupId) });
+}
+
+function processGroupTerminationNote(termination: ProcessGroupTermination | null): string {
+  if (termination === null) return 'The verify process tree was not signalled beyond the shell (no owned process group on this platform).';
+  if (termination.signals.length === 0) return `Process group ${termination.groupId} had already exited; no descendants survived.`;
+  const sequence = termination.signals.includes('SIGKILL')
+    ? `SIGTERM, then SIGKILL after a ${PROCESS_GROUP_TERMINATE_GRACE_MILLISECONDS}ms grace period`
+    : 'SIGTERM';
+  return termination.survivors
+    ? `Killed process group ${termination.groupId} (${sequence}), but descendants were still present afterwards.`
+    : `Killed process group ${termination.groupId} (${sequence}); no descendants survived.`;
+}
+
+function recordProcessGroupTermination(logPath: string, note: string): void {
+  try {
+    fs.appendFileSync(logPath, `\n[sidequest] Verification timed out. ${note}\n`);
+  } catch {
+    // The returned evidence still carries the note when the log cannot be appended.
+  }
+}
+
 function failedResult(requirement: VerificationRequirement, status: 'failed_suite' | 'toolchain_missing' | 'could_not_run' | 'timeout', command: string, logPath: string, reason: string, exitCode: number | null, tail: string, timeoutMilliseconds?: number, shell?: string): VerificationResult {
   const identity = exitCode == null ? status : `${status}:exit-${exitCode}`;
   return Object.freeze({
@@ -182,6 +260,7 @@ export function runProcessVerification(requirement: VerificationRequirement, opt
         cwd: options.cwd || process.cwd(),
         env: options.environment,
         windowsHide: true,
+        detached: ownsProcessGroup,
         timeout: timeoutMilliseconds,
         stdio: ['ignore', log, log],
       });
@@ -194,10 +273,12 @@ export function runProcessVerification(requirement: VerificationRequirement, opt
   } finally {
     fs.rmSync(scriptPath, { force: true });
   }
-  const tail = outputTail(logPath, outputTailBytes);
   if (processTimedOut(outcome?.error)) {
-    return failedResult(requirement, 'timeout', command, logPath, `Verification timed out after ${timeoutMilliseconds}ms; partial output captured.`, 2, tail, timeoutMilliseconds, shell.label);
+    const note = processGroupTerminationNote(terminateProcessGroup(outcome?.pid));
+    recordProcessGroupTermination(logPath, note);
+    return failedResult(requirement, 'timeout', command, logPath, `Verification timed out after ${timeoutMilliseconds}ms; partial output captured. ${note}`, 2, outputTail(logPath, outputTailBytes), timeoutMilliseconds, shell.label);
   }
+  const tail = outputTail(logPath, outputTailBytes);
   const exitCode = markerExitCode(logPath);
   if (exitCode === null) {
     const shellExitCode = outcome?.status ?? (outcome?.error ? 2 : null);
