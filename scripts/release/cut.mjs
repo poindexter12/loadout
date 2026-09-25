@@ -555,9 +555,9 @@ export async function cut(options = {}) {
     git.add([...new Set([...touched, ...consumed])].sort());
     git.commit(message);
     const commit = git.revParse('HEAD');
-    git.tag(plan.tag, message);
+    git.tag(plan.tag, message, { force });
     for (const plugin of plan.plugins) {
-      git.tag(`${plugin.name}-v${plugin.to}`, `${plugin.name} ${plugin.to} (${plan.tag})`);
+      git.tag(`${plugin.name}-v${plugin.to}`, `${plugin.name} ${plugin.to} (${plan.tag})`, { force });
     }
     plan.commit = commit;
 

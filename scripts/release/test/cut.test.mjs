@@ -161,6 +161,7 @@ test('local tags from an unpublished attempt explain how to recover', async (t) 
   context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
   const integration = context.commit('integrate');
   context.git('tag', 'v3.208.0', integration);
+  context.git('tag', 'sidequest-v3.6.18', integration);
 
   await assert.rejects(
     () => cut({ repoRoot: context.root, skipTests: true, log: () => {} }),
@@ -168,6 +169,12 @@ test('local tags from an unpublished attempt explain how to recover', async (t) 
   );
   assert.equal(context.version('sidequest'), '3.6.17');
   assert.equal(context.git('rev-list', '-n', '1', 'refs/tags/v3.208.0'), integration, 'the existing tag did not move');
+
+  const forced = await cut({ repoRoot: context.root, skipTests: true, force: true, log: () => {} });
+  assert.equal(forced.status, 'cut');
+  for (const tag of forced.plan.tags) {
+    assert.equal(context.git('rev-list', '-n', '1', `refs/tags/${tag}`), forced.commit, `${tag} moved to the new release commit`);
+  }
 });
 
 test('a plugin whose manifest and marketplace entry disagree blocks the cut', async (t) => {
