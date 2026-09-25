@@ -1,6 +1,7 @@
 'use strict';
 
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationRef } = require('../kernel/review-binding');
+const { classifyVerificationKind, verificationRequirement } = require('../kernel/verification.js');
 
 function createTickets(dependencies: any) {
   const {
@@ -1069,6 +1070,62 @@ function activeClaimScopeRefusal(slug?: any, ticket?: any, files?: any, patch?: 
   return `${refusal} Use \`sidequest scope-request ${ticket.ref} --file <path> --by ${ticket.claim.by}\` to request approval.`;
 }
 
+// The requirement that merged-tree verification of a pending submission runs:
+// an orchestrator re-pin wins, else the requirement pinned at dispatch. Kept in
+// step with pinnedVerificationRequirement in submissions.ts.
+function pendingSubmissionPinnedRequirement(t?: any) {
+  const state = dispatchState(t);
+  return t.submission?.verificationRequirement
+    || state?.verificationRequirement
+    || state?.lifecycleAttempt?.verificationRequirement
+    || t.lifecycleAttempt?.verificationRequirement
+    || null;
+}
+
+// A submission's verify is not frozen. Once the dispatch that produced it is
+// terminal, a control-plane verify amendment re-pins the requirement that the
+// next integration (integrate, groomClose delivery, wave delivery) runs, and
+// records the old and new commands as an orchestrator decision. The executor's
+// own submission.verify is left untouched: it is what the executor ran. Pure:
+// it plans the re-pin (or throws) before the update mutates anything.
+function pendingSubmissionVerificationRepin(t?: any, by?: any) {
+  if (!pendingSubmission(t)) return null;
+  const state = dispatchState(t);
+  if (state && !state.terminalAt) return null; // the live dispatch sync owns this case
+  const previous = pendingSubmissionPinnedRequirement(t);
+  const oldCommand = String(previous?.command || t.submission?.verify || '').trim() || null;
+  const recorded = String(t.executorVerify || '').trim();
+  const artifact = String(t.executorAttestationArtifact || '').trim();
+  const kind = classifyVerificationKind(recorded, t.executorVerifyKind);
+  const command = ['suite', 'command'].includes(kind) ? recorded : '';
+  const commit = String(t.submission?.commit || t.submission?.sourceRevision?.value || '').slice(0, 12);
+  if (!command && !['manual', 'attestation'].includes(kind)) {
+    throw new Error(`${t.ref} has a pending submission (candidate ${commit || 'unknown'}); its verify can be re-pinned only to one runnable command, \`manual: <what to check>\`, or an attestation. Nothing changed: the next integration verification still runs ${oldCommand ? JSON.stringify(oldCommand) : '<none>'}.`);
+  }
+  const next = verificationRequirement({
+    kind,
+    command: command || undefined,
+    evidence: recorded || artifact || undefined,
+    artifact: t.executorAttestationArtifact,
+  });
+  if (JSON.stringify(previous || null) === JSON.stringify(next)) return null;
+  const record = Object.freeze({
+    at: new Date().toISOString(),
+    by: String(by || '').trim() || null,
+    oldCommand,
+    newCommand: String(next.command || '').trim() || null,
+    appliesTo: 'pending_submission',
+    candidate: commit || null,
+  });
+  return { requirement: next, record };
+}
+
+function applyPendingSubmissionRepin(t?: any, repin?: any) {
+  if (!repin) return;
+  t.submission.verificationRequirement = repin.requirement;
+  t.verificationAmendments = [...(Array.isArray(t.verificationAmendments) ? t.verificationAmendments : []), repin.record].slice(-20);
+}
+
 // Apply a partial update. Only known fields are written; unknown keys ignored.
 // Locked (like every other mutator) so a concurrent comment/claim/link append
 // can never be silently overwritten by an update whose read predates it.
@@ -1153,6 +1210,7 @@ function updateTicket(slug?: any, idOrRef?: any, patch?: any, reviewTarget?: any
       const verifyTicket = Object.assign({}, t, { executorVerifyKind, executorAttestationArtifact, executorVerify });
       const verifyError = authoringVerifyError(verifyTicket, readMeta(slug)?.path);
       if (verifyError) throw new Error(`${verifyError} Keep acceptance criteria in a comment, not the verify field.`);
+      const submissionRepin = pendingSubmissionVerificationRepin(verifyTicket, patch.by);
       if (t.claim || dispatchState(t)) {
         const verifyError = dispatchVerifyCommandError(verifyTicket, readMeta(slug)?.path);
         if (verifyError) throw new Error(verifyError);
@@ -1161,6 +1219,7 @@ function updateTicket(slug?: any, idOrRef?: any, patch?: any, reviewTarget?: any
       t.executorAttestationArtifact = executorAttestationArtifact;
       t.executorVerify = executorVerify;
       syncLiveDispatchVerification(slug, t, { by: patch.by });
+      applyPendingSubmissionRepin(t, submissionRepin);
     }
     // A provenance stamp may ride along a patch (e.g. the dashboard completing a
     // ticket). Permissive like the routing fields above: a valid stamp is set, a
