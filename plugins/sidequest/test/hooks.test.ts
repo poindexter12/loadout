@@ -2402,6 +2402,148 @@ test('worktree isolation guard: allows unparseable read and verify-wrapper Bash 
   }
 });
 
+// SQ-133. A security guard must never allow a call just because the board is contended: whoever holds the lock
+// could then walk any guarded call past it. Each guard below reaches its board read while another process holds
+// the board lock, and must refuse with the retry guidance instead of allowing. Since SQ-125 every store open is
+// read-only, and under WAL a BEGIN IMMEDIATE writer never blocks a reader, so the holder takes the one lock a
+// reader cannot pass: exclusive locking mode plus a read inside BEGIN EXCLUSIVE.
+function failClosedBoardHome(): string {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-fail-closed-'));
+  execFileSync(process.execPath, ['-e', `require(${JSON.stringify(path.join(PLUGIN_ROOT, 'lib', 'store.js'))}).listProjects({ all: true });`], {
+    env: { ...process.env, SIDEQUEST_HOME: home },
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  assert.ok(fs.existsSync(path.join(home, 'sidequest.db')), 'fixture board database was not created');
+  return home;
+}
+
+function holdExclusiveBoardLock(home: string): Promise<ReturnType<typeof spawn>> {
+  const holder = spawn(process.execPath, ['-e', `
+    const { DatabaseSync } = require('node:sqlite');
+    const database = new DatabaseSync(${JSON.stringify(path.join(home, 'sidequest.db'))});
+    database.exec('PRAGMA locking_mode = EXCLUSIVE');
+    database.exec('BEGIN EXCLUSIVE');
+    database.prepare('SELECT COUNT(*) AS n FROM sqlite_master').get();
+    process.stdout.write('locked');
+    setInterval(() => {}, 1000);
+  `], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  return new Promise((resolve, reject) => {
+    holder.once('error', reject);
+    holder.stdout.once('data', () => resolve(holder));
+    holder.stderr.once('data', (data: Buffer) => reject(new Error(String(data))));
+  });
+}
+
+async function runGuardUnderBoardLock(script: string, payload: Record<string, unknown>) {
+  const home = failClosedBoardHome();
+  const holder = await holdExclusiveBoardLock(home);
+  try {
+    const started = Date.now();
+    const result = await runHookProcessForBudget(script, payload, { SIDEQUEST_HOME: home });
+    return { ...result, elapsedMs: Date.now() - started };
+  } finally {
+    holder.kill();
+  }
+}
+
+function assertBoardContentionDeny(result: HookProcessResult & { elapsedMs: number }, hook: string): void {
+  const details = `exit=${result.status}\nstderr=${JSON.stringify(result.stderr)}\nstdout=${JSON.stringify(result.stdout)}`;
+  assert.equal(result.status, 0, `${hook} must deny through its hook output, not crash:\n${details}`);
+  let output: any = null;
+  try { output = JSON.parse(result.stdout); } catch (_) {}
+  assert.equal(output?.hookSpecificOutput?.hookEventName, 'PreToolUse', `${hook} must emit one PreToolUse decision:\n${details}`);
+  assert.equal(output?.hookSpecificOutput?.permissionDecision, 'deny', `${hook} allowed a call it could not check:\n${details}`);
+  const reason = String(output.hookSpecificOutput.permissionDecisionReason);
+  assert.match(reason, new RegExp(`sidequest: ${hook} refused this call because of board lock contention`));
+  assert.match(reason, /The call did not run\. Retry the same call in a few seconds/);
+  assert.match(result.stderr, /fail-closed, board lock busy/);
+  assert.doesNotMatch(result.stderr, /fail-open/);
+  // The lock wait is bounded by the budget itself: the guard refuses on its first 1.5s exhaustion and never retries,
+  // so it fits its 10s hook timeout. Assert that bound from the guard's own report rather than wall-clock time,
+  // which on a loaded machine measures process startup, not lock waiting.
+  assert.match(
+    result.stderr,
+    /after 1 attempt, each waiting up to 1500ms \(hook lock budget\)/,
+    `${hook} must refuse on its first hook-budget exhaustion (took ${result.elapsedMs}ms):\n${details}`,
+  );
+}
+
+function executorPayload(toolName: string, toolInput: Record<string, unknown>, cwd?: string): Record<string, unknown> {
+  return {
+    hook_event_name: 'PreToolUse',
+    session_id: `sq-133-fail-closed-${crypto.randomUUID()}`,
+    agent_id: `sq-133-agent-${crypto.randomUUID()}`,
+    agent_type: 'sidequest-exec-high',
+    tool_name: toolName,
+    tool_input: toolInput,
+    ...(cwd ? { cwd } : {}),
+  };
+}
+
+test('fail-closed guard: guard-destructive-git denies a push it cannot check while the board lock is held', async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-fail-closed-push-'));
+  gitFixture(['init', '-q', '-b', 'main'], repo);
+  gitFixture(['remote', 'add', 'origin', path.join(repo, 'missing-remote.git')], repo);
+  // Unlocked, this push is allowed: an unregistered repo integrates on main, so main is not the published branch
+  // it guards. Only the board can say that, so under contention the guard refuses instead of guessing.
+  const result = await runGuardUnderBoardLock(path.join(HOOKS, 'guard-destructive-git.js'), {
+    hook_event_name: 'PreToolUse',
+    session_id: `sq-133-fail-closed-${crypto.randomUUID()}`,
+    tool_name: 'Bash',
+    tool_input: { command: 'git push origin main' },
+    cwd: repo,
+  });
+  assertBoardContentionDeny(result, 'guard-destructive-git');
+});
+
+test('fail-closed guard: guard-shared-checkout-git denies an executor git write it cannot check while the board lock is held', async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-fail-closed-commit-'));
+  gitFixture(['init', '-q', '-b', 'main'], repo);
+  const result = await runGuardUnderBoardLock(
+    path.join(HOOKS, 'guard-shared-checkout-git.js'),
+    executorPayload('Bash', { command: 'git commit -m checked' }, repo),
+  );
+  assertBoardContentionDeny(result, 'guard-shared-checkout-git');
+});
+
+test('fail-closed guard: guard-worktree-isolation denies an executor write it cannot check while the board lock is held', async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-fail-closed-write-'));
+  gitFixture(['init', '-q', '-b', 'main'], repo);
+  const result = await runGuardUnderBoardLock(
+    GUARD_WORKTREE_ISOLATION,
+    executorPayload('Write', { file_path: path.join(repo, 'checked.txt'), content: 'checked\n' }, repo),
+  );
+  assertBoardContentionDeny(result, 'guard-worktree-isolation');
+});
+
+test('fail-closed guard: force-exec-bypass denies an executor call it cannot check while the board lock is held', async () => {
+  const result = await runGuardUnderBoardLock(FORCE_BYPASS, executorPayload('Bash', { command: 'ls' }));
+  assertBoardContentionDeny(result, 'force-exec-bypass');
+});
+
+test('fail-closed guard: guard-home-delete and read-only git stay unrefused while the board lock is held', async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-fail-closed-read-'));
+  gitFixture(['init', '-q', '-b', 'main'], repo);
+  const home = failClosedBoardHome();
+  const holder = await holdExclusiveBoardLock(home);
+  try {
+    for (const [script, payload] of [
+      [GUARD_HOME_DELETE, executorPayload('Bash', { command: 'rm -rf ./build' }, repo)],
+      [path.join(HOOKS, 'guard-shared-checkout-git.js'), executorPayload('Bash', { command: 'git status --short' }, repo)],
+      [path.join(HOOKS, 'guard-destructive-git.js'), executorPayload('Bash', { command: 'git log --oneline -1' }, repo)],
+    ] as const) {
+      const result = await runHookProcessForBudget(script, payload, { SIDEQUEST_HOME: home });
+      const hook = path.basename(script, '.js');
+      assert.equal(result.status, 0, `${hook}: ${result.stderr}`);
+      assert.equal(result.stdout.trim(), '', `${hook} must not decide a call that never needs the board: ${result.stdout}`);
+      assert.doesNotMatch(result.stderr, /board lock busy/, hook);
+    }
+  } finally {
+    holder.kill();
+  }
+});
+
 test('heredoc guard: denies a heredoc in a dispatched isolated worktree', () => {
   const ticket = addStopTicket('heredoc isolation guard');
   const sessionId = `heredoc-isolated-${++sqSeq}`;

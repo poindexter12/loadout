@@ -6,13 +6,6 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
-var __commonJS = (cb, mod) => function __require() {
-  try {
-    return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
-  } catch (e) {
-    throw mod = 0, e;
-  }
-};
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
     for (let key of __getOwnPropNames(from))
@@ -31,35 +24,77 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // src/hooks/shared/sqlite-budget.ts
-var require_sqlite_budget = __commonJS({
-  "src/hooks/shared/sqlite-budget.ts"() {
-    "use strict";
-    var import_node_path4 = __toESM(require("node:path"));
-    var SQLITE_BUSY_POLICY_KEY = /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy");
-    var HOOK_SQLITE_BUSY_TIMEOUT_MS = 1500;
-    function failOpen(error) {
-      const hook = import_node_path4.default.basename(process.argv[1] || "hook", ".js");
-      process.stderr.write(`sidequest: ${hook} allowed this event without its board check (fail-open, board lock busy): ${error.message}
-`);
-      process.exit(0);
-    }
-    Reflect.set(globalThis, SQLITE_BUSY_POLICY_KEY, Object.freeze({
-      label: "hook",
-      timeoutMs: HOOK_SQLITE_BUSY_TIMEOUT_MS,
-      attempts: 1,
-      onExhausted: failOpen
-    }));
+var import_node_fs = __toESM(require("node:fs"));
+var import_node_path = __toESM(require("node:path"));
+var SQLITE_BUSY_POLICY_KEY = /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy");
+var HOOK_SQLITE_BUSY_TIMEOUT_MS = 1500;
+var failClosedEvent = null;
+function hookName() {
+  return import_node_path.default.basename(process.argv[1] || "hook", ".js");
+}
+function installBudget(onExhausted) {
+  Reflect.set(globalThis, SQLITE_BUSY_POLICY_KEY, Object.freeze({
+    label: "hook",
+    timeoutMs: HOOK_SQLITE_BUSY_TIMEOUT_MS,
+    attempts: 1,
+    onExhausted
+  }));
+}
+function writeStderr(text) {
+  try {
+    import_node_fs.default.writeSync(2, text);
+  } catch (_) {
   }
-});
+}
+function failOpen(error) {
+  writeStderr(`sidequest: ${hookName()} allowed this event without its board check (fail-open, board lock busy): ${error.message}
+`);
+  process.exit(0);
+}
+function failClosed(error) {
+  const hook = hookName();
+  const reason = `sidequest: ${hook} refused this call because of board lock contention: another process holds the Sidequest board database lock, so this security guard could not finish its board check, and it refuses rather than allow the call unchecked. The call did not run. Retry the same call in a few seconds; if it keeps failing, a long-running Sidequest writer is holding the board lock.`;
+  let denied = false;
+  try {
+    import_node_fs.default.writeSync(1, JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: failClosedEvent || "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: reason
+      }
+    }));
+    denied = true;
+  } catch (_) {
+  }
+  writeStderr(`${denied ? "" : `${reason}
+`}sidequest: ${hook} refused this event without its board check (fail-closed, board lock busy): ${error.message}
+`);
+  process.exit(denied ? 0 : 2);
+}
+function boardBusy(error) {
+  if (!(error instanceof Error)) return false;
+  const code = Reflect.get(error, "code");
+  const errcode = Reflect.get(error, "errcode");
+  if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" || errcode === 5 || errcode === 6) return true;
+  if (/database (?:table )?is (?:locked|busy)/i.test(error.message)) return true;
+  return boardBusy(Reflect.get(error, "cause"));
+}
+installBudget(failOpen);
+function failClosedOnBoardBusy(hookEventName = "PreToolUse") {
+  failClosedEvent = hookEventName;
+  installBudget(failClosed);
+}
+function refuseWhenBoardBusy(error) {
+  if (failClosedEvent && boardBusy(error)) failClosed(error);
+}
 
 // src/hooks/guard-shared-checkout-git.ts
-var import_sqlite_budget = __toESM(require_sqlite_budget());
-var import_node_fs3 = __toESM(require("node:fs"));
-var import_node_path3 = __toESM(require("node:path"));
+var import_node_fs4 = __toESM(require("node:fs"));
+var import_node_path4 = __toESM(require("node:path"));
 var import_node_child_process = require("node:child_process");
 
 // src/hooks/shared/input.ts
-var import_node_fs = __toESM(require("node:fs"));
+var import_node_fs2 = __toESM(require("node:fs"));
 
 // src/lib/exec-names.ts
 var EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
@@ -94,7 +129,7 @@ function isRecord(value) {
 }
 function readStdin() {
   try {
-    const raw = import_node_fs.default.readFileSync(0, "utf8");
+    const raw = import_node_fs2.default.readFileSync(0, "utf8");
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!isRecord(parsed)) return null;
@@ -172,16 +207,16 @@ function writeDeny(hookEventName, permissionDecisionReason) {
 }
 
 // src/hooks/shared/runtime-identity.ts
-var import_node_fs2 = __toESM(require("node:fs"));
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_fs3 = __toESM(require("node:fs"));
+var import_node_path3 = __toESM(require("node:path"));
 
 // src/hooks/shared/paths.ts
-var import_node_path = __toESM(require("node:path"));
+var import_node_path2 = __toESM(require("node:path"));
 function pluginRoot() {
-  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path.default.join(__dirname, "..");
+  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path2.default.join(__dirname, "..");
 }
 function runtimeModule(name) {
-  return import_node_path.default.join(pluginRoot(), "lib", `${name}.js`);
+  return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
 // src/hooks/shared/runtime-identity.ts
@@ -201,12 +236,14 @@ function isolationExpectation(input, agentId, executor, includeSessionFallback =
     const store = require(runtimeModule("store"));
     const found = store.dispatchIsolationExpectation({ agentId, executor, sessionId: hookSessionId(input), observedWorktree });
     return agentId && !includeSessionFallback && found?.matchedBy === "session" ? null : found;
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return null;
   }
 }
 
 // src/hooks/guard-shared-checkout-git.ts
+failClosedOnBoardBusy();
 var MUTATING_SUBCOMMANDS = /* @__PURE__ */ new Set([
   "add",
   "am",
@@ -236,9 +273,9 @@ function commandText(input) {
 }
 function canonicalPath(value) {
   try {
-    return import_node_fs3.default.realpathSync.native(value);
+    return import_node_fs4.default.realpathSync.native(value);
   } catch (_) {
-    return import_node_path3.default.resolve(value);
+    return import_node_path4.default.resolve(value);
   }
 }
 function samePath(left, right) {
@@ -253,7 +290,7 @@ function gitInvocation(command) {
   return { target, subcommand: match[2].toLowerCase() };
 }
 function targetRoot(target, cwd) {
-  const directory = import_node_path3.default.resolve(cwd || ".", target);
+  const directory = import_node_path4.default.resolve(cwd || ".", target);
   try {
     return canonicalPath((0, import_node_child_process.execFileSync)("git", ["rev-parse", "--show-toplevel"], {
       cwd: directory,
@@ -274,16 +311,17 @@ function main() {
   const agentId = stringField(input, "agent_id", "agentId");
   const executor = stringField(input, "agent_type", "agentType", "subagent_type");
   if (!agentId || !executorAgent(executor)) return;
-  const found = isolationExpectation(input, agentId, executor, false);
-  if (!found || found.sharedTree || found.terminal || !found.projectPath) return;
   const invocation = gitInvocation(commandText(input));
   if (!invocation || !MUTATING_SUBCOMMANDS.has(invocation.subcommand)) return;
+  const found = isolationExpectation(input, agentId, executor, false);
+  if (!found || found.sharedTree || found.terminal || !found.projectPath) return;
   if (samePath(targetRoot(invocation.target, stringField(input, "cwd")), found.projectPath)) {
     writeDeny("PreToolUse", refusal());
   }
 }
 try {
   main();
-} catch (_) {
+} catch (error) {
+  refuseWhenBoardBusy(error);
   process.exit(0);
 }

@@ -6,13 +6,6 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
-var __commonJS = (cb, mod) => function __require() {
-  try {
-    return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
-  } catch (e) {
-    throw mod = 0, e;
-  }
-};
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
     for (let key of __getOwnPropNames(from))
@@ -31,34 +24,76 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // src/hooks/shared/sqlite-budget.ts
-var require_sqlite_budget = __commonJS({
-  "src/hooks/shared/sqlite-budget.ts"() {
-    "use strict";
-    var import_node_path4 = __toESM(require("node:path"));
-    var SQLITE_BUSY_POLICY_KEY = /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy");
-    var HOOK_SQLITE_BUSY_TIMEOUT_MS = 1500;
-    function failOpen(error) {
-      const hook = import_node_path4.default.basename(process.argv[1] || "hook", ".js");
-      process.stderr.write(`sidequest: ${hook} allowed this event without its board check (fail-open, board lock busy): ${error.message}
-`);
-      process.exit(0);
-    }
-    Reflect.set(globalThis, SQLITE_BUSY_POLICY_KEY, Object.freeze({
-      label: "hook",
-      timeoutMs: HOOK_SQLITE_BUSY_TIMEOUT_MS,
-      attempts: 1,
-      onExhausted: failOpen
-    }));
+var import_node_fs = __toESM(require("node:fs"));
+var import_node_path = __toESM(require("node:path"));
+var SQLITE_BUSY_POLICY_KEY = /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy");
+var HOOK_SQLITE_BUSY_TIMEOUT_MS = 1500;
+var failClosedEvent = null;
+function hookName() {
+  return import_node_path.default.basename(process.argv[1] || "hook", ".js");
+}
+function installBudget(onExhausted) {
+  Reflect.set(globalThis, SQLITE_BUSY_POLICY_KEY, Object.freeze({
+    label: "hook",
+    timeoutMs: HOOK_SQLITE_BUSY_TIMEOUT_MS,
+    attempts: 1,
+    onExhausted
+  }));
+}
+function writeStderr(text) {
+  try {
+    import_node_fs.default.writeSync(2, text);
+  } catch (_) {
   }
-});
+}
+function failOpen(error) {
+  writeStderr(`sidequest: ${hookName()} allowed this event without its board check (fail-open, board lock busy): ${error.message}
+`);
+  process.exit(0);
+}
+function failClosed(error) {
+  const hook = hookName();
+  const reason = `sidequest: ${hook} refused this call because of board lock contention: another process holds the Sidequest board database lock, so this security guard could not finish its board check, and it refuses rather than allow the call unchecked. The call did not run. Retry the same call in a few seconds; if it keeps failing, a long-running Sidequest writer is holding the board lock.`;
+  let denied = false;
+  try {
+    import_node_fs.default.writeSync(1, JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: failClosedEvent || "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: reason
+      }
+    }));
+    denied = true;
+  } catch (_) {
+  }
+  writeStderr(`${denied ? "" : `${reason}
+`}sidequest: ${hook} refused this event without its board check (fail-closed, board lock busy): ${error.message}
+`);
+  process.exit(denied ? 0 : 2);
+}
+function boardBusy(error) {
+  if (!(error instanceof Error)) return false;
+  const code = Reflect.get(error, "code");
+  const errcode = Reflect.get(error, "errcode");
+  if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" || errcode === 5 || errcode === 6) return true;
+  if (/database (?:table )?is (?:locked|busy)/i.test(error.message)) return true;
+  return boardBusy(Reflect.get(error, "cause"));
+}
+installBudget(failOpen);
+function failClosedOnBoardBusy(hookEventName = "PreToolUse") {
+  failClosedEvent = hookEventName;
+  installBudget(failClosed);
+}
+function refuseWhenBoardBusy(error) {
+  if (failClosedEvent && boardBusy(error)) failClosed(error);
+}
 
 // src/hooks/guard-worktree-isolation.ts
-var import_sqlite_budget = __toESM(require_sqlite_budget());
-var import_node_path3 = __toESM(require("node:path"));
+var import_node_path4 = __toESM(require("node:path"));
 var import_node_child_process = require("node:child_process");
 
 // src/hooks/shared/input.ts
-var import_node_fs = __toESM(require("node:fs"));
+var import_node_fs2 = __toESM(require("node:fs"));
 
 // src/lib/exec-names.ts
 var EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
@@ -93,7 +128,7 @@ function isRecord(value) {
 }
 function readStdin() {
   try {
-    const raw = import_node_fs.default.readFileSync(0, "utf8");
+    const raw = import_node_fs2.default.readFileSync(0, "utf8");
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!isRecord(parsed)) return null;
@@ -171,17 +206,17 @@ function writeDeny(hookEventName, permissionDecisionReason) {
 }
 
 // src/hooks/shared/paths.ts
-var import_node_path = __toESM(require("node:path"));
+var import_node_path2 = __toESM(require("node:path"));
 function pluginRoot() {
-  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path.default.join(__dirname, "..");
+  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path2.default.join(__dirname, "..");
 }
 function runtimeModule(name) {
-  return import_node_path.default.join(pluginRoot(), "lib", `${name}.js`);
+  return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
 // src/hooks/shared/runtime-identity.ts
-var import_node_fs2 = __toESM(require("node:fs"));
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_fs3 = __toESM(require("node:fs"));
+var import_node_path3 = __toESM(require("node:path"));
 function canonicalPath(value) {
   const kernel = require(runtimeModule("kernel/worktree"));
   return kernel.canonicalPath(value);
@@ -200,15 +235,15 @@ function hookSessionId(input) {
 function enclosingCheckout(start) {
   let directory = canonicalPath(start);
   for (; ; ) {
-    const gitEntry = import_node_path2.default.join(directory, ".git");
+    const gitEntry = import_node_path3.default.join(directory, ".git");
     let stats = null;
     try {
-      stats = import_node_fs2.default.statSync(gitEntry);
+      stats = import_node_fs3.default.statSync(gitEntry);
     } catch (_) {
       stats = null;
     }
     if (stats) return { root: directory, linked: stats.isFile() };
-    const parent = import_node_path2.default.dirname(directory);
+    const parent = import_node_path3.default.dirname(directory);
     if (parent === directory) return null;
     directory = parent;
   }
@@ -218,7 +253,8 @@ function isolationExpectation(input, agentId, executor, includeSessionFallback =
     const store = require(runtimeModule("store"));
     const found = store.dispatchIsolationExpectation({ agentId, executor, sessionId: hookSessionId(input), observedWorktree });
     return agentId && !includeSessionFallback && found?.matchedBy === "session" ? null : found;
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return null;
   }
 }
@@ -226,7 +262,8 @@ function identityDiagnosis(input, agentId, executor, observedWorktree) {
   try {
     const store = require(runtimeModule("store"));
     return store.dispatchIdentityDiagnosis({ agentId, executor, sessionId: hookSessionId(input), observedWorktree });
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return null;
   }
 }
@@ -239,7 +276,8 @@ function unboundClaim(input, executor, observedWorktree) {
       observedWorktree,
       agentName: stringField(input, "agent_name", "agentName", "name")
     });
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return null;
   }
 }
@@ -255,11 +293,13 @@ function bindObservedRuntimeIdentity(input, agentId, executor, worktree) {
       stringField(input, "agent_name", "agentName", "name") || null,
       worktree
     );
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
   }
 }
 
 // src/hooks/guard-worktree-isolation.ts
+failClosedOnBoardBusy();
 var leaseKernel = require(runtimeModule("kernel/worktree"));
 var WRITE_TOOLS = /* @__PURE__ */ new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 function targetPath(input) {
@@ -267,7 +307,7 @@ function targetPath(input) {
   if (!isRecord(toolInput)) return "";
   const value = toolInput.file_path ?? toolInput.notebook_path ?? toolInput.path;
   const target = value == null ? "" : String(value);
-  return target && import_node_path3.default.isAbsolute(target) ? import_node_path3.default.resolve(target) : "";
+  return target && import_node_path4.default.isAbsolute(target) ? import_node_path4.default.resolve(target) : "";
 }
 function samePath(a, b) {
   const normalize = (value) => {
@@ -280,7 +320,8 @@ function registeredProjectCheckout(root) {
   try {
     const store = require(runtimeModule("store"));
     return Boolean(store.findProject(root)?.ok);
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return false;
   }
 }
@@ -291,7 +332,7 @@ function observedWorktreeLease(found, worktree, agentId) {
     windowsHide: true,
     stdio: ["ignore", "pipe", "ignore"]
   }).trim();
-  const gitPath = (value) => import_node_path3.default.isAbsolute(value) ? value : import_node_path3.default.resolve(worktree, value);
+  const gitPath = (value) => import_node_path4.default.isAbsolute(value) ? value : import_node_path4.default.resolve(worktree, value);
   const baselineAncestry = (baseline) => {
     if (!baseline) return "unknown";
     try {
@@ -402,7 +443,7 @@ function main() {
   if (!agentId || !executorAgent(executor)) return;
   const target = targetPath(input);
   if (!target) return;
-  const repo = enclosingCheckout(import_node_path3.default.dirname(canonicalPath(target)));
+  const repo = enclosingCheckout(import_node_path4.default.dirname(canonicalPath(target)));
   if (!repo) return;
   let found = isolationExpectation(input, agentId, executor, true, repo.root);
   if (!found?.terminal && !found?.identityBound && (repo.linked || !found && registeredProjectCheckout(repo.root))) {
@@ -440,6 +481,7 @@ function main() {
 }
 try {
   main();
-} catch (_) {
+} catch (error) {
+  refuseWhenBoardBusy(error);
   process.exit(0);
 }

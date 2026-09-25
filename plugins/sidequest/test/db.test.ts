@@ -1,6 +1,7 @@
 import './_temp-cleanup.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -40,9 +41,10 @@ const databaseApi = require('../lib/db.js') as {
   txn<T>(database: DatabaseSync, fn: () => T): T;
   SQLITE_BUSY_TIMEOUT_MS: number;
   SQLITE_BUSY_POLICY_KEY: symbol;
+  CURRENT_SCHEMA_VERSION: number;
 };
 
-const { openDb, getRow, putRow, deleteRow, listRows, listRowsPage, countRows, selectRows, prepareCached, txn, SQLITE_BUSY_TIMEOUT_MS, SQLITE_BUSY_POLICY_KEY } = databaseApi;
+const { openDb, getRow, putRow, deleteRow, listRows, listRowsPage, countRows, selectRows, prepareCached, txn, SQLITE_BUSY_TIMEOUT_MS, SQLITE_BUSY_POLICY_KEY, CURRENT_SCHEMA_VERSION } = databaseApi;
 const pluginRoot = path.join(__dirname, '..');
 
 function makeDb(): { db: SidequestDatabase; homeRoot: string } {
@@ -375,6 +377,75 @@ test('every hook registered with a 10s timeout installs the hook lock budget, an
   for (const name of budgeted) assert.match(bundle(name), /fail-open, board lock busy/, `${name} must install the hook lock budget`);
   assert.deepStrictEqual([...exempt], ['worktree-create']);
   assert.doesNotMatch(bundle('worktree-create'), /sidequest\.sqlite-busy-policy/);
+  // SQ-133: exactly the security guards switch the budget to fail closed at load; every other hook, including
+  // guard-home-delete, keeps failing open.
+  const failClosed = [...budgeted].filter((name) => /^failClosedOnBoardBusy\(\);$/m.test(bundle(name))).sort();
+  assert.deepStrictEqual(failClosed, ['force-exec-bypass', 'guard-destructive-git', 'guard-shared-checkout-git', 'guard-worktree-isolation']);
+  for (const name of failClosed) assert.match(bundle(name), /fail-closed, board lock busy/, `${name} must carry the fail-closed refusal`);
+  assert.ok(budgeted.has('guard-home-delete'));
+  assert.doesNotMatch(bundle('guard-home-delete'), /fail-closed/, 'guard-home-delete stays fail-open');
+});
+
+test('a long-lived store handle re-flags a read-only seed another connection stores unflagged after open (SQ-133)', () => {
+  const homeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-db-test-'));
+  const script = `
+    const { DatabaseSync } = require('node:sqlite');
+    const store = require(${JSON.stringify(path.join(pluginRoot, 'lib', 'store.js'))});
+    store.listProjects({ all: true });
+    const { DEFAULT_CATEGORIES } = require(${JSON.stringify(path.join(pluginRoot, 'lib', 'category-defaults.js'))});
+    const readonlySeeds = new Set(DEFAULT_CATEGORIES.filter((category) => category.readonly === true).map((category) => category.id));
+    const other = new DatabaseSync(${JSON.stringify(path.join(homeRoot, 'sidequest.db'))});
+    const row = other.prepare('SELECT profile_id, category_id, data FROM routing_profile_entries').all()
+      .find((entry) => readonlySeeds.has(entry.category_id) && JSON.parse(entry.data).readonly === true);
+    if (!row) throw new Error('the seeded home has no read-only routing entry to unflag');
+    const category = JSON.parse(row.data);
+    delete category.readonly;
+    other.prepare('UPDATE routing_profile_entries SET data = ? WHERE profile_id = ? AND category_id = ?')
+      .run(JSON.stringify(category), row.profile_id, row.category_id);
+    store.listProjects({ all: true });
+    const after = JSON.parse(other.prepare('SELECT data FROM routing_profile_entries WHERE profile_id = ? AND category_id = ?')
+      .get(row.profile_id, row.category_id).data);
+    other.close();
+    process.stdout.write(JSON.stringify({ category: row.category_id, readonly: after.readonly === true }));
+  `;
+  const result = spawnSync(process.execPath, ['-e', script], { env: { ...process.env, SIDEQUEST_HOME: homeRoot }, encoding: 'utf8', timeout: 30_000 });
+  assert.strictEqual(result.status, 0, result.stderr);
+  const outcome = JSON.parse(result.stdout) as { category: string; readonly: boolean };
+  assert.strictEqual(outcome.readonly, true, `${outcome.category} stayed unflagged: the open handle never rechecked the seeds after another connection's commit`);
+});
+
+// SQ-133: an edit to the schema script that ships without a CURRENT_SCHEMA_VERSION bump never reaches an existing
+// board, because openDb only runs upgradeSchema when the stored version is behind. Pin the script to the version.
+const UPGRADE_SCHEMA_SHA256: Record<number, string> = {
+  8: 'aef1dea45fdba795fce06057977fbfc87ef4da5f8dca7a8817a59a89558602b5',
+};
+
+function upgradeSchemaFingerprint(): string {
+  const source = fs.readFileSync(path.join(pluginRoot, 'src', 'lib', 'db.ts'), 'utf8').replace(/\r\n/g, '\n');
+  const start = source.indexOf('\nfunction upgradeSchema(');
+  assert.ok(start >= 0, 'upgradeSchema() was not found in src/lib/db.ts');
+  const end = source.indexOf('\n}\n', start);
+  assert.ok(end > start, 'the end of upgradeSchema() was not found in src/lib/db.ts');
+  const normalized = source.slice(start + 1, end + 2)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .filter((line) => !/^\s*(?:\/\/|--)/.test(line))
+    .join('\n')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return crypto.createHash('sha256').update(normalized).digest('hex');
+}
+
+test('the upgradeSchema script is pinned to CURRENT_SCHEMA_VERSION (SQ-133)', () => {
+  const actual = upgradeSchemaFingerprint();
+  const pinned = UPGRADE_SCHEMA_SHA256[CURRENT_SCHEMA_VERSION];
+  assert.ok(pinned, `no upgradeSchema hash is pinned for schema version ${CURRENT_SCHEMA_VERSION}. After adding that version's migration step, pin UPGRADE_SCHEMA_SHA256[${CURRENT_SCHEMA_VERSION}] = '${actual}' in test/db.test.ts.`);
+  assert.strictEqual(actual, pinned, [
+    `upgradeSchema in src/lib/db.ts changed without a schema version bump (CURRENT_SCHEMA_VERSION is still ${CURRENT_SCHEMA_VERSION}).`,
+    'An existing board at that version never reruns upgradeSchema, so the edit would not reach it.',
+    `Bump CURRENT_SCHEMA_VERSION to ${CURRENT_SCHEMA_VERSION + 1}, add a migration step that brings version ${CURRENT_SCHEMA_VERSION} boards forward, then pin UPGRADE_SCHEMA_SHA256[${CURRENT_SCHEMA_VERSION + 1}] = '${actual}'.`,
+    `Re-pin version ${CURRENT_SCHEMA_VERSION} instead only when the edit cannot change any database it runs on (comments and whitespace are already ignored).`,
+  ].join('\n'));
 });
 
 test('requiring db.js emits no SQLite ExperimentalWarning', () => {

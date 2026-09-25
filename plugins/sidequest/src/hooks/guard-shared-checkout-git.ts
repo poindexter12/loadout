@@ -1,11 +1,14 @@
 #!/usr/bin/env node
-import './shared/sqlite-budget.js';
+import { failClosedOnBoardBusy, refuseWhenBoardBusy } from './shared/sqlite-budget.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { readStdin, stringField, isRecord } from './shared/input.js';
 import { writeDeny } from './shared/output.js';
 import { executorAgent, isolationExpectation } from './shared/runtime-identity.js';
+
+// An isolation guard: refuse under board lock contention rather than allow a shared-checkout write unchecked (SQ-133).
+failClosedOnBoardBusy();
 
 const MUTATING_SUBCOMMANDS = new Set([
   'add', 'am', 'apply', 'branch', 'checkout', 'cherry-pick', 'clean', 'commit', 'merge', 'mv',
@@ -65,10 +68,12 @@ function main(): void {
   const agentId = stringField(input, 'agent_id', 'agentId');
   const executor = stringField(input, 'agent_type', 'agentType', 'subagent_type');
   if (!agentId || !executorAgent(executor)) return;
-  const found = isolationExpectation(input, agentId, executor, false);
-  if (!found || found.sharedTree || found.terminal || !found.projectPath) return;
+  // Decide from the command first: only a mutating git command needs the board, so board lock contention can
+  // never refuse a read-only one.
   const invocation = gitInvocation(commandText(input));
   if (!invocation || !MUTATING_SUBCOMMANDS.has(invocation.subcommand)) return;
+  const found = isolationExpectation(input, agentId, executor, false);
+  if (!found || found.sharedTree || found.terminal || !found.projectPath) return;
   if (samePath(targetRoot(invocation.target, stringField(input, 'cwd')), found.projectPath)) {
     writeDeny('PreToolUse', refusal());
   }
@@ -76,6 +81,7 @@ function main(): void {
 
 try {
   main();
-} catch (_) {
+} catch (error) {
+  refuseWhenBoardBusy(error);
   process.exit(0);
 }

@@ -6,13 +6,6 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
-var __commonJS = (cb, mod) => function __require() {
-  try {
-    return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
-  } catch (e) {
-    throw mod = 0, e;
-  }
-};
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
     for (let key of __getOwnPropNames(from))
@@ -31,35 +24,41 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // src/hooks/shared/sqlite-budget.ts
-var require_sqlite_budget = __commonJS({
-  "src/hooks/shared/sqlite-budget.ts"() {
-    "use strict";
-    var import_node_path3 = __toESM(require("node:path"));
-    var SQLITE_BUSY_POLICY_KEY = /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy");
-    var HOOK_SQLITE_BUSY_TIMEOUT_MS = 1500;
-    function failOpen(error) {
-      const hook = import_node_path3.default.basename(process.argv[1] || "hook", ".js");
-      process.stderr.write(`sidequest: ${hook} allowed this event without its board check (fail-open, board lock busy): ${error.message}
-`);
-      process.exit(0);
-    }
-    Reflect.set(globalThis, SQLITE_BUSY_POLICY_KEY, Object.freeze({
-      label: "hook",
-      timeoutMs: HOOK_SQLITE_BUSY_TIMEOUT_MS,
-      attempts: 1,
-      onExhausted: failOpen
-    }));
+var import_node_fs = __toESM(require("node:fs"));
+var import_node_path = __toESM(require("node:path"));
+var SQLITE_BUSY_POLICY_KEY = /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy");
+var HOOK_SQLITE_BUSY_TIMEOUT_MS = 1500;
+function hookName() {
+  return import_node_path.default.basename(process.argv[1] || "hook", ".js");
+}
+function installBudget(onExhausted) {
+  Reflect.set(globalThis, SQLITE_BUSY_POLICY_KEY, Object.freeze({
+    label: "hook",
+    timeoutMs: HOOK_SQLITE_BUSY_TIMEOUT_MS,
+    attempts: 1,
+    onExhausted
+  }));
+}
+function writeStderr(text) {
+  try {
+    import_node_fs.default.writeSync(2, text);
+  } catch (_) {
   }
-});
+}
+function failOpen(error) {
+  writeStderr(`sidequest: ${hookName()} allowed this event without its board check (fail-open, board lock busy): ${error.message}
+`);
+  process.exit(0);
+}
+installBudget(failOpen);
 
 // src/hooks/guard-shared-tree-commit.ts
-var import_sqlite_budget = __toESM(require_sqlite_budget());
-var import_node_fs2 = __toESM(require("node:fs"));
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_fs3 = __toESM(require("node:fs"));
+var import_node_path3 = __toESM(require("node:path"));
 var import_node_child_process = require("node:child_process");
 
 // src/hooks/shared/input.ts
-var import_node_fs = __toESM(require("node:fs"));
+var import_node_fs2 = __toESM(require("node:fs"));
 
 // src/lib/exec-names.ts
 var EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
@@ -94,7 +93,7 @@ function isRecord(value) {
 }
 function readStdin() {
   try {
-    const raw = import_node_fs.default.readFileSync(0, "utf8");
+    const raw = import_node_fs2.default.readFileSync(0, "utf8");
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!isRecord(parsed)) return null;
@@ -172,12 +171,12 @@ function writeDeny(hookEventName, permissionDecisionReason) {
 }
 
 // src/hooks/shared/paths.ts
-var import_node_path = __toESM(require("node:path"));
+var import_node_path2 = __toESM(require("node:path"));
 function pluginRoot() {
-  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path.default.join(__dirname, "..");
+  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path2.default.join(__dirname, "..");
 }
 function runtimeModule(name) {
-  return import_node_path.default.join(pluginRoot(), "lib", `${name}.js`);
+  return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
 // src/hooks/guard-shared-tree-commit.ts
@@ -200,10 +199,10 @@ function targetRepo(command, cwd, index) {
   const before = command.slice(0, index);
   const dashCs = Array.from(before.matchAll(/git\s+-C\s+("[^"]+"|'[^']+'|\S+)/gi));
   const dashC = dashCs.at(-1);
-  if (dashC?.[1]) return import_node_path2.default.resolve(cwd, unquote(dashC[1]));
+  if (dashC?.[1]) return import_node_path3.default.resolve(cwd, unquote(dashC[1]));
   const cds = Array.from(before.matchAll(/(?:^|[\n;&|])\s*cd\s+("[^"]+"|'[^']+'|\S+)/gi));
   const cd = cds.at(-1);
-  return cd?.[1] ? import_node_path2.default.resolve(cwd, unquote(cd[1])) : import_node_path2.default.resolve(cwd);
+  return cd?.[1] ? import_node_path3.default.resolve(cwd, unquote(cd[1])) : import_node_path3.default.resolve(cwd);
 }
 function repoRoot(repo) {
   try {
@@ -219,15 +218,15 @@ function repoRoot(repo) {
 }
 function sharedCheckout(repo) {
   try {
-    return import_node_fs2.default.statSync(import_node_path2.default.join(repo, ".git")).isDirectory();
+    return import_node_fs3.default.statSync(import_node_path3.default.join(repo, ".git")).isDirectory();
   } catch {
     return false;
   }
 }
 function canonicalPath(value) {
-  const resolved = import_node_path2.default.resolve(value);
+  const resolved = import_node_path3.default.resolve(value);
   try {
-    return import_node_fs2.default.realpathSync.native(resolved);
+    return import_node_fs3.default.realpathSync.native(resolved);
   } catch {
     return resolved;
   }

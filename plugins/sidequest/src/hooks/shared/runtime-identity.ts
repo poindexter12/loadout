@@ -2,6 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { stringField, type HookInput } from './input.js';
 import { runtimeModule } from './paths.js';
+// The catches below treat an unreadable board as "no expectation". Board lock contention is the exception in a
+// fail-closed guard, which refuses instead (a no-op in every other hook) (SQ-133).
+import { refuseWhenBoardBusy } from './sqlite-budget.js';
 
 export type DispatchPhase = 'prepared' | 'created' | 'bound' | 'claimed' | 'working' | 'submitted' | 'integrated' | 'terminal';
 
@@ -76,7 +79,8 @@ export function isolationExpectation(input: HookInput, agentId: string, executor
     };
     const found = store.dispatchIsolationExpectation({ agentId, executor, sessionId: hookSessionId(input), observedWorktree });
     return agentId && !includeSessionFallback && found?.matchedBy === 'session' ? null : found;
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return null;
   }
 }
@@ -97,7 +101,8 @@ export function identityDiagnosis(input: HookInput, agentId: string, executor: s
       dispatchIdentityDiagnosis: (identity: unknown) => IdentityDiagnosis;
     };
     return store.dispatchIdentityDiagnosis({ agentId, executor, sessionId: hookSessionId(input), observedWorktree });
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return null;
   }
 }
@@ -118,7 +123,8 @@ export function unboundClaim(input: HookInput, executor: string, observedWorktre
       observedWorktree,
       agentName: stringField(input, 'agent_name', 'agentName', 'name'),
     });
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return null;
   }
 }
@@ -142,6 +148,7 @@ export function bindObservedRuntimeIdentity(input: HookInput, agentId: string, e
       stringField(input, 'agent_name', 'agentName', 'name') || null,
       worktree,
     );
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
   }
 }

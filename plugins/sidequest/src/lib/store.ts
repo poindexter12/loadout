@@ -1262,14 +1262,15 @@ function installedProviderSeedProfiles() {
 function refreshRoutingProfileSeeds(handle?: any) {
   const pending: any[] = [];
   for (const seed of installedProviderSeedProfiles()) {
-    const profile = handle.prepare(`
+    // Through lib/db's read helpers, like every read on the open path, so a hook's lock budget governs them.
+    const profile: any = db.selectRow(handle, `
       SELECT id, seed_revision FROM routing_profiles WHERE source = 'seed' AND seed_key = ?
-    `).get(seed.id);
+    `, [seed.id]);
     if (!profile || profile.seed_revision == null) continue;
-    const existing = handle.prepare(`
+    const existing: any[] = db.selectRows(handle, `
       SELECT category_id, data, position FROM routing_profile_entries
       WHERE profile_id = ? ORDER BY position, category_id
-    `).all(profile.id);
+    `, [profile.id]);
     const matchesSeed = existing.length === seed.categories.length
       && existing.every((entry: any, position: number) => entry.category_id === seed.categories[position].id
         && entry.data === JSON.stringify(seed.categories[position])
@@ -1318,7 +1319,7 @@ function readonlyCategorySeedsPending(handle: any, readonlyIds: ReadonlySet<stri
       .some((row: any) => unflaggedReadonlyCategory(row.data, readonlyIds, row.id));
 }
 
-function refreshReadonlyCategorySeeds(handle?: any) {
+function refreshReadonlyCategorySeeds(handle?: any): boolean {
   const readonlyIds = new Set([
     ...DEFAULT_CATEGORIES.filter((category: any) => category.readonly === true).map((category: any) => category.id),
     'hand-analysis',
@@ -1326,7 +1327,8 @@ function refreshReadonlyCategorySeeds(handle?: any) {
   // This runs on every store open, which means every hook process. BEGIN IMMEDIATE takes the machine-global
   // write lock even when nothing changes, so look first with plain reads and only transact when a row is
   // actually stale (SQ-125). The transaction re-reads, so a writer that lands in between is still honoured.
-  if (!readonlyCategorySeedsPending(handle, readonlyIds)) return;
+  // A writer that commits after this look is caught by the data_version recheck in database() (SQ-133).
+  if (!readonlyCategorySeedsPending(handle, readonlyIds)) return false;
   const affected = new Set<string>();
   let changed = false;
   withinTransaction(handle, () => {
@@ -1351,6 +1353,33 @@ function refreshReadonlyCategorySeeds(handle?: any) {
     }
     if (changed) refreshPreparedDispatches(handle, [...affected], [...readonlyIds]);
   });
+  return changed;
+}
+
+// The seed check above is a look-then-write, and a long-lived server keeps its handle for its whole life, so a
+// check made once at open would leave a row that another writer stores unflagged later (an older plugin version,
+// or one committing between the look and the return) stale for good. PRAGMA data_version changes exactly when
+// another connection commits, and reading it takes no write lock, so the check reruns whenever it moves.
+const readonlySeedCheckedVersions = new WeakMap<object, number>();
+let refreshingReadonlySeeds = false;
+
+function refreshReadonlyCategorySeedsForDataVersion(handle: any): void {
+  // Never from inside a transaction (nor from the refresh's own nested store calls): a seed fix must commit on
+  // its own, not ride along with, and roll back with, an unrelated caller's write.
+  if (refreshingReadonlySeeds || transactionDepth.get(handle)) return;
+  const version = Number(db.selectRow(handle, 'PRAGMA data_version')?.data_version) || 0;
+  if (readonlySeedCheckedVersions.get(handle) === version) return;
+  refreshingReadonlySeeds = true;
+  try {
+    const changed = refreshReadonlyCategorySeeds(handle);
+    // Record the version read BEFORE the check: a commit that lands after it moves the version and forces one
+    // more pass. This connection's own seed commit leaves the version alone, so the fix cannot loop, and for
+    // the same reason a resident cache built before it would never notice the change without an invalidation.
+    readonlySeedCheckedVersions.set(handle, version);
+    if (changed) invalidateStoreCaches();
+  } finally {
+    refreshingReadonlySeeds = false;
+  }
 }
 
 function refreshRoutingProfileSeedsForCatalogState(handle: unknown, root: string) {
@@ -1367,8 +1396,8 @@ function database() {
     handle = db.openDb(root);
     migrateIfNeeded(handle, root);
     dbByHome.set(root, handle);
-    refreshReadonlyCategorySeeds(handle);
   }
+  refreshReadonlyCategorySeedsForDataVersion(handle);
   if (!refreshingRoutingProfileSeeds) {
     refreshingRoutingProfileSeeds = true;
     try {
