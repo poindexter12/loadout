@@ -4,7 +4,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { cut } from '../cut.mjs';
-import { createGit, mutatesRemote, spawnRunner } from '../lib/git.mjs';
+import {
+  REMOTE_PROBE_TIMEOUT_MS,
+  createGit,
+  mutatesRemote,
+  probesRemote,
+  remoteProbeEnvironment,
+  remoteProbeTimeoutMs,
+  spawnRunner,
+} from '../lib/git.mjs';
 import { makeGitRepo } from './realrepo.mjs';
 
 const PLUGINS = { sidequest: '3.6.17', toolbelt: '0.63.6' };
@@ -31,6 +39,31 @@ test('push is the only verb that can change a remote', () => {
     assert.equal(mutatesRemote(args), false, args.join(' '));
   }
   assert.equal(mutatesRemote(['push', '--atomic', 'origin', 'HEAD:main']), true);
+});
+
+test('ls-remote and fetch are the remote probes, bounded by a timeout an operator can raise', () => {
+  assert.equal(probesRemote(['ls-remote', '--tags', 'origin']), true);
+  assert.equal(probesRemote(['ls-remote', '--exit-code', 'origin', 'refs/heads/main']), true);
+  assert.equal(probesRemote(['fetch', '--quiet', '--no-tags', 'origin', 'refs/heads/main']), true);
+  for (const args of [['push', '--atomic', 'origin', 'HEAD:main'], ['remote'], ['for-each-ref', '--contains', 'x'], ['tag', '--list']]) {
+    assert.equal(probesRemote(args), false, args.join(' '));
+  }
+  assert.equal(remoteProbeTimeoutMs({}), REMOTE_PROBE_TIMEOUT_MS);
+  assert.equal(remoteProbeTimeoutMs({ LOADOUT_RELEASE_REMOTE_TIMEOUT_MS: '2500' }), 2500);
+  for (const invalid of ['', '0', '-5', 'soon']) {
+    assert.equal(remoteProbeTimeoutMs({ LOADOUT_RELEASE_REMOTE_TIMEOUT_MS: invalid }), REMOTE_PROBE_TIMEOUT_MS, `"${invalid}" keeps the default`);
+  }
+});
+
+test('a probe environment turns off terminal prompts and keeps whichever ssh command git would have used', () => {
+  const probe = (environment, configured) => remoteProbeEnvironment(environment, configured);
+  assert.equal(probe({}).GIT_TERMINAL_PROMPT, '0');
+  assert.equal(probe({ GIT_TERMINAL_PROMPT: '1' }).GIT_TERMINAL_PROMPT, '0', 'an operator setting cannot turn prompts back on');
+  assert.equal(probe({}).GIT_SSH_COMMAND, 'ssh -o BatchMode=yes');
+  assert.equal(probe({ GIT_SSH_COMMAND: 'ssh -i /key' }, 'ssh -i /configured').GIT_SSH_COMMAND, 'ssh -i /key -o BatchMode=yes');
+  assert.equal(probe({ GIT_SSH: '/bin/ssh-wrapper' }, 'ssh -i /configured').GIT_SSH_COMMAND, 'ssh -i /configured -o BatchMode=yes', 'core.sshCommand outranks GIT_SSH, as in git');
+  assert.equal(probe({ GIT_SSH: "/opt/it's ssh" }).GIT_SSH_COMMAND, `'/opt/it'\\''s ssh' -o BatchMode=yes`);
+  assert.equal(probe({ HOME: '/home/x' }).HOME, '/home/x', 'the rest of the environment is kept');
 });
 
 test('a held publish lock stops before the local release window changes', async (t) => {
@@ -156,11 +189,21 @@ test('a three-plugin release puts only the marketplace tag in the workflow-trigg
 
 test('a rejected ref rejects the whole push, so the remote never half-publishes', async (t) => {
   const repo = setup(t);
-  const integration = repo.git('rev-parse', 'HEAD');
-  repo.git('tag', 'v3.208.0', integration);
-  repo.git('push', '-q', 'origin', 'refs/tags/v3.208.0');
-  repo.git('tag', '-d', 'v3.208.0');
   const before = repo.remoteRefs();
+  // The cut refuses a planned tag the remote already has, so the rejection comes from a race:
+  // someone publishes this window's tag after the cut checked and before its first push lands.
+  const real = spawnRunner(repo.root);
+  let racingTag = null;
+  const git = createGit({
+    cwd: repo.root,
+    run: (args) => {
+      if (args[0] === 'push' && racingTag === null) {
+        racingTag = repo.originGit('rev-parse', 'refs/heads/main');
+        repo.originGit('tag', 'v3.208.0', racingTag);
+      }
+      return real(args);
+    },
+  });
   const events = [];
   const publishLock = {
     acquire: async () => {
@@ -174,11 +217,11 @@ test('a rejected ref rejects the whole push, so the remote never half-publishes'
   };
 
   await assert.rejects(
-    () => cut({ repoRoot: repo.root, push: true, publishLock, skipTests: true, force: true, log: () => {} }),
+    () => cut({ repoRoot: repo.root, git, push: true, publishLock, skipTests: true, log: () => {} }),
     /git push .* failed/,
   );
 
-  assert.deepEqual(repo.remoteRefs(), before, 'not one ref moved');
+  assert.deepEqual(repo.remoteRefs(), { ...before, 'refs/tags/v3.208.0': racingTag }, 'not one ref the cut pushed moved');
   assert.deepEqual(events, ['acquire', 'release']);
 });
 

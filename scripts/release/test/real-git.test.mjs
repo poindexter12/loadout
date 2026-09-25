@@ -8,7 +8,7 @@ import test from 'node:test';
 
 import { cut } from '../cut.mjs';
 import { loadPlan } from '../plan.mjs';
-import { createGit } from '../lib/git.mjs';
+import { createGit, spawnRunner } from '../lib/git.mjs';
 import { readValue } from '../lib/jsonedit.mjs';
 import { makeGitRepo } from './realrepo.mjs';
 import { fragmentText } from './helpers.mjs';
@@ -70,21 +70,30 @@ test('a real push atomically lands main and the marketplace tag before plugin ta
 test('a rejected refspec leaves every remote ref exactly where it was', async (t) => {
   const repo = setup(t);
   repo.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'minor' });
-  const integration = repo.commit('integrate');
-
-  // Someone already published this window's tag at a different commit, so the tag update is not a
-  // fast-forward and git must reject the whole push.
-  repo.git('tag', 'v3.208.0', integration);
-  repo.git('push', '-q', 'origin', 'refs/tags/v3.208.0');
-  repo.git('tag', '-d', 'v3.208.0');
+  repo.commit('integrate');
   const before = repo.remoteRefs();
 
+  // Someone publishes this window's tag at a different commit after the cut checked the remote and
+  // before it pushes, so the tag update is not a fast-forward and git must reject the whole push.
+  const real = spawnRunner(repo.root);
+  let racingTag = null;
+  const git = createGit({
+    cwd: repo.root,
+    run: (args) => {
+      if (args[0] === 'push' && racingTag === null) {
+        racingTag = repo.originGit('rev-parse', 'refs/heads/main');
+        repo.originGit('tag', 'v3.208.0', racingTag);
+      }
+      return real(args);
+    },
+  });
+
   await assert.rejects(
-    () => cut({ repoRoot: repo.root, push: true, skipTests: true, force: true, log: () => {} }),
+    () => cut({ repoRoot: repo.root, git, push: true, skipTests: true, log: () => {} }),
     /git push .* failed/,
   );
 
-  assert.deepEqual(repo.remoteRefs(), before, 'not one ref moved');
+  assert.deepEqual(repo.remoteRefs(), { ...before, 'refs/tags/v3.208.0': racingTag }, 'not one ref the cut pushed moved');
 });
 
 test('a suite that moves HEAD stops the release before it is published', async (t) => {

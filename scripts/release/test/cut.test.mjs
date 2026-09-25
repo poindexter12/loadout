@@ -2,7 +2,7 @@
 // it leaves alone are all statements about a tree, so they are tested against one.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -26,6 +26,137 @@ function tagAs(context, { name, email }, tag, target) {
 }
 
 const failingSuite = (suite) => ({ code: 1, command: suite.command });
+
+// A second remote this clone can read: an empty bare repository beside origin.
+function addRemote(context, name) {
+  const dir = path.join(context.base, `${name}.git`);
+  const result = spawnSync('git', ['init', '-q', '--bare', '-b', 'main', dir], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  context.git('remote', 'add', name, dir);
+  return dir;
+}
+
+async function rejection(promise) {
+  let failure;
+  await assert.rejects(promise, (error) => {
+    failure = error;
+    return true;
+  });
+  return failure;
+}
+
+// A commit made directly in origin on top of `parent`, so this clone has never seen it: the remote
+// moved on without a fetch. Origin's main is left pointing at it.
+function commitOnOrigin(context, parent, message) {
+  const commit = context.originGit(
+    '-c', 'user.name=someone else', '-c', 'user.email=someone@else.example',
+    'commit-tree', `${parent}^{tree}`, '-p', parent, '-m', message,
+  );
+  context.originGit('update-ref', 'refs/heads/main', commit);
+  return commit;
+}
+
+// Real git, except that every command `fails` matches exits 128 as if the remote were unreachable.
+function gitFailing(context, fails) {
+  const real = spawnRunner(context.root);
+  return createGit({
+    cwd: context.root,
+    run: (args) => (fails(args) ? { code: 128, stdout: '', stderr: `forced failure: git ${args.join(' ')}` } : real(args)),
+  });
+}
+
+// A probe gets PROBE_TIMEOUT_MS; a blocking host holds on for SSH_BLOCK_MS; a cut that refuses
+// within PROBE_DEADLINE_MS did not wait for the block to end.
+const PROBE_TIMEOUT_MS = 1000;
+const PROBE_DEADLINE_MS = 15_000;
+const SSH_BLOCK_MS = 30_000;
+const BLOCKING_ORIGIN = 'ssh://blocking.invalid/origin.git';
+
+// A stand-in for ssh, named ssh so git treats it as OpenSSH. It logs each call's arguments and the
+// GIT_TERMINAL_PROMPT it saw. A call to blocking.invalid never answers: it holds the connection
+// open, as a blackholed host or a password prompt would, until git goes away (its stdin closes) or
+// SSH_BLOCK_MS pass. Any other host is served by running the requested git command locally, so
+// ssh://<host><path> reaches the repository at <path>.
+function fakeSsh(context) {
+  const dir = path.join(context.base, 'fake-ssh');
+  mkdirSync(dir);
+  const log = path.join(dir, 'calls.jsonl');
+  const script = path.join(dir, 'ssh.mjs');
+  writeFileSync(script, [
+    "import { spawnSync } from 'node:child_process';",
+    "import { appendFileSync } from 'node:fs';",
+    'const args = process.argv.slice(2);',
+    `appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, prompt: process.env.GIT_TERMINAL_PROMPT ?? null }) + '\\n');`,
+    "if (args.some((arg) => arg.includes('blocking.invalid'))) {",
+    `  setTimeout(() => process.exit(255), ${SSH_BLOCK_MS});`,
+    "  process.stdin.on('end', () => process.exit(255)).resume();",
+    '} else {',
+    "  process.exit(spawnSync('sh', ['-c', args[args.length - 1]], { stdio: 'inherit' }).status ?? 255);",
+    '}',
+    '',
+  ].join('\n'));
+  const ssh = path.join(dir, 'ssh');
+  writeFileSync(ssh, `#!/bin/sh\nexec '${process.execPath}' '${script}' "$@"\n`, { mode: 0o755 });
+  const calls = () => (existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)) : []);
+  return { ssh, calls };
+}
+
+// Sets (or, for undefined, clears) process variables until the test ends, the way an operator's
+// shell would hand them to the cut's git.
+function useEnvironment(t, entries) {
+  for (const [name, value] of Object.entries(entries)) {
+    const previous = process.env[name];
+    t.after(() => {
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    });
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+}
+
+// The operator's own ssh command is the fake, so every ssh remote this test names goes through it.
+function sshThroughFake(t, context) {
+  const fake = fakeSsh(context);
+  useEnvironment(t, { GIT_SSH_COMMAND: `'${fake.ssh}' -o ServerAliveInterval=7`, GIT_SSH: undefined });
+  return fake;
+}
+
+// Real git with probes bounded at PROBE_TIMEOUT_MS, except that each command `blocks` matches asks
+// a host that never answers in place of origin. `blocked` records which of them ran.
+function gitBlocking(context, blocks, blocked = []) {
+  const real = spawnRunner(context.root, { remoteTimeoutMs: PROBE_TIMEOUT_MS });
+  return createGit({
+    cwd: context.root,
+    run: (args) => {
+      if (!blocks(args)) return real(args);
+      blocked.push(args.join(' '));
+      return real(args.map((arg) => (arg === 'origin' ? BLOCKING_ORIGIN : arg)));
+    },
+  });
+}
+
+function assertBatchProbes(calls, label) {
+  assert.ok(calls.length > 0, `${label}: the probes went through ssh`);
+  for (const { args, prompt } of calls) {
+    assert.equal(prompt, '0', `${label}: terminal prompts are off for ${args.join(' ')}`);
+    const batch = args.findIndex((arg, index) => arg === 'BatchMode=yes' && args[index - 1] === '-o');
+    assert.ok(batch > 0, `${label}: ssh runs in batch mode for ${args.join(' ')}`);
+  }
+}
+
+function stubLock(events) {
+  return {
+    acquire: async () => {
+      events.push('acquire');
+      return { ok: true };
+    },
+    release: async () => {
+      events.push('release');
+      return { ok: true };
+    },
+  };
+}
 
 function releaseSubjects(context) {
   return context.git('log', '--all', '--format=%s').split('\n').filter((subject) => /^release v/.test(subject));
@@ -185,7 +316,7 @@ test('local tags from an unpublished attempt explain how to recover', async (t) 
 
   await assert.rejects(
     () => cut({ repoRoot: context.root, skipTests: true, log: () => {} }),
-    /local tags are leftovers from an unpublished attempt.*Verify they are absent from origin, delete the local tags, then retry/s,
+    /local tags are leftovers from an unpublished attempt: v3\.208\.0, sidequest-v3\.6\.18\. origin has none of them.*git tag -d v3\.208\.0 sidequest-v3\.6\.18 and retry, or pass --force/s,
   );
   assert.equal(context.version('sidequest'), '3.6.17');
   assert.equal(context.git('rev-list', '-n', '1', 'refs/tags/v3.208.0'), integration, 'the existing tag did not move');
@@ -263,6 +394,354 @@ test('this fork\'s local-only tag on a commit the remote already has is pushed, 
   assert.match(failure.message, /git push --atomic origin refs\/tags\/v3\.208\.0:refs\/tags\/v3\.208\.0/);
   assert.doesNotMatch(failure.message, /leftovers from an unpublished attempt/);
   assert.equal(context.git('rev-list', '-n', '1', 'refs/tags/v3.208.0'), published, 'the tag did not move');
+});
+
+test('--force recreates a leftover tag with -f but creates every other planned tag without it', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const integration = context.commit('integrate');
+  context.git('tag', '-a', 'v3.208.0', '-m', 'v3.208.0', integration);
+  const calls = [];
+  const git = createGit({ cwd: context.root, onCommand: (entry) => calls.push(entry.args.join(' ')) });
+
+  const result = await cut({ repoRoot: context.root, git, skipTests: true, force: true, log: () => {} });
+
+  assert.equal(result.status, 'cut');
+  const tagCalls = calls.filter((call) => call.startsWith('tag ') && call.includes(' -a '));
+  assert.deepEqual(tagCalls.map((call) => call.split(' -m ')[0]), ['tag -f -a v3.208.0', 'tag -a sidequest-v3.6.18']);
+  for (const tag of result.plan.tags) assert.equal(context.git('rev-list', '-n', '1', `refs/tags/${tag}`), result.commit);
+});
+
+test('--force refuses a foreign local tag and leaves it, and this clone\'s leftover beside it, exactly where they were', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const integration = context.commit('integrate');
+  // Readable, so this clone's own tag beside the foreign one is provably a leftover.
+  addRemote(context, 'upstream');
+  tagAs(context, { name: 'Kenny Vaneetvelde', email: 'kenny@upstream.example' }, 'v3.208.0', integration);
+  context.git('tag', '-a', 'sidequest-v3.6.18', '-m', 'sidequest-v3.6.18', integration);
+  const foreignTag = context.git('rev-parse', 'refs/tags/v3.208.0');
+  const leftoverTag = context.git('rev-parse', 'refs/tags/sidequest-v3.6.18');
+  let failure;
+
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, skipTests: true, force: true, log: () => {} }),
+    (error) => {
+      failure = error;
+      return true;
+    },
+  );
+
+  assert.match(failure.message, /--force recreates only this clone's own leftover local tags.*It does not override these, and nothing was changed:/s);
+  assert.match(failure.message, /v3\.208\.0 \(tagged by Kenny Vaneetvelde <kenny@upstream\.example>\)/);
+  assert.match(failure.message, /which --force would recreate once the tags above are resolved: sidequest-v3\.6\.18/);
+  assert.equal(context.git('rev-parse', 'refs/tags/v3.208.0'), foreignTag, 'the foreign tag object, tagger and target, is untouched');
+  assert.equal(context.git('rev-parse', 'refs/tags/sidequest-v3.6.18'), leftoverTag, 'a leftover is not recreated while a foreign tag blocks');
+  assert.equal(context.git('rev-parse', 'HEAD'), integration);
+  assert.deepEqual(releaseSubjects(context), []);
+  assert.equal(context.version('sidequest'), '3.6.17');
+});
+
+test('--force refuses this clone\'s tag on a commit the remote has since built on, fetching what the clone never saw', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const integration = context.commit('integrate');
+  context.git('push', '-q', 'origin', 'HEAD:refs/heads/main');
+  context.git('tag', '-a', 'v3.208.0', '-m', 'v3.208.0', integration);
+  const ourTag = context.git('rev-parse', 'refs/tags/v3.208.0');
+  // origin/main now contains the tagged commit through a commit this clone does not have, so only
+  // a fetch can tell that the tag marks a published commit rather than a leftover.
+  const remoteTip = commitOnOrigin(context, integration, 'built on the integration commit');
+  const trackingBefore = context.git('rev-parse', 'refs/remotes/origin/main');
+  let failure;
+
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, skipTests: true, force: true, log: () => {} }),
+    (error) => {
+      failure = error;
+      return true;
+    },
+  );
+
+  assert.match(failure.message, /--force recreates only this clone's own leftover local tags/);
+  assert.match(failure.message, /mark commits origin\/main already contains, but never reached origin: v3\.208\.0/);
+  assert.doesNotMatch(failure.message, /leftovers from an unpublished attempt/);
+  assert.equal(context.git('rev-parse', 'refs/tags/v3.208.0'), ourTag, 'the tag did not move');
+  assert.equal(context.git('rev-parse', 'HEAD'), integration);
+  assert.deepEqual(releaseSubjects(context), []);
+  assert.equal(context.git('rev-parse', 'refs/remotes/origin/main'), trackingBefore, 'the reachability fetch moved no ref');
+  assert.equal(context.git('cat-file', '-t', remoteTip), 'commit', 'the fetch brought in the commit the clone had never seen');
+});
+
+test('--force refuses this clone\'s tag when the remote branch cannot be checked', async (t) => {
+  const failures = {
+    'the branch cannot be read': (args) => args[0] === 'ls-remote' && args.includes('--exit-code'),
+    'the branch cannot be fetched': (args) => args[0] === 'fetch',
+  };
+  for (const [label, fails] of Object.entries(failures)) {
+    const context = setup(t);
+    context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+    const integration = context.commit('integrate');
+    context.git('tag', '-a', 'v3.208.0', '-m', 'v3.208.0', integration);
+    const ourTag = context.git('rev-parse', 'refs/tags/v3.208.0');
+    // The remote moved to a commit this clone lacks, so answering needs a fetch as well as a read.
+    commitOnOrigin(context, context.originGit('rev-parse', 'main'), 'unrelated work');
+
+    await assert.rejects(
+      () => cut({ repoRoot: context.root, git: gitFailing(context, fails), skipTests: true, force: true, log: () => {} }),
+      /could not tell whether origin\/main already contains the commits these local release tags mark: v3\.208\.0/,
+      label,
+    );
+    assert.equal(context.git('rev-parse', 'refs/tags/v3.208.0'), ourTag, `${label}: the tag did not move`);
+    assert.deepEqual(releaseSubjects(context), [], label);
+  }
+});
+
+// Tagger identity names a person, not a clone: the same maintainer's other clone stamps the same
+// name and email. So each case below uses a tag made by this clone's own identity, which the
+// SQ-141 classifier took as proof of a leftover, and only remote evidence can tell it apart.
+test('--force refuses a same-identity tag a second remote already has, and leaves it unmoved', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const integration = context.commit('integrate');
+  addRemote(context, 'mirror');
+  context.git('tag', '-a', 'v3.208.0', '-m', 'v3.208.0', integration);
+  context.git('push', '-q', 'mirror', 'refs/tags/v3.208.0');
+  const tagObject = context.git('rev-parse', 'refs/tags/v3.208.0');
+  assert.equal(context.git('for-each-ref', '--contains', integration, 'refs/remotes/'), '', 'no remote-tracking ref contains the commit, so only the tag listing can tell');
+
+  const failure = await rejection(cut({ repoRoot: context.root, skipTests: true, force: true, log: () => {} }));
+
+  assert.match(failure.message, /--force recreates only this clone's own leftover local tags.*nothing was changed:/s);
+  assert.match(failure.message, /these local release tags already exist on another configured remote, so they were published from somewhere and are not leftovers: v3\.208\.0 \(on mirror\)/);
+  assert.doesNotMatch(failure.message, /leftovers from an unpublished attempt/);
+  assert.equal(context.git('rev-parse', 'refs/tags/v3.208.0'), tagObject, 'the tag object, tagger and target, is untouched');
+  assert.equal(context.git('rev-parse', 'HEAD'), integration);
+  assert.deepEqual(releaseSubjects(context), []);
+  assert.equal(context.version('sidequest'), '3.6.17');
+});
+
+test('--force refuses a same-identity tag whose commit a second remote\'s tracking branch contains', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const integration = context.commit('integrate');
+  addRemote(context, 'mirror');
+  // The mirror's branch was built on the tagged commit, so the commit is reachable, not the tip.
+  const child = context.git('commit-tree', `${integration}^{tree}`, '-p', integration, '-m', 'built on the tagged commit');
+  context.git('push', '-q', 'mirror', `${child}:refs/heads/feature`);
+  assert.equal(context.git('rev-parse', 'refs/remotes/mirror/feature'), child, 'the push left a remote-tracking branch');
+  context.git('tag', '-a', 'v3.208.0', '-m', 'v3.208.0', integration);
+  assert.equal(context.git('ls-remote', '--tags', 'mirror'), '', 'no remote has the tag itself, so only reachability can tell');
+  const tagObject = context.git('rev-parse', 'refs/tags/v3.208.0');
+
+  const failure = await rejection(cut({ repoRoot: context.root, skipTests: true, force: true, log: () => {} }));
+
+  assert.match(failure.message, /--force recreates only this clone's own leftover local tags/);
+  assert.match(failure.message, /these local release tags mark commits a remote-tracking branch already contains, so no unpublished attempt left them: v3\.208\.0 \(in mirror\/feature\)/);
+  assert.doesNotMatch(failure.message, /leftovers from an unpublished attempt: /);
+  assert.equal(context.git('rev-parse', 'refs/tags/v3.208.0'), tagObject, 'the tag did not move');
+  assert.equal(context.git('rev-parse', 'HEAD'), integration);
+  assert.deepEqual(releaseSubjects(context), []);
+});
+
+test('--force still recreates a genuine leftover from an unpublished attempt when every remote answers without it', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const integration = context.commit('integrate');
+  addRemote(context, 'mirror');
+  // The mirror carries the integration commit, but never the release commit built on it.
+  context.git('push', '-q', 'mirror', 'HEAD:refs/heads/main');
+
+  // A real attempt: its suite fails, --keep-on-failure keeps the window, and the operator resets
+  // the commit away but keeps the tags, the half of the undo that is easy to forget.
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, keepOnFailure: true, runSuite: failingSuite, log: () => {} }),
+    /release suites failed/,
+  );
+  const attempt = context.git('rev-parse', 'HEAD');
+  assert.notEqual(attempt, integration);
+  context.git('reset', '-q', '--hard', integration);
+  assert.equal(context.git('rev-list', '-n', '1', 'refs/tags/v3.208.0'), attempt, 'the attempt left its tag behind');
+
+  const result = await cut({ repoRoot: context.root, skipTests: true, force: true, log: () => {} });
+
+  assert.equal(result.status, 'cut');
+  assert.notEqual(result.commit, attempt);
+  for (const tag of result.plan.tags) {
+    assert.equal(context.git('rev-list', '-n', '1', `refs/tags/${tag}`), result.commit, `${tag} was recreated at the new release commit`);
+  }
+});
+
+test('--force refuses a same-identity tag when any remote, or the remote-tracking refs, cannot be checked', async (t) => {
+  const cases = {
+    'a configured remote does not answer': {
+      prepare: (context) => context.git('remote', 'add', 'mirror', path.join(context.base, 'never-created.git')),
+      fails: () => false,
+      doubt: /v3\.208\.0 \(mirror could not be listed\)/,
+    },
+    'the remote-tracking refs cannot be searched': {
+      prepare: () => {},
+      fails: (args) => args[0] === 'for-each-ref' && args.includes('--contains'),
+      doubt: /v3\.208\.0 \(the remote-tracking refs could not be searched\)/,
+    },
+    'the configured remotes cannot be listed': {
+      prepare: () => {},
+      fails: (args) => args.length === 1 && args[0] === 'remote',
+      doubt: /v3\.208\.0 \(the configured remotes could not be listed\)/,
+    },
+  };
+  for (const [label, { prepare, fails, doubt }] of Object.entries(cases)) {
+    const context = setup(t);
+    context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+    const integration = context.commit('integrate');
+    prepare(context);
+    context.git('tag', '-a', 'v3.208.0', '-m', 'v3.208.0', integration);
+    const tagObject = context.git('rev-parse', 'refs/tags/v3.208.0');
+
+    const failure = await rejection(
+      cut({ repoRoot: context.root, git: gitFailing(context, fails), skipTests: true, force: true, log: () => {} }),
+    );
+
+    assert.match(failure.message, /could not prove these local release tags unpublished, so they are not treated as leftovers/, label);
+    assert.match(failure.message, doubt, label);
+    assert.doesNotMatch(failure.message, /leftovers from an unpublished attempt: /, label);
+    assert.equal(context.git('rev-parse', 'refs/tags/v3.208.0'), tagObject, `${label}: the tag did not move`);
+    assert.deepEqual(releaseSubjects(context), [], label);
+  }
+});
+
+test('a remote probe keeps the operator\'s ssh command, adds BatchMode, and turns off terminal prompts', async (t) => {
+  const cases = {
+    'GIT_SSH_COMMAND': (context, fake) => ({
+      environment: { GIT_SSH_COMMAND: `'${fake.ssh}' -o ServerAliveInterval=7`, GIT_SSH: undefined },
+      kept: 'ServerAliveInterval=7',
+    }),
+    'core.sshCommand, which outranks GIT_SSH as it does in git': (context, fake) => {
+      context.git('config', 'core.sshCommand', `'${fake.ssh}' -o ServerAliveInterval=9`);
+      return { environment: { GIT_SSH_COMMAND: undefined, GIT_SSH: path.join(context.base, 'no-such-ssh') }, kept: 'ServerAliveInterval=9' };
+    },
+    'GIT_SSH': (context, fake) => ({ environment: { GIT_SSH_COMMAND: undefined, GIT_SSH: fake.ssh }, kept: null }),
+  };
+  for (const [label, prepare] of Object.entries(cases)) {
+    const context = setup(t);
+    const fake = fakeSsh(context);
+    const { environment, kept } = prepare(context, fake);
+    useEnvironment(t, environment);
+    context.git('remote', 'set-url', 'origin', `ssh://served.invalid${context.origin}`);
+    const git = createGit({ cwd: context.root });
+
+    git.remoteTags('origin');
+    assert.equal(git.remoteBranchTip('origin', 'main'), context.originGit('rev-parse', 'main'), `${label}: the remote answered`);
+    assert.equal(git.fetchBranch('origin', 'main'), true, `${label}: the fetch went through`);
+
+    const calls = fake.calls();
+    assertBatchProbes(calls, label);
+    if (kept) assert.ok(calls.every(({ args }) => args.includes(kept)), `${label}: ${kept} is kept`);
+  }
+});
+
+test('--force refuses within the probe deadline, and leaves the tag unmoved, when a remote probe never answers', async (t) => {
+  const cases = {
+    'a second remote never answers its tag listing': {
+      prepare: (context) => context.git('remote', 'add', 'mirror', 'ssh://blocking.invalid/mirror.git'),
+      blocks: () => false,
+      probe: null,
+      refusal: /could not prove these local release tags unpublished[^]*v3\.208\.0 \(mirror could not be listed\)/,
+    },
+    'origin never answers its tag listing': {
+      prepare: () => {},
+      blocks: (args) => args[0] === 'ls-remote' && args.includes('--tags'),
+      probe: 'ls-remote --tags origin',
+      refusal: /git ls-remote --tags origin failed \(124\): no answer within 1000ms, so the remote could not be checked/,
+    },
+    'origin never answers for its publish branch': {
+      prepare: () => {},
+      blocks: (args) => args[0] === 'ls-remote' && args.includes('--exit-code'),
+      probe: 'ls-remote --exit-code origin refs/heads/main',
+      refusal: /could not tell whether origin\/main already contains the commits these local release tags mark: v3\.208\.0/,
+    },
+    'origin never answers the fetch of its publish branch': {
+      // The remote moved to a commit this clone lacks, so answering needs a fetch as well as a read.
+      prepare: (context) => commitOnOrigin(context, context.originGit('rev-parse', 'main'), 'unrelated work'),
+      blocks: (args) => args[0] === 'fetch',
+      probe: 'fetch',
+      refusal: /could not tell whether origin\/main already contains the commits these local release tags mark: v3\.208\.0/,
+    },
+  };
+  for (const [label, { prepare, blocks, probe, refusal }] of Object.entries(cases)) {
+    const context = setup(t);
+    const fake = sshThroughFake(t, context);
+    context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+    const integration = context.commit('integrate');
+    prepare(context);
+    context.git('tag', '-a', 'v3.208.0', '-m', 'v3.208.0', integration);
+    const tagObject = context.git('rev-parse', 'refs/tags/v3.208.0');
+    const blocked = [];
+
+    const started = Date.now();
+    const failure = await rejection(
+      cut({ repoRoot: context.root, git: gitBlocking(context, blocks, blocked), skipTests: true, force: true, log: () => {} }),
+    );
+    const elapsed = Date.now() - started;
+
+    assert.ok(elapsed < PROBE_DEADLINE_MS, `${label}: refused after ${elapsed}ms, not within ${PROBE_DEADLINE_MS}ms`);
+    if (probe) assert.ok(blocked.some((command) => command.startsWith(probe)), `${label}: ${probe} asked the host that never answers`);
+    assert.ok(fake.calls().some(({ args }) => args.includes('blocking.invalid')), `${label}: the blocking host was asked`);
+    assert.match(failure.message, refusal, label);
+    assert.doesNotMatch(failure.message, /leftovers from an unpublished attempt: /, label);
+    assert.equal(context.git('rev-parse', 'refs/tags/v3.208.0'), tagObject, `${label}: the tag did not move`);
+    assert.deepEqual(releaseSubjects(context), [], label);
+  }
+});
+
+test('--force still recreates a genuine leftover when every remote answers over ssh in batch mode', async (t) => {
+  const context = setup(t);
+  const fake = sshThroughFake(t, context);
+  context.git('remote', 'set-url', 'origin', `ssh://served.invalid${context.origin}`);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const integration = context.commit('integrate');
+  addRemote(context, 'mirror');
+  context.git('push', '-q', 'mirror', 'HEAD:refs/heads/main');
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, keepOnFailure: true, runSuite: failingSuite, log: () => {} }),
+    /release suites failed/,
+  );
+  const attempt = context.git('rev-parse', 'HEAD');
+  context.git('reset', '-q', '--hard', integration);
+
+  const result = await cut({ repoRoot: context.root, skipTests: true, force: true, log: () => {} });
+
+  assert.equal(result.status, 'cut');
+  assert.notEqual(result.commit, attempt);
+  for (const tag of result.plan.tags) {
+    assert.equal(context.git('rev-list', '-n', '1', `refs/tags/${tag}`), result.commit, `${tag} was recreated at the new release commit`);
+  }
+  const calls = fake.calls();
+  assertBatchProbes(calls, 'origin over ssh');
+  assert.ok(calls.every(({ args }) => args.includes('ServerAliveInterval=7')), 'the operator\'s own ssh options are kept');
+});
+
+test('--force refuses a planned tag that already exists on the remote, before the lock or any build', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const integration = context.commit('integrate');
+  context.git('tag', 'v3.208.0', integration);
+  context.git('push', '-q', 'origin', 'refs/tags/v3.208.0');
+  context.git('tag', '-d', 'v3.208.0');
+  const before = context.remoteRefs();
+  const events = [];
+
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, push: true, publishLock: stubLock(events), skipTests: true, force: true, log: () => {} }),
+    /these tags already exist on origin: v3\.208\.0\..*--force does not change this: the cut never force-pushes/s,
+  );
+
+  assert.deepEqual(events, [], 'refused before the publish lock was taken');
+  assert.equal(context.git('rev-parse', 'HEAD'), integration);
+  assert.equal(context.git('tag', '--list'), '');
+  assert.deepEqual(releaseSubjects(context), []);
+  assert.equal(context.exists('.release/unreleased/SQ-1.md'), true);
+  assert.deepEqual(context.remoteRefs(), before);
 });
 
 test('a plugin whose manifest and marketplace entry disagree blocks the cut', async (t) => {
@@ -425,6 +904,239 @@ test('a rollback after an --allow-dirty start resets with --keep, so the operato
   assert.equal(context.git('rev-parse', 'HEAD'), originalHead);
   assert.equal(context.git('tag', '--list'), '');
   assert.equal(context.read('plugins/toolbelt/index.js'), '// operator edit, not part of the release\n');
+});
+
+test('--allow-dirty refuses an edit to a manifest the release writes, before anything changes, so the edit survives', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const originalHead = context.commit('integrate');
+  const manifestPath = 'plugins/sidequest/.claude-plugin/plugin.json';
+  const edited = `${JSON.stringify({ name: 'sidequest', version: '3.6.17', license: 'MIT', description: 'operator edit, not part of the release' }, null, 2)}\n`;
+  context.write(manifestPath, edited);
+  const refusal = /--allow-dirty only tolerates changes outside the release, but these paths the release writes or removes have local changes: plugins\/sidequest\/\.claude-plugin\/plugin\.json\..*nothing was changed/s;
+  let suiteRuns = 0;
+  let failure;
+
+  // A failing suite is what used to lose the edit: the release commit swept it in, and the
+  // rollback's reset took it away with the commit.
+  await assert.rejects(
+    () => cut({
+      repoRoot: context.root,
+      allowDirty: true,
+      log: () => {},
+      runSuite: (suite) => {
+        suiteRuns += 1;
+        return failingSuite(suite);
+      },
+    }),
+    (error) => {
+      failure = error;
+      return true;
+    },
+  );
+
+  assert.equal(context.read(manifestPath), edited, 'the operator\'s edit survives');
+  assert.equal(context.git('rev-parse', 'HEAD'), originalHead);
+  assert.match(failure.message, refusal);
+  assert.equal(failure.rollback, undefined, 'refused before a release commit existed, so nothing needed rolling back');
+  assert.equal(suiteRuns, 0, 'refused before any suite ran');
+  assert.equal(context.git('tag', '--list'), '');
+  assert.deepEqual(releaseSubjects(context), []);
+  assert.equal(context.exists('.release/unreleased/SQ-1.md'), true, 'the fragment is still queued');
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, allowDirty: true, dryRun: true, log: () => {} }),
+    refusal,
+    'a dry run refuses exactly where a real cut would',
+  );
+  assert.equal(context.read(manifestPath), edited);
+});
+
+test('--allow-dirty refuses a local change to any path a cut writes or removes, and leaves the change in place', async (t) => {
+  const reference = setup(t);
+  reference.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  reference.commit('integrate');
+  const result = await cut({ repoRoot: reference.root, skipTests: true, log: () => {} });
+  const releasePaths = [...new Set([...result.touched, ...result.consumed])].sort();
+  assert.deepEqual(releasePaths, [
+    '.claude-plugin/marketplace.json',
+    '.release/unreleased/SQ-1.md',
+    'CHANGELOG.md',
+    'plugins/sidequest/.claude-plugin/plugin.json',
+    'plugins/sidequest/CHANGELOG.md',
+  ], 'every path the release commit adds');
+
+  const changes = releasePaths.map((relative) => ({ relative, kind: 'edit' }));
+  changes.push({ relative: '.release/unreleased/SQ-1.md', kind: 'delete' });
+  for (const { relative, kind } of changes) {
+    const label = `${kind} ${relative}`;
+    const context = setup(t);
+    context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+    const originalHead = context.commit('integrate');
+    let expected = null;
+    if (kind === 'delete') {
+      rmSync(path.join(context.root, relative));
+    } else {
+      // Tracked paths get an unstaged edit; paths the release creates get an untracked file.
+      expected = context.exists(relative) ? `${context.read(relative)}\n` : '# operator notes\n';
+      context.write(relative, expected);
+    }
+    const escaped = relative.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    await assert.rejects(
+      () => cut({ repoRoot: context.root, allowDirty: true, skipTests: true, log: () => {} }),
+      new RegExp(`these paths the release writes or removes have local changes: ${escaped}\\.`),
+      label,
+    );
+    if (expected === null) assert.equal(context.exists(relative), false, `${label}: the deletion is kept`);
+    else assert.equal(context.read(relative), expected, `${label}: the change is kept`);
+    assert.equal(context.git('rev-parse', 'HEAD'), originalHead, label);
+    assert.equal(context.git('tag', '--list'), '', label);
+    assert.deepEqual(releaseSubjects(context), [], label);
+  }
+});
+
+test('a failed cut is not rolled back once the remote contains the release commit, even after building on it', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const originalHead = context.commit('integrate');
+  let release = null;
+  let remoteTip = null;
+  let failure;
+
+  await assert.rejects(
+    () => cut({
+      repoRoot: context.root,
+      log: () => {},
+      runSuite: (suite) => {
+        if (release === null) {
+          // While the suites run, someone else publishes the release commit and builds on it, so
+          // the remote branch contains the commit without pointing at it.
+          release = context.git('rev-parse', 'HEAD');
+          context.git('push', '-q', 'origin', `${release}:refs/heads/main`);
+          remoteTip = commitOnOrigin(context, release, 'built on the release');
+        }
+        return failingSuite(suite);
+      },
+    }),
+    (error) => {
+      failure = error;
+      return /release suites failed/.test(error.message);
+    },
+  );
+
+  assert.notEqual(release, originalHead);
+  assert.equal(failure.rollback.status, 'skipped');
+  assert.equal(failure.rollback.reason, 'the remote already carries a release ref');
+  assert.match(failure.message, /Not rolled back automatically: the remote already carries a release ref/);
+  assert.equal(context.git('rev-parse', 'HEAD'), release, 'the release commit the remote built on is not reset away');
+  assert.equal(context.git('tag', '--list'), 'sidequest-v3.6.18\nv3.208.0', 'no tag was deleted');
+  assert.equal(context.originGit('rev-parse', 'main'), remoteTip);
+});
+
+test('a failed cut is still rolled back when the remote moved on without the release commit', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const originalHead = context.commit('integrate');
+  let remoteTip = null;
+  let failure;
+
+  await assert.rejects(
+    () => cut({
+      repoRoot: context.root,
+      log: () => {},
+      runSuite: (suite) => {
+        remoteTip ??= commitOnOrigin(context, context.originGit('rev-parse', 'main'), 'unrelated work');
+        return failingSuite(suite);
+      },
+    }),
+    (error) => {
+      failure = error;
+      return /release suites failed/.test(error.message);
+    },
+  );
+
+  assert.equal(failure.rollback.status, 'rolled-back');
+  assert.equal(context.git('rev-parse', 'HEAD'), originalHead);
+  assert.equal(context.git('tag', '--list'), '');
+  assert.equal(context.originGit('rev-parse', 'main'), remoteTip);
+});
+
+test('a failed cut is not rolled back, and stops within the probe deadline, when the remote check never answers', async (t) => {
+  const cases = {
+    'origin never answers its tag listing': (args) => args[0] === 'ls-remote' && args.includes('--tags'),
+    'origin never answers for its publish branch': (args) => args[0] === 'ls-remote' && args.includes('--exit-code'),
+    'origin never answers the fetch of its publish branch': (args) => args[0] === 'fetch',
+  };
+  for (const [label, blocks] of Object.entries(cases)) {
+    const context = setup(t);
+    sshThroughFake(t, context);
+    context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+    const originalHead = context.commit('integrate');
+    // The remote moved to a commit this clone lacks, so answering needs a fetch as well as a read.
+    commitOnOrigin(context, context.originGit('rev-parse', 'main'), 'unrelated work');
+    // Only the rollback check blocks: the checks before the build answer as usual.
+    let suitesRan = false;
+    const blocked = [];
+    const runSuite = (suite) => {
+      suitesRan = true;
+      return failingSuite(suite);
+    };
+
+    const started = Date.now();
+    const failure = await rejection(
+      cut({ repoRoot: context.root, git: gitBlocking(context, (args) => suitesRan && blocks(args), blocked), log: () => {}, runSuite }),
+    );
+    const elapsed = Date.now() - started;
+
+    assert.match(failure.message, /release suites failed/, label);
+    assert.ok(elapsed < PROBE_DEADLINE_MS, `${label}: stopped after ${elapsed}ms, not within ${PROBE_DEADLINE_MS}ms`);
+    assert.equal(blocked.length, 1, `${label}: the rollback check asked the host that never answers once`);
+    assert.equal(failure.rollback.status, 'skipped', label);
+    assert.equal(failure.rollback.reason, 'the remote could not be checked', label);
+    assert.match(failure.message, /Not rolled back automatically: the remote could not be checked/, label);
+    const release = context.git('rev-parse', 'HEAD');
+    assert.notEqual(release, originalHead, `${label}: the release commit is kept`);
+    assert.equal(context.git('rev-list', '-n', '1', 'refs/tags/v3.208.0'), release, `${label}: the tag stays on the release commit`);
+    assert.equal(context.git('tag', '--list'), 'sidequest-v3.6.18\nv3.208.0', `${label}: no tag was deleted`);
+  }
+});
+
+test('a failed cut is not rolled back when the remote branch cannot be read or fetched', async (t) => {
+  const failures = {
+    'the branch cannot be read': (args) => args[0] === 'ls-remote' && args.includes('--exit-code'),
+    'the branch cannot be fetched': (args) => args[0] === 'fetch',
+  };
+  for (const [label, fails] of Object.entries(failures)) {
+    const context = setup(t);
+    context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+    const originalHead = context.commit('integrate');
+    // The remote moved to a commit this clone lacks, so answering needs a fetch as well as a read.
+    commitOnOrigin(context, context.originGit('rev-parse', 'main'), 'unrelated work');
+    let failure;
+
+    await assert.rejects(
+      () => cut({ repoRoot: context.root, git: gitFailing(context, fails), log: () => {}, runSuite: failingSuite }),
+      (error) => {
+        failure = error;
+        return /release suites failed/.test(error.message);
+      },
+    );
+
+    assert.equal(failure.rollback.status, 'skipped', label);
+    assert.equal(failure.rollback.reason, 'the remote could not be checked', label);
+    assert.match(failure.message, /Not rolled back automatically: the remote could not be checked/, label);
+    // An unanswered remote proves nothing about it, so the window is not called local.
+    assert.doesNotMatch(failure.message, /The release commit and tags are local only/, label);
+    const release = context.git('rev-parse', 'HEAD');
+    assert.match(
+      failure.message,
+      new RegExp(`Could not confirm that the release commit and tags are local only, because origin could not be checked\\. Confirm origin has neither ${release} on main nor the tags v3\\.208\\.0, sidequest-v3\\.6\\.18, then undo the local window:`),
+      label,
+    );
+    assert.match(failure.message, new RegExp(`git reset --hard ${originalHead}\\n  git tag -d v3\\.208\\.0 sidequest-v3\\.6\\.18`), `${label}: the undo commands are still given`);
+    assert.notEqual(context.git('rev-parse', 'HEAD'), originalHead, `${label}: the release commit is kept`);
+    assert.equal(context.git('tag', '--list'), 'sidequest-v3.6.18\nv3.208.0', `${label}: no tag was deleted`);
+  }
 });
 
 test('a failed push is never rolled back, whichever push failed', async (t) => {
