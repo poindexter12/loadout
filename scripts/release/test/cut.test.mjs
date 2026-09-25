@@ -1,16 +1,35 @@
 // Behaviour of a cut, against a real repository. What the engine writes, what it refuses, and what
 // it leaves alone are all statements about a tree, so they are tested against one.
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
+import * as cutModule from '../cut.mjs';
 import { assertGitHubReleasePublished, assertParentCiPassed, cut, defaultSuiteRunner } from '../cut.mjs';
-import { createGit } from '../lib/git.mjs';
+import { createGit, spawnRunner } from '../lib/git.mjs';
 import { readValue } from '../lib/jsonedit.mjs';
 import { makeGitRepo } from './realrepo.mjs';
 
 const PLUGINS = { 'codex-gateway': '0.33.4', sidequest: '3.6.17', toolbelt: '0.63.6' };
+
+// An annotated tag stamped with an explicit tagger. The environment outranks any configured
+// identity, so the tagger is exactly this one wherever the suite runs.
+function tagAs(context, { name, email }, tag, target) {
+  const result = spawnSync('git', ['tag', '-a', tag, '-m', `${tag} by ${name}`, target], {
+    cwd: context.root,
+    encoding: 'utf8',
+    env: { ...process.env, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email },
+  });
+  assert.equal(result.status, 0, result.stderr);
+}
+
+const failingSuite = (suite) => ({ code: 1, command: suite.command });
+
+function releaseSubjects(context) {
+  return context.git('log', '--all', '--format=%s').split('\n').filter((subject) => /^release v/.test(subject));
+}
 
 function setup(t, options = {}) {
   const repo = makeGitRepo({ plugins: PLUGINS, ...options });
@@ -160,7 +179,8 @@ test('local tags from an unpublished attempt explain how to recover', async (t) 
   const context = setup(t);
   context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
   const integration = context.commit('integrate');
-  context.git('tag', 'v3.208.0', integration);
+  // Annotated and stamped by this clone's identity, exactly as a cut makes its tags.
+  context.git('tag', '-a', 'v3.208.0', '-m', 'v3.208.0', integration);
 
   await assert.rejects(
     () => cut({ repoRoot: context.root, skipTests: true, log: () => {} }),
@@ -168,6 +188,74 @@ test('local tags from an unpublished attempt explain how to recover', async (t) 
   );
   assert.equal(context.version('sidequest'), '3.6.17');
   assert.equal(context.git('rev-list', '-n', '1', 'refs/tags/v3.208.0'), integration, 'the existing tag did not move');
+});
+
+test('a local-only tag another remote fetched is named as foreign, with the tagOpt fix instead of the leftover advice', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const integration = context.commit('integrate');
+  context.git('remote', 'add', 'upstream', path.join(context.base, 'never-contacted.git'));
+  tagAs(context, { name: 'Kenny Vaneetvelde', email: 'kenny@upstream.example' }, 'v3.208.0', integration);
+  context.git('tag', 'sidequest-v3.6.18', integration);
+
+  let failure;
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, skipTests: true, log: () => {} }),
+    (error) => {
+      failure = error;
+      return true;
+    },
+  );
+
+  assert.match(failure.message, /not made by this clone's release identity/);
+  assert.match(failure.message, /v3\.208\.0 \(tagged by Kenny Vaneetvelde <kenny@upstream\.example>\)/);
+  assert.match(failure.message, /sidequest-v3\.6\.18 \(lightweight, no tagger\)/);
+  assert.match(failure.message, /git tag -d v3\.208\.0 sidequest-v3\.6\.18/);
+  assert.match(failure.message, /git config remote\.upstream\.tagOpt --no-tags/);
+  assert.doesNotMatch(failure.message, /remote\.origin\.tagOpt/, 'the publish remote keeps its tags');
+  assert.doesNotMatch(failure.message, /leftovers from an unpublished attempt/);
+  assert.equal(context.version('sidequest'), '3.6.17');
+  assert.equal(context.git('tag', '--list'), 'sidequest-v3.6.18\nv3.208.0', 'classifying deletes nothing');
+});
+
+test('loadout.releaseTagger makes another identity count as this fork\'s release tagger', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const integration = context.commit('integrate');
+  tagAs(context, { name: 'Former Maintainer', email: 'former@fork.example' }, 'v3.208.0', integration);
+
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, skipTests: true, log: () => {} }),
+    /v3\.208\.0 \(tagged by Former Maintainer <former@fork\.example>\)/,
+  );
+
+  context.git('config', '--add', 'loadout.releaseTagger', 'former@fork.example');
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, skipTests: true, log: () => {} }),
+    /local tags are leftovers from an unpublished attempt: v3\.208\.0/,
+  );
+});
+
+test('this fork\'s local-only tag on a commit the remote already has is pushed, not deleted', async (t) => {
+  const context = setup(t);
+  const published = context.originGit('rev-parse', 'main');
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  context.commit('integrate');
+  context.git('tag', '-a', 'v3.208.0', '-m', 'v3.208.0', published);
+
+  let failure;
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, skipTests: true, log: () => {} }),
+    (error) => {
+      failure = error;
+      return true;
+    },
+  );
+
+  assert.match(failure.message, /mark commits origin\/main already contains, but never reached origin: v3\.208\.0/);
+  assert.match(failure.message, /git push --atomic origin refs\/tags\/v3\.208\.0:refs\/tags\/v3\.208\.0/);
+  assert.doesNotMatch(failure.message, /leftovers from an unpublished attempt/);
+  assert.equal(context.git('rev-list', '-n', '1', 'refs/tags/v3.208.0'), published, 'the tag did not move');
 });
 
 test('a plugin whose manifest and marketplace entry disagree blocks the cut', async (t) => {
@@ -247,7 +335,7 @@ test('the cut refuses a dirty tree and the wrong branch', async (t) => {
   await assert.rejects(() => cut({ repoRoot: wrongBranch.root, skipTests: true, log: () => {} }), /cutting from "dev"/);
 });
 
-test('a failing suite leaves the release local and prints recovery commands', async (t) => {
+test('a failing suite rolls the unpublished release back, leaving no release commit or tags', async (t) => {
   const context = setup(t);
   context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
   const originalHead = context.commit('integrate');
@@ -259,7 +347,7 @@ test('a failing suite leaves the release local and prints recovery commands', as
       repoRoot: context.root,
       push: true,
       log: () => {},
-      runSuite: (suite) => ({ code: 1, command: suite.command }),
+      runSuite: failingSuite,
     }),
     (error) => {
       failure = error;
@@ -267,10 +355,155 @@ test('a failing suite leaves the release local and prints recovery commands', as
     },
   );
 
+  assert.match(failure.message, new RegExp(`Rolled back the unpublished release: HEAD is back at ${originalHead} \\(git reset --hard\\)`));
+  assert.doesNotMatch(failure.message, /git reset --hard [0-9a-f]{40}\n|git tag -d/, 'no manual undo is left to run');
+  assert.equal(failure.rollback.status, 'rolled-back');
+  assert.deepEqual(failure.rollback.deletedTags, ['v3.208.0', 'sidequest-v3.6.18']);
+  assert.equal(context.git('rev-parse', 'HEAD'), originalHead);
+  assert.deepEqual(releaseSubjects(context), [], 'no ref reaches a release commit');
+  assert.equal(context.git('tag', '--list'), '', 'no local release tags remain');
+  assert.equal(context.git('status', '--porcelain', '--untracked-files=no'), '', 'the tracked tree is the original head again');
+  assert.equal(context.version('sidequest'), '3.6.17');
+  assert.equal(context.exists('.release/unreleased/SQ-1.md'), true, 'the fragment is queued again');
+  assert.deepEqual(context.remoteRefs(), before);
+});
+
+test('--keep-on-failure keeps a failed unpublished release and prints the recovery commands', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const originalHead = context.commit('integrate');
+  const before = context.remoteRefs();
+  let failure;
+
+  await assert.rejects(
+    () => cut({
+      repoRoot: context.root,
+      push: true,
+      keepOnFailure: true,
+      log: () => {},
+      runSuite: failingSuite,
+    }),
+    (error) => {
+      failure = error;
+      return /release suites failed, nothing was published/.test(error.message);
+    },
+  );
+
+  assert.equal(failure.rollback.status, 'kept');
   assert.match(failure.message, new RegExp(`git reset --hard ${originalHead}`));
   assert.match(failure.message, /git tag -d v3\.208\.0 sidequest-v3\.6\.18/);
   assert.match(failure.message, /A reset does not delete local tags/);
+  assert.notEqual(context.git('rev-parse', 'HEAD'), originalHead, 'the release commit is kept');
+  assert.equal(context.git('tag', '--list'), 'sidequest-v3.6.18\nv3.208.0', 'the release tags are kept');
   assert.deepEqual(context.remoteRefs(), before);
+});
+
+test('a rollback after an --allow-dirty start resets with --keep, so the operator\'s edits survive', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const originalHead = context.commit('integrate');
+  writeFileSync(path.join(context.root, 'plugins/toolbelt/index.js'), '// operator edit, not part of the release\n');
+  let failure;
+
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, allowDirty: true, log: () => {}, runSuite: failingSuite }),
+    (error) => {
+      failure = error;
+      return true;
+    },
+  );
+
+  assert.equal(failure.rollback.status, 'rolled-back');
+  assert.equal(failure.rollback.resetMode, '--keep');
+  assert.equal(context.git('rev-parse', 'HEAD'), originalHead);
+  assert.equal(context.git('tag', '--list'), '');
+  assert.equal(context.read('plugins/toolbelt/index.js'), '// operator edit, not part of the release\n');
+});
+
+test('a failed push is never rolled back, whichever push failed', async (t) => {
+  for (const failingPush of [1, 2]) {
+    const context = setup(t);
+    context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+    const originalHead = context.commit('integrate');
+    const real = spawnRunner(context.root);
+    let pushes = 0;
+    const git = createGit({
+      cwd: context.root,
+      run: (args) => {
+        if (args[0] !== 'push') return real(args);
+        pushes += 1;
+        return pushes === failingPush ? { code: 1, stdout: '', stderr: 'forced push failure' } : real(args);
+      },
+    });
+    let failure;
+
+    await assert.rejects(
+      () => cut({ repoRoot: context.root, git, push: true, skipTests: true, log: () => {} }),
+      (error) => {
+        failure = error;
+        return /forced push failure/.test(error.message);
+      },
+    );
+
+    assert.equal(failure.rollback.status, 'skipped', `push ${failingPush}`);
+    const releaseCommit = context.git('rev-parse', 'HEAD');
+    assert.notEqual(releaseCommit, originalHead, `push ${failingPush}: the release commit is untouched`);
+    assert.equal(context.git('tag', '--list'), 'sidequest-v3.6.18\nv3.208.0', `push ${failingPush}: the local tags are untouched`);
+    if (failingPush === 1) {
+      assert.match(failure.message, /The push to origin did not complete, so nothing was rolled back automatically/);
+      assert.match(failure.message, /Confirm origin has neither .* on main nor the tags v3\.208\.0, sidequest-v3\.6\.18/);
+    } else {
+      assert.match(failure.message, /The marketplace commit and tag v3\.208\.0 are already published/);
+      assert.equal(context.remoteRefs()['refs/heads/main'], releaseCommit);
+    }
+  }
+});
+
+test('the rollback decision refuses every case but an unpushed failure at the release commit', () => {
+  const { failureRecovery } = cutModule;
+  for (const pushStarted of [false, true, undefined]) {
+    for (const keepOnFailure of [false, true]) {
+      for (const headIsReleaseCommit of [false, true]) {
+        for (const remoteCarriesRelease of [false, true, null]) {
+          const inputs = { pushStarted, keepOnFailure, headIsReleaseCommit, remoteCarriesRelease };
+          const { action } = failureRecovery(inputs);
+          const expected = pushStarted !== false ? 'instructions'
+            : keepOnFailure ? 'keep'
+              : headIsReleaseCommit && remoteCarriesRelease === false ? 'rollback' : 'instructions';
+          assert.equal(action, expected, JSON.stringify(inputs));
+        }
+      }
+    }
+  }
+});
+
+test('a push that leaves a planned tag off the remote fails loudly and names it', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  context.commit('integrate');
+  const real = spawnRunner(context.root);
+  // The plugin-tag push reports success without sending anything, as the v3.537.0 tags did.
+  const git = createGit({
+    cwd: context.root,
+    run: (args) => (args[0] === 'push' && args.some((arg) => arg.startsWith('refs/tags/sidequest-'))
+      ? { code: 0, stdout: '', stderr: '' }
+      : real(args)),
+  });
+  let failure;
+
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, git, push: true, skipTests: true, log: () => {} }),
+    (error) => {
+      failure = error;
+      return true;
+    },
+  );
+
+  assert.match(failure.message, /the push reported success but these release tags do not resolve on origin: sidequest-v3\.6\.18\./);
+  assert.match(failure.message, /git push --atomic origin refs\/tags\/sidequest-v3\.6\.18:refs\/tags\/sidequest-v3\.6\.18/);
+  assert.equal(failure.rollback.status, 'skipped', 'a published release is never rolled back');
+  assert.equal(context.git('tag', '--list'), 'sidequest-v3.6.18\nv3.208.0');
+  assert.ok(context.remoteRefs()['refs/tags/v3.208.0'], 'the marketplace tag did land');
 });
 
 test('a failed Test workflow refuses before suites or release mutations', async (t) => {
@@ -283,12 +516,12 @@ test('a failed Test workflow refuses before suites or release mutations', async 
   let suiteRuns = 0;
   const failedTestRun = () => ({
     status: 0,
-    stdout: JSON.stringify([{ headSha: remoteParent, conclusion: 'failure' }]),
+    stdout: JSON.stringify([{ headSha: localParent, conclusion: 'failure' }]),
     stderr: '',
   });
 
   assert.throws(
-    () => assertParentCiPassed(context.root, remoteParent, failedTestRun),
+    () => assertParentCiPassed(context.root, localParent, failedTestRun),
     /Test workflow for .* concluded failure; refusing to publish/,
   );
   await assert.rejects(
@@ -312,8 +545,8 @@ test('a failed Test workflow refuses before suites or release mutations', async 
     }),
     /Test workflow for .* concluded failure; refusing to publish/,
   );
-  assert.equal(checkedCommit, remoteParent);
-  assert.notEqual(checkedCommit, localParent);
+  assert.equal(checkedCommit, localParent, 'CI is asserted on the pinned commit the release is built from');
+  assert.notEqual(checkedCommit, remoteParent, 'not on whatever the remote head happens to be');
   assert.equal(suiteRuns, 0, 'a CI refusal skips release suites');
   assert.equal(context.git('rev-parse', 'HEAD'), localParent, 'no release commit exists');
   assert.equal(context.exists('.release/unreleased/SQ-1.md'), true, 'the fragment is still queued');
@@ -399,10 +632,10 @@ test('a cut succeeds and reports a deferred GitHub Release', async (t) => {
   assert.ok(logs.includes(deferredRelease.message));
 });
 
-test('a local cut prints the passing remote CI verdict with its push command', async (t) => {
+test('a local cut prints the passing CI verdict on the pinned commit with its push command', async (t) => {
   const context = setup(t);
   context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
-  context.commit('integrate');
+  const pinned = context.commit('integrate');
   const remoteParent = context.originGit('rev-parse', 'main');
   const logs = [];
 
@@ -411,21 +644,21 @@ test('a local cut prints the passing remote CI verdict with its push command', a
     skipTests: true,
     log: (message) => logs.push(message),
     assertParentCiPassed: (repoRoot, commit) => {
-      assert.equal(commit, remoteParent);
+      assert.equal(commit, pinned);
+      assert.notEqual(commit, remoteParent);
       return { commit, conclusion: 'success' };
     },
   });
 
-  assert.deepEqual(result.ci, { status: 'passed', commit: remoteParent, conclusion: 'success' });
-  assert.ok(logs.includes(`Test CI on origin/main (${remoteParent}) passed.`));
+  assert.deepEqual(result.ci, { status: 'passed', commit: pinned, conclusion: 'success' });
+  assert.ok(logs.includes(`Test CI on the pinned commit ${pinned} passed.`));
   for (const command of result.pushCommands) assert.ok(logs.includes(`  ${command}`));
 });
 
 test('a CI override records its reason for a local cut', async (t) => {
   const context = setup(t);
   context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
-  context.commit('integrate');
-  const remoteParent = context.originGit('rev-parse', 'main');
+  const pinned = context.commit('integrate');
   const logs = [];
 
   const result = await cut({
@@ -435,18 +668,74 @@ test('a CI override records its reason for a local cut', async (t) => {
     log: (message) => logs.push(message),
     assertParentCiPassed: (repoRoot, commit) => assertParentCiPassed(repoRoot, commit, () => ({
       status: 0,
-      stdout: JSON.stringify([{ headSha: remoteParent, conclusion: 'failure' }]),
+      stdout: JSON.stringify([{ headSha: pinned, conclusion: 'failure' }]),
       stderr: '',
     })),
   });
 
   assert.deepEqual(result.ci, {
     status: 'overridden',
-    commit: remoteParent,
+    commit: pinned,
     reason: 'SQ-1349 repairs the failed Test workflow',
-    error: `Test workflow for ${remoteParent} concluded failure; refusing to publish. Retry with --ci-override "<reason>" only when the release fixes that CI failure.`,
+    error: `Test workflow for ${pinned} concluded failure; refusing to publish. Retry with --ci-override "<reason>" only when the release fixes that CI failure.`,
   });
-  assert.ok(logs.includes(`Test CI on origin/main (${remoteParent}) was overridden: SQ-1349 repairs the failed Test workflow`));
+  assert.ok(logs.includes(`Test CI on the pinned commit ${pinned} was overridden: SQ-1349 repairs the failed Test workflow`));
+});
+
+test('--trust-ci records a failing local suite as a warning when CI passed on the pinned commit', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const pinned = context.commit('integrate');
+  const logs = [];
+
+  const result = await cut({
+    repoRoot: context.root,
+    trustCi: true,
+    log: (message) => logs.push(message),
+    runSuite: failingSuite,
+    assertParentCiPassed: (repoRoot, commit) => ({ commit, conclusion: 'success' }),
+  });
+
+  assert.equal(result.status, 'cut');
+  assert.deepEqual(result.ci, { status: 'passed', commit: pinned, conclusion: 'success' });
+  assert.equal(result.suiteWarnings.length, 1);
+  assert.match(result.suiteWarnings[0], new RegExp(`the Test workflow passed on ${pinned} and --trust-ci accepts that verdict`));
+  assert.match(result.suiteWarnings[0], /exited 1/);
+  assert.ok(logs.includes(`warning: ${result.suiteWarnings[0]}`));
+  assert.equal(context.version('sidequest'), '3.6.18');
+});
+
+test('--trust-ci refuses without a CI verdict, beside --ci-override, and in a hotfix', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const pinned = context.commit('integrate');
+
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, trustCi: true, log: () => {}, runSuite: failingSuite }),
+    /--trust-ci needs a passing Test workflow on the pinned commit/,
+  );
+  assert.equal(context.git('rev-parse', 'HEAD'), pinned, 'no release commit exists');
+  assert.equal(context.git('tag', '--list'), '', 'no release tags were created');
+
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, trustCi: true, ciOverrideReason: 'x', log: () => {} }),
+    /--trust-ci and --ci-override contradict each other/,
+  );
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, trustCi: true, mode: 'hotfix', tickets: ['SQ-1'], log: () => {} }),
+    /--trust-ci applies to normal windows only/,
+  );
+  assert.equal(context.git('rev-parse', 'HEAD'), pinned);
+});
+
+test('--trust-ci and --keep-on-failure parse to cut options that default off', () => {
+  const { parseCutArgs } = cutModule;
+  const on = parseCutArgs(['--trust-ci', '--keep-on-failure', '--repo', '/tmp/x']).options;
+  assert.equal(on.trustCi, true);
+  assert.equal(on.keepOnFailure, true);
+  const off = parseCutArgs(['--repo', '/tmp/x']).options;
+  assert.equal(off.trustCi, false);
+  assert.equal(off.keepOnFailure, false);
 });
 
 test('a missing Test workflow run offers a committed container baseline and every planned suite', (t) => {
