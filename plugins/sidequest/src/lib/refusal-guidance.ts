@@ -116,5 +116,5 @@ export function verificationTimeoutGuidance(verify: VerificationTimeoutFacts | n
   const ran = observed == null ? 'Verification was stopped' : `Verification ran ${millisecondsText(observed)} and was stopped`;
   const at = cap == null ? 'at the board integration verify cap' : `at the board integration verify cap of ${millisecondsText(cap)}`;
   const limit = max == null ? '' : ` (maximum ${max})`;
-  return `${ran} ${at}; the command did not fail. The cap is per-board config, not a code constant: raise it with board_config({ integrationVerifyTimeoutMs: <ms> })${limit} above the command's real run time and retry, or re-pin the ticket's verify to a faster command. The candidate is not defective on this evidence.`;
+  return `${ran} ${at}; the command did not fail. The cap is per-board config, not a code constant: raise it with board_config({ integrationVerifyTimeoutMs: <ms> })${limit} above the command's real run time and retry, or re-pin the ticket's pending verify to a faster command with update({ ref, verify: "<narrower command>" }) from the orchestrator. The candidate is not defective on this evidence.`;
 }
