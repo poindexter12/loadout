@@ -724,6 +724,117 @@ test('control-plane delivery validates a reviewed interaction and keeps no-submi
   assert.equal(ordinary.ticket.completion.delivery.commit, ordinaryDelivery);
 });
 
+// SQ-99: the orchestrator reviews a candidate, commits a fix ON TOP of the
+// pinned candidate (a reviewed descendant touching only submitted paths), and
+// the branch lands as one squash commit. Neither the pinned candidate nor the
+// descendant is reachable from main, and main's content differs from the
+// candidate, so the content check must compare the delivery against the
+// named reviewed descendant instead.
+function squashReviewedDescendant(label: string, reviewedBody: string) {
+  const verify = nodeVerify(`const fs=require('node:fs'); const {execFileSync}=require('node:child_process'); const branch=execFileSync('git',['branch','--show-current'],{encoding:'utf8'}).trim(); const expected=branch==='main'?${JSON.stringify(reviewedBody)}:'executor work\\n'; process.exit(fs.readFileSync('feature.txt','utf8')===expected?0:7)`);
+  const fixture = makeRepo(label);
+  const { slug } = store.ensureProject(fixture.repo);
+  const ticket = store.createTicket(slug, {
+    title: `reviewed descendant ${label}`,
+    category: 'codebase-exploration',
+    description: 'A candidate delivered as a squash of itself plus a reviewed fix on top.',
+    files: ['feature.txt'],
+  });
+  submitFixture(slug, ticket, fixture, verify);
+  const review = path.join(fixture.repo, '.claude', 'worktrees', `review-${label}`);
+  git(['worktree', 'add', '-b', `review-${label}`, review, fixture.submitted], fixture.repo);
+  const interaction = commitFile(review, 'feature.txt', reviewedBody);
+  commitFile(fixture.repo, 'main-moved.txt', 'main moved before the squash\n');
+  git(['merge', '--squash', `review-${label}`], fixture.repo);
+  git(['commit', '-m', 'squash reviewed candidate'], fixture.repo);
+  return { fixture, slug, ticket, review, interaction, squash: head(fixture.repo) };
+}
+
+test('a squash-merged reviewed descendant of the pinned candidate records delivery through deliveryInteractionCommit', () => {
+  const { fixture, slug, ticket, interaction, squash } = squashReviewedDescendant('squash-descendant', 'reviewed fix\n');
+
+  const withoutInteraction = store.recordDeliveredSubmission(slug, ticket.ref, {
+    target: store.integrationTarget(slug),
+    deliveryCommit: squash,
+    reason: 'The squash carries a reviewed fix, so it is not the pinned candidate alone.',
+  });
+  assert.equal(withoutInteraction.ok, false);
+  assert.equal(withoutInteraction.reason, 'delivery_content_missing');
+  assert.match(withoutInteraction.message, /deliveryInteractionCommit/);
+
+  const delivered = store.recordDeliveredSubmission(slug, ticket.ref, {
+    target: store.integrationTarget(slug),
+    deliveryCommit: squash,
+    deliveryInteractionCommit: interaction,
+    reason: 'PR squash-merged the pinned candidate plus the reviewed one-line fix.',
+  });
+  assert.equal(delivered.ok, true, delivered.message);
+  assert.equal(delivered.integration.mode, 'recorded-reviewed-interaction');
+  assert.equal(delivered.integration.verify.status, 'passed');
+  assert.equal(delivered.integration.deliveryCommit, squash);
+  assert.equal(delivered.integration.deliveryIdentity.kind, 'reviewed-candidate-descendant');
+  assert.equal(delivered.integration.deliveryIdentity.candidate, fixture.submitted);
+  assert.equal(delivered.integration.deliveryIdentity.interaction.commit, interaction);
+  assert.deepEqual(delivered.integration.deliveryIdentity.interaction.paths, ['feature.txt']);
+  assert.equal(delivered.integration.contentEvidence, 'equivalent_patches:reviewed_candidate_descendant');
+});
+
+test('a manual delivery of the pinned candidate accepts working-tree content from its reviewed descendant', () => {
+  const { fixture, slug, ticket, interaction } = squashReviewedDescendant('manual-descendant', 'manual reviewed fix\n');
+
+  const withoutInteraction = store.recordDeliveredSubmission(slug, ticket.ref, {
+    target: store.integrationTarget(slug),
+    deliveryCommit: fixture.submitted,
+    deliveryMethod: 'manual',
+    reason: 'The working tree carries the reviewed fix, not the pinned candidate alone.',
+  });
+  assert.equal(withoutInteraction.ok, false);
+  assert.equal(withoutInteraction.reason, 'delivery_content_missing');
+
+  const delivered = store.completeTicketAsControlPlane(slug, ticket.ref, {
+    purpose: 'delivery',
+    by: 'orchestrator',
+    reason: 'The pinned candidate plus its reviewed fix is present on the integration tree.',
+    deliveryCommit: fixture.submitted,
+    deliveryMethod: 'manual',
+    deliveryInteractionCommit: interaction,
+  });
+  assert.equal(delivered.ok, true, delivered.message);
+  const stored = store.getTicket(slug, ticket.ref);
+  assert.equal(stored.status, 'done');
+  assert.equal(stored.submission.integration.deliveryIdentity.kind, 'reviewed-candidate-descendant');
+  assert.equal(stored.submission.integration.deliveryIdentity.method, 'manual');
+  assert.equal(stored.submission.integration.deliveryIdentity.interaction.commit, interaction);
+  assert.equal(stored.submission.integration.contentEvidence, 'working_tree_matches_candidate:reviewed_candidate_descendant');
+});
+
+test('a reviewed candidate descendant is refused when it leaves submitted paths or the delivery lacks its content', () => {
+  const { slug, ticket, review, squash } = squashReviewedDescendant('refused-descendant', 'refused reviewed fix\n');
+  const outside = commitFile(review, 'unrelated.txt', 'outside the candidate\n');
+  const outsideResult = store.recordDeliveredSubmission(slug, ticket.ref, {
+    target: store.integrationTarget(slug),
+    deliveryCommit: squash,
+    deliveryInteractionCommit: outside,
+    reason: 'The descendant also changes a path the candidate never submitted.',
+  });
+  assert.equal(outsideResult.ok, false);
+  assert.equal(outsideResult.reason, 'delivery_interaction_outside_candidate');
+  assert.deepEqual(outsideResult.unrelatedPaths, ['unrelated.txt']);
+
+  git(['checkout', '-b', `divergent-refused`, `${outside}~1`], review);
+  const divergent = commitFile(review, 'feature.txt', 'a different fix that never landed\n');
+  const divergentResult = store.recordDeliveredSubmission(slug, ticket.ref, {
+    target: store.integrationTarget(slug),
+    deliveryCommit: squash,
+    deliveryInteractionCommit: divergent,
+    reason: 'The named descendant is not what the squash delivered.',
+  });
+  assert.equal(divergentResult.ok, false);
+  assert.equal(divergentResult.reason, 'delivery_content_missing');
+  assert.match(divergentResult.message, new RegExp(`reviewed descendant ${divergent}`));
+  assert.notEqual(store.getTicket(slug, ticket.ref).status, 'done');
+});
+
 test('groomClose delivers a landed candidate despite an overlapping pending sibling candidate', async () => {
   const fixture = makeRepo('gc-ovl');
   const { slug } = store.ensureProject(fixture.repo);
