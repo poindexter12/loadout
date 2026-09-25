@@ -150,6 +150,9 @@ const PROCESS_GROUP_TERMINATE_GRACE_MILLISECONDS = 5_000;
 const PROCESS_GROUP_KILL_SETTLE_MILLISECONDS = 1_000;
 const PROCESS_GROUP_POLL_MILLISECONDS = 50;
 const ownsProcessGroup = process.platform !== 'win32';
+// Node's spawnSync honors `detached` (the child leads a new process group), but @types/node omits
+// it from SpawnSyncOptions; spreading it keeps the call's option literal type-checked otherwise.
+const processGroupSpawnOption = Object.freeze({ detached: ownsProcessGroup });
 
 type ProcessGroupTermination = Readonly<{
   groupId: number;
@@ -260,7 +263,7 @@ export function runProcessVerification(requirement: VerificationRequirement, opt
         cwd: options.cwd || process.cwd(),
         env: options.environment,
         windowsHide: true,
-        detached: ownsProcessGroup,
+        ...processGroupSpawnOption,
         timeout: timeoutMilliseconds,
         stdio: ['ignore', log, log],
       });

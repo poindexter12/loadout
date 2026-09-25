@@ -131,6 +131,7 @@ const PROCESS_GROUP_TERMINATE_GRACE_MILLISECONDS = 5e3;
 const PROCESS_GROUP_KILL_SETTLE_MILLISECONDS = 1e3;
 const PROCESS_GROUP_POLL_MILLISECONDS = 50;
 const ownsProcessGroup = process.platform !== "win32";
+const processGroupSpawnOption = Object.freeze({ detached: ownsProcessGroup });
 function sleepSynchronously(milliseconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
@@ -222,7 +223,7 @@ function runProcessVerification(requirement, options = {}) {
         cwd: options.cwd || process.cwd(),
         env: options.environment,
         windowsHide: true,
-        detached: ownsProcessGroup,
+        ...processGroupSpawnOption,
         timeout: timeoutMilliseconds,
         stdio: ["ignore", log, log]
       });
