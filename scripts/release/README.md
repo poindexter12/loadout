@@ -23,7 +23,7 @@ The marketplace is delivered through `main` and its marketplace tag, `v<marketpl
 
 The GitHub Release workflow is notification-only. It runs for marketplace `v*` tag pushes, on its daily schedule, and on manual dispatch. The daily cap can defer the GitHub Release, but it does not delay the already-published marketplace `main` branch or marketplace tag. Plugin tags do not create GitHub Releases.
 
-`--push` acquires the Sidequest publish lock before changing the local release window. It also checks the current remote `main` Test workflow before publishing. A failed or missing run stops the cut unless `--ci-override "<reason>"` records why it may proceed. The lock is released after the pushes or any failure.
+`--push` acquires the Sidequest publish lock before changing the local release window. It also checks the Test workflow on the pinned commit the release is built from, not on whatever the remote `main` head happens to be. A failed or missing run stops the cut unless `--ci-override "<reason>"` records why it may proceed. `--trust-ci` goes the other way: when that Test workflow passed on the pinned commit itself, a failing local suite is recorded as a warning (`suiteWarnings` in `--json`) instead of stopping the cut. It refuses when no CI verdict was checked, beside `--ci-override`, and in hotfix mode. After the pushes, the cut checks that every planned tag resolves on the remote and fails naming any that do not. The lock is released after the pushes or any failure.
 
 ## Workflow
 
@@ -47,7 +47,7 @@ node scripts/release/cut.mjs
 node scripts/release/cut.mjs --push
 ```
 
-`--dry-run` writes nothing. Without `--push`, the cut creates the local commit and tags and prints the exact publish commands. Other useful options include `--sha <rev>`, `--skip-tests`, `--allow-dirty` for unstaged or untracked files, and `--force` for an intentional held-window or tag repair. A hotfix selects tickets explicitly:
+`--dry-run` writes nothing. Without `--push`, the cut creates the local commit and tags and prints the exact publish commands. Other useful options include `--sha <rev>`, `--skip-tests`, `--allow-dirty` for unstaged or untracked files, `--keep-on-failure` to keep a failed unpublished window for inspection, and `--force` for an intentional held-window or tag repair. A hotfix selects tickets explicitly:
 
 ```bash
 node scripts/release/cut.mjs --mode hotfix --tickets SQ-843,SQ-845 --push
@@ -57,7 +57,11 @@ Run `--help` for the complete option list.
 
 ## Recovery
 
-Everything before the first remote push is local. If a suite or invariant fails, the cut leaves the remote untouched and prints a reset to the previous `HEAD` plus a `git tag -d` command for every tag it created. Run both commands before retrying. A reset alone leaves local tags behind.
+Everything before the first remote push is local. If a suite or invariant fails before any push ran, the cut rolls the window back itself: it resets to the previous `HEAD` (`--hard` from a clean start, `--keep` after an `--allow-dirty` start so your edits survive) and deletes each tag it created that still points at the release commit. It rolls back only when no push started, `HEAD` is still the release commit, and the remote carries neither the release commit nor any planned tag; otherwise it prints the undo commands instead. `--keep-on-failure` keeps the commit and tags and prints the reset plus a `git tag -d` for every tag. Run both before retrying, because a reset alone leaves local tags behind.
+
+If the first atomic push fails, nothing is rolled back automatically. Confirm the remote has neither the release commit nor its tags, then run the printed reset and `git tag -d`.
+
+A local-only tag that already names a planned version stops the cut, classified by the annotated tag's tagger. A tag this clone's release identity made is either an unpushed tag on a commit the remote already has (push it) or a leftover from an unpublished attempt (delete it). Anything else, including a lightweight tag, is foreign: it came from another remote's fetch. Delete it and set `git config remote.<name>.tagOpt --no-tags` on that remote. The release identity is the committer identity plus every `git config --add loadout.releaseTagger "<name or email>"` value.
 
 If the first atomic push succeeds and the separate plugin-tag push fails, `main` and the marketplace tag remain published. Inspect the remote, then publish the missing plugin tags with the plugin-tag push command printed by the cut. Do not rerun the whole cut or move an already-published marketplace tag.
 

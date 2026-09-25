@@ -90,7 +90,12 @@ test('every remote-changing command happens after the whole release is built', a
 
   const mutations = calls.filter((call) => call.startsWith('push'));
   assert.equal(mutations.length, 2, 'the marketplace ref and plugin tags publish separately');
-  assert.equal(calls.at(-1), mutations[1], 'the plugin-tag push is the last thing that runs');
+  const pluginPushIndex = calls.lastIndexOf(mutations[1]);
+  assert.deepEqual(
+    calls.slice(pluginPushIndex + 1),
+    ['ls-remote --tags origin'],
+    'the plugin-tag push is the last thing that changes anything; only the read-only check that every tag landed follows it',
+  );
 
   const marketplacePushIndex = calls.indexOf(mutations[0]);
   for (const verb of ['commit -m', 'tag -a v3.208.0', 'add --']) {
