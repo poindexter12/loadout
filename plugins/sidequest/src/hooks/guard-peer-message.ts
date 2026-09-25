@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './shared/sqlite-budget.js';
 import { isRecord, readStdin, stringField } from './shared/input.js';
 import { writeDeny } from './shared/output.js';
 import { runtimeModule } from './shared/paths.js';

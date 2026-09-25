@@ -1330,11 +1330,26 @@ function refreshRoutingProfileSeeds(handle) {
   });
   invalidateStoreCaches();
 }
+function unflaggedReadonlyCategory(data, readonlyIds, id) {
+  let category;
+  try {
+    category = JSON.parse(data);
+  } catch (_) {
+    return null;
+  }
+  if (!category || typeof category !== "object" || Array.isArray(category)) return null;
+  if (!readonlyIds.has(String(id === void 0 ? category.id : id)) || category.readonly !== void 0) return null;
+  return category;
+}
+function readonlyCategorySeedsPending(handle, readonlyIds) {
+  return db.selectRows(handle, "SELECT data FROM routing_profile_entries").some((row) => unflaggedReadonlyCategory(row.data, readonlyIds)) || db.selectRows(handle, "SELECT id, data FROM project_categories").some((row) => unflaggedReadonlyCategory(row.data, readonlyIds, row.id));
+}
 function refreshReadonlyCategorySeeds(handle) {
   const readonlyIds = /* @__PURE__ */ new Set([
     ...DEFAULT_CATEGORIES.filter((category) => category.readonly === true).map((category) => category.id),
     "hand-analysis"
   ]);
+  if (!readonlyCategorySeedsPending(handle, readonlyIds)) return;
   const affected = /* @__PURE__ */ new Set();
   let changed = false;
   withinTransaction(handle, () => {
@@ -1342,26 +1357,16 @@ function refreshReadonlyCategorySeeds(handle) {
     const updateProjectEntry = handle.prepare("UPDATE project_categories SET data = ? WHERE project = ? AND id = ?");
     const now = (/* @__PURE__ */ new Date()).toISOString();
     for (const row of handle.prepare("SELECT profile_id, category_id, data FROM routing_profile_entries").all()) {
-      let category;
-      try {
-        category = JSON.parse(row.data);
-      } catch (_) {
-        continue;
-      }
-      if (!readonlyIds.has(category?.id) || category.readonly !== void 0) continue;
+      const category = unflaggedReadonlyCategory(row.data, readonlyIds);
+      if (!category) continue;
       category.readonly = true;
       updateProfileEntry.run(JSON.stringify(category), now, row.profile_id, row.category_id);
       for (const project of handle.prepare("SELECT project FROM project_routing_profiles WHERE profile_id = ?").all(row.profile_id)) affected.add(String(project.project));
       changed = true;
     }
     for (const row of handle.prepare("SELECT project, id, data FROM project_categories").all()) {
-      let category;
-      try {
-        category = JSON.parse(row.data);
-      } catch (_) {
-        continue;
-      }
-      if (!readonlyIds.has(row.id) || category.readonly !== void 0) continue;
+      const category = unflaggedReadonlyCategory(row.data, readonlyIds, row.id);
+      if (!category) continue;
       category.readonly = true;
       updateProjectEntry.run(JSON.stringify(category), row.project, row.id);
       affected.add(String(row.project));

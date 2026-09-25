@@ -1,3 +1,4 @@
+import './shared/sqlite-budget.js';
 import { canonicalExecutorName } from '../lib/exec-names.js';
 import { isRecord, readStdin, stringField } from './shared/input.js';
 import { writeSystemMessage } from './shared/output.js';

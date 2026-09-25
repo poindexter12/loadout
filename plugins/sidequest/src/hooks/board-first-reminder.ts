@@ -1,3 +1,4 @@
+import './shared/sqlite-budget.js';
 import { isSubagent, readStdin, stringField, type HookInput } from './shared/input.js';
 import { writeContext } from './shared/output.js';
 import { runtimeModule } from './shared/paths.js';

@@ -1,3 +1,4 @@
+import './shared/sqlite-budget.js';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';

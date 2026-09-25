@@ -6,6 +6,13 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __commonJS = (cb, mod) => function __require() {
+  try {
+    return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+  } catch (e) {
+    throw mod = 0, e;
+  }
+};
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
     for (let key of __getOwnPropNames(from))
@@ -22,6 +29,31 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
   mod
 ));
+
+// src/hooks/shared/sqlite-budget.ts
+var require_sqlite_budget = __commonJS({
+  "src/hooks/shared/sqlite-budget.ts"() {
+    "use strict";
+    var import_node_path4 = __toESM(require("node:path"));
+    var SQLITE_BUSY_POLICY_KEY = /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy");
+    var HOOK_SQLITE_BUSY_TIMEOUT_MS = 1500;
+    function failOpen(error) {
+      const hook = import_node_path4.default.basename(process.argv[1] || "hook", ".js");
+      process.stderr.write(`sidequest: ${hook} allowed this event without its board check (fail-open, board lock busy): ${error.message}
+`);
+      process.exit(0);
+    }
+    Reflect.set(globalThis, SQLITE_BUSY_POLICY_KEY, Object.freeze({
+      label: "hook",
+      timeoutMs: HOOK_SQLITE_BUSY_TIMEOUT_MS,
+      attempts: 1,
+      onExhausted: failOpen
+    }));
+  }
+});
+
+// src/hooks/session-end.ts
+var import_sqlite_budget = __toESM(require_sqlite_budget());
 
 // src/hooks/shared/input.ts
 var import_node_fs = __toESM(require("node:fs"));

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './shared/sqlite-budget.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { readStdin, stringField, type HookInput } from './shared/input.js';

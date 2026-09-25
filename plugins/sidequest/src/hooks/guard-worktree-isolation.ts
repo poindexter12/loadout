@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './shared/sqlite-budget.js';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { readStdin, stringField, isRecord } from './shared/input.js';
