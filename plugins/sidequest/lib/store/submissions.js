@@ -1,6 +1,7 @@
 "use strict";
 const { classifyVerificationKind, commandVerificationResult, verificationAccepted, verificationFailureDiagnostic, verificationOutcome, verificationRequirement, validateVerificationWaiver, verificationWaiverDiagnostic } = require("../kernel/verification.js");
 const { runProcessVerification } = require("../ports/process.js");
+const { verificationTimeoutGuidance } = require("../refusal-guidance.js");
 const { decideSubmissionAdmission } = require("../kernel/submission");
 const { isSourceRevisionAdapterFacts, sourceRevisionBaseline } = require("../source-revision-capability.js");
 const { reviewCandidateFromSubmission, reviewRelationFor, reviewRelationRef, reviewRelationOutcome, reviewLockMessage, reviewProvenance } = require("../kernel/review-binding");
@@ -485,6 +486,9 @@ Expires: ${checkpoint.expiresAt}`;
     return path.join(dir, `${Date.now()}-${crypto.randomBytes(4).toString("hex")}.log`);
   }
   function pinnedVerificationRequirement(ticket) {
+    const liveDispatch = ticket.dispatch && typeof ticket.dispatch === "object" && !ticket.dispatch.terminalAt;
+    const repinned = !liveDispatch && pendingSubmission(ticket) ? ticket.submission?.verificationRequirement : null;
+    if (repinned && typeof repinned === "object") return repinned;
     const pinned = ticket.dispatch?.verificationRequirement || ticket.dispatch?.lifecycleAttempt?.verificationRequirement || ticket.lifecycleAttempt?.verificationRequirement;
     if (pinned && typeof pinned === "object") return pinned;
     const legacyCommand = String(ticket.executorVerify || ticket.submission?.verify || "").trim();
@@ -621,18 +625,24 @@ Checkpoint current work, release the claim, and re-dispatch; the recovery dispat
       };
     }
     const timeoutMilliseconds = normalizeIntegrationVerifyTimeoutMs(boardConfig(slug)?.integrationVerifyTimeoutMs);
-    return runProcessVerification(requirement, {
+    return timedIntegrationVerification(requirement, {
       cwd: readMeta(slug)?.path,
       timeoutMilliseconds,
       logPath: integrationVerifyLogPath(slug, ticket),
       outputTailBytes: INTEGRATION_VERIFY_OUTPUT_TAIL_BYTES
     });
   }
-  function verificationFailureComment(verify) {
+  function verificationRepinHint(ticket, verify) {
+    if (verify?.status !== "timeout") return "";
+    return ` To narrow it, re-pin the pending submission's verify with update({ref:"${ticket.ref}", verify:"<narrower command>"}) from the orchestrator; the next integrate or groomClose verification then runs the re-pinned command (the update response names it), not the verify recorded at submit.`;
+  }
+  function verificationFailureComment(verify, ticket) {
+    const hint = verificationRepinHint(ticket, verify).trim();
     return [
       `Integration verification returned ${verify.status}.`,
       verify.command ? `Command: ${verify.command}` : null,
       verify.logPath ? `Log: ${verify.logPath}` : null,
+      hint || null,
       Array.isArray(verify.failureIdentities) && verify.failureIdentities.length ? `Failures: ${verify.failureIdentities.join(", ")}` : null,
       verify.outputTail ? `Output tail:
 ${verify.outputTail}` : null
@@ -648,7 +658,7 @@ ${verify.outputTail}` : null
     const stored = updateSubmissionIntegration(slug, ticket.id, { verify, outcome: accepted ? "verified" : verificationOutcome(verify) });
     if (!stored.ok) return stored;
     if (accepted) return { ok: true, ticket: stored.ticket, verify };
-    const comment = addComment(slug, ticket.id, { by: String(opts?.by || "orchestrator"), source: "integration", body: verificationFailureComment(verify) });
+    const comment = addComment(slug, ticket.id, { by: String(opts?.by || "orchestrator"), source: "integration", body: verificationFailureComment(verify, ticket) });
     return { ok: false, reason: verificationOutcome(verify), ticket: comment.ticket || stored.ticket, verify };
   }
   function changedIntegrationPaths(repo, submission) {
@@ -685,7 +695,7 @@ ${verify.outputTail}` : null
           ok: false,
           reason: "invalid_submission_verify",
           ticket,
-          message: `${ticket.ref} integration refused; submission record verify ${JSON.stringify(boundedExcerpt(recordedVerify, 500).text)} is invalid: ${verifyError} The integrator reads submission.verify, not ticket.executorVerify. Re-submit with one runnable command or \`manual: <what you checked>\`.`
+          message: `${ticket.ref} integration refused; submission record verify ${JSON.stringify(boundedExcerpt(recordedVerify, 500).text)} is invalid: ${verifyError} This check reads the executor's submission.verify record; update({verify}) re-pins which command integration runs but does not rewrite that record. Re-submit with one runnable command or \`manual: <what you checked>\`.`
         };
       }
     }
@@ -772,7 +782,18 @@ ${verify.outputTail}` : null
       return { ok: true, ticket };
     });
   }
+  function timedIntegrationVerification(requirement, options) {
+    const started = Date.now();
+    const result = runProcessVerification(requirement, options);
+    return Object.freeze(Object.assign({}, result, { durationMs: Date.now() - started }));
+  }
+  function withVerificationTimeoutGuidance(slug, message, verify) {
+    const guidance = verificationTimeoutGuidance(verify, boardConfig(slug)?.integrationVerifyTimeoutMaxMs);
+    if (!guidance) return message;
+    return message ? `${message} ${guidance}` : guidance;
+  }
   function integrationFailure(slug, ticket, patch) {
+    if (patch?.verify?.status === "timeout") patch = Object.assign({}, patch, { message: withVerificationTimeoutGuidance(slug, patch.message, patch.verify) });
     updateSubmissionIntegration(slug, ticket.id, Object.assign({ outcome: "failed", completedAt: (/* @__PURE__ */ new Date()).toISOString() }, patch));
     return Object.assign({ ok: false, ticket: getTicket(slug, ticket.id) }, patch);
   }
@@ -858,7 +879,7 @@ ${verify.outputTail}` : null
     };
   }
   function postMergeVerificationFailure(slug, ticket, verify, repo, mode, before, deliveryHead, targetBranch) {
-    const verificationMessage = `${ticket.ref} verification returned ${verify.status} after ${mode} delivery: ${verify.command || `verification ${verify.status}`}. Log: ${verify.logPath || "not created"}.`;
+    const verificationMessage = `${ticket.ref} verification returned ${verify.status} after ${mode} delivery: ${verify.command || `verification ${verify.status}`}. Log: ${verify.logPath || "not created"}.${verificationRepinHint(ticket, verify)}`;
     try {
       const rollback = restorePostMergeVerificationCheckout(repo, before, deliveryHead, targetBranch, mode);
       return integrationFailure(slug, ticket, {
@@ -1136,7 +1157,7 @@ ${verify.outputTail}` : null
         return integrationFailure(slug, ticket, {
           reason: `${verificationOutcome(verify)}_recorded_delivery`,
           verify,
-          message: `${ticket.ref} merged-tree verification returned ${verify.status} for recorded delivery ${deliveryCommit}: ${verify.command || `verification ${verify.status}`}. Log: ${verify.logPath || "not created"}.`
+          message: `${ticket.ref} merged-tree verification returned ${verify.status} for recorded delivery ${deliveryCommit}: ${verify.command || `verification ${verify.status}`}. Log: ${verify.logPath || "not created"}.${verificationRepinHint(ticket, verify)}`
         });
       }
       const deliveredFiles = workingTreeDelivery ? workingTreeDeliveryPaths(repo) : interaction.interaction ? Array.from(/* @__PURE__ */ new Set([...deliveredCommitPaths(repo, deliveryCommit), ...interaction.interaction.paths])) : deliveredCommitPaths(repo, deliveryCommit);
@@ -1447,7 +1468,7 @@ ${verify.outputTail}` : null
         } catch (rollbackError) {
           return { ok: false, reason: `${verificationOutcome(verification)}_wave_delivery_rollback_failed`, tickets: assembled.tickets, before, verify: verification, message: `Wave ${assembled.wave.id} verification failed and rollback failed: ${integrationGitError(rollbackError)}` };
         }
-        return { ok: false, reason: `${verificationOutcome(verification)}_wave_delivery`, tickets: assembled.tickets, before, verify: verification, message: `Wave ${assembled.wave.id} delivery verification returned ${verification.status}.` };
+        return { ok: false, reason: `${verificationOutcome(verification)}_wave_delivery`, tickets: assembled.tickets, before, verify: verification, message: withVerificationTimeoutGuidance(slug, `Wave ${assembled.wave.id} delivery verification returned ${verification.status}.`, verification) };
       }
       const delivered = recordSubmissionWaveDelivery(slug, assembled.participantRefs, { source: "git", value: resultingHead, observedAt: (/* @__PURE__ */ new Date()).toISOString() }, verification);
       if (!delivered.ok) return delivered;
@@ -1856,7 +1877,7 @@ ${verify.outputTail}` : null
           return integrationFailure(slug, ticket, {
             reason: `${verificationOutcome(verify2)}_existing_delivery`,
             verify: verify2,
-            message: `${ticket.ref} is already on ${target.branch}, but verification returned ${verify2.status}: ${verify2.command || `verification ${verify2.status}`}. Log: ${verify2.logPath || "not created"}.`
+            message: `${ticket.ref} is already on ${target.branch}, but verification returned ${verify2.status}: ${verify2.command || `verification ${verify2.status}`}. Log: ${verify2.logPath || "not created"}.${verificationRepinHint(ticket, verify2)}`
           });
         }
         delivered = { commit: pinnedCommit, targetBranch: target.branch, resultingHead: resultingHead2 };
@@ -2739,7 +2760,7 @@ ${verify.outputTail}` : null
       const candidateWorktree = tickets.length === 1 ? String(tickets[0]?.submission?.worktree || "").trim() : "";
       return {
         ok: true,
-        verification: runProcessVerification(requirement.requirement, {
+        verification: timedIntegrationVerification(requirement.requirement, {
           cwd: candidateWorktree || readMeta(slug)?.path,
           timeoutMilliseconds,
           logPath: integrationVerifyLogPath(slug, { ref: waveId }),
@@ -2946,7 +2967,7 @@ ${verify.outputTail}` : null
       return {
         ok: false,
         reason: "assembled_wave_gate_failed",
-        message: `Wave ${waveId} gate returned ${gate.verification.status}. Refresh and reverify its candidates before delivery.`,
+        message: gate.verification?.status === "timeout" ? withVerificationTimeoutGuidance(slug, `Wave ${waveId} gate returned timeout.`, gate.verification) : `Wave ${waveId} gate returned ${gate.verification.status}. Refresh and reverify its candidates before delivery.`,
         wave,
         assembly: decision.assembly,
         gate

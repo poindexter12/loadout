@@ -22,7 +22,8 @@ __export(refusal_guidance_exports, {
   claimRefusalMessage: () => claimRefusalMessage,
   forcedClaimReleaseGuidance: () => forcedClaimReleaseGuidance,
   negativeControlRecoveryGuidance: () => negativeControlRecoveryGuidance,
-  routingDisabledMessage: () => routingDisabledMessage
+  routingDisabledMessage: () => routingDisabledMessage,
+  verificationTimeoutGuidance: () => verificationTimeoutGuidance
 });
 module.exports = __toCommonJS(refusal_guidance_exports);
 var import_prepared_dispatch = require("./prepared-dispatch.js");
@@ -84,11 +85,29 @@ function routingDisabledMessage(ref) {
 function negativeControlRecoveryGuidance() {
   return "Revert the non-test changes, run the changed tests, and keep them importable. Only an assertion failure in the changed tests proves they catch wrong behavior; an ImportError or collection error only proves a symbol vanished. Post [sidequest:negative-control] target=<broken file:line or behavior>; assertion=<named assertion>; <command> failed=<n> with n greater than zero. The target and assertion must be the changed behavior this ticket is about. Then restore the change and run the declared verify. You may add context after failed=<n>. For every added or modified named test, add [sidequest:negative-control-test] failed <test name>. If a named test does not cover the reverted change, add [sidequest:negative-control-test] unaffected <test name> because <reason> instead. If the control cannot run, post a line beginning [sidequest:negative-control] waived <reason of at least 20 characters>.";
 }
+function positiveMilliseconds(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.round(number) : null;
+}
+function millisecondsText(value) {
+  return `${value}ms (${Math.round(value / 1e3)}s)`;
+}
+function verificationTimeoutGuidance(verify, maxMs) {
+  if (!verify || verify.status !== "timeout") return "";
+  const cap = positiveMilliseconds(verify.timeoutMilliseconds);
+  const observed = positiveMilliseconds(verify.durationMs);
+  const max = positiveMilliseconds(maxMs);
+  const ran = observed == null ? "Verification was stopped" : `Verification ran ${millisecondsText(observed)} and was stopped`;
+  const at = cap == null ? "at the board integration verify cap" : `at the board integration verify cap of ${millisecondsText(cap)}`;
+  const limit = max == null ? "" : ` (maximum ${max})`;
+  return `${ran} ${at}; the command did not fail. The cap is per-board config, not a code constant: raise it with board_config({ integrationVerifyTimeoutMs: <ms> })${limit} above the command's real run time and retry, or re-pin the ticket's pending verify to a faster command with update({ ref, verify: "<narrower command>" }) from the orchestrator. The candidate is not defective on this evidence.`;
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   CLAIM_REFUSAL_MESSAGES,
   claimRefusalMessage,
   forcedClaimReleaseGuidance,
   negativeControlRecoveryGuidance,
-  routingDisabledMessage
+  routingDisabledMessage,
+  verificationTimeoutGuidance
 });
