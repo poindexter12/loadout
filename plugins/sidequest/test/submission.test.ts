@@ -284,7 +284,7 @@ test('integration rejects legacy invalid submission verify before delivery', () 
   assert.strictEqual(refused.ok, false);
   assert.strictEqual(refused.reason, 'invalid_submission_verify');
   assert.match(refused.message, /submission record verify "manual focused verifier"/);
-  assert.match(refused.message, /submission\.verify, not ticket\.executorVerify/);
+  assert.match(refused.message, /reads the executor's submission\.verify record; update\(\{verify\}\) re-pins which command integration runs but does not rewrite that record/);
 });
 
 test('MCP submit requires a completed capture for the declared executor verifier', async () => {
@@ -532,6 +532,89 @@ test('integration keeps a recorded verifier instead of re-deriving a plugin gate
   assert.strictEqual(result.reason, 'verification_failed_suite');
   assert.strictEqual(result.verify.status, 'failed_suite');
   assert.strictEqual(result.verify.command, 'cd plugins/integration-gate-fixture && node --test test/changed.test.js');
+});
+
+test('SQ-123: update re-pins the verify a pending submission integrates with, and says which verify runs next', async () => {
+  const submittedCommand = 'node -e "process.exit(0)" && node -e "process.exit(1)"';
+  const narrowedCommand = 'node -e "process.exit(0)"';
+  const t = addTicket('pending submission verify re-pin', {
+    category: 'submission.fixture',
+    executorVerifyKind: 'command',
+    executorVerify: submittedCommand,
+  });
+  // The dispatch that produced the submission is terminal and pinned the slow verify.
+  t.dispatch = {
+    terminalAt: '2026-09-24T00:00:00.000Z',
+    verificationRequirement: { kind: 'command', command: submittedCommand, evidence: submittedCommand },
+  };
+  t.submission = { commit: COMMIT, verify: submittedCommand, integration: { outcome: 'delivered' } };
+  persist(t);
+
+  const updated = await callMcp('update', { project: PROJECT_DIR, ref: t.ref, by: 'orchestrator', verify: narrowedCommand });
+
+  assert.strictEqual(updated.verificationAmendment.status, 'applied_to_pending_submission');
+  assert.strictEqual(updated.verificationAmendment.oldCommand, submittedCommand);
+  assert.strictEqual(updated.verificationAmendment.newCommand, narrowedCommand);
+  assert.match(updated.verificationAmendment.message, /next integrate or groomClose merged-tree verification runs node -e "process\.exit\(0\)"/);
+  const repinned = store.getTicket(slug, t.ref);
+  assert.strictEqual(repinned.submission.verify, submittedCommand, 'the executor record is not rewritten');
+  assert.strictEqual(repinned.submission.verificationRequirement.command, narrowedCommand);
+  assert.deepStrictEqual(repinned.verificationAmendments.at(-1), {
+    at: repinned.verificationAmendments.at(-1).at,
+    by: 'orchestrator',
+    oldCommand: submittedCommand,
+    newCommand: narrowedCommand,
+    appliesTo: 'pending_submission',
+    candidate: COMMIT.slice(0, 12),
+  });
+
+  const result = store.verifyIntegration(slug, t.ref);
+
+  assert.strictEqual(result.ok, true, JSON.stringify(result.verify));
+  assert.strictEqual(result.verify.status, 'passed');
+  assert.strictEqual(result.verify.command, narrowedCommand);
+});
+
+test('SQ-123: clearing a pending submission verify refuses and names the verify that still runs', () => {
+  const submittedCommand = 'node -e "process.exit(0)"';
+  const t = addTicket('pending submission verify clear', {
+    category: 'submission.fixture',
+    executorVerifyKind: 'command',
+    executorVerify: submittedCommand,
+  });
+  t.dispatch = {
+    terminalAt: '2026-09-24T00:00:00.000Z',
+    verificationRequirement: { kind: 'command', command: submittedCommand, evidence: submittedCommand },
+  };
+  t.submission = { commit: COMMIT, verify: submittedCommand };
+  persist(t);
+
+  assert.throws(
+    () => store.updateTicket(slug, t.ref, { executorVerifyKind: 'suite', executorVerify: '', source: 'test' }),
+    /pending submission .*Nothing changed: the next integration verification still runs "node -e \\"process\.exit\(0\)\\""/,
+  );
+  const unchanged = store.getTicket(slug, t.ref);
+  assert.strictEqual(unchanged.executorVerify, submittedCommand);
+  assert.strictEqual(unchanged.submission.verificationRequirement, undefined);
+});
+
+test('SQ-123: a timed-out integration verification names the re-pin path', () => {
+  const slowCommand = 'node -e "process.exit(0)"';
+  const t = addTicket('timed out integration verify', { executorVerifyKind: 'command', executorVerify: slowCommand });
+  t.submission = {
+    commit: COMMIT,
+    verify: slowCommand,
+    integration: { outcome: 'delivered', verify: { kind: 'command', status: 'timeout', command: slowCommand, evidence: 'timed out' } },
+  };
+  persist(t);
+
+  const result = store.verifyIntegration(slug, t.ref);
+
+  assert.strictEqual(result.ok, false);
+  const body = String(result.ticket.comments.at(-1).body);
+  assert.match(body, /Integration verification returned timeout/);
+  assert.match(body, new RegExp(`update\\(\\{ref:"${t.ref}", verify:"<narrower command>"\\}\\)`));
+  assert.match(body, /runs the re-pinned command/);
 });
 
 test('SQ-1875: every rejected submission range reason gives a pinned-base remedy', () => {

@@ -604,7 +604,15 @@ function integrationVerifyLogPath(slug: any, ticket: any) {
   return path.join(dir, `${Date.now()}-${crypto.randomBytes(4).toString('hex')}.log`);
 }
 
+// Which verify the next verification runs. A live dispatch's pin always wins
+// (update keeps it in step with the ticket verify). Once that dispatch is
+// terminal, an orchestrator re-pin of the pending submission
+// (update({ref, verify}), recorded in ticket.verificationAmendments) wins over
+// the requirement pinned at dispatch. A fresh submission drops the re-pin.
 function pinnedVerificationRequirement(ticket: any) {
+  const liveDispatch = ticket.dispatch && typeof ticket.dispatch === 'object' && !ticket.dispatch.terminalAt;
+  const repinned = !liveDispatch && pendingSubmission(ticket) ? ticket.submission?.verificationRequirement : null;
+  if (repinned && typeof repinned === 'object') return repinned;
   const pinned = ticket.dispatch?.verificationRequirement || ticket.dispatch?.lifecycleAttempt?.verificationRequirement || ticket.lifecycleAttempt?.verificationRequirement;
   if (pinned && typeof pinned === 'object') return pinned;
   const legacyCommand = String(ticket.executorVerify || ticket.submission?.verify || '').trim();
@@ -756,11 +764,20 @@ function verifyDeliveredSubmission(slug: any, ticket: any, opts?: any) {
   });
 }
 
-function verificationFailureComment(verify: any) {
+// Agent-facing: the only supported way to narrow a verify that timed out on a
+// pending submission, and which command the retry will run.
+function verificationRepinHint(ticket: any, verify: any) {
+  if (verify?.status !== 'timeout') return '';
+  return ` To narrow it, re-pin the pending submission's verify with update({ref:"${ticket.ref}", verify:"<narrower command>"}) from the orchestrator; the next integrate or groomClose verification then runs the re-pinned command (the update response names it), not the verify recorded at submit.`;
+}
+
+function verificationFailureComment(verify: any, ticket?: any) {
+  const hint = verificationRepinHint(ticket, verify).trim();
   return [
     `Integration verification returned ${verify.status}.`,
     verify.command ? `Command: ${verify.command}` : null,
     verify.logPath ? `Log: ${verify.logPath}` : null,
+    hint || null,
     Array.isArray(verify.failureIdentities) && verify.failureIdentities.length ? `Failures: ${verify.failureIdentities.join(', ')}` : null,
     verify.outputTail ? `Output tail:\n${verify.outputTail}` : null,
   ].filter(Boolean).join('\n');
@@ -776,7 +793,7 @@ function verifyIntegration(slug: any, idOrRef: any, opts?: any) {
   const stored = updateSubmissionIntegration(slug, ticket.id, { verify, outcome: accepted ? 'verified' : verificationOutcome(verify) });
   if (!stored.ok) return stored;
   if (accepted) return { ok: true, ticket: stored.ticket, verify };
-  const comment = addComment(slug, ticket.id, { by: String(opts?.by || 'orchestrator'), source: 'integration', body: verificationFailureComment(verify) });
+  const comment = addComment(slug, ticket.id, { by: String(opts?.by || 'orchestrator'), source: 'integration', body: verificationFailureComment(verify, ticket) });
   return { ok: false, reason: verificationOutcome(verify), ticket: comment.ticket || stored.ticket, verify };
 }
 
@@ -815,7 +832,7 @@ function validateIntegrationSubmission(slug?: any, idOrRef?: any, opts?: any) {
         ok: false,
         reason: 'invalid_submission_verify',
         ticket,
-        message: `${ticket.ref} integration refused; submission record verify ${JSON.stringify(boundedExcerpt(recordedVerify, 500).text)} is invalid: ${verifyError} The integrator reads submission.verify, not ticket.executorVerify. Re-submit with one runnable command or \`manual: <what you checked>\`.`,
+        message: `${ticket.ref} integration refused; submission record verify ${JSON.stringify(boundedExcerpt(recordedVerify, 500).text)} is invalid: ${verifyError} This check reads the executor's submission.verify record; update({verify}) re-pins which command integration runs but does not rewrite that record. Re-submit with one runnable command or \`manual: <what you checked>\`.`,
       };
     }
   }
@@ -1009,7 +1026,7 @@ function deliveryInProgress(ticket: any) {
 }
 
 function postMergeVerificationFailure(slug: any, ticket: any, verify: any, repo: string, mode: string, before: string, deliveryHead: string, targetBranch: string) {
-  const verificationMessage = `${ticket.ref} verification returned ${verify.status} after ${mode} delivery: ${verify.command || `verification ${verify.status}`}. Log: ${verify.logPath || 'not created'}.`;
+  const verificationMessage = `${ticket.ref} verification returned ${verify.status} after ${mode} delivery: ${verify.command || `verification ${verify.status}`}. Log: ${verify.logPath || 'not created'}.${verificationRepinHint(ticket, verify)}`;
   try {
     const rollback = restorePostMergeVerificationCheckout(repo, before, deliveryHead, targetBranch, mode);
     return integrationFailure(slug, ticket, {
@@ -1303,7 +1320,7 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
       return integrationFailure(slug, ticket, {
         reason: `${verificationOutcome(verify)}_recorded_delivery`,
         verify,
-        message: `${ticket.ref} merged-tree verification returned ${verify.status} for recorded delivery ${deliveryCommit}: ${verify.command || `verification ${verify.status}`}. Log: ${verify.logPath || 'not created'}.`,
+        message: `${ticket.ref} merged-tree verification returned ${verify.status} for recorded delivery ${deliveryCommit}: ${verify.command || `verification ${verify.status}`}. Log: ${verify.logPath || 'not created'}.${verificationRepinHint(ticket, verify)}`,
       });
     }
     const deliveredFiles = workingTreeDelivery
@@ -2111,7 +2128,7 @@ function integrateSubmissionUnlocked(slug?: any, idOrRef?: any, opts?: any) {
         return integrationFailure(slug, ticket, {
           reason: `${verificationOutcome(verify)}_existing_delivery`,
           verify,
-          message: `${ticket.ref} is already on ${target.branch}, but verification returned ${verify.status}: ${verify.command || `verification ${verify.status}`}. Log: ${verify.logPath || 'not created'}.`,
+          message: `${ticket.ref} is already on ${target.branch}, but verification returned ${verify.status}: ${verify.command || `verification ${verify.status}`}. Log: ${verify.logPath || 'not created'}.${verificationRepinHint(ticket, verify)}`,
         });
       }
       delivered = { commit: pinnedCommit, targetBranch: target.branch, resultingHead };

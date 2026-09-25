@@ -1,5 +1,6 @@
 "use strict";
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationRef } = require("../kernel/review-binding");
+const { classifyVerificationKind, verificationRequirement } = require("../kernel/verification.js");
 function createTickets(dependencies) {
   const {
     EXECUTOR_ANCHORS_MAX,
@@ -950,6 +951,46 @@ function createTickets(dependencies) {
     }
     return `${refusal} Use \`sidequest scope-request ${ticket.ref} --file <path> --by ${ticket.claim.by}\` to request approval.`;
   }
+  function pendingSubmissionPinnedRequirement(t) {
+    const state = dispatchState(t);
+    return t.submission?.verificationRequirement || state?.verificationRequirement || state?.lifecycleAttempt?.verificationRequirement || t.lifecycleAttempt?.verificationRequirement || null;
+  }
+  function pendingSubmissionVerificationRepin(t, by) {
+    if (!pendingSubmission(t)) return null;
+    const state = dispatchState(t);
+    if (state && !state.terminalAt) return null;
+    const previous = pendingSubmissionPinnedRequirement(t);
+    const oldCommand = String(previous?.command || t.submission?.verify || "").trim() || null;
+    const recorded = String(t.executorVerify || "").trim();
+    const artifact = String(t.executorAttestationArtifact || "").trim();
+    const kind = classifyVerificationKind(recorded, t.executorVerifyKind);
+    const command = ["suite", "command"].includes(kind) ? recorded : "";
+    const commit = String(t.submission?.commit || t.submission?.sourceRevision?.value || "").slice(0, 12);
+    if (!command && !["manual", "attestation"].includes(kind)) {
+      throw new Error(`${t.ref} has a pending submission (candidate ${commit || "unknown"}); its verify can be re-pinned only to one runnable command, \`manual: <what to check>\`, or an attestation. Nothing changed: the next integration verification still runs ${oldCommand ? JSON.stringify(oldCommand) : "<none>"}.`);
+    }
+    const next = verificationRequirement({
+      kind,
+      command: command || void 0,
+      evidence: recorded || artifact || void 0,
+      artifact: t.executorAttestationArtifact
+    });
+    if (JSON.stringify(previous || null) === JSON.stringify(next)) return null;
+    const record = Object.freeze({
+      at: (/* @__PURE__ */ new Date()).toISOString(),
+      by: String(by || "").trim() || null,
+      oldCommand,
+      newCommand: String(next.command || "").trim() || null,
+      appliesTo: "pending_submission",
+      candidate: commit || null
+    });
+    return { requirement: next, record };
+  }
+  function applyPendingSubmissionRepin(t, repin) {
+    if (!repin) return;
+    t.submission.verificationRequirement = repin.requirement;
+    t.verificationAmendments = [...Array.isArray(t.verificationAmendments) ? t.verificationAmendments : [], repin.record].slice(-20);
+  }
   function updateTicket(slug, idOrRef, patch, reviewTarget, options = {}) {
     const found = getTicket(slug, idOrRef);
     if (!found) return null;
@@ -1027,6 +1068,7 @@ function createTickets(dependencies) {
         const verifyTicket = Object.assign({}, t, { executorVerifyKind, executorAttestationArtifact, executorVerify });
         const verifyError = authoringVerifyError(verifyTicket, readMeta(slug)?.path);
         if (verifyError) throw new Error(`${verifyError} Keep acceptance criteria in a comment, not the verify field.`);
+        const submissionRepin = pendingSubmissionVerificationRepin(verifyTicket, patch.by);
         if (t.claim || dispatchState(t)) {
           const verifyError2 = dispatchVerifyCommandError(verifyTicket, readMeta(slug)?.path);
           if (verifyError2) throw new Error(verifyError2);
@@ -1035,6 +1077,7 @@ function createTickets(dependencies) {
         t.executorAttestationArtifact = executorAttestationArtifact;
         t.executorVerify = executorVerify;
         syncLiveDispatchVerification(slug, t, { by: patch.by });
+        applyPendingSubmissionRepin(t, submissionRepin);
       }
       if (patch.workedBy !== void 0) {
         try {

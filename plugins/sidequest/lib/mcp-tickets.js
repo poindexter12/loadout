@@ -81,14 +81,38 @@ const VERIFY_ORACLE_PROP = {
   maxLength: store.EXECUTOR_VERIFY_MAX,
   description: "Pin the required verifier in the prepared attempt. command and suite use one validated command, and suite names resolve during preparation. document, link, schema, manual, review, attestation, and custom preserve their own evidence contract. Attestation evidence uses `attestation: <artifact> | <evidence produced> | <what it showed>`. Executors can provide evidence but cannot replace or skip the pinned verifier. A waiver needs explicit authority, reason, affected gate, and bounded scope or expiry."
 };
-function liveVerificationAmendment(ticket) {
-  const amendment = Array.isArray(ticket.verificationAmendments) ? ticket.verificationAmendments.at(-1) : null;
-  if (!amendment || !ticket.dispatch || ticket.dispatch.terminalAt) return null;
+function amendmentCount(ticket) {
+  return Array.isArray(ticket?.verificationAmendments) ? ticket.verificationAmendments.length : 0;
+}
+function verificationAmendmentAck(before, ticket) {
+  const recorded = amendmentCount(ticket) !== amendmentCount(before) || JSON.stringify(ticket.verificationAmendments?.at(-1) || null) !== JSON.stringify(before?.verificationAmendments?.at(-1) || null);
+  const amendment = recorded ? ticket.verificationAmendments.at(-1) : null;
+  const liveDispatch = ticket.dispatch && !ticket.dispatch.terminalAt;
+  if (amendment && amendment.appliesTo === "pending_submission") {
+    return {
+      status: "applied_to_pending_submission",
+      oldCommand: amendment.oldCommand || null,
+      newCommand: amendment.newCommand || null,
+      message: `Verification was re-pinned for ${ticket.ref}'s pending submission (candidate ${amendment.candidate || "unknown"}), recorded as an orchestrator decision. The next integrate or groomClose merged-tree verification runs ${amendment.newCommand || "<no command>"}; it previously would have run ${amendment.oldCommand || "<none>"}. The executor's submission.verify record is unchanged.`
+    };
+  }
+  if (amendment && liveDispatch) {
+    return {
+      status: "applied_to_live_dispatch",
+      oldCommand: amendment.oldCommand || null,
+      newCommand: amendment.newCommand || null,
+      message: `Verification was amended for ${ticket.ref}. The live dispatch now requires ${amendment.newCommand || "<none>"}; it previously required ${amendment.oldCommand || "<none>"}.`
+    };
+  }
+  if (liveDispatch || ticket.submission && !ticket.submission.integratedAt && (ticket.submission.commit || ticket.submission.sourceRevision)) {
+    return null;
+  }
+  const next = String(ticket.executorVerify || "").trim();
   return {
-    status: "applied_to_live_dispatch",
-    oldCommand: amendment.oldCommand || null,
-    newCommand: amendment.newCommand || null,
-    message: `Verification was amended for ${ticket.ref}. The live dispatch now requires ${amendment.newCommand || "<none>"}; it previously required ${amendment.oldCommand || "<none>"}.`
+    status: "applies_to_next_dispatch",
+    oldCommand: null,
+    newCommand: next || null,
+    message: `Verification for ${ticket.ref} is now ${next || "<none>"}. No live dispatch or pending submission holds a pinned verify, so the next dispatch pins it.`
   };
 }
 const REVIEW_TARGET_PROP = {
@@ -202,7 +226,7 @@ const tools = [
   },
   {
     name: "update",
-    description: 'Update ticket fields by scope. A live claim permits closeout-affecting fields only from the runtime session that prepared its dispatch; by is a label, not proof. Executors must use scopeRequest for files. A control-plane verifier amendment updates the live dispatch requirement and records the old and new command on the ticket. Any omitted field is left unchanged. Set route only for a one-ticket model override, or "none" to clear it. Editing a category route repoints future tickets too. model/effort are not accepted. Deletion is not a status; use the permanent remove tool instead.',
+    description: 'Update ticket fields by scope. A live claim permits closeout-affecting fields only from the runtime session that prepared its dispatch; by is a label, not proof. Executors must use scopeRequest for files. A control-plane verify amendment is never frozen: it updates the live dispatch requirement, or, once the ticket has a pending submission and no live dispatch, re-pins the verify that the next integrate/groomClose merged-tree verification runs (the submission.verify record the executor wrote is unchanged). Either way it records the old and new command on the ticket, and verificationAmendment in the response names which verify the next verification runs. Any omitted field is left unchanged. Set route only for a one-ticket model override, or "none" to clear it. Editing a category route repoints future tickets too. model/effort are not accepted. Deletion is not a status; use the permanent remove tool instead.',
     inputSchema: {
       type: "object",
       properties: {
@@ -314,7 +338,7 @@ const tools = [
       const warnings = store.ticketReferenceWarnings(slug, patch.title, patch.description);
       warnings.push(...store.ticketPlanningWarnings(t, meta.path));
       const presentedWarnings = store.presentWarnings(t, warnings, sessionOf(args));
-      const verificationAmendment = verificationWasAmended ? liveVerificationAmendment(t) : null;
+      const verificationAmendment = verificationWasAmended ? verificationAmendmentAck(existing, t) : null;
       return mutationAck(slug, { ok: true, ticket: t }, Object.assign(
         presentedWarnings.length ? { warnings: presentedWarnings } : {},
         verificationAmendment ? { verificationAmendment } : {},
