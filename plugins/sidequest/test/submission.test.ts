@@ -1533,6 +1533,49 @@ test('integration refuses delivery when the assembled-wave gate fails', () => {
   assert.match(missingWaiver.message, /human waiver with authority, reason, affectedGate/);
 });
 
+test('a verify stopped at the integration cap names the observed time, the cap, and the board_config route (SQ-122)', () => {
+  cleanBranch();
+  const originalConfig = store.boardConfig(slug);
+  assert.strictEqual(originalConfig.integrationVerifyTimeoutMaxMs, 60 * 60 * 1000);
+  store.setBoardConfig(slug, { integrationVerifyTimeoutMs: 1500 });
+  try {
+    const t = addTicket('verification cap timeout', { files: ['lib/slow-verify.js'] });
+    assert.strictEqual(runCli(['claim', t.ref, '--by', 'slow-verify-worker', '--direct', '--reason', 'The submission fixture requires a local direct claim.']).status, 0);
+    fs.mkdirSync(path.join(PROJECT_DIR, 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(PROJECT_DIR, 'lib', 'slow-verify.js'), 'slow\n');
+    git(['add', 'lib/slow-verify.js']);
+    git(['commit', '-m', 'slow verify candidate']);
+    const commit = git(['rev-parse', 'HEAD']);
+    pin(t, commit);
+    const slowVerify = 'node -e "setTimeout(() => {}, 20000)"';
+    assert.strictEqual(runCli(['submit', t.ref, '--by', 'slow-verify-worker', '--commit', commit, '--verify', slowVerify]).status, 0);
+
+    const target = Object.assign({}, store.integrationTarget(slug), { branch: git(['branch', '--show-current']) });
+    const rejected = store.integrateSubmission(slug, t.ref, { mode: 'merge', target });
+    assert.strictEqual(rejected.ok, false);
+    assert.strictEqual(rejected.reason, 'assembled_wave_gate_failed');
+    const verification = rejected.gate.verification;
+    assert.strictEqual(verification.status, 'timeout');
+    assert.strictEqual(verification.timeoutMilliseconds, 1500);
+    assert.ok(Number.isInteger(verification.durationMs) && verification.durationMs >= 1000 && verification.durationMs < 20000, `durationMs ${verification.durationMs}`);
+    assert.match(rejected.message, /Verification ran \d+ms \(\d+s\) and was stopped at the board integration verify cap of 1500ms/);
+    assert.match(rejected.message, /board_config\(\{ integrationVerifyTimeoutMs: <ms> \}\) \(maximum 3600000\)/);
+    assert.doesNotMatch(rejected.message, /Refresh and reverify its candidates/);
+  } finally {
+    store.setBoardConfig(slug, { integrationVerifyTimeoutMs: originalConfig.integrationVerifyTimeoutMs });
+  }
+});
+
+test('timeout guidance is empty for non-timeout results and degrades without duration facts', () => {
+  const { verificationTimeoutGuidance } = require('../lib/refusal-guidance.js');
+  assert.strictEqual(verificationTimeoutGuidance({ status: 'failed_suite', timeoutMilliseconds: 600000 }), '');
+  assert.strictEqual(verificationTimeoutGuidance(null), '');
+  const bare = verificationTimeoutGuidance({ status: 'timeout', timeoutMilliseconds: 600000 });
+  assert.match(bare, /^Verification was stopped at the board integration verify cap of 600000ms \(600s\)/);
+  assert.match(bare, /integrationVerifyTimeoutMs/);
+  assert.doesNotMatch(bare, /maximum/);
+});
+
 test('a missing assembled-wave command reports the gate environment and its setup', () => {
   cleanBranch();
   const missingCommand = `sidequest-missing-gate-command-${process.pid}-${Date.now()}`;

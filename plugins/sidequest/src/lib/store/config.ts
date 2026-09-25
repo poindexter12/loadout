@@ -358,6 +358,7 @@ function boardConfig(slug?: any) {
     delivery: normalizeDeliveryMode(meta.delivery),
     deliveryChannel: resolveDeliveryConfig(meta),
     integrationVerifyTimeoutMs: normalizeIntegrationVerifyTimeoutMs(meta.integrationVerifyTimeoutMs),
+    integrationVerifyTimeoutMaxMs: MAX_INTEGRATION_VERIFY_TIMEOUT_MS,
     worktreeIsolation: normalizeWorktreeIsolation(meta.worktreeIsolation),
     worktreeBase: normalizeWorktreeBase(meta.worktreeBase),
     notIntegratedSalvageAgeHours: normalizeNotIntegratedSalvageAgeHours(meta.notIntegratedSalvageAgeHours),

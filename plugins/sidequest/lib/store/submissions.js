@@ -1,6 +1,7 @@
 "use strict";
 const { classifyVerificationKind, commandVerificationResult, verificationAccepted, verificationFailureDiagnostic, verificationOutcome, verificationRequirement, validateVerificationWaiver, verificationWaiverDiagnostic } = require("../kernel/verification.js");
 const { runProcessVerification } = require("../ports/process.js");
+const { verificationTimeoutGuidance } = require("../refusal-guidance.js");
 const { decideSubmissionAdmission } = require("../kernel/submission");
 const { isSourceRevisionAdapterFacts, sourceRevisionBaseline } = require("../source-revision-capability.js");
 const { reviewCandidateFromSubmission, reviewRelationFor, reviewRelationRef, reviewRelationOutcome, reviewLockMessage, reviewProvenance } = require("../kernel/review-binding");
@@ -621,7 +622,7 @@ Checkpoint current work, release the claim, and re-dispatch; the recovery dispat
       };
     }
     const timeoutMilliseconds = normalizeIntegrationVerifyTimeoutMs(boardConfig(slug)?.integrationVerifyTimeoutMs);
-    return runProcessVerification(requirement, {
+    return timedIntegrationVerification(requirement, {
       cwd: readMeta(slug)?.path,
       timeoutMilliseconds,
       logPath: integrationVerifyLogPath(slug, ticket),
@@ -772,7 +773,18 @@ ${verify.outputTail}` : null
       return { ok: true, ticket };
     });
   }
+  function timedIntegrationVerification(requirement, options) {
+    const started = Date.now();
+    const result = runProcessVerification(requirement, options);
+    return Object.freeze(Object.assign({}, result, { durationMs: Date.now() - started }));
+  }
+  function withVerificationTimeoutGuidance(slug, message, verify) {
+    const guidance = verificationTimeoutGuidance(verify, boardConfig(slug)?.integrationVerifyTimeoutMaxMs);
+    if (!guidance) return message;
+    return message ? `${message} ${guidance}` : guidance;
+  }
   function integrationFailure(slug, ticket, patch) {
+    if (patch?.verify?.status === "timeout") patch = Object.assign({}, patch, { message: withVerificationTimeoutGuidance(slug, patch.message, patch.verify) });
     updateSubmissionIntegration(slug, ticket.id, Object.assign({ outcome: "failed", completedAt: (/* @__PURE__ */ new Date()).toISOString() }, patch));
     return Object.assign({ ok: false, ticket: getTicket(slug, ticket.id) }, patch);
   }
@@ -1447,7 +1459,7 @@ ${verify.outputTail}` : null
         } catch (rollbackError) {
           return { ok: false, reason: `${verificationOutcome(verification)}_wave_delivery_rollback_failed`, tickets: assembled.tickets, before, verify: verification, message: `Wave ${assembled.wave.id} verification failed and rollback failed: ${integrationGitError(rollbackError)}` };
         }
-        return { ok: false, reason: `${verificationOutcome(verification)}_wave_delivery`, tickets: assembled.tickets, before, verify: verification, message: `Wave ${assembled.wave.id} delivery verification returned ${verification.status}.` };
+        return { ok: false, reason: `${verificationOutcome(verification)}_wave_delivery`, tickets: assembled.tickets, before, verify: verification, message: withVerificationTimeoutGuidance(slug, `Wave ${assembled.wave.id} delivery verification returned ${verification.status}.`, verification) };
       }
       const delivered = recordSubmissionWaveDelivery(slug, assembled.participantRefs, { source: "git", value: resultingHead, observedAt: (/* @__PURE__ */ new Date()).toISOString() }, verification);
       if (!delivered.ok) return delivered;
@@ -2739,7 +2751,7 @@ ${verify.outputTail}` : null
       const candidateWorktree = tickets.length === 1 ? String(tickets[0]?.submission?.worktree || "").trim() : "";
       return {
         ok: true,
-        verification: runProcessVerification(requirement.requirement, {
+        verification: timedIntegrationVerification(requirement.requirement, {
           cwd: candidateWorktree || readMeta(slug)?.path,
           timeoutMilliseconds,
           logPath: integrationVerifyLogPath(slug, { ref: waveId }),
@@ -2946,7 +2958,7 @@ ${verify.outputTail}` : null
       return {
         ok: false,
         reason: "assembled_wave_gate_failed",
-        message: `Wave ${waveId} gate returned ${gate.verification.status}. Refresh and reverify its candidates before delivery.`,
+        message: gate.verification?.status === "timeout" ? withVerificationTimeoutGuidance(slug, `Wave ${waveId} gate returned timeout.`, gate.verification) : `Wave ${waveId} gate returned ${gate.verification.status}. Refresh and reverify its candidates before delivery.`,
         wave,
         assembly: decision.assembly,
         gate
