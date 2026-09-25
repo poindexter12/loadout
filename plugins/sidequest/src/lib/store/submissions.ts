@@ -3463,10 +3463,14 @@ function assembleSubmissionWave(slug?: any, refs?: any, opts?: any) {
   if ('code' in opened) return { ok: false, reason: opened.code, message: opened.message };
   const decision = assembleWave(opened, waveCandidatesForBaseline(slug, waveCandidates, opened.baseline));
   if (!decision.ok) {
+    // The MCP ack keeps only reason and message, so the per-candidate cause must
+    // travel in the message or the caller cannot tell a moved baseline from an
+    // out-of-scope surface without a manual git cross-check (SQ-59).
+    const causes = decision.invalidated.map((entry: { ref: string; reason: string; message: string }) => `${entry.ref} ${entry.reason}: ${entry.message}`).join(' ');
     return {
       ok: false,
       reason: 'wave_invalidated',
-      message: `Wave ${waveId} could not assemble at the current integration target. Submitted candidates remain parked with their existing verification evidence.`,
+      message: `Wave ${waveId} could not assemble at the current integration target ${opened.baseline.revision.source}:${opened.baseline.revision.value}. ${causes} Submitted candidates remain parked with their existing verification evidence.`,
       invalidated: decision.invalidated,
       wave: { id: waveId, baseline: opened.baseline },
     };

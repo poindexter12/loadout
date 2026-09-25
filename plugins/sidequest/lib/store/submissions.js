@@ -3052,10 +3052,11 @@ ${verify.outputTail}` : null
     if ("code" in opened) return { ok: false, reason: opened.code, message: opened.message };
     const decision = assembleWave(opened, waveCandidatesForBaseline(slug, waveCandidates, opened.baseline));
     if (!decision.ok) {
+      const causes = decision.invalidated.map((entry) => `${entry.ref} ${entry.reason}: ${entry.message}`).join(" ");
       return {
         ok: false,
         reason: "wave_invalidated",
-        message: `Wave ${waveId} could not assemble at the current integration target. Submitted candidates remain parked with their existing verification evidence.`,
+        message: `Wave ${waveId} could not assemble at the current integration target ${opened.baseline.revision.source}:${opened.baseline.revision.value}. ${causes} Submitted candidates remain parked with their existing verification evidence.`,
         invalidated: decision.invalidated,
         wave: { id: waveId, baseline: opened.baseline }
       };
