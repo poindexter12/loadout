@@ -86,3 +86,35 @@ export function routingDisabledMessage(ref: string): string {
 export function negativeControlRecoveryGuidance(): string {
   return 'Revert the non-test changes, run the changed tests, and keep them importable. Only an assertion failure in the changed tests proves they catch wrong behavior; an ImportError or collection error only proves a symbol vanished. Post [sidequest:negative-control] target=<broken file:line or behavior>; assertion=<named assertion>; <command> failed=<n> with n greater than zero. The target and assertion must be the changed behavior this ticket is about. Then restore the change and run the declared verify. You may add context after failed=<n>. For every added or modified named test, add [sidequest:negative-control-test] failed <test name>. If a named test does not cover the reverted change, add [sidequest:negative-control-test] unaffected <test name> because <reason> instead. If the control cannot run, post a line beginning [sidequest:negative-control] waived <reason of at least 20 characters>.';
 }
+
+export interface VerificationTimeoutFacts {
+  status?: unknown;
+  durationMs?: unknown;
+  timeoutMilliseconds?: unknown;
+}
+
+function positiveMilliseconds(value: unknown): number | null {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.round(number) : null;
+}
+
+function millisecondsText(value: number): string {
+  return `${value}ms (${Math.round(value / 1000)}s)`;
+}
+
+/**
+ * Recovery text for a verification the runner stopped at the integration cap.
+ * The cap is per-board config (`integrationVerifyTimeoutMs`), so the refusal
+ * names the observed run time, the effective cap, and the exact route to raise
+ * it. Returns '' for any non-timeout result.
+ */
+export function verificationTimeoutGuidance(verify: VerificationTimeoutFacts | null | undefined, maxMs?: unknown): string {
+  if (!verify || verify.status !== 'timeout') return '';
+  const cap = positiveMilliseconds(verify.timeoutMilliseconds);
+  const observed = positiveMilliseconds(verify.durationMs);
+  const max = positiveMilliseconds(maxMs);
+  const ran = observed == null ? 'Verification was stopped' : `Verification ran ${millisecondsText(observed)} and was stopped`;
+  const at = cap == null ? 'at the board integration verify cap' : `at the board integration verify cap of ${millisecondsText(cap)}`;
+  const limit = max == null ? '' : ` (maximum ${max})`;
+  return `${ran} ${at}; the command did not fail. The cap is per-board config, not a code constant: raise it with board_config({ integrationVerifyTimeoutMs: <ms> })${limit} above the command's real run time and retry, or re-pin the ticket's verify to a faster command. The candidate is not defective on this evidence.`;
+}
