@@ -158,6 +158,26 @@ function stubLock(events) {
   };
 }
 
+/**
+ * Cuts with a committer date one minute past `attempt`. A retry in the same second as the attempt
+ * rebuilds a byte-identical release commit, so without this a fast runner cannot tell a recreated
+ * tag from one that never moved.
+ */
+async function cutAfter(context, attempt, options) {
+  const later = `${Number(context.git('log', '-1', '--format=%ct', attempt)) + 60} +0000`;
+  const saved = { author: process.env.GIT_AUTHOR_DATE, committer: process.env.GIT_COMMITTER_DATE };
+  process.env.GIT_AUTHOR_DATE = later;
+  process.env.GIT_COMMITTER_DATE = later;
+  try {
+    return await cut(options);
+  } finally {
+    for (const [key, value] of [['GIT_AUTHOR_DATE', saved.author], ['GIT_COMMITTER_DATE', saved.committer]]) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
 function releaseSubjects(context) {
   return context.git('log', '--all', '--format=%s').split('\n').filter((subject) => /^release v/.test(subject));
 }
@@ -563,7 +583,7 @@ test('--force still recreates a genuine leftover from an unpublished attempt whe
   context.git('reset', '-q', '--hard', integration);
   assert.equal(context.git('rev-list', '-n', '1', 'refs/tags/v3.208.0'), attempt, 'the attempt left its tag behind');
 
-  const result = await cut({ repoRoot: context.root, skipTests: true, force: true, log: () => {} });
+  const result = await cutAfter(context, attempt, { repoRoot: context.root, skipTests: true, force: true, log: () => {} });
 
   assert.equal(result.status, 'cut');
   assert.notEqual(result.commit, attempt);
@@ -709,7 +729,7 @@ test('--force still recreates a genuine leftover when every remote answers over 
   const attempt = context.git('rev-parse', 'HEAD');
   context.git('reset', '-q', '--hard', integration);
 
-  const result = await cut({ repoRoot: context.root, skipTests: true, force: true, log: () => {} });
+  const result = await cutAfter(context, attempt, { repoRoot: context.root, skipTests: true, force: true, log: () => {} });
 
   assert.equal(result.status, 'cut');
   assert.notEqual(result.commit, attempt);
