@@ -101,6 +101,52 @@ function fakeSsh(context) {
   return { ssh, calls };
 }
 
+// A blocking stand-in that survives git's normal timeout cleanup, so this test can prove the probe
+// runner kills the entire detached process group rather than only the git process.
+function persistentFakeSsh(context, t) {
+  const dir = path.join(context.base, 'persistent-fake-ssh');
+  mkdirSync(dir);
+  const pidPath = path.join(dir, 'pid');
+  const script = path.join(dir, 'ssh.mjs');
+  writeFileSync(script, [
+    "process.on('SIGHUP', () => {});",
+    "process.on('SIGTERM', () => {});",
+    'setInterval(() => {}, 1_000);',
+    '',
+  ].join('\n'));
+  const ssh = path.join(dir, 'ssh');
+  writeFileSync(ssh, `#!/bin/sh\nprintf '%s' "$$" > ${JSON.stringify(pidPath)}\nexec '${process.execPath}' '${script}' "$@"\n`, { mode: 0o755 });
+  const pid = () => Number(readFileSync(pidPath, 'utf8'));
+  t.after(() => {
+    if (!existsSync(pidPath)) return;
+    try {
+      process.kill(pid(), 'SIGKILL');
+    } catch (error) {
+      if (error.code !== 'ESRCH') throw error;
+    }
+  });
+  return { ssh, pid };
+}
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === 'ESRCH') return false;
+    throw error;
+  }
+}
+
+async function eventually(test, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (test()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(test(), `condition did not become true within ${timeoutMs}ms`);
+}
+
 // Sets (or, for undefined, clears) process variables until the test ends, the way an operator's
 // shell would hand them to the cut's git.
 function useEnvironment(t, entries) {
@@ -658,6 +704,23 @@ test('a remote probe keeps the operator\'s ssh command, adds BatchMode, and turn
     assertBatchProbes(calls, label);
     if (kept) assert.ok(calls.every(({ args }) => args.includes(kept)), `${label}: ${kept} is kept`);
   }
+});
+
+test('a timed-out remote probe kills its persistent ssh child', async (t) => {
+  const context = setup(t);
+  const fake = persistentFakeSsh(context, t);
+  const runner = spawnRunner(context.root, {
+    env: { ...process.env, GIT_SSH_COMMAND: `'${fake.ssh}'`, GIT_SSH: undefined },
+    remoteTimeoutMs: 500,
+  });
+
+  const started = Date.now();
+  const result = runner(['ls-remote', 'ssh://blocking.invalid/origin.git']);
+  const elapsed = Date.now() - started;
+
+  assert.equal(result.code, 124);
+  assert.ok(elapsed < PROBE_DEADLINE_MS, `probe returned after ${elapsed}ms, not within ${PROBE_DEADLINE_MS}ms`);
+  await eventually(() => !processExists(fake.pid()));
 });
 
 test('--force refuses within the probe deadline, and leaves the tag unmoved, when a remote probe never answers', async (t) => {
