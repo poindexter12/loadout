@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 
-const { runVerifyCapture, runCapturedVerification, recordCapture, shellCommand, captureSlotDirectory, fullSuiteCaptureTimeoutMilliseconds } = require('../lib/verify-capture.js');
+const { runVerifyCapture, runCapturedVerification, recordCapture, shellCommand, captureSlotDirectory, acquireCaptureSlot, fullSuiteCaptureTimeoutMilliseconds } = require('../lib/verify-capture.js');
 const store = require('../lib/store.js');
 const SIDEQUEST_DIR = path.resolve(__dirname, '..');
 
@@ -109,6 +109,60 @@ test('full-suite capture serializes sibling captures and records the queue wait'
     assert.equal(waitedCapture.queuePosition, 2);
     assert.ok(Number.isInteger(waitedCapture.waitedForSlotMs) && waitedCapture.waitedForSlotMs > 0, `waited ${waitedCapture.waitedForSlotMs}ms`);
   } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('full-suite capture reaps a dead active lease before acquiring', async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-capture-dead-active-'));
+  const slotDirectory = captureSlotDirectory(project);
+  const activeDirectory = path.join(slotDirectory, 'active');
+  fs.mkdirSync(activeDirectory, { recursive: true });
+  fs.writeFileSync(path.join(activeDirectory, 'owner.json'), JSON.stringify({ pid: 12345, startedAt: 1 }));
+
+  try {
+    const slot = await acquireCaptureSlot(project, 100, fs, { isAlive: () => false });
+    assert.ok('release' in slot, 'a dead active lease does not block acquisition');
+    if ('release' in slot) assert.equal(await slot.release(), null);
+  } finally {
+    fs.rmSync(slotDirectory, { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('full-suite capture reaps a dead queued waiter ahead of itself', async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-capture-dead-waiter-'));
+  const slotDirectory = captureSlotDirectory(project);
+  const deadWaiter = path.join(slotDirectory, 'waiting', '000000000000000-12345-dead.json');
+  fs.mkdirSync(path.dirname(deadWaiter), { recursive: true });
+  fs.writeFileSync(deadWaiter, JSON.stringify({ pid: 12345, startedAt: 1 }));
+
+  try {
+    const slot = await acquireCaptureSlot(project, 100, fs, { isAlive: () => false });
+    assert.ok('release' in slot, 'a dead waiter does not retain queue priority');
+    assert.equal(fs.existsSync(deadWaiter), false, 'the dead waiter is removed');
+    if ('release' in slot) assert.equal(await slot.release(), null);
+  } finally {
+    fs.rmSync(slotDirectory, { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('full-suite capture never reaps a live lease', async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-capture-live-active-'));
+  const slotDirectory = captureSlotDirectory(project);
+  const activeDirectory = path.join(slotDirectory, 'active');
+  const ownerPath = path.join(activeDirectory, 'owner.json');
+  fs.mkdirSync(activeDirectory, { recursive: true });
+  fs.writeFileSync(ownerPath, JSON.stringify({ pid: 12345, startedAt: 1 }));
+
+  try {
+    const slot = await acquireCaptureSlot(project, 0, fs, { isAlive: () => true });
+    assert.ok('reason' in slot, 'a live lease keeps the caller queued');
+    assert.equal(fs.existsSync(activeDirectory), true, 'the live active lease remains');
+    assert.equal(fs.readFileSync(ownerPath, 'utf8'), JSON.stringify({ pid: 12345, startedAt: 1 }));
+  } finally {
+    fs.rmSync(slotDirectory, { recursive: true, force: true });
     fs.rmSync(project, { recursive: true, force: true });
   }
 });
