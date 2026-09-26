@@ -9,9 +9,23 @@ const { createHash, randomUUID } = require('node:crypto') as typeof import('node
 const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
 const { defaultVerificationTimeoutMilliseconds, runProcessVerification, shellCommand } = require('./ports/process.js') as typeof import('./ports/process.js');
 
-type CaptureSlotFileSystem = Pick<typeof fs, 'existsSync' | 'mkdirSync' | 'readdirSync' | 'renameSync' | 'rmSync' | 'writeFileSync'>;
+type CaptureSlotFileSystem = Pick<typeof fs, 'existsSync' | 'mkdirSync' | 'readdirSync' | 'readFileSync' | 'renameSync' | 'rmSync' | 'statSync' | 'writeFileSync'>;
+type CaptureSlotProcessLiveness = Readonly<{ isAlive(pid: number, startedAt: number): boolean }>;
+type CaptureSlotOwner = Readonly<{ pid: number; startedAt: number }>;
+
+const captureSlotProcessLiveness: CaptureSlotProcessLiveness = Object.freeze({
+  isAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error: unknown) {
+      return (error as NodeJS.ErrnoException)?.code === 'EPERM';
+    }
+  },
+});
 
 const captureSlotTimeoutMilliseconds = 30 * 60 * 1_000;
+const captureSlotStaleMilliseconds = 30 * 60 * 1_000;
 const captureSlotRetryMilliseconds = 50;
 const captureSlotOperationRetryLimit = 20;
 const captureSlotContentionErrorCodes = new Set(['EEXIST', 'EPERM', 'EBUSY', 'ENOTEMPTY']);
@@ -121,6 +135,59 @@ function queuedWaiters(slotDirectory: string, fileSystem: CaptureSlotFileSystem 
   }
 }
 
+function captureSlotOwnerPath(slotPath: string): string {
+  return path.join(slotPath, 'owner.json');
+}
+
+function captureSlotOwner(): CaptureSlotOwner {
+  return Object.freeze({ pid: process.pid, startedAt: Math.round(Date.now() - process.uptime() * 1_000) });
+}
+
+function readCaptureSlotOwner(ownerPath: string, fileSystem: CaptureSlotFileSystem): CaptureSlotOwner | null {
+  try {
+    const parsed = JSON.parse(String(fileSystem.readFileSync(ownerPath, 'utf8')));
+    return Number.isInteger(parsed?.pid) && parsed.pid > 0 && Number.isFinite(parsed?.startedAt)
+      ? Object.freeze({ pid: parsed.pid, startedAt: parsed.startedAt })
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function captureSlotEntryIsStale(slotPath: string, fileSystem: CaptureSlotFileSystem): boolean {
+  try {
+    return Date.now() - fileSystem.statSync(slotPath).mtimeMs >= captureSlotStaleMilliseconds;
+  } catch {
+    return false;
+  }
+}
+
+function reportCaptureSlotReap(kind: 'lease' | 'waiter', slotPath: string, owner: CaptureSlotOwner | null): void {
+  const identity = owner ? `dead ${kind} for pid ${owner.pid}` : `stale ${kind}`;
+  process.stdout.write(`verify-capture: reaped ${identity} at ${JSON.stringify(slotPath)}.\n`);
+}
+
+async function reapDeadCaptureSlots(slotDirectory: string, activeDirectory: string, fileSystem: CaptureSlotFileSystem, liveness: CaptureSlotProcessLiveness, protectedWaiterPath?: string): Promise<void> {
+  const activeOwner = readCaptureSlotOwner(captureSlotOwnerPath(activeDirectory), fileSystem);
+  if ((activeOwner && !liveness.isAlive(activeOwner.pid, activeOwner.startedAt)) || (!activeOwner && captureSlotEntryIsStale(activeDirectory, fileSystem))) {
+    const failure = await releaseCaptureSlot(activeDirectory, fileSystem);
+    if (!failure) reportCaptureSlotReap('lease', activeDirectory, activeOwner);
+  }
+  for (const waiterName of queuedWaiters(slotDirectory, fileSystem)) {
+    const waiterPath = path.join(slotDirectory, 'waiting', waiterName);
+    if (waiterPath === protectedWaiterPath) continue;
+    const waiterOwner = readCaptureSlotOwner(waiterPath, fileSystem);
+    if ((waiterOwner && !liveness.isAlive(waiterOwner.pid, waiterOwner.startedAt)) || (!waiterOwner && captureSlotEntryIsStale(waiterPath, fileSystem))) {
+      try {
+        fileSystem.rmSync(waiterPath, { force: true });
+        reportCaptureSlotReap('waiter', waiterPath, waiterOwner);
+      } catch {
+        // A competing capture may have removed this waiter after the liveness check.
+      }
+    }
+  }
+}
+
 function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -164,18 +231,20 @@ async function releaseCaptureSlot(activeDirectory: string, fileSystem: CaptureSl
   return retryCaptureSlotOperation('remove', tombstoneDirectory, () => fileSystem.rmSync(tombstoneDirectory, { recursive: true, force: true }));
 }
 
-async function acquireCaptureSlot(project: string, timeoutMilliseconds = captureSlotTimeoutMilliseconds, fileSystem: CaptureSlotFileSystem = fs): Promise<CaptureSlotLease | CaptureSlotTimeout | CaptureSlotFailure> {
+async function acquireCaptureSlot(project: string, timeoutMilliseconds = captureSlotTimeoutMilliseconds, fileSystem: CaptureSlotFileSystem = fs, liveness: CaptureSlotProcessLiveness = captureSlotProcessLiveness): Promise<CaptureSlotLease | CaptureSlotTimeout | CaptureSlotFailure> {
   const slotDirectory = captureSlotDirectory(project);
   const activeDirectory = path.join(slotDirectory, 'active');
   const startedAt = Date.now();
   const waiterPath = captureSlotWaiterPath(slotDirectory, fileSystem);
   const waiterName = path.basename(waiterPath);
-  fileSystem.writeFileSync(waiterPath, '', { encoding: 'utf8', flag: 'wx' });
+  const owner = captureSlotOwner();
+  fileSystem.writeFileSync(waiterPath, JSON.stringify(owner), { encoding: 'utf8', flag: 'wx' });
   let waitingAnnounced = false;
   let queuePosition = 1;
   let acquireContentionAttempts = 0;
 
   for (;;) {
+    await reapDeadCaptureSlots(slotDirectory, activeDirectory, fileSystem, liveness, waiterPath);
     const waiterIndex = queuedWaiters(slotDirectory, fileSystem).indexOf(waiterName);
     const active = fileSystem.existsSync(activeDirectory);
     queuePosition = Math.max(queuePosition, waiterIndex + (active ? 2 : 1));
@@ -197,6 +266,13 @@ async function acquireCaptureSlot(project: string, timeoutMilliseconds = capture
         }
       }
       if (acquired) {
+        try {
+          fileSystem.writeFileSync(captureSlotOwnerPath(activeDirectory), JSON.stringify(owner), { encoding: 'utf8', flag: 'wx' });
+        } catch (error: unknown) {
+          fileSystem.rmSync(waiterPath, { force: true });
+          const releaseFailure = await releaseCaptureSlot(activeDirectory, fileSystem);
+          return releaseFailure || captureSlotOperationFailure('write owner for', activeDirectory, 1, error);
+        }
         fileSystem.rmSync(waiterPath, { force: true });
         return Object.freeze({
           waitedForSlotMs: Date.now() - startedAt,
@@ -470,6 +546,6 @@ async function main() {
   process.exitCode = capture.exitCode === 0 && (!target || recorded?.ok) ? 0 : 2;
 }
 
-module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, isFullSuiteCommand, fullSuiteCaptureTimeoutMilliseconds, recordCapture, verifiedRevision };
+module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, acquireCaptureSlot, isFullSuiteCommand, fullSuiteCaptureTimeoutMilliseconds, recordCapture, verifiedRevision };
 
 if (require.main === module) void main();
