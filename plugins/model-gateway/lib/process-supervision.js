@@ -226,6 +226,20 @@ function recordStopRequest(operation, name) {
 function commandResultSync(command, commandArgs) {
   return spawnSync(command, commandArgs, { encoding: 'utf8', windowsHide: true });
 }
+const DARWIN = process.platform === 'darwin';
+const DARWIN_NETSTAT_ARGS = ['-anv', '-p', 'tcp'];
+// On macOS `lsof` walks every process's descriptor table to answer a port
+// query, which takes seconds on a loaded host and overruns the probe budget,
+// so a plainly inspectable listener came back as an unconfirmed owner
+// (SQ-161). `netstat -anv -p tcp` reads the socket table in tens of
+// milliseconds and names the owner in its process:pid column, so darwin asks
+// it first and only falls back to lsof when it has no answer. The process
+// name in that column is truncated and may contain spaces, so the row is
+// matched by shape rather than split on whitespace.
+function listenerPidFromDarwinNetstat(output, port) {
+  const pattern = new RegExp(`^tcp\\d*\\s+\\d+\\s+\\d+\\s+\\S+\\.${port}\\s+\\S+\\s+LISTEN\\s+(?:\\d+\\s+){4}(?:.*?):(\\d+)(?:\\s|$)`, 'm');
+  return Number(String(output).match(pattern)?.[1]) || null;
+}
 function listeningSocketInodesInProc(port) {
   if (process.platform !== 'linux') return new Set();
   const portSuffix = `:${Number(port).toString(16).padStart(4, '0').toUpperCase()}`;
@@ -266,6 +280,11 @@ function processOwningPortInProc(port) {
 }
 function processOwningPortSync(port) {
   if (!port) return null;
+  if (DARWIN) {
+    const netstat = commandResultSync('netstat', DARWIN_NETSTAT_ARGS);
+    const pid = netstat.status === 0 ? listenerPidFromDarwinNetstat(netstat.stdout, port) : null;
+    if (pid) return pid;
+  }
   const result = WIN
     ? commandResultSync('netstat', ['-ano', '-p', 'tcp'])
     : commandResultSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t']);
@@ -490,7 +509,13 @@ async function processOwningPortInProcAsync(port, { timeout = probeTimeoutMs(), 
 async function processOwningPortAsync(port, { commandResult = commandResultAsync, probeChildren = null, timeout = probeTimeoutMs(), now = Date.now, procOwner = processOwningPortInProcAsync } = {}) {
   if (!port) return null;
   const deadline = now() + timeout;
-  const result = await commandResult(WIN ? 'netstat' : 'lsof', WIN ? ['-ano', '-p', 'tcp'] : ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { probeChildren, timeout });
+  if (DARWIN) {
+    const netstat = await commandResult('netstat', DARWIN_NETSTAT_ARGS, { probeChildren, timeout });
+    const pid = !netstat.timedOut && netstat.status === 0 ? listenerPidFromDarwinNetstat(netstat.stdout, port) : null;
+    if (pid) return pid;
+    if (now() >= deadline) return undefined;
+  }
+  const result = await commandResult(WIN ? 'netstat' : 'lsof', WIN ? ['-ano', '-p', 'tcp'] : ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { probeChildren, timeout: Math.max(1, deadline - now()) });
   if (result.timedOut) return undefined;
   if (!WIN) {
     const pid = result.status === 0 ? Number(String(result.stdout).trim().split(/\s+/)[0]) || null : null;
