@@ -48,6 +48,15 @@ function configuredSshCommand(cwd, env) {
   return result.status === 0 ? result.stdout.trim() || null : null;
 }
 
+function killProbeProcessGroup(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch (error) {
+    if (error.code !== 'ESRCH') throw error;
+  }
+}
+
 /**
  * Runs git in `cwd`. A remote probe (see probesRemote) runs in remoteProbeEnvironment and is killed
  * after `remoteTimeoutMs`; the timeout comes back as a failed command, exit 124, so every caller
@@ -61,9 +70,11 @@ export function spawnRunner(cwd, { env = process.env, remoteTimeoutMs = remotePr
       options.env = remoteProbeEnvironment(env, env.GIT_SSH_COMMAND ? null : configuredSshCommand(cwd, env));
       options.timeout = remoteTimeoutMs;
       options.killSignal = 'SIGKILL';
+      options.detached = true;
     }
     const result = spawnSync('git', args, options);
     if (probe && result.error?.code === 'ETIMEDOUT') {
+      killProbeProcessGroup(result.pid);
       return { code: 124, stdout: '', stderr: `no answer within ${remoteTimeoutMs}ms, so the remote could not be checked`, timedOut: true };
     }
     if (result.error) throw result.error;
