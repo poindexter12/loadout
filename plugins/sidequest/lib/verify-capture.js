@@ -324,11 +324,60 @@ function captureProject(target) {
   const resolution = resolveCaptureProject(target);
   return resolution.ok ? resolution.project : null;
 }
-function captureWorkingDirectory(target, cwd, project) {
-  if (!project) return cwd;
+function dispatchedIsolatedWorktree(ticket) {
+  const dispatch = ticket?.dispatch;
+  if (!dispatch || dispatch.sharedTree === true || dispatch.workingTreeDelivery === true) return "";
+  return typeof dispatch.worktree === "string" ? dispatch.worktree.trim() : "";
+}
+function gitOutput(cwd, args, raw = false) {
+  try {
+    const output = String(execFileSync("git", [...args], { cwd, encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }));
+    return raw ? output : output.trim();
+  } catch (_) {
+    return "";
+  }
+}
+function canonicalPath(value) {
+  try {
+    return fs.realpathSync(value);
+  } catch (_) {
+    return path.resolve(value);
+  }
+}
+function captureBindingRefusal(status, identity, reason) {
+  return Object.freeze({ ok: false, status, identity, reason });
+}
+function captureBinding(target, cwd, project) {
+  if (!project) return Object.freeze({ ok: true, cwd });
   const store = require("./store.js");
   const ticket = store.getTicket(project.slug, target.ticket);
-  return store.workingTreeDeliveryCandidate(project.slug, ticket) ? project.path : cwd;
+  if (store.workingTreeDeliveryCandidate(project.slug, ticket)) return Object.freeze({ ok: true, cwd: project.path });
+  const worktree = dispatchedIsolatedWorktree(ticket);
+  if (!worktree) return Object.freeze({ ok: true, cwd });
+  const toplevel = gitOutput(worktree, ["rev-parse", "--show-toplevel"]);
+  const head = gitOutput(worktree, ["rev-parse", "--verify", "HEAD^{commit}"]).toLowerCase();
+  if (!toplevel || !head || canonicalPath(toplevel) !== canonicalPath(worktree)) {
+    return captureBindingRefusal("could_not_run", "could_not_run:verification-capture-worktree-unavailable", `capture_worktree_unavailable: ${target.ticket} was dispatched to the isolated worktree ${JSON.stringify(worktree)}, but git resolves no live worktree root with a HEAD commit there. The capture must run in and bind to that worktree, so nothing was run. Release the claim and re-dispatch rather than verifying another checkout.`);
+  }
+  const dirty = gitOutput(worktree, ["status", "--porcelain=v1", "--untracked-files=normal"], true).split("\n").map((line) => line.slice(3).trim()).filter(Boolean);
+  if (dirty.length) {
+    const shown = dirty.slice(0, 10).join(", ") + (dirty.length > 10 ? `, and ${dirty.length - 10} more` : "");
+    return captureBindingRefusal("failed_check", "failed_check:verification-capture-uncommitted-candidate", `capture_candidate_uncommitted: ${target.ticket}'s worktree ${JSON.stringify(worktree)} has uncommitted changes, so the capture would run that code but bind to HEAD ${head}, a commit that does not contain it, and submit would refuse the capture. Nothing was run. Commit the declared scope with the board commit tool, restore or remove anything else, then rerun the wrapper. Uncommitted: ${shown}`);
+  }
+  return Object.freeze({ ok: true, cwd: toplevel });
+}
+function captureBindingFailure(command, binding) {
+  return Object.freeze({
+    kind: "command",
+    status: binding.status,
+    evidence: binding.reason,
+    command,
+    logPath: null,
+    exitCode: 2,
+    outputTail: null,
+    failureIdentities: Object.freeze([binding.identity]),
+    reason: binding.reason
+  });
 }
 function pinnedCaptureCommand(target, project) {
   if (!project) return null;
@@ -367,7 +416,12 @@ async function runCapturedVerification(command, target, cwd = process.cwd(), fil
   const resolution = target ? resolveCaptureProject(target) : null;
   const project = resolution?.ok ? resolution.project : null;
   const preflight = target ? preflightCapture(command, target, project) : null;
-  const captureCwd = target && !preflight ? captureWorkingDirectory(target, cwd, project) : cwd;
+  const binding = target && !preflight ? captureBinding(target, cwd, project) : null;
+  if (binding && !binding.ok) {
+    const capture2 = captureBindingFailure(command, binding);
+    return Object.freeze({ capture: capture2, recorded: Object.freeze({ ok: false, reason: binding.reason.split(":")[0] || "capture_binding_refused", message: binding.reason }) });
+  }
+  const captureCwd = binding?.ok ? binding.cwd : cwd;
   const capture = preflight || (target && isFullSuiteCommand(command) ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem) : await runVerifyCapture(command, captureCwd));
   const recorded = target ? recordCapture(target, capture, captureCwd, resolution) : null;
   return Object.freeze({ capture, recorded });

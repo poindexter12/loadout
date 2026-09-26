@@ -492,6 +492,110 @@ test('verification capture resolves a stale worktree --project back to the ticke
   }
 });
 
+// SQ-162 fixture: a board project whose ticket was dispatched to an isolated
+// linked worktree, the shape `isolation: worktree` executors run under.
+function isolatedCaptureFixture(prefix: string) {
+  const suite = `require('node:fs').writeFileSync('suite-ran', process.cwd());\n`;
+  const project = captureFixtureProject(prefix, suite);
+  fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({ scripts: { 'test:full': 'node suite.js', check: 'node suite.js' } }));
+  execFileSync('git', ['-c', 'user.name=Sidequest Tests', '-c', 'user.email=sidequest@example.invalid', 'commit', '--quiet', '-am', 'check script'], { cwd: project, windowsHide: true });
+  const worktreeParent = fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}worktrees-`));
+  const worktree = path.join(worktreeParent, 'agent-isolated');
+  execFileSync('git', ['worktree', 'add', '--quiet', '-b', 'agent-isolated', worktree, 'HEAD'], { cwd: project, windowsHide: true });
+  fs.appendFileSync(path.join(worktree, 'suite.js'), '// candidate change\n');
+  execFileSync('git', ['-c', 'user.name=Sidequest Tests', '-c', 'user.email=sidequest@example.invalid', 'commit', '--quiet', '-am', 'candidate'], { cwd: worktree, windowsHide: true });
+  const git = (cwd: string, args: string[]) => String(execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true })).trim();
+  const boardProject = store.ensureProject(project);
+  const created = store.createTicket(boardProject.slug, {
+    title: 'capture binds to the dispatched isolated worktree',
+    files: ['suite.js'],
+    category: 'coding.normal',
+    executorVerifyKind: 'command',
+    executorVerify: 'npm run check',
+  });
+  const sessionId = `${prefix}session-${Date.now()}`;
+  const prepared = store.prepareDispatch(boardProject.slug, created.ref, { sessionId, sharedTree: false });
+  assert.equal(store.recordDispatchLaunch(boardProject.slug, created.ref, { sessionId, token: prepared.token, executor: prepared.ticket.dispatchExecutor }).ok, true);
+  assert.equal(store.bindDispatchWorktreeCreation(boardProject.slug, sessionId, worktree).ok, true);
+  const ticket = store.getTicket(boardProject.slug, created.ref);
+  assert.equal(fs.realpathSync(ticket.dispatch.worktree), fs.realpathSync(worktree), 'the fixture ticket is bound to its isolated worktree');
+  const cleanup = () => {
+    fs.rmSync(captureSlotDirectory(project), { recursive: true, force: true });
+    fs.rmSync(worktreeParent, { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  };
+  return { project, worktree, ticket, slug: boardProject.slug, base: git(project, ['rev-parse', 'HEAD']), candidate: git(worktree, ['rev-parse', 'HEAD']), cleanup };
+}
+
+test('SQ-162: a capture requested from the canonical checkout runs in and records the dispatched worktree', async () => {
+  const fixture = isolatedCaptureFixture('sq-162-canonical-cwd-');
+  try {
+    assert.notEqual(fixture.base, fixture.candidate, 'the fixture candidate differs from the canonical HEAD');
+    // SQ-81 shape: the executor shell stood in the shared checkout.
+    const { capture, recorded } = await runCapturedVerification('npm run check', { project: fixture.project, ticket: fixture.ticket.ref }, fixture.project);
+    assert.equal(capture.status, 'passed', capture.evidence);
+    assert.equal(recorded?.ok, true, recorded?.reason);
+    assert.deepEqual(recorded?.capture?.candidate, { source: 'git', value: fixture.candidate });
+    assert.equal(fs.realpathSync(recorded?.capture?.worktree), fs.realpathSync(fixture.worktree));
+    assert.equal(fs.realpathSync(fs.readFileSync(path.join(fixture.worktree, 'suite-ran'), 'utf8')), fs.realpathSync(fixture.worktree), 'the verify command ran with the worktree as cwd');
+    assert.equal(fs.existsSync(path.join(fixture.project, 'suite-ran')), false, 'nothing ran in the canonical checkout');
+    fs.rmSync(capture.logPath, { force: true });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('SQ-162: a capture requested from the dispatched linked worktree records its HEAD (SQ-134 shape)', async () => {
+  const fixture = isolatedCaptureFixture('sq-162-linked-cwd-');
+  try {
+    const { capture, recorded } = await runCapturedVerification('npm run check', { project: fixture.project, ticket: fixture.ticket.ref }, fixture.worktree);
+    assert.equal(capture.status, 'passed', capture.evidence);
+    assert.equal(recorded?.ok, true, recorded?.reason);
+    assert.deepEqual(recorded?.capture?.candidate, { source: 'git', value: fixture.candidate });
+    assert.equal(fs.realpathSync(fs.readFileSync(path.join(fixture.worktree, 'suite-ran'), 'utf8')), fs.realpathSync(fixture.worktree));
+    fs.rmSync(capture.logPath, { force: true });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('SQ-162: a capture whose worktree HEAD is not the code that would run is refused before spawning', async () => {
+  const fixture = isolatedCaptureFixture('sq-162-uncommitted-');
+  try {
+    // SQ-158 shape: the candidate edit is still uncommitted, so HEAD names a commit without it.
+    fs.appendFileSync(path.join(fixture.worktree, 'suite.js'), '// uncommitted candidate edit\n');
+    const { capture, recorded } = await runCapturedVerification('npm run check', { project: fixture.project, ticket: fixture.ticket.ref }, fixture.worktree);
+    assert.deepEqual({ status: capture.status, exitCode: capture.exitCode }, { status: 'failed_check', exitCode: 2 });
+    assert.deepEqual(capture.failureIdentities, ['failed_check:verification-capture-uncommitted-candidate']);
+    assert.match(capture.reason || '', /^capture_candidate_uncommitted: /);
+    assert.match(capture.reason || '', new RegExp(`bind to HEAD ${fixture.candidate}`));
+    assert.match(capture.reason || '', /Uncommitted: suite\.js/);
+    assert.equal(fs.existsSync(path.join(fixture.worktree, 'suite-ran')), false, 'the refused capture never spawned the verify command');
+    // Refused before any process ran, so no wall-clock deadline was spent (asserted structurally, since timing is load-dependent).
+    assert.equal(capture.logPath, null, "the refusal spawned no verify process and wrote no log");
+    assert.equal(recorded?.ok, false);
+    assert.equal(recorded?.reason, 'capture_candidate_uncommitted');
+    assert.equal((store.getTicket(fixture.slug, fixture.ticket.ref).verificationCaptures || []).length, 0, 'no capture binds the wrong commit');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('SQ-162: a capture whose dispatched worktree is gone is refused and names the worktree', async () => {
+  const fixture = isolatedCaptureFixture('sq-162-missing-worktree-');
+  try {
+    execFileSync('git', ['worktree', 'remove', '--force', fixture.worktree], { cwd: fixture.project, windowsHide: true });
+    const { capture, recorded } = await runCapturedVerification('npm run check', { project: fixture.project, ticket: fixture.ticket.ref }, fixture.project);
+    assert.deepEqual({ status: capture.status, exitCode: capture.exitCode }, { status: 'could_not_run', exitCode: 2 });
+    assert.match(capture.reason || '', /^capture_worktree_unavailable: /);
+    assert.ok((capture.reason || '').includes(JSON.stringify(fixture.ticket.dispatch.worktree)), capture.reason);
+    assert.equal(fs.existsSync(path.join(fixture.project, 'suite-ran')), false, 'the canonical checkout is never verified in its place');
+    assert.equal(recorded?.reason, 'capture_worktree_unavailable');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test('verification capture names the dead checkout when a retired agent worktree has no HEAD', () => {
   const project = captureFixtureProject('sq-capture-retired-project-', 'process.exit(0);\n');
   const worktreeParent = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-capture-retired-worktrees-'));

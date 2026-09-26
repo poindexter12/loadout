@@ -412,11 +412,84 @@ function captureProject(target: CaptureTarget): CaptureProject | null {
   return resolution.ok ? resolution.project : null;
 }
 
-function captureWorkingDirectory(target: CaptureTarget, cwd: string, project: CaptureProject | null): string {
-  if (!project) return cwd;
+type CaptureBinding =
+  | Readonly<{ ok: true; cwd: string }>
+  | Readonly<{ ok: false; status: 'could_not_run' | 'failed_check'; identity: string; reason: string }>;
+
+// An isolated dispatch owns exactly one checkout: the linked worktree the board
+// bound at dispatch. Shared-tree and working-tree (artifact) dispatches keep the
+// caller's checkout, which is the project checkout itself.
+function dispatchedIsolatedWorktree(ticket: any): string {
+  const dispatch = ticket?.dispatch;
+  if (!dispatch || dispatch.sharedTree === true || dispatch.workingTreeDelivery === true) return '';
+  return typeof dispatch.worktree === 'string' ? dispatch.worktree.trim() : '';
+}
+
+function gitOutput(cwd: string, args: readonly string[], raw = false): string {
+  try {
+    const output = String(execFileSync('git', [...args], { cwd, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }));
+    return raw ? output : output.trim();
+  } catch (_) {
+    return '';
+  }
+}
+
+function canonicalPath(value: string): string {
+  try {
+    return fs.realpathSync(value);
+  } catch (_) {
+    return path.resolve(value);
+  }
+}
+
+function captureBindingRefusal(status: 'could_not_run' | 'failed_check', identity: string, reason: string): CaptureBinding {
+  return Object.freeze({ ok: false as const, status, identity, reason });
+}
+
+// SQ-162: a capture used to run in whatever directory the wrapper was started
+// from and record that checkout's HEAD. An isolated executor whose shell stood
+// in the canonical checkout certified main instead of its candidate (SQ-81), and
+// one that ran before committing certified its base commit while the candidate
+// sat uncommitted in the tree (SQ-158). Either way the run spent up to its full
+// deadline and submit then refused the capture as not matching the candidate.
+// For an isolated dispatch the capture now runs in the dispatched worktree, and
+// it refuses before spawning anything when that worktree cannot be bound or its
+// HEAD would not be the code that runs.
+function captureBinding(target: CaptureTarget, cwd: string, project: CaptureProject | null): CaptureBinding {
+  if (!project) return Object.freeze({ ok: true as const, cwd });
   const store = require('./store.js') as VerificationCaptureStore;
   const ticket = store.getTicket(project.slug, target.ticket);
-  return store.workingTreeDeliveryCandidate(project.slug, ticket) ? project.path : cwd;
+  if (store.workingTreeDeliveryCandidate(project.slug, ticket)) return Object.freeze({ ok: true as const, cwd: project.path });
+  const worktree = dispatchedIsolatedWorktree(ticket);
+  if (!worktree) return Object.freeze({ ok: true as const, cwd });
+  const toplevel = gitOutput(worktree, ['rev-parse', '--show-toplevel']);
+  const head = gitOutput(worktree, ['rev-parse', '--verify', 'HEAD^{commit}']).toLowerCase();
+  if (!toplevel || !head || canonicalPath(toplevel) !== canonicalPath(worktree)) {
+    return captureBindingRefusal('could_not_run', 'could_not_run:verification-capture-worktree-unavailable', `capture_worktree_unavailable: ${target.ticket} was dispatched to the isolated worktree ${JSON.stringify(worktree)}, but git resolves no live worktree root with a HEAD commit there. The capture must run in and bind to that worktree, so nothing was run. Release the claim and re-dispatch rather than verifying another checkout.`);
+  }
+  // Porcelain lines are `XY path`; the status column can start with a space, so
+  // the output is split untrimmed.
+  const dirty = gitOutput(worktree, ['status', '--porcelain=v1', '--untracked-files=normal'], true)
+    .split('\n').map((line) => line.slice(3).trim()).filter(Boolean);
+  if (dirty.length) {
+    const shown = dirty.slice(0, 10).join(', ') + (dirty.length > 10 ? `, and ${dirty.length - 10} more` : '');
+    return captureBindingRefusal('failed_check', 'failed_check:verification-capture-uncommitted-candidate', `capture_candidate_uncommitted: ${target.ticket}'s worktree ${JSON.stringify(worktree)} has uncommitted changes, so the capture would run that code but bind to HEAD ${head}, a commit that does not contain it, and submit would refuse the capture. Nothing was run. Commit the declared scope with the board commit tool, restore or remove anything else, then rerun the wrapper. Uncommitted: ${shown}`);
+  }
+  return Object.freeze({ ok: true as const, cwd: toplevel });
+}
+
+function captureBindingFailure(command: string, binding: Extract<CaptureBinding, { ok: false }>): VerifyCapture {
+  return Object.freeze({
+    kind: 'command',
+    status: binding.status,
+    evidence: binding.reason,
+    command,
+    logPath: null,
+    exitCode: 2,
+    outputTail: null,
+    failureIdentities: Object.freeze([binding.identity]),
+    reason: binding.reason,
+  });
 }
 
 function pinnedCaptureCommand(target: CaptureTarget, project: CaptureProject | null): Readonly<{ ticket: unknown; command: string }> | null {
@@ -461,7 +534,13 @@ async function runCapturedVerification(command: string, target: CaptureTarget | 
   const resolution = target ? resolveCaptureProject(target) : null;
   const project = resolution?.ok ? resolution.project : null;
   const preflight = target ? preflightCapture(command, target, project) : null;
-  const captureCwd = target && !preflight ? captureWorkingDirectory(target, cwd, project) : cwd;
+  const binding = target && !preflight ? captureBinding(target, cwd, project) : null;
+  if (binding && !binding.ok) {
+    // A refused binding ran nothing, so there is no checked revision to record.
+    const capture = captureBindingFailure(command, binding);
+    return Object.freeze({ capture, recorded: Object.freeze({ ok: false, reason: binding.reason.split(':')[0] || 'capture_binding_refused', message: binding.reason }) });
+  }
+  const captureCwd = binding?.ok ? binding.cwd : cwd;
   const capture = preflight || (target && isFullSuiteCommand(command)
     ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem)
     : await runVerifyCapture(command, captureCwd));
