@@ -1110,7 +1110,11 @@ function integrateArtifactSubmission(slug: any, ticket: any, opts?: any) {
 
 function patchIdForCommit(repo: string, commit: string) {
   const parent = integrationGit(repo, ['rev-parse', `${commit}^`]);
-  const patch = execFileSync('git', ['diff', '--no-ext-diff', '--unified=0', parent, commit], {
+  return patchIdForDiff(repo, parent, commit);
+}
+
+function patchIdForDiff(repo: string, from: string, commit: string) {
+  const patch = execFileSync('git', ['diff', '--no-ext-diff', '--unified=0', from, commit], {
     cwd: repo,
     encoding: 'utf8',
     windowsHide: true,
@@ -1145,6 +1149,83 @@ function deliveryContainsSubmittedContent(repo: string, submission: any, deliver
   return missing.length
     ? { ok: false, missing }
     : { ok: true, evidence: 'equivalent_patches' };
+}
+
+function resolveCommitOrNull(repo: string, revision: string) {
+  try {
+    return integrationGit(repo, ['rev-parse', '--verify', '--quiet', `${revision}^{commit}`]).toLowerCase() || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function isAncestorCommit(repo: string, ancestor: string, descendant: string) {
+  try {
+    integrationGit(repo, ['merge-base', '--is-ancestor', ancestor, descendant]);
+    return true;
+  } catch (error: any) {
+    if (error?.status === 1) return false;
+    throw error;
+  }
+}
+
+// A reviewed candidate descendant is a commit the reviewer made ON TOP of the
+// pinned candidate (for example a one-line fix found in review), touching only
+// submitted paths. It is typically delivered as a squash of candidate plus fix,
+// so neither commit is reachable from the target and the delivered content is
+// the descendant's, not the candidate's. Returns applicable:false when the
+// named interaction is not such a descendant, so the caller keeps its
+// candidate-only refusal (and the landed-source interaction shape).
+function reviewedCandidateDescendant(repo: string, ticket: any, requestedInteraction: any) {
+  const interaction = String(requestedInteraction || '').trim();
+  if (!interaction || !SUBMISSION_COMMIT_RE.test(interaction)) return { applicable: false };
+  const candidate = String(ticket.submission?.commit || '').toLowerCase();
+  const interactionCommit = resolveCommitOrNull(repo, interaction);
+  if (!candidate || !interactionCommit || interactionCommit === candidate) return { applicable: false, interactionCommit };
+  if (!isAncestorCommit(repo, candidate, interactionCommit)) return { applicable: false, interactionCommit };
+  const paths = integrationGit(repo, ['diff', '--name-only', candidate, interactionCommit]).split(/\r?\n/).filter(Boolean);
+  if (!paths.length) {
+    return {
+      applicable: true,
+      ok: false,
+      reason: 'delivery_interaction_required',
+      message: `${ticket.ref} reviewed descendant ${interactionCommit} does not change the pinned candidate ${candidate}.`,
+    };
+  }
+  const submittedPaths = changedIntegrationPaths(repo, ticket.submission);
+  const unrelatedPaths = paths.filter((file: string) => !isInScope(file, submittedPaths));
+  if (unrelatedPaths.length) {
+    return {
+      applicable: true,
+      ok: false,
+      reason: 'delivery_interaction_outside_candidate',
+      unrelatedPaths,
+      message: `${ticket.ref} reviewed descendant ${interactionCommit} changes paths outside the submitted candidate: ${unrelatedPaths.join(', ')}. Record that work through its own reviewed delivery.`,
+    };
+  }
+  return { applicable: true, ok: true, interaction: { commit: interactionCommit, paths } };
+}
+
+// Does a reachable delivery carry the reviewed descendant's content? Accepts
+// the descendant (or a merge of it) being an ancestor, every reviewed commit
+// replayed as an equivalent patch, or one delivered commit equivalent to the
+// descendant's whole change since it forked from the delivery line (a squash).
+function deliveryContainsReviewedDescendant(repo: string, submission: any, interactionCommit: string, deliveryCommit: string) {
+  if (isAncestorCommit(repo, interactionCommit, deliveryCommit)) return { ok: true, evidence: 'candidate_ancestor' };
+  const candidate = String(submission.commit || '').toLowerCase();
+  const commonBase = integrationGit(repo, ['merge-base', interactionCommit, deliveryCommit]);
+  const deliveredCommits = integrationGit(repo, ['rev-list', '--reverse', `${commonBase}..${deliveryCommit}`]).split(/\r?\n/).filter(Boolean);
+  const deliveredPatchIds = new Set(deliveredCommits.map((commit: string) => patchIdForCommit(repo, commit)));
+  const candidateCommits = Array.isArray(submission.commits) && submission.commits.length ? submission.commits.map(String) : [candidate];
+  const reviewCommits = integrationGit(repo, ['rev-list', '--reverse', `${candidate}..${interactionCommit}`]).split(/\r?\n/).filter(Boolean);
+  const reviewedCommits = [...candidateCommits, ...reviewCommits];
+  if (reviewedCommits.every((commit: string) => deliveredPatchIds.has(patchIdForCommit(repo, commit)))) {
+    return { ok: true, evidence: 'equivalent_patches' };
+  }
+  if (deliveredPatchIds.has(patchIdForDiff(repo, commonBase, interactionCommit))) {
+    return { ok: true, evidence: 'equivalent_patches' };
+  }
+  return { ok: false, missing: [interactionCommit] };
 }
 
 function reviewedMergedTreeInteraction(repo: string, ticket: any, sourceCommit: string, resultingHead: string, requestedInteraction: any) {
@@ -1221,9 +1302,9 @@ function pinnedCandidateMatches(repo: string, ticket: any, candidate: string) {
   }
 }
 
-function workingTreeContainsSubmittedContent(repo: string, submission: any, candidate: string) {
+function workingTreeContainsSubmittedContent(repo: string, submission: any, candidate: string, extraPaths: string[] = []) {
   const missing: string[] = [];
-  for (const file of changedIntegrationPaths(repo, submission)) {
+  for (const file of Array.from(new Set([...changedIntegrationPaths(repo, submission), ...extraPaths]))) {
     let candidateContents: Buffer | null;
     try {
       candidateContents = execFileSync('git', ['show', `${candidate}:${file}`], {
@@ -1317,19 +1398,45 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
         message: `${ticket.ref} reconciliation refused: non-reachable delivery must name its immutable ${submissionGitRef(ticket)} candidate, not ${deliveryCommit}.`,
       };
     }
-    const content = workingTreeDelivery && !reachable
+    let content: any = workingTreeDelivery && !reachable
       ? workingTreeContainsSubmittedContent(repo, ticket.submission, deliveryCommit)
       : deliveryContainsSubmittedContent(repo, ticket.submission, deliveryCommit);
+    let descendant: any = null;
     if (!content.ok) {
-      return {
-        ok: false,
-        reason: 'delivery_content_missing',
-        ticket,
-        missingCommits: content.missing,
-        message: `${ticket.ref} reconciliation refused: ${deliveryCommit} does not preserve the submitted candidate content for ${content.missing.join(', ')}.`,
-      };
+      const candidate = String(ticket.submission.commit || '').toLowerCase();
+      const reviewed: any = reviewedCandidateDescendant(repo, ticket, opts.deliveryInteractionCommit);
+      if (!reviewed.applicable) {
+        const requested = String(opts.deliveryInteractionCommit || '').trim();
+        const hint = requested
+          ? ` deliveryInteractionCommit ${reviewed.interactionCommit || requested} is not a descendant of pinned candidate ${candidate}, so it cannot stand in for the candidate content; name the reviewed commit made on top of ${candidate}.`
+          : ` If the delivery carries a reviewed fix committed on top of the pinned candidate (for example a squash of candidate plus review fix), name that reviewed descendant of ${candidate} as deliveryInteractionCommit; it may change submitted paths only, and the delivery is then checked against its content.`;
+        return {
+          ok: false,
+          reason: 'delivery_content_missing',
+          ticket,
+          missingCommits: content.missing,
+          message: `${ticket.ref} reconciliation refused: ${deliveryCommit} does not preserve the submitted candidate content for ${content.missing.join(', ')}.${hint}`,
+        };
+      }
+      if (!reviewed.ok) {
+        const { applicable: _applicable, ...refusal } = reviewed;
+        return Object.assign({ ticket }, refusal);
+      }
+      descendant = reviewed.interaction;
+      content = workingTreeDelivery
+        ? workingTreeContainsSubmittedContent(repo, ticket.submission, descendant.commit, descendant.paths)
+        : deliveryContainsReviewedDescendant(repo, ticket.submission, descendant.commit, deliveryCommit);
+      if (!content.ok) {
+        return {
+          ok: false,
+          reason: 'delivery_content_missing',
+          ticket,
+          missingCommits: content.missing,
+          message: `${ticket.ref} reconciliation refused: ${workingTreeDelivery ? 'the integration working tree' : deliveryCommit} does not preserve the content of reviewed descendant ${descendant.commit} of pinned candidate ${candidate} for ${content.missing.join(', ')}.`,
+        };
+      }
     }
-    const interaction = workingTreeDelivery
+    const interaction = workingTreeDelivery || descendant
       ? { ok: true, interaction: null }
       : reviewedMergedTreeInteraction(repo, ticket, deliveryCommit, resultingHead, opts.deliveryInteractionCommit);
     if (!interaction.ok) return Object.assign({ ticket }, interaction);
@@ -1343,19 +1450,22 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
     }
     const deliveredFiles = workingTreeDelivery
       ? workingTreeDeliveryPaths(repo)
-      : interaction.interaction
-        ? Array.from(new Set([...deliveredCommitPaths(repo, deliveryCommit), ...interaction.interaction.paths]))
+      : interaction.interaction || descendant
+        ? Array.from(new Set([...deliveredCommitPaths(repo, deliveryCommit), ...(interaction.interaction || descendant).paths]))
         : deliveredCommitPaths(repo, deliveryCommit);
     const deliveryIdentity = {
-      kind: interaction.interaction ? 'reviewed-merged-tree-interaction' : workingTreeDelivery ? 'pinned-working-tree' : 'reachable-commit',
+      kind: descendant
+        ? 'reviewed-candidate-descendant'
+        : interaction.interaction ? 'reviewed-merged-tree-interaction' : workingTreeDelivery ? 'pinned-working-tree' : 'reachable-commit',
       pinnedRef: submissionGitRef(ticket),
       candidate: ticket.submission.commit,
       sourceRevision: deliveryRevision,
       ...(interaction.interaction ? { sourceCommit: deliveryCommit, interaction: interaction.interaction } : {}),
+      ...(descendant ? { sourceCommit: deliveryCommit, interaction: descendant } : {}),
       ...(workingTreeDelivery ? { method: deliveryMethod } : {}),
     };
     const recorded = updateSubmissionIntegration(slug, ticket.id, {
-      mode: interaction.interaction ? 'recorded-reviewed-interaction' : workingTreeDelivery ? 'recorded-working-tree' : 'recorded',
+      mode: interaction.interaction || (descendant && !workingTreeDelivery) ? 'recorded-reviewed-interaction' : workingTreeDelivery ? 'recorded-working-tree' : 'recorded',
       pinnedRef: submissionGitRef(ticket),
       pinnedCommit: ticket.submission.commit,
       deliveryCommit,
@@ -1369,7 +1479,9 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
       deliveredFiles,
       verify,
       evidence: reason,
-      contentEvidence: interaction.interaction ? `${content.evidence}:reviewed_merged_tree_interaction` : content.evidence,
+      contentEvidence: descendant
+        ? `${content.evidence}:reviewed_candidate_descendant`
+        : interaction.interaction ? `${content.evidence}:reviewed_merged_tree_interaction` : content.evidence,
       outcome: 'verified',
       recordedAt: new Date().toISOString(),
       deliveredAt: new Date().toISOString(),
