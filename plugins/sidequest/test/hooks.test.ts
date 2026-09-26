@@ -3548,9 +3548,21 @@ test('worktree-create refuses an unbound request before Git or target mutation',
   assert.throws(() => gitFixture(['show-ref', '--verify', `refs/heads/worktree-${name}`], repo));
 });
 
+test('linked worktree fixture paths include entropy beyond their sequence number', () => {
+  const first = linkedWorktreeFixturePath();
+  const second = linkedWorktreeFixturePath();
+  const pathPattern = /^sq-linked-worktree-hook-\d+-([0-9a-f-]{36})$/;
+  const firstEntropy = path.basename(first).match(pathPattern)?.[1];
+  const secondEntropy = path.basename(second).match(pathPattern)?.[1];
+
+  assert.ok(firstEntropy, 'the first fixture path must include a UUID suffix');
+  assert.ok(secondEntropy, 'the second fixture path must include a UUID suffix');
+  assert.notEqual(firstEntropy, secondEntropy, 'fixture paths must not rely only on the per-process sequence number');
+});
+
 test('worktree-create binds a linked checkout to its registered main board', () => {
   const repository = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-linked-worktree-hook-repo-'));
-  const linkedCheckout = path.join(os.tmpdir(), `sq-linked-worktree-hook-${++sqSeq}`);
+  const linkedCheckout = linkedWorktreeFixturePath();
   gitFixture(['init', '--quiet', '-b', 'main'], repository);
   gitFixture(['config', 'user.email', 'test@example.invalid'], repository);
   gitFixture(['config', 'user.name', 'Linked Worktree Hook Test'], repository);
@@ -4051,6 +4063,9 @@ test('ticket filing stays explicit while the Agent gate enforces dispatch and do
  * ------------------------------------------------------------------ */
 
 let sqSeq = 0;
+function linkedWorktreeFixturePath() {
+  return path.join(os.tmpdir(), `sq-linked-worktree-hook-${++sqSeq}-${crypto.randomUUID()}`);
+}
 function addTicket(title?: any) {
   return addStopTicket(title);
 }
