@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 
-import { applyChangelogs, readRepoChangelog, releasedFragmentFingerprints, REPO_CHANGELOG } from './lib/changelog.mjs';
+import { applyChangelogs, pluginChangelogPath, readRepoChangelog, releasedFragmentFingerprints, REPO_CHANGELOG } from './lib/changelog.mjs';
 import { createGit } from './lib/git.mjs';
 import { fragmentFile, fragmentFingerprint, HOLD_FILE, isHeld, readFragments } from './lib/fragments.mjs';
 import { applyVersions, checkManifest, readManifest } from './lib/manifests.mjs';
@@ -35,9 +35,17 @@ tag, then pushes the plugin tags separately.
   --skip-tests             Do not run the changed plugins' suites
   --no-merge               The tree is already prepared; skip the fast-forward merge
   --no-branch-check        Allow cutting from a branch other than --publish-branch
-  --allow-dirty            Tolerate unstaged or untracked files (staged changes are never allowed)
-  --force                  Override .release/HOLD, held fragments, and existing tags
+  --allow-dirty            Tolerate unstaged or untracked files outside the paths the release writes
+                           (staged changes, and any local change to a release path, are refused)
+  --force                  Override .release/HOLD and held fragments, and recreate leftover local tags
+                           from an unpublished attempt: this clone's release identity made them, no
+                           configured remote lists them, and no remote branch contains their commits.
+                           Refuses when any remote cannot be checked. Never moves a remote tag
   --ci-override <reason>   Proceed after a failed or missing Test workflow, recording why
+  --trust-ci               When the Test workflow passed on the pinned commit itself, record a failing
+                           local suite as a warning instead of aborting (normal windows only)
+  --keep-on-failure        On a failure before anything is pushed, keep the release commit and tags
+                           and print the undo commands instead of rolling the window back
   --json                   Machine-readable result
   --repo <dir>             Repository root (defaults to this script's repo)`;
 
@@ -175,26 +183,410 @@ async function runReleaseAudit(repoRoot, apply, log, auditRunner) {
   }
 }
 
+/**
+ * Every path a cut writes or removes, derived from the plan: the marketplace manifest, the repo
+ * changelog, each released plugin's manifest and changelog, and each consumed fragment.
+ */
+export function releaseTouchedPaths(plan, manifest) {
+  const paths = new Set([manifest.marketplacePath, REPO_CHANGELOG]);
+  for (const plugin of plan.plugins) {
+    paths.add(manifest.plugins.get(plugin.name)?.manifestPath ?? plugin.manifestPath);
+    paths.add(pluginChangelogPath(plugin));
+  }
+  for (const fragment of plan.selected) paths.add(fragmentFile(fragment.ref));
+  return [...paths].sort();
+}
+
+/**
+ * --allow-dirty tolerates edits the release never touches. An edit to a path it does touch would
+ * be swept into the release commit by `git add`, and a rollback's reset would then take it away
+ * with the commit, so any local change there (staged, unstaged, or untracked) refuses the cut
+ * before it changes anything.
+ */
+function assertReleasePathsUnchanged(git, plan, manifest) {
+  const changed = git.changedPaths(releaseTouchedPaths(plan, manifest));
+  if (changed.length === 0) return;
+  throw new Error(
+    `--allow-dirty only tolerates changes outside the release, but these paths the release writes or removes have local changes: ${changed.join(', ')}. ` +
+    'The cut would commit them as part of the release, and a rollback would discard them. Commit, stash, or revert them, then retry; nothing was changed.',
+  );
+}
+
+/**
+ * A planned tag that already exists stops the cut, with one exception: under --force, a leftover
+ * tag from this clone's unpublished attempt is recreated at the new release commit. Returns the
+ * tags --force may recreate. The pushes are never forced, so no flag can move a tag the remote
+ * already has; a remote clash always refuses, before anything is built.
+ */
 function assertNoStaleTags(git, plan, { remote, force }) {
   const localTags = new Set(git.localTags());
   const remoteTags = new Set(git.remoteTags(remote));
   const remoteClashes = plan.tags.filter((tag) => remoteTags.has(tag));
-  const localOnlyClashes = plan.tags.filter((tag) => localTags.has(tag) && !remoteTags.has(tag));
-  if (remoteClashes.length === 0 && localOnlyClashes.length === 0) return;
-  if (force) return;
   if (remoteClashes.length > 0) {
     throw new Error(
       `these tags already exist on ${remote}: ${remoteClashes.join(', ')}. ` +
-      'Cut a new window instead of moving a published tag; --force only when you are deliberately repairing the remote state.',
+      `Cut a new window instead of moving a published tag. --force does not change this: the cut never force-pushes, so it cannot move a tag on ${remote}; ` +
+      'it only recreates this clone\'s own leftover local tags. Nothing was changed.',
     );
   }
-  throw new Error(
-    `these local tags are leftovers from an unpublished attempt: ${localOnlyClashes.join(', ')}. ` +
-    `Verify they are absent from ${remote}, delete the local tags, then retry; --force only if you know the tags are safe to reuse.`,
-  );
+  const localClashes = plan.tags.filter((tag) => localTags.has(tag));
+  if (localClashes.length === 0) return new Set();
+  const clashes = classifyLocalTagClashes(git, plan, localClashes, { remote, remoteTags });
+  const blocking = localClashes.length - clashes.leftover.length;
+  if (force && blocking === 0) return new Set(clashes.leftover);
+  throw new Error(localTagClashMessage(git, plan, clashes, remote, { force }));
 }
 
-function releaseRecoveryInstructions(plan, originalHead, remote, marketplacePublished) {
+/**
+ * The identities a cut from this clone stamps on its tags. `git tag -a` records the committer
+ * identity, which `git var` resolves exactly as the tag command would; `loadout.releaseTagger`
+ * (repeatable, a name or an email) adds any other identity whose tags are this fork's releases.
+ */
+function releaseTaggers(git) {
+  const names = new Set();
+  const emails = new Set();
+  const addIdentity = (value) => {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    if (trimmed.includes('@')) emails.add(trimmed.replace(/^<|>$/g, '').toLowerCase());
+    else names.add(trimmed);
+  };
+  const ident = git.invoke(['var', 'GIT_COMMITTER_IDENT'], { allowFail: true });
+  const match = ident.code === 0 ? /^(.*?)\s*<([^>]*)>/.exec(ident.stdout.trim()) : null;
+  if (match) {
+    addIdentity(match[1]);
+    addIdentity(match[2]);
+  }
+  const configured = git.invoke(['config', '--get-all', 'loadout.releaseTagger'], { allowFail: true });
+  if (configured.code === 0) configured.stdout.split('\n').forEach(addIdentity);
+  return { names, emails };
+}
+
+function tagTagger(git, tag) {
+  const ref = `refs/tags/${tag}`;
+  const result = git.invoke(['for-each-ref', '--format=%(refname)%09%(objecttype)%09%(taggername)%09%(taggeremail)', ref], { allowFail: true });
+  const line = result.code === 0 ? result.stdout.split('\n').find((candidate) => candidate.startsWith(`${ref}\t`)) : undefined;
+  const [, type = '', name = '', email = ''] = (line ?? '').split('\t');
+  return { annotated: type === 'tag', name: name.trim(), email: email.trim().replace(/^<|>$/g, '').toLowerCase() };
+}
+
+/**
+ * Sorts each local-only clash into exactly one bucket; only `leftover` is one --force may recreate.
+ *
+ * A leftover is proven by remote evidence, never by who made the tag. Tagger identity names a
+ * person, not a clone: the same maintainer's other clone stamps the same name and email, and its
+ * tag fetched into this clone looks exactly like one this clone made. So identity only narrows: a
+ * tag no release identity made (lightweight included, since a cut never makes lightweight tags)
+ * is `foreign`, fetched from elsewhere. One a release identity did make is a leftover only when
+ * every piece of remote evidence says it was never published:
+ *   - no configured remote lists the tag (`published` otherwise);
+ *   - the publish branch, as the remote reports it now, does not contain its commit (`unpushed`);
+ *   - no remote-tracking ref contains its commit (`tracked`).
+ * Any question the cut could not answer (a remote that did not list its tags, remote-tracking
+ * refs it could not search, or a publish branch it could not read) makes the tag `unverified` or
+ * `unknown` instead, so --force never recreates a tag it could not prove unpublished.
+ */
+function classifyLocalTagClashes(git, plan, tags, { remote, remoteTags }) {
+  const taggers = releaseTaggers(git);
+  let listings = null;
+  let probe = null;
+  const clashes = { foreign: [], published: [], unpushed: [], tracked: [], unverified: [], unknown: [], leftover: [] };
+  for (const tag of tags) {
+    const tagger = tagTagger(git, tag);
+    const ours = tagger.annotated && (taggers.names.has(tagger.name) || taggers.emails.has(tagger.email));
+    if (!ours) {
+      clashes.foreign.push({ tag, ...tagger });
+      continue;
+    }
+    listings ??= remoteTagListings(git, remote, remoteTags);
+    const carriers = listings.listed.filter((listing) => listing.tags.has(tag)).map((listing) => listing.name);
+    if (carriers.length > 0) {
+      clashes.published.push({ tag, remotes: carriers });
+      continue;
+    }
+    const target = git.tagTarget(tag);
+    probe ??= publishBranchProbe(git, remote, plan.publishBranch);
+    const contained = probe.contains(target);
+    if (contained === true) {
+      clashes.unpushed.push(tag);
+      continue;
+    }
+    const trackingRefs = target ? git.remoteTrackingRefsContaining(target) : null;
+    if (trackingRefs !== null && trackingRefs.length > 0) {
+      clashes.tracked.push({ tag, refs: trackingRefs.map((ref) => ref.replace(/^refs\/remotes\//, '')) });
+      continue;
+    }
+    const doubts = listings.unlisted.map((name) => `${name} could not be listed`);
+    if (!target) doubts.push('its commit could not be read');
+    else if (trackingRefs === null) doubts.push('the remote-tracking refs could not be searched');
+    if (doubts.length > 0 && contained === null) doubts.push(`${remote}/${plan.publishBranch} could not be read`);
+    if (doubts.length > 0) clashes.unverified.push({ tag, doubts });
+    else if (contained === null) clashes.unknown.push(tag);
+    else clashes.leftover.push(tag);
+  }
+  return clashes;
+}
+
+/**
+ * The tags each configured remote reports, the publish remote's already in hand. A remote that
+ * does not answer lands in `unlisted`, as does the whole set when git cannot name the remotes.
+ */
+function remoteTagListings(git, remote, remoteTags) {
+  const listed = [{ name: remote, tags: remoteTags }];
+  const unlisted = [];
+  let names;
+  try {
+    names = git.remotes();
+  } catch (_) {
+    return { listed, unlisted: ['the configured remotes'] };
+  }
+  for (const name of names) {
+    if (name === remote) continue;
+    try {
+      listed.push({ name, tags: new Set(git.remoteTags(name)) });
+    } catch (_) {
+      unlisted.push(name);
+    }
+  }
+  return { listed, unlisted };
+}
+
+/**
+ * Answers "does <remote>/<branch> contain this commit?" from the branch tip the remote itself
+ * reports, never from a remote-tracking ref that may be stale. When that tip is missing from the
+ * local object store the branch is fetched once (objects only; no ref moves) before git is asked.
+ * Each answer is true, false, or null for "could not tell"; a remote that answers it has no such
+ * branch contains nothing.
+ */
+function publishBranchProbe(git, remote, branch) {
+  let tip;
+  try {
+    tip = git.remoteBranchTip(remote, branch);
+  } catch (_) {
+    return { contains: () => null };
+  }
+  if (tip === null) return { contains: () => false };
+  let fetched = false;
+  return {
+    contains: (commit) => {
+      if (!commit) return null;
+      if (commit === tip) return true;
+      let answer = git.containsCommit(tip, commit);
+      if (answer === null && !fetched) {
+        fetched = true;
+        if (git.fetchBranch(remote, branch)) answer = git.containsCommit(tip, commit);
+      }
+      return answer;
+    },
+  };
+}
+
+function localTagClashMessage(git, plan, clashes, remote, { force = false } = {}) {
+  const parts = [];
+  if (force) {
+    parts.push(
+      `--force recreates only this clone's own leftover local tags: ones no configured remote lists, on commits neither ${remote}/${plan.publishBranch} nor any remote-tracking branch contains. ` +
+      'It does not override these, and nothing was changed:',
+    );
+  }
+  if (clashes.foreign.length > 0) {
+    const named = clashes.foreign.map(({ tag, annotated, name, email }) => (annotated
+      ? `${tag} (tagged by ${name || 'an unnamed tagger'}${email ? ` <${email}>` : ''})`
+      : `${tag} (lightweight, no tagger)`));
+    let otherRemotes = [];
+    try {
+      otherRemotes = git.remotes().filter((name) => name !== remote);
+    } catch (_) {
+      otherRemotes = [];
+    }
+    const tagOpt = tagOptFix(otherRemotes.length > 0 ? otherRemotes : ['<remote>']);
+    parts.push(
+      `these local tags were not made by this clone's release identity, so they came from another remote's fetch, not from a cut: ${named.join(', ')}. ` +
+      `Delete them with git tag -d ${clashes.foreign.map(({ tag }) => tag).join(' ')}, then stop fetches bringing them back with ${tagOpt}. ` +
+      'If one is in fact this fork\'s, add its tagger with git config --add loadout.releaseTagger "<name or email>" and retry.',
+    );
+  }
+  if (clashes.published.length > 0) {
+    const carriers = [...new Set(clashes.published.flatMap(({ remotes }) => remotes))];
+    parts.push(
+      `these local release tags already exist on another configured remote, so they were published from somewhere and are not leftovers: ${clashes.published.map(({ tag, remotes }) => `${tag} (on ${remotes.join(', ')})`).join(', ')}. ` +
+      `If that remote is not where this fork releases, delete the local tags with git tag -d ${clashes.published.map(({ tag }) => tag).join(' ')} and stop its fetches bringing them back with ${tagOptFix(carriers)}; ` +
+      'otherwise this window needs a version those tags do not already name. --force never recreates a tag any remote has.',
+    );
+  }
+  if (clashes.unpushed.length > 0) {
+    const refspecs = clashes.unpushed.map((tag) => `refs/tags/${tag}:refs/tags/${tag}`);
+    parts.push(
+      `these local release tags mark commits ${remote}/${plan.publishBranch} already contains, but never reached ${remote}: ${clashes.unpushed.join(', ')}. ` +
+      `Push them with ${pushCommand(remote, refspecs)} instead of deleting them; this window then needs a version those tags do not already name.`,
+    );
+  }
+  if (clashes.tracked.length > 0) {
+    parts.push(
+      `these local release tags mark commits a remote-tracking branch already contains, so no unpublished attempt left them: ${clashes.tracked.map(({ tag, refs }) => `${tag} (in ${refs.join(', ')})`).join(', ')}. ` +
+      `Find out where those commits were published before touching the tags; if one is this fork's release, push it to ${remote} instead of deleting it, and this window then needs a version those tags do not already name.`,
+    );
+  }
+  if (clashes.unverified.length > 0) {
+    parts.push(
+      `could not prove these local release tags unpublished, so they are not treated as leftovers: ${clashes.unverified.map(({ tag, doubts }) => `${tag} (${doubts.join('; ')})`).join(', ')}. ` +
+      'Proving a leftover needs every configured remote to answer. Make each one reachable, or remove one this clone no longer uses with git remote remove <name>, and retry.',
+    );
+  }
+  if (clashes.unknown.length > 0) {
+    parts.push(
+      `could not tell whether ${remote}/${plan.publishBranch} already contains the commits these local release tags mark: ${clashes.unknown.join(', ')}. ` +
+      `Make sure ${remote} is reachable and retry; if ${remote}/${plan.publishBranch} does contain them, push the tags instead of deleting them.`,
+    );
+  }
+  if (clashes.leftover.length > 0) {
+    parts.push(force
+      ? `these local tags are leftovers from an unpublished attempt, which --force would recreate once the tags above are resolved: ${clashes.leftover.join(', ')}.`
+      : `these local tags are leftovers from an unpublished attempt: ${clashes.leftover.join(', ')}. ` +
+        `${remote} has none of them, no other configured remote lists them, and neither ${remote}/${plan.publishBranch} nor any remote-tracking branch contains the commits they mark. ` +
+        `Delete them with git tag -d ${clashes.leftover.join(' ')} and retry, or pass --force to recreate them at the new release commit; --force never moves a tag on ${remote}.`);
+  }
+  return parts.join('\n');
+}
+
+function tagOptFix(remotes) {
+  return remotes.map((name) => `git config remote.${name}.tagOpt --no-tags`).join(' and ');
+}
+
+/**
+ * What a failure after the release commit exists does to the local window. Rolling back is only
+ * safe while nothing can have reached the remote, so any push attempt, a remote that already
+ * carries a release ref (or could not be checked), or a HEAD that is no longer the release commit
+ * leaves the window for a human. --keep-on-failure opts out of the rollback entirely.
+ */
+export function failureRecovery({ pushStarted, keepOnFailure, headIsReleaseCommit, remoteCarriesRelease }) {
+  if (pushStarted !== false) return { action: 'instructions', reason: 'a push to the remote already started' };
+  if (keepOnFailure) return { action: 'keep', reason: '--keep-on-failure kept the failed window' };
+  if (headIsReleaseCommit !== true) return { action: 'instructions', reason: 'HEAD is no longer the release commit' };
+  if (remoteCarriesRelease !== false) {
+    return {
+      action: 'instructions',
+      reason: remoteCarriesRelease === true ? 'the remote already carries a release ref' : 'the remote could not be checked',
+    };
+  }
+  return { action: 'rollback', reason: 'nothing was pushed' };
+}
+
+/**
+ * Whether the remote already has any part of this release: a planned tag, or a publish branch
+ * that contains the release commit. Containment, not equality: someone may have pushed the commit
+ * and built on it since. Null when either question could not be answered.
+ */
+function remoteCarriesRelease(git, plan, remote, commit) {
+  let published;
+  try {
+    published = new Set(git.remoteTags(remote));
+  } catch (_) {
+    return null;
+  }
+  if (plan.tags.some((tag) => published.has(tag))) return true;
+  return publishBranchProbe(git, remote, plan.publishBranch).contains(commit);
+}
+
+function rollBackUnpublished(git, plan, { basePin, commit, trackedCleanAtStart }) {
+  // --hard only when the cut started from clean tracked files. Under --allow-dirty, --keep refuses
+  // rather than discard an operator's edits to a file the release commit changed.
+  const resetMode = trackedCleanAtStart ? '--hard' : '--keep';
+  git.invoke(['reset', resetMode, basePin]);
+  const head = git.revParse('HEAD');
+  if (head !== basePin) throw new Error(`HEAD is at ${head} after git reset ${resetMode}, not ${basePin}`);
+  const deleted = [];
+  const left = [];
+  for (const tag of plan.tags) {
+    const target = git.tagTarget(tag);
+    if (target === commit) {
+      git.invoke(['tag', '-d', tag]);
+      deleted.push(tag);
+    } else if (target !== null) {
+      left.push(tag);
+    }
+  }
+  const survivors = deleted.filter((tag) => git.tagTarget(tag) !== null);
+  if (survivors.length > 0) throw new Error(`local tags ${survivors.join(', ')} still exist after git tag -d`);
+  return { resetMode, deleted, left };
+}
+
+function recoverFromFailure(git, plan, context) {
+  const { remote, basePin, commit, pushStarted, marketplacePublished, keepOnFailure, trackedCleanAtStart } = context;
+  let headIsReleaseCommit = false;
+  try {
+    headIsReleaseCommit = git.revParse('HEAD') === commit;
+  } catch (_) {
+    headIsReleaseCommit = false;
+  }
+  const needsRemoteCheck = !pushStarted && !keepOnFailure && headIsReleaseCommit;
+  const carried = needsRemoteCheck ? remoteCarriesRelease(git, plan, remote, commit) : null;
+  const decision = failureRecovery({ pushStarted, keepOnFailure, headIsReleaseCommit, remoteCarriesRelease: carried });
+  const instructions = releaseRecoveryInstructions(plan, basePin, remote, marketplacePublished, {
+    // A remote check that ran and got no answer proves nothing about the remote, so the undo is
+    // conditional on confirming it by hand rather than presented as a purely local cleanup.
+    remoteUnconfirmed: needsRemoteCheck && carried === null,
+    commit,
+  });
+
+  if (decision.action === 'rollback') {
+    try {
+      const { resetMode, deleted, left } = rollBackUnpublished(git, plan, { basePin, commit, trackedCleanAtStart });
+      const leftNote = left.length > 0 ? `; left ${left.join(', ')} because they no longer point at the release commit` : '';
+      return {
+        rollback: { status: 'rolled-back', reason: decision.reason, head: basePin, resetMode, deletedTags: deleted, leftTags: left },
+        message: [
+          `Rolled back the unpublished release: HEAD is back at ${basePin} (git reset ${resetMode}) and local tags ${deleted.join(', ') || '(none)'} are deleted${leftNote}.`,
+          `Nothing reached ${remote}. Fix the failure and cut again; pass --keep-on-failure to keep a failed window for inspection.`,
+        ].join('\n'),
+      };
+    } catch (error) {
+      return {
+        rollback: { status: 'failed', reason: error.message },
+        message: `Automatic rollback stopped: ${error.message}. Nothing was pushed; finish the undo by hand.\n${instructions}`,
+      };
+    }
+  }
+  if (decision.action === 'keep') {
+    return {
+      rollback: { status: 'kept', reason: decision.reason },
+      message: `--keep-on-failure left the release commit ${commit} and its tags in place.\n${instructions}`,
+    };
+  }
+  if (pushStarted && !marketplacePublished) {
+    return {
+      rollback: { status: 'skipped', reason: decision.reason },
+      message: [
+        `The push to ${remote} did not complete, so nothing was rolled back automatically.`,
+        `Confirm ${remote} has neither ${commit} on ${plan.publishBranch} nor the tags ${plan.tags.join(', ')}, then undo the local window:`,
+        `  git reset --hard ${basePin}`,
+        `  git tag -d ${plan.tags.join(' ')}`,
+      ].join('\n'),
+    };
+  }
+  return {
+    rollback: { status: 'skipped', reason: decision.reason },
+    message: marketplacePublished ? instructions : `Not rolled back automatically: ${decision.reason}.\n${instructions}`,
+  };
+}
+
+/**
+ * A push that exits 0 has still been known to leave tags behind, so every planned tag has to
+ * resolve on the remote before the cut calls itself published.
+ */
+function assertTagsPublished(git, plan, remote) {
+  const published = new Set(git.remoteTags(remote));
+  const missing = plan.tags.filter((tag) => !published.has(tag));
+  if (missing.length > 0) {
+    const refspecs = missing.map((tag) => `refs/tags/${tag}:refs/tags/${tag}`);
+    throw new Error(
+      `the push reported success but these release tags do not resolve on ${remote}: ${missing.join(', ')}. ` +
+      `Publish them with ${pushCommand(remote, refspecs)} before the next window is cut.`,
+    );
+  }
+}
+
+function releaseRecoveryInstructions(plan, originalHead, remote, marketplacePublished, { remoteUnconfirmed = false, commit = null } = {}) {
   if (marketplacePublished) {
     return [
       `The marketplace commit and tag ${plan.tag} are already published.`,
@@ -203,7 +595,10 @@ function releaseRecoveryInstructions(plan, originalHead, remote, marketplacePubl
     ].join('\n');
   }
   return [
-    'The release commit and tags are local only. To undo this local window:',
+    remoteUnconfirmed
+      ? `Could not confirm that the release commit and tags are local only, because ${remote} could not be checked. ` +
+        `Confirm ${remote} has neither ${commit ?? plan.commit ?? '<release-sha>'} on ${plan.publishBranch} nor the tags ${plan.tags.join(', ')}, then undo the local window:`
+      : 'The release commit and tags are local only. To undo this local window:',
     `  git reset --hard ${originalHead}`,
     `  git tag -d ${plan.tags.join(' ')}`,
     'A reset does not delete local tags, so run both commands before retrying.',
@@ -388,12 +783,23 @@ export async function cut(options = {}) {
     allowDirty = false,
     force = false,
     ciOverrideReason = null,
+    trustCi = false,
+    keepOnFailure = false,
     log = console.log,
     auditRunner = runSidequestAudit,
   } = options;
 
   if (!repoRoot) throw new UsageError('cut() needs a repoRoot');
+  if (trustCi && ciOverrideReason) {
+    throw new UsageError('--trust-ci and --ci-override contradict each other: --trust-ci relies on a Test workflow that passed, --ci-override proceeds without one');
+  }
+  if (trustCi && mode === 'hotfix') {
+    throw new UsageError('--trust-ci applies to normal windows only: a hotfix releases cherry-picks, not the pinned commit the Test workflow ran on');
+  }
   const git = options.git ?? createGit({ cwd: repoRoot, dryRun });
+  // Every push this cut makes is recorded from here on; the failure path treats any of them as
+  // proof the remote may have changed, whatever the in-memory flags say.
+  const historyStart = git.history?.length ?? 0;
 
   const loadManifest = (source) => {
     const loaded = readManifest(source, repoRoot);
@@ -416,6 +822,7 @@ export async function cut(options = {}) {
   if (!allowDirty && !git.isClean()) {
     throw new Error('the working tree has uncommitted changes; cut from a clean checkout or pass --allow-dirty');
   }
+  const trackedCleanAtStart = !allowDirty || git.capture(['status', '--porcelain', '--untracked-files=no']) === '';
   if (branchCheck) {
     const branch = git.currentBranch();
     if (branch !== publishBranch) {
@@ -468,21 +875,32 @@ export async function cut(options = {}) {
     return { status: 'nothing-to-release', plan };
   }
 
-  assertNoStaleTags(git, plan, { remote, force });
+  // A clean start already guarantees this; checked after the plan so the paths are exact, and
+  // before anything else so a dry run refuses exactly where a real cut would.
+  if (allowDirty) assertReleasePathsUnchanged(git, plan, manifest);
+  const recreatableTags = assertNoStaleTags(git, plan, { remote, force });
 
   const githubRemote = !dryRun && isGitHubRemote(git.remoteUrl(remote));
   let ci = null;
   if (!dryRun && (options.assertParentCiPassed || githubRemote)) {
-    const parent = git.remoteBranchHead(remote, publishBranch);
+    // CI is asserted on the commit this window releases. The remote branch head is a different
+    // commit whenever the pin is ahead of it, and its verdict says nothing about the pin.
     const assertCiPassed = options.assertParentCiPassed
       ?? ((repoRoot, commit, suites) => assertParentCiPassed(repoRoot, commit, spawnSync, suites));
     try {
-      const result = assertCiPassed(repoRoot, parent, plan.suites);
-      ci = { status: 'passed', commit: parent, conclusion: result?.conclusion ?? 'success' };
+      const result = assertCiPassed(repoRoot, pinned, plan.suites);
+      ci = { status: 'passed', commit: pinned, conclusion: result?.conclusion ?? 'success' };
     } catch (error) {
       if (!ciOverrideReason) throw error;
-      ci = { status: 'overridden', commit: parent, reason: ciOverrideReason, error: error.message };
+      ci = { status: 'overridden', commit: pinned, reason: ciOverrideReason, error: error.message };
     }
+  }
+  const ciTrusted = trustCi && ci?.status === 'passed' && ci.commit === pinned;
+  if (trustCi && !dryRun && !ciTrusted) {
+    throw new Error(
+      `--trust-ci needs a passing Test workflow on the pinned commit ${pinned}, but none was checked ` +
+      `(the remote is not on GitHub and no CI check was supplied); nothing was changed. Run the suites, or drop --trust-ci.`,
+    );
   }
 
   if (dryRun) {
@@ -555,13 +973,19 @@ export async function cut(options = {}) {
     git.add([...new Set([...touched, ...consumed])].sort());
     git.commit(message);
     const commit = git.revParse('HEAD');
-    git.tag(plan.tag, message);
+    // -f only for tags every remote proved unpublished (see classifyLocalTagClashes); any other
+    // existing tag makes `git tag` fail rather than be overwritten.
+    git.tag(plan.tag, message, { force: recreatableTags.has(plan.tag) });
     for (const plugin of plan.plugins) {
-      git.tag(`${plugin.name}-v${plugin.to}`, `${plugin.name} ${plugin.to} (${plan.tag})`);
+      const tag = `${plugin.name}-v${plugin.to}`;
+      git.tag(tag, `${plugin.name} ${plugin.to} (${plan.tag})`, { force: recreatableTags.has(tag) });
     }
     plan.commit = commit;
 
     let marketplacePublished = false;
+    // Set before the first push is attempted, never after: a push that throws may still have
+    // reached the remote, so from this point on nothing is rolled back automatically.
+    let pushStarted = false;
     try {
       const failures = [];
       const runSuite = options.runSuite ?? defaultSuiteRunner(repoRoot, { log, tag: plan.tag });
@@ -574,10 +998,16 @@ export async function cut(options = {}) {
           }
         }
       }
-      if (failures.length > 0) {
+      const suiteWarnings = [];
+      if (failures.length > 0 && !ciTrusted) {
         throw new Error(
           `release suites failed, nothing was published:\n  ${failures.join('\n  ')}`,
         );
+      }
+      for (const failure of failures) {
+        const warning = `release suite failed locally, but the Test workflow passed on ${pinned} and --trust-ci accepts that verdict: ${failure}`;
+        suiteWarnings.push(warning);
+        log(`warning: ${warning}`);
       }
       assertReleaseIntact(git, plan, commit);
 
@@ -589,9 +1019,11 @@ export async function cut(options = {}) {
       let githubRelease = null;
       let audit = null;
       if (push) {
+        pushStarted = true;
         git.pushAtomic(remote, marketplacePush);
         marketplacePublished = true;
         if (pluginPush.length > 0) git.pushAtomic(remote, pluginPush);
+        assertTagsPublished(git, plan, remote);
         if (githubRemote) {
           const assertReleasePublished = options.assertGitHubReleasePublished
             ?? ((repoRoot, tag, releaseCommit) => assertGitHubReleasePublished(repoRoot, tag, releaseCommit));
@@ -604,19 +1036,31 @@ export async function cut(options = {}) {
       } else {
         log(`built ${plan.tag} locally as ${commit}; publish it with:`);
         if (ci?.status === 'passed') {
-          log(`Test CI on ${remote}/${publishBranch} (${ci.commit}) passed.`);
+          log(`Test CI on the pinned commit ${ci.commit} passed.`);
         } else if (ci?.status === 'overridden') {
-          log(`Test CI on ${remote}/${publishBranch} (${ci.commit}) was overridden: ${ci.reason}`);
+          log(`Test CI on the pinned commit ${ci.commit} was overridden: ${ci.reason}`);
         }
         for (const command of pushCommands) log(`  ${command}`);
       }
 
       return {
         status: 'cut', plan, commit, message, pushed, refspecs, marketplacePush, pluginPush,
-        pushCommands, touched, consumed, ci, githubRelease, audit,
+        pushCommands, touched, consumed, ci, suiteWarnings, githubRelease, audit,
       };
     } catch (error) {
-      throw new Error(`${error.message}\n${releaseRecoveryInstructions(plan, basePin, remote, marketplacePublished)}`, { cause: error });
+      const pushSeen = pushStarted || (git.history ?? []).slice(historyStart).some((entry) => entry.mutatesRemote);
+      const recovery = recoverFromFailure(git, plan, {
+        remote,
+        basePin,
+        commit,
+        pushStarted: pushSeen,
+        marketplacePublished,
+        keepOnFailure,
+        trackedCleanAtStart,
+      });
+      const failure = new Error(`${error.message}\n${recovery.message}`, { cause: error });
+      failure.rollback = recovery.rollback;
+      throw failure;
     }
   } finally {
     if (publishLockAcquired) {
@@ -626,7 +1070,8 @@ export async function cut(options = {}) {
   }
 }
 
-export async function main(argv) {
+/** Maps the command line onto cut() options; `help` and `json` stay with the caller. */
+export function parseCutArgs(argv) {
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -644,38 +1089,49 @@ export async function main(argv) {
       'allow-dirty': { type: 'boolean' },
       force: { type: 'boolean' },
       'ci-override': { type: 'string' },
+      'trust-ci': { type: 'boolean' },
+      'keep-on-failure': { type: 'boolean' },
       json: { type: 'boolean' },
       repo: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
     },
   });
 
-  if (values.help) {
+  return {
+    help: values.help === true,
+    json: values.json === true,
+    options: {
+      repoRoot: path.resolve(values.repo ?? repoRootFrom(import.meta.url)),
+      mode: values.mode ?? 'normal',
+      tickets: splitList(values.tickets),
+      sha: values.sha ?? null,
+      date: values.date ?? null,
+      publishBranch: values['publish-branch'] ?? 'main',
+      remote: values.remote ?? 'origin',
+      dryRun: values['dry-run'] === true,
+      push: values.push === true,
+      skipTests: values['skip-tests'] === true,
+      noMerge: values['no-merge'] === true,
+      branchCheck: values['no-branch-check'] !== true,
+      allowDirty: values['allow-dirty'] === true,
+      force: values.force === true,
+      ciOverrideReason: values['ci-override'] ?? null,
+      trustCi: values['trust-ci'] === true,
+      keepOnFailure: values['keep-on-failure'] === true,
+    },
+  };
+}
+
+export async function main(argv) {
+  const { help, json, options } = parseCutArgs(argv);
+  if (help) {
     console.log(USAGE);
     return 0;
   }
 
-  const repoRoot = path.resolve(values.repo ?? repoRootFrom(import.meta.url));
-  const result = await cut({
-    repoRoot,
-    mode: values.mode ?? 'normal',
-    tickets: splitList(values.tickets),
-    sha: values.sha ?? null,
-    date: values.date ?? null,
-    publishBranch: values['publish-branch'] ?? 'main',
-    remote: values.remote ?? 'origin',
-    dryRun: values['dry-run'] === true,
-    push: values.push === true,
-    skipTests: values['skip-tests'] === true,
-    noMerge: values['no-merge'] === true,
-    branchCheck: values['no-branch-check'] !== true,
-    allowDirty: values['allow-dirty'] === true,
-    force: values.force === true,
-    ciOverrideReason: values['ci-override'] ?? null,
-    log: values.json ? () => {} : console.log,
-  });
+  const result = await cut({ ...options, log: json ? () => {} : console.log });
 
-  if (values.json) {
+  if (json) {
     console.log(JSON.stringify({
       status: result.status,
       commit: result.commit ?? null,
@@ -683,6 +1139,7 @@ export async function main(argv) {
       pushCommand: result.pushCommand ?? null,
       refspecs: result.refspecs ?? [],
       ci: result.ci ?? null,
+      suiteWarnings: result.suiteWarnings ?? [],
       githubRelease: result.githubRelease ?? null,
       touched: result.touched ?? [],
       consumed: result.consumed ?? [],

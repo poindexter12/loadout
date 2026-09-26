@@ -2,7 +2,7 @@
 
 `.release/unreleased/` is the queue of changes that have landed but are not published yet. The orchestrator keeps one fragment per integrated ticket and cuts the release from `main` at `HEAD`. The fragment is the repository-owned record of what the board integrated.
 
-`cut.mjs` owns marketplace and plugin version bumps, changelogs, release tags, and fragment consumption. Ticket work records the fragment and does not hand-edit plugin or marketplace versions. See [`scripts/release/README.md`](../scripts/release/README.md) for the release lifecycle and recovery steps.
+`cut.mjs` owns marketplace and plugin version bumps, changelogs, release tags, and fragment consumption, and rolls back its own local commit and tags when a cut fails before anything is pushed and the remote does not already carry the release (`--keep-on-failure` keeps them). Ticket work records the fragment and does not hand-edit plugin or marketplace versions. See [`scripts/release/README.md`](../scripts/release/README.md) for the release lifecycle and recovery steps.
 
 Write one with `node scripts/release/note.mjs`, never by hand if you can avoid it, because the script validates what it writes:
 
