@@ -1337,6 +1337,57 @@ function workingTreeDeliveryMethod(value: any) {
   return WORKING_TREE_DELIVERY_METHODS.has(method) ? method : null;
 }
 
+// Git allows a branch to be checked out in at most one worktree at a time, so if the
+// canonical project root is not on the target branch, the one place its live state
+// could still be read from is whichever linked worktree (if any) has it checked out.
+// Returns that worktree's absolute path, or null when no worktree of this repo has it.
+function integrationWorktreeForBranch(repo: string, branch: string) {
+  let listing: string;
+  try {
+    listing = integrationGit(repo, ['worktree', 'list', '--porcelain']);
+  } catch (_) {
+    return null;
+  }
+  const targetRef = `refs/heads/${branch}`;
+  let currentPath: string | null = null;
+  for (const line of listing.split(/\r?\n/)) {
+    if (line.startsWith('worktree ')) {
+      currentPath = line.slice('worktree '.length).trim();
+    } else if (line.startsWith('branch ')) {
+      const matched = currentPath && line.slice('branch '.length).trim() === targetRef;
+      if (matched) return currentPath;
+      currentPath = null;
+    } else if (line === '') {
+      currentPath = null;
+    }
+  }
+  return null;
+}
+
+// Accepts a manual delivery recorded on the checked-out branch once the ticket's target
+// branch has merged into it — either the target branch's own tip (when it still resolves
+// locally) or the delivered commit itself is an ancestor of HEAD. This is the SQ-158 case:
+// a wave branch's PR merges into main, the board's canonical checkout moves on to main, and
+// recording that external delivery should not require checking out a now-dead branch, the
+// way SQ-99 already accepts a reviewed descendant standing in for a diverged pinned candidate.
+function targetBranchMergedIntoHead(repo: string, branch: string, deliveryCommit: string, head: string) {
+  const candidates = [deliveryCommit];
+  try {
+    candidates.push(integrationGit(repo, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`]).toLowerCase());
+  } catch (_) {
+    // Branch may already be gone locally (e.g. GitHub's post-merge branch cleanup).
+  }
+  return candidates.some((commit) => {
+    try {
+      integrationGit(repo, ['merge-base', '--is-ancestor', commit, head]);
+      return true;
+    } catch (error: any) {
+      if (error?.status === 1) return false;
+      throw error;
+    }
+  });
+}
+
 function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
   opts = opts || {};
   const preflight = validateIntegrationSubmission(slug, idOrRef, { deliveryInteractionCommit: opts.deliveryInteractionCommit });
@@ -1349,16 +1400,23 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
   const requestedCommit = String(opts.deliveryCommit || '').trim();
   if (!reason) return { ok: false, reason: 'evidence_required', ticket, message: `${ticket.ref} reconciliation requires delivery evidence.` };
   if (!SUBMISSION_COMMIT_RE.test(requestedCommit)) return { ok: false, reason: 'delivery_commit_required', ticket, message: `${ticket.ref} reconciliation requires the delivery commit hash.` };
-  const repo = String(readMeta(slug)?.path || '').trim();
+  let repo = String(readMeta(slug)?.path || '').trim();
   const target = opts.target;
   if (!repo || !target?.branch) return { ok: false, reason: 'integration_target_unavailable', ticket };
   try {
-    const currentBranch = integrationGit(repo, ['branch', '--show-current']);
+    let currentBranch = integrationGit(repo, ['branch', '--show-current']);
     if (currentBranch !== target.branch) {
-      return { ok: false, reason: 'branch_not_checked_out', ticket, message: `${target.branch} must be checked out before recording an external delivery; currently on ${currentBranch || 'detached HEAD'}.` };
+      const worktreePath = integrationWorktreeForBranch(repo, target.branch);
+      if (worktreePath) {
+        repo = worktreePath;
+        currentBranch = target.branch;
+      }
     }
     const deliveryCommit = integrationGit(repo, ['rev-parse', '--verify', `${requestedCommit}^{commit}`]).toLowerCase();
     const resultingHead = integrationGit(repo, ['rev-parse', 'HEAD']).toLowerCase();
+    if (currentBranch !== target.branch && !targetBranchMergedIntoHead(repo, target.branch, deliveryCommit, resultingHead)) {
+      return { ok: false, reason: 'branch_not_checked_out', ticket, message: `${target.branch} must be checked out before recording an external delivery; currently on ${currentBranch || 'detached HEAD'}.` };
+    }
     const deliveryRevision = {
       source: `git:${target.upstream}`,
       value: resultingHead,

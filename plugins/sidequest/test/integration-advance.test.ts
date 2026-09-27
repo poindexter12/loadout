@@ -835,6 +835,96 @@ test('a reviewed candidate descendant is refused when it leaves submitted paths 
   assert.notEqual(store.getTicket(slug, ticket.ref).status, 'done');
 });
 
+// SQ-158: groomClose's manual delivery targets a wave branch, but by the time
+// the orchestrator records the delivery, that wave branch's PR has already
+// merged into the checked-out branch (main) — and GitHub may have deleted the
+// wave branch entirely. The guard must accept the delivery from main once the
+// target (or the delivery commit itself) is an ancestor of HEAD, the same way
+// SQ-99 accepts a reviewed descendant standing in for the pinned candidate.
+test('a manual delivery accepts a wave branch target once it has merged into the checked-out branch', () => {
+  const fixture = makeRepo('wave-merged');
+  const { slug } = store.ensureProject(fixture.repo);
+  const ticket = store.createTicket(slug, {
+    title: 'wave branch merged into main',
+    category: 'codebase-exploration',
+    description: 'A wave branch delivery recorded from main after the wave PR merged and the branch was deleted.',
+    files: ['feature.txt'],
+  });
+  submitFixture(slug, ticket, fixture);
+
+  const waveBranch = 'sidequest/wave/wave-merged';
+  const wave = path.join(fixture.repo, '.claude', 'worktrees', 'wave-merged-wt');
+  git(['worktree', 'add', '-b', waveBranch, wave, fixture.submitted], fixture.repo);
+  git(['merge', '--ff-only', waveBranch], fixture.repo);
+  const mainHead = head(fixture.repo);
+  git(['worktree', 'remove', '--force', wave], fixture.repo);
+  git(['branch', '-D', waveBranch], fixture.repo);
+
+  const delivered = store.recordDeliveredSubmission(slug, ticket.ref, {
+    target: { mode: 'local', branch: waveBranch, upstream: waveBranch },
+    deliveryCommit: mainHead,
+    deliveryMethod: 'manual',
+    reason: 'The wave branch merged into main and was deleted; recording the manual delivery from main.',
+  });
+  assert.equal(delivered.ok, true, delivered.message);
+  assert.equal(delivered.integration.deliveryCommit, mainHead);
+  assert.equal(delivered.integration.targetBranch, waveBranch);
+  assert.equal(delivered.integration.resultingHead, mainHead);
+});
+
+test('a manual delivery is still refused when the wave branch has not merged into the checked-out branch', () => {
+  const fixture = makeRepo('wave-unmerged');
+  const { slug } = store.ensureProject(fixture.repo);
+  const ticket = store.createTicket(slug, {
+    title: 'wave branch not yet merged',
+    category: 'codebase-exploration',
+    description: 'A wave branch delivery attempted from main before the wave PR ever merged.',
+    files: ['feature.txt'],
+  });
+  submitFixture(slug, ticket, fixture);
+
+  const waveBranch = 'sidequest/wave/wave-unmerged';
+  const wave = path.join(fixture.repo, '.claude', 'worktrees', 'wave-unmerged-wt');
+  git(['worktree', 'add', '-b', waveBranch, wave, fixture.submitted], fixture.repo);
+  git(['worktree', 'remove', '--force', wave], fixture.repo);
+
+  const result = store.recordDeliveredSubmission(slug, ticket.ref, {
+    target: { mode: 'local', branch: waveBranch, upstream: waveBranch },
+    deliveryCommit: fixture.submitted,
+    deliveryMethod: 'manual',
+    reason: 'The wave branch has not merged into main; this delivery must still be refused.',
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'branch_not_checked_out');
+});
+
+test('a manual delivery reads the target branch from a linked worktree instead of the canonical root', () => {
+  const fixture = makeRepo('wave-worktree');
+  const { slug } = store.ensureProject(fixture.repo);
+  const ticket = store.createTicket(slug, {
+    title: 'wave branch checked out in a linked worktree',
+    category: 'codebase-exploration',
+    description: 'A wave branch delivery recorded while the wave branch is checked out in a linked worktree, not the canonical root.',
+    files: ['feature.txt'],
+  });
+  submitFixture(slug, ticket, fixture);
+
+  const waveBranch = 'sidequest/wave/wave-worktree';
+  const wave = path.join(fixture.repo, '.claude', 'worktrees', 'wave-worktree-wt');
+  git(['worktree', 'add', '-b', waveBranch, wave, fixture.submitted], fixture.repo);
+
+  const result = store.recordDeliveredSubmission(slug, ticket.ref, {
+    target: { mode: 'local', branch: waveBranch, upstream: waveBranch },
+    deliveryCommit: fixture.submitted,
+    deliveryMethod: 'manual',
+    reason: 'The wave branch is checked out in a linked worktree, not the canonical project root.',
+  });
+  assert.equal(result.ok, true, result.message);
+  assert.equal(result.integration.deliveryCommit, fixture.submitted);
+  assert.equal(result.integration.resultingHead, fixture.submitted);
+  assert.equal(result.integration.targetBranch, waveBranch);
+});
+
 test('groomClose delivers a landed candidate despite an overlapping pending sibling candidate', async () => {
   const fixture = makeRepo('gc-ovl');
   const { slug } = store.ensureProject(fixture.repo);
