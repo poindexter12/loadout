@@ -10,11 +10,12 @@ Loadout publishes from `main`. A release cut creates a marketplace tag, `v<marke
 ## Prepare a release
 
 1. Add a fragment under `.release/unreleased/` with the plugin, change type, and user-facing summary.
-2. Check the queue and preview the release:
+2. Check the queue and preview the release. Normal windows advance the marketplace minor version by default. For a deliberate fork-line version move, add `--marketplace-level major`; the dry-run shows the resulting marketplace version and `v<version>` tag. Hotfix windows always patch the marketplace version and do not accept this override:
 
    ```text
    sidequest publish queue
    node scripts/release/cut.mjs --dry-run
+   node scripts/release/cut.mjs --marketplace-level major --dry-run
    ```
 
 3. Run the publish cut:
