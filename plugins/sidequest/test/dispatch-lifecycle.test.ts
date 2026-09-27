@@ -1724,6 +1724,148 @@ test('dirty released worktrees without commits resume in place for a continuatio
   }
 });
 
+// SQ-165/SQ-167: a continuation attempt that ends before any runtime binds it never touched its retained
+// worktree, yet its terminal outcome is not a release. Every later dispatch refused, because the checkout
+// was neither a WorktreeCreate binding to reclaim nor a released attempt to resume.
+function releasedRetainedWorktree(label: string, work: (worktree: string) => string | null) {
+  const ticket = createFixture(`${label} fixture`);
+  const sessionId = `${label}-${Date.now()}`;
+  const agentId = `${label}-${Date.now()}`;
+  const branch = `worktree-agent-${agentId}`;
+  const worktree = worktrees.agentWorktreePath(PROJECT, agentId);
+  fs.mkdirSync(path.dirname(worktree), { recursive: true });
+  const prepared = store.prepareDispatch(slug, ticket.ref, { sessionId });
+  const executor = prepared.ticket.dispatchExecutor;
+  assert.equal(store.recordDispatchLaunch(slug, ticket.ref, { sessionId, token: prepared.token, executor, agentName: agentId }).ok, true);
+  assert.equal(store.bindDispatchWorktreeCreation(slug, sessionId, worktree).ok, true);
+  execFileSync('git', ['worktree', 'add', '-b', branch, worktree, 'HEAD'], { cwd: PROJECT });
+  markCheckoutInstance(worktree);
+  assert.equal(store.completeDispatchWorktreeCreation(slug, sessionId, worktree).ok, true);
+  assert.equal(store.bindDispatchAgent(sessionId, executor, agentId, agentId, worktree).ok, true);
+  assert.equal(store.claimTicket(slug, ticket.ref, `${label}-worker`, { sessionId, token: prepared.token, executor }).ok, true);
+  const checkpoint = work(worktree);
+  assert.equal(store.releaseTicket(slug, ticket.ref, `${label}-worker`, { status: 'todo', source: 'test', releaseKind: 'handback' }).ok, true);
+  return { ticket, sessionId, worktree, branch, checkpoint };
+}
+
+function cleanupRetainedWorktree(fixture: { ticket: any; worktree: string; branch: string }) {
+  store.releaseTicket(slug, fixture.ticket.ref, 'retained-cleanup', { status: 'todo', source: 'test', force: true });
+  if (fs.existsSync(fixture.worktree)) execFileSync('git', ['worktree', 'remove', '--force', fixture.worktree], { cwd: PROJECT });
+  try { execFileSync('git', ['branch', '-D', fixture.branch], { cwd: PROJECT }); } catch (_) {}
+}
+
+function expireContinuationBeforeLaunch(ticket: any, sessionId: string, mode: string) {
+  const continued = store.prepareDispatch(slug, ticket.ref, { sessionId });
+  assert.equal(continued.ticket.dispatch.continuation.mode, mode);
+  assert.equal(continued.ticket.dispatch.worktreeBindingSource, 'continuation');
+  const swept = store.sweepStaleDispatches({ project: slug, source: 'session-start', now: Date.now() + store.preparedDispatchTtlMs() + 60_000 });
+  assert.ok(swept.expired.some((entry: any) => entry.ref === ticket.ref));
+  const expired = store.getTicket(slug, ticket.ref);
+  assert.equal(expired.dispatch.outcome, 'expired');
+  assert.equal(expired.dispatchNonce, null);
+  return continued;
+}
+
+test('an expired never-launched dirty continuation resumes the same retained worktree on the next dispatch', () => {
+  const fixture = releasedRetainedWorktree('expired-dirty-continuation', (worktree) => {
+    fs.appendFileSync(path.join(worktree, 'tracked.js'), 'module.exports = 41;\n');
+    return null;
+  });
+  try {
+    const first = expireContinuationBeforeLaunch(fixture.ticket, `${fixture.sessionId}-2`, 'dirty_worktree_resume');
+    const fresh = store.prepareDispatch(slug, fixture.ticket.ref, { sessionId: `${fixture.sessionId}-3` });
+    assert.equal(fresh.ticket.dispatch.continuation.mode, 'dirty_worktree_resume');
+    assert.equal(fresh.ticket.dispatch.worktreeBindingSource, 'continuation');
+    assert.equal(worktrees.canonicalPath(fresh.ticket.dispatch.worktree), worktrees.canonicalPath(fixture.worktree));
+    assert.equal(fresh.ticket.dispatch.continuation.releaseKind, 'handback');
+    assert.equal(fresh.ticket.dispatch.continuation.releasedAt, first.ticket.dispatch.continuation.releasedAt);
+    assert.equal(fresh.ticket.dispatch.continuation.baseCommit, first.ticket.dispatch.continuation.baseCommit);
+    assert.deepEqual(fresh.ticket.dispatch.declaredFiles, first.ticket.dispatch.declaredFiles);
+
+    const executor = fresh.ticket.dispatchExecutor;
+    const nextSession = `${fixture.sessionId}-3`;
+    const nextAgent = `${fixture.sessionId}-agent-3`;
+    assert.equal(store.recordDispatchLaunch(slug, fixture.ticket.ref, { sessionId: nextSession, token: fresh.token, executor, agentName: nextAgent }).ok, true);
+    assert.equal(store.bindDispatchAgent(nextSession, executor, nextAgent, nextAgent).ok, true);
+    assert.equal(store.claimTicket(slug, fixture.ticket.ref, 'expired-dirty-continuation-next', { sessionId: nextSession, token: fresh.token, executor }).ok, true);
+    assert.equal(store.getTicket(slug, fixture.ticket.ref).dispatch.worktree, worktrees.canonicalPath(fixture.worktree));
+    assert.deepEqual(store.completionTreeCheck(slug, store.getTicket(slug, fixture.ticket.ref)).changedPaths, ['tracked.js']);
+  } finally {
+    cleanupRetainedWorktree(fixture);
+  }
+});
+
+test('an expired never-launched committed handback continuation resumes the same retained worktree on the next dispatch', () => {
+  const fixture = releasedRetainedWorktree('expired-retained-continuation', (worktree) => {
+    fs.appendFileSync(path.join(worktree, 'tracked.js'), 'module.exports = 42;\n');
+    execFileSync('git', ['add', 'tracked.js'], { cwd: worktree });
+    execFileSync('git', ['commit', '--quiet', '-m', 'retained progress'], { cwd: worktree });
+    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).trim();
+  });
+  try {
+    expireContinuationBeforeLaunch(fixture.ticket, `${fixture.sessionId}-2`, 'retained_worktree_resume');
+    const fresh = store.prepareDispatch(slug, fixture.ticket.ref, { sessionId: `${fixture.sessionId}-3` });
+    assert.equal(fresh.ticket.dispatch.continuation.mode, 'retained_worktree_resume');
+    assert.equal(worktrees.canonicalPath(fresh.ticket.dispatch.worktree), worktrees.canonicalPath(fixture.worktree));
+    assert.equal(fresh.ticket.dispatch.continuation.commit, fixture.checkpoint);
+    assert.deepEqual(fresh.ticket.dispatch.continuation.commits, [fixture.checkpoint]);
+    assert.equal(fresh.ticket.dispatch.continuation.releaseKind, 'handback');
+    assert.equal(fresh.ticket.dispatch.worktreeObservedRevision, fixture.checkpoint);
+  } finally {
+    cleanupRetainedWorktree(fixture);
+  }
+});
+
+test('a launched continuation that session reconciliation failed before it bound resumes the same retained worktree', () => {
+  const fixture = releasedRetainedWorktree('reconciled-dirty-continuation', (worktree) => {
+    fs.appendFileSync(path.join(worktree, 'tracked.js'), 'module.exports = 43;\n');
+    return null;
+  });
+  try {
+    const launchSession = `${fixture.sessionId}-2`;
+    const continued = store.prepareDispatch(slug, fixture.ticket.ref, { sessionId: launchSession });
+    assert.equal(continued.ticket.dispatch.continuation.mode, 'dirty_worktree_resume');
+    assert.equal(store.recordDispatchLaunch(slug, fixture.ticket.ref, {
+      sessionId: launchSession,
+      token: continued.token,
+      executor: continued.ticket.dispatchExecutor,
+      agentName: `${fixture.sessionId}-agent-2`,
+    }).ok, true);
+    assert.ok(store.reconcileLaunchedDispatches(launchSession, { source: 'session-start' }).reconciled.includes(fixture.ticket.ref));
+    assert.equal(store.getTicket(slug, fixture.ticket.ref).dispatch.outcome, 'failed');
+
+    const fresh = store.prepareDispatch(slug, fixture.ticket.ref, { sessionId: `${fixture.sessionId}-3` });
+    assert.equal(fresh.ticket.dispatch.continuation.mode, 'dirty_worktree_resume');
+    assert.equal(worktrees.canonicalPath(fresh.ticket.dispatch.worktree), worktrees.canonicalPath(fixture.worktree));
+  } finally {
+    cleanupRetainedWorktree(fixture);
+  }
+});
+
+test('an unbound continuation whose retained worktree moved names the real binding and the resume refusal', () => {
+  const fixture = releasedRetainedWorktree('moved-dirty-continuation', (worktree) => {
+    fs.appendFileSync(path.join(worktree, 'tracked.js'), 'module.exports = 44;\n');
+    return null;
+  });
+  try {
+    expireContinuationBeforeLaunch(fixture.ticket, `${fixture.sessionId}-2`, 'dirty_worktree_resume');
+    execFileSync('git', ['commit', '--quiet', '-am', 'moved behind the board'], { cwd: fixture.worktree });
+    fs.appendFileSync(path.join(fixture.worktree, 'tracked.js'), 'module.exports = 45;\n');
+    assert.throws(
+      () => store.prepareDispatch(slug, fixture.ticket.ref, { sessionId: `${fixture.sessionId}-3` }),
+      (error: any) => {
+        assert.match(error.message, /bound by "continuation", not by a board WorktreeCreate/);
+        assert.doesNotMatch(error.message, /WorktreeCreate binding was incomplete/);
+        assert.match(error.message, /The retained checkout cannot resume: released_worktree_lease_refused/);
+        return true;
+      },
+    );
+    assert.equal(fs.existsSync(fixture.worktree), true);
+  } finally {
+    cleanupRetainedWorktree(fixture);
+  }
+});
+
 test('dirty released worktrees with checkpoints fall back to cherry-picking the commit range', () => {
   const ticket = createFixture('dirty checkpoint fallback fixture');
   const sessionId = `dirty-checkpoint-${Date.now()}`;

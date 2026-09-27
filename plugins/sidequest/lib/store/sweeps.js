@@ -13,7 +13,7 @@ function createSweeps({ addComment, claimAbandonMs, claimIdleMs, claimReleaseNot
           const res = withTicketLock(project.slug, ticket.id, () => {
             const current = getTicket(project.slug, ticket.id);
             if (!current || !expiredPreparedDispatch(dispatchState(current), now)) return { ok: false };
-            setDispatchTerminal(current, "expired", source);
+            setDispatchTerminal(current, "expired", source, { slug: project.slug });
             current.dispatchNonce = null;
             current.dispatchExecutor = null;
             stampDispatchEvent(current, source);

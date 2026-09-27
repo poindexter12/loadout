@@ -1130,22 +1130,54 @@ function reportsRegisteredProjectCheckout(slug?: any, worktree?: any) {
   return Boolean(projectPath && reportedWorktree && canonicalPath(projectPath) === canonicalPath(reportedWorktree));
 }
 
+// A continuation attempt that ended before any runtime bound it (expired before launch, or launched and then
+// failed by session reconciliation without ever binding) never touched its retained worktree. Its terminal
+// outcome is not a release, so without this the next dispatch found neither a WorktreeCreate binding to reclaim
+// nor a released attempt to resume, and every later dispatch refused (SQ-165/SQ-167). The attempt inherits the
+// continuation it was prepared from: the release it resumed is still the release of record, and the lease,
+// registration, revision, and dirty/commit checks below re-validate that retained checkout from scratch.
+function inheritedReleasedContinuation(state?: any) {
+  if (!state?.terminalAt || state.sharedTree !== false || state.worktreeBindingSource !== 'continuation') return null;
+  if (state.boundAt || state.agentId || state.claimedAt) return null;
+  const continuation = state.continuation;
+  if (!continuation || typeof continuation !== 'object' || !continuation.sourceWorktree || !continuation.lease) return null;
+  if (!['dirty_worktree_resume', 'retained_worktree_resume'].includes(continuation.mode)) return null;
+  return continuation;
+}
+
 function retainedWorktreeContinuationState(slug?: any, ticket?: any, state?: any) {
   const attempts = Array.isArray(state?.attempts) ? state.attempts : [];
-  const attempt = attempts[attempts.length - 1] || null;
+  const inherited = inheritedReleasedContinuation(state);
+  // The inherited release is the attempt the continuation resumed, not the unbound attempt that just ended.
+  const inheritedAttempt = inherited
+    ? attempts.slice().reverse().find((candidate?: any) => candidate?.terminalAt && candidate.terminalAt === inherited.releasedAt)
+      || {
+        release: inherited.releaseKind ? { kind: inherited.releaseKind } : null,
+        ...(inherited.releaseKind === 'checkpoint' && inherited.commit ? { commit: inherited.commit } : {}),
+      }
+    : null;
+  const attempt = inheritedAttempt || attempts[attempts.length - 1] || null;
   const checkpointCommit = String(attempt?.commit || '').trim();
   const checkpointedTerminalFailure = Boolean(state?.terminalAt && checkpointCommit && ['failed', 'died'].includes(state.outcome));
-  if (!state || (!checkpointedTerminalFailure && state.outcome !== 'released') || !state.terminalAt || state.sharedTree !== false) return null;
-  const recordedWorktree = String(state.worktree || '').trim();
+  if (!state || (!inherited && !checkpointedTerminalFailure && state.outcome !== 'released') || !state.terminalAt || state.sharedTree !== false) return null;
+  const releasedAt = inherited ? String(inherited.releasedAt || state.terminalAt) : state.terminalAt;
+  const recordedWorktree = String(state.worktree || inherited?.sourceWorktree || '').trim();
   if (!recordedWorktree || !fs.existsSync(recordedWorktree)) {
     return { fallback: continuationFallback('released_worktree_missing', recordedWorktree) };
   }
   let worktree = recordedWorktree;
   try {
-    const recordedGitDirectory = String(state.worktreeGitDirectory || '').trim();
-    const recordedCommonGitDirectory = String(state.worktreeCommonGitDirectory || '').trim();
-    const recordedCheckoutInstance = String(state.worktreeCheckoutInstance || '').trim();
-    const recordedRevision = String(state.terminalWorktreeRevision || '').trim();
+    const inheritedLease = inherited ? inherited.lease : null;
+    const recordedGitDirectory = String(state.worktreeGitDirectory || inheritedLease?.boundGitDirectory || '').trim();
+    const recordedCommonGitDirectory = String(state.worktreeCommonGitDirectory || inheritedLease?.boundCommonGitDirectory || '').trim();
+    const recordedCheckoutInstance = String(state.worktreeCheckoutInstance || inheritedLease?.boundCheckoutInstance || '').trim();
+    // An inherited continuation resumes at the revision its release recorded, not at whatever an unbound
+    // attempt happened to observe when it ended.
+    const recordedRevision = String(inheritedLease ? inheritedLease.boundRevision || '' : state.terminalWorktreeRevision || '').trim();
+    const recordedBaseCommit = String(inherited ? inherited.baseCommit || inheritedLease?.dispatchBaseline || '' : state.baseCommit || '').trim();
+    const recordedIdentity = inheritedLease?.identity?.status === 'bound' && inheritedLease.identity.agentId
+      ? { status: 'bound' as const, agentId: String(inheritedLease.identity.agentId) }
+      : state.agentId ? { status: 'bound' as const, agentId: String(state.agentId) } : { status: 'unknown' as const };
     const worktreeFacts = immutableWorktreeFacts(slug, recordedWorktree);
     if (!worktreeFacts || !recordedGitDirectory || !recordedCommonGitDirectory || !recordedCheckoutInstance || !recordedRevision) {
       return { fallback: continuationFallback('released_worktree_identity_unavailable', recordedWorktree) };
@@ -1157,7 +1189,7 @@ function retainedWorktreeContinuationState(slug?: any, ticket?: any, state?: any
       gitDirectory: worktreeFacts.gitDirectory,
       commonGitDirectory: worktreeFacts.commonGitDirectory,
       dispatchRef: String(ticket?.ref || '') || null,
-      dispatchBaseline: String(state.baseCommit || '').trim() || null,
+      dispatchBaseline: recordedBaseCommit || null,
       observedRevision,
       observedWorktree: worktree,
       boundRevision: recordedRevision,
@@ -1165,10 +1197,13 @@ function retainedWorktreeContinuationState(slug?: any, ticket?: any, state?: any
       boundGitDirectory: recordedGitDirectory,
       boundCommonGitDirectory: recordedCommonGitDirectory,
       boundCheckoutInstance: recordedCheckoutInstance,
-      identity: state.agentId ? { status: 'bound' as const, agentId: String(state.agentId) } : { status: 'unknown' as const },
+      identity: recordedIdentity,
       phase: 'terminal' as const,
       locked: false,
-      liveness: { status: 'terminal' as const, evidence: 'released at ' + state.terminalAt },
+      liveness: {
+        status: 'terminal' as const,
+        evidence: 'released at ' + releasedAt + (inherited ? `; unbound continuation attempt ${state.outcome} at ${state.terminalAt}` : ''),
+      },
       provisioning: 'host' as const,
     };
     const lease = createWorktreeLease(leaseFacts);
@@ -1179,7 +1214,7 @@ function retainedWorktreeContinuationState(slug?: any, ticket?: any, state?: any
     if (!resume.allowed) {
       return { fallback: continuationFallback('released_worktree_lease_refused', worktree, { cause: resume.reason }) };
     }
-    const baseCommit = gitOutput(worktree, ['rev-parse', '--verify', String(state.baseCommit) + '^{commit}']);
+    const baseCommit = gitOutput(worktree, ['rev-parse', '--verify', recordedBaseCommit + '^{commit}']);
     const commits = gitOutput(worktree, ['rev-list', '--reverse', baseCommit + '..' + observedRevision, '--']).split(/\r?\n/).filter(Boolean);
     let sourceBranch = null;
     try { sourceBranch = gitOutput(worktree, ['symbolic-ref', '--quiet', '--short', 'HEAD']) || null; } catch (_: any) {}
@@ -1188,7 +1223,7 @@ function retainedWorktreeContinuationState(slug?: any, ticket?: any, state?: any
         return {
           continuation: {
             mode: 'dirty_worktree_resume', ticketRef: ticket.ref, sourceWorktree: worktree, sourceBranch, baseCommit, commit: observedRevision,
-            clean: false, releasedAt: state.terminalAt, releaseKind: attempt?.release?.kind || 'release', lease: leaseFacts,
+            clean: false, releasedAt, releaseKind: inherited?.releaseKind || attempt?.release?.kind || 'release', lease: leaseFacts,
           },
         };
       }
@@ -1205,7 +1240,7 @@ function retainedWorktreeContinuationState(slug?: any, ticket?: any, state?: any
     return {
       continuation: {
         mode: 'retained_worktree_resume', ticketRef: ticket.ref, sourceWorktree: worktree, sourceBranch, baseCommit, commit: observedRevision, commits,
-        clean: true, releasedAt: state.terminalAt, releaseKind: attempt?.release?.kind || (checkpointCommit ? 'checkpoint' : 'handback'), lease: leaseFacts,
+        clean: true, releasedAt, releaseKind: inherited?.releaseKind || attempt?.release?.kind || (checkpointCommit ? 'checkpoint' : 'handback'), lease: leaseFacts,
       },
     };
   } catch (error: any) {
@@ -1312,7 +1347,10 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
           const checkpointRecovery = checkpointCommit
             ? ` Restore ${current.worktree} to checkpoint ${checkpointCommit}, then dispatch again; the board will resume that retained checkout without creating another.`
             : '';
-          throw new Error(`prepare dispatch: ${t.ref} cannot retry because ${recovery.message || `immutable recovery fact ${recovery.reason || 'is unreadable'}`}${checkpointRecovery}`);
+          const resumeRefusal = retainedContinuation?.fallback?.reason
+            ? ` The retained checkout cannot resume: ${retainedContinuation.fallback.reason}${retainedContinuation.fallback.cause ? ` (${typeof retainedContinuation.fallback.cause === 'string' ? retainedContinuation.fallback.cause : JSON.stringify(retainedContinuation.fallback.cause)})` : ''}.`
+            : '';
+          throw new Error(`prepare dispatch: ${t.ref} cannot retry because ${recovery.message || `immutable recovery fact ${recovery.reason || 'is unreadable'}`}${resumeRefusal}${checkpointRecovery}`);
         }
       }
     }
@@ -1414,7 +1452,9 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
     // carryover unions with the current effective scope instead of replacing it
     // (the-bot-resurrection SQ-825: a path granted after a handback never
     // entered the redispatch binding and had to ship as an out-of-band commit).
-    const releasedBinding = current?.outcome === 'released' && Array.isArray(current.declaredFiles) && current.declaredFiles.length
+    // An unbound continuation attempt carried its release's binding forward, so it hands that binding on too.
+    const releasedBinding = (current?.outcome === 'released' || inheritedReleasedContinuation(current))
+      && Array.isArray(current.declaredFiles) && current.declaredFiles.length
       ? current.declaredFiles.slice()
       : null;
     const effectiveFiles = releasedBinding
