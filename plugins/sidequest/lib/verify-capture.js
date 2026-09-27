@@ -326,15 +326,18 @@ function captureProject(target) {
 }
 function dispatchedIsolatedWorktree(ticket) {
   const dispatch = ticket?.dispatch;
-  if (!dispatch || dispatch.sharedTree === true || dispatch.workingTreeDelivery === true) return "";
-  return typeof dispatch.worktree === "string" ? dispatch.worktree.trim() : "";
+  if (!dispatch || typeof dispatch !== "object" || dispatch.terminalAt) return Object.freeze({ isolated: false });
+  if (dispatch.sharedTree === true || dispatch.workingTreeDelivery === true) return Object.freeze({ isolated: false });
+  const worktree = typeof dispatch.worktree === "string" ? dispatch.worktree.trim() : "";
+  if (!worktree && dispatch.sharedTree !== false) return Object.freeze({ isolated: false });
+  return Object.freeze({ isolated: true, worktree });
 }
 function gitOutput(cwd, args, raw = false) {
   try {
     const output = String(execFileSync("git", [...args], { cwd, encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }));
     return raw ? output : output.trim();
   } catch (_) {
-    return "";
+    return null;
   }
 }
 function canonicalPath(value) {
@@ -352,19 +355,27 @@ function captureBinding(target, cwd, project) {
   const store = require("./store.js");
   const ticket = store.getTicket(project.slug, target.ticket);
   if (store.workingTreeDeliveryCandidate(project.slug, ticket)) return Object.freeze({ ok: true, cwd: project.path });
-  const worktree = dispatchedIsolatedWorktree(ticket);
-  if (!worktree) return Object.freeze({ ok: true, cwd });
+  const dispatch = dispatchedIsolatedWorktree(ticket);
+  if (!dispatch.isolated) return Object.freeze({ ok: true, cwd });
+  const worktree = dispatch.worktree;
+  if (!worktree) {
+    return captureBindingRefusal("could_not_run", "could_not_run:verification-capture-worktree-unavailable", `capture_worktree_unavailable: ${target.ticket} holds an isolated dispatch, but no worktree is bound to it, so there is no candidate checkout to verify. Nothing was run, and the checkout the wrapper started from (${JSON.stringify(path.resolve(cwd))}) was not verified in its place. Release the claim and re-dispatch.`);
+  }
   const toplevel = gitOutput(worktree, ["rev-parse", "--show-toplevel"]);
-  const head = gitOutput(worktree, ["rev-parse", "--verify", "HEAD^{commit}"]).toLowerCase();
+  const head = (gitOutput(worktree, ["rev-parse", "--verify", "HEAD^{commit}"]) || "").toLowerCase();
   if (!toplevel || !head || canonicalPath(toplevel) !== canonicalPath(worktree)) {
     return captureBindingRefusal("could_not_run", "could_not_run:verification-capture-worktree-unavailable", `capture_worktree_unavailable: ${target.ticket} was dispatched to the isolated worktree ${JSON.stringify(worktree)}, but git resolves no live worktree root with a HEAD commit there. The capture must run in and bind to that worktree, so nothing was run. Release the claim and re-dispatch rather than verifying another checkout.`);
   }
-  const dirty = gitOutput(worktree, ["status", "--porcelain=v1", "--untracked-files=normal"], true).split("\n").map((line) => line.slice(3).trim()).filter(Boolean);
+  const status = gitOutput(worktree, ["status", "--porcelain=v1", "--untracked-files=normal"], true);
+  if (status === null) {
+    return captureBindingRefusal("could_not_run", "could_not_run:verification-capture-worktree-unavailable", `capture_worktree_unavailable: git status failed in ${target.ticket}'s worktree ${JSON.stringify(worktree)}, so the capture cannot confirm that HEAD ${head} is the code that would run. Nothing was run. Rerun the wrapper once git status succeeds there.`);
+  }
+  const dirty = status.split("\n").map((line) => line.slice(3).trim()).filter(Boolean);
   if (dirty.length) {
     const shown = dirty.slice(0, 10).join(", ") + (dirty.length > 10 ? `, and ${dirty.length - 10} more` : "");
     return captureBindingRefusal("failed_check", "failed_check:verification-capture-uncommitted-candidate", `capture_candidate_uncommitted: ${target.ticket}'s worktree ${JSON.stringify(worktree)} has uncommitted changes, so the capture would run that code but bind to HEAD ${head}, a commit that does not contain it, and submit would refuse the capture. Nothing was run. Commit the declared scope with the board commit tool, restore or remove anything else, then rerun the wrapper. Uncommitted: ${shown}`);
   }
-  return Object.freeze({ ok: true, cwd: toplevel });
+  return Object.freeze({ ok: true, cwd: toplevel, head });
 }
 function captureBindingFailure(command, binding) {
   return Object.freeze({
@@ -423,7 +434,7 @@ async function runCapturedVerification(command, target, cwd = process.cwd(), fil
   }
   const captureCwd = binding?.ok ? binding.cwd : cwd;
   const capture = preflight || (target && isFullSuiteCommand(command) ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem) : await runVerifyCapture(command, captureCwd));
-  const recorded = target ? recordCapture(target, capture, captureCwd, resolution) : null;
+  const recorded = target ? recordCapture(target, capture, captureCwd, resolution, binding?.ok ? binding.head : void 0) : null;
   return Object.freeze({ capture, recorded });
 }
 function verifiedRevision(cwd) {
@@ -441,14 +452,23 @@ function verifiedRevision(cwd) {
     return null;
   }
 }
-function recordCapture(target, capture, cwd, resolved) {
+function recordCapture(target, capture, cwd, resolved, boundRevision) {
   const store = require("./store.js");
   const resolution = resolved || resolveCaptureProject(target);
   if (!resolution.ok) return { ok: false, reason: resolution.reason };
   const project = resolution.project;
   const ticket = store.getTicket(project.slug, target.ticket);
   const workingTreeCandidate = store.workingTreeDeliveryCandidate(project.slug, ticket);
-  const candidate = workingTreeCandidate?.candidate || verifiedRevision(cwd);
+  if (!workingTreeCandidate && boundRevision) {
+    const after = verifiedRevision(cwd);
+    if (after?.value !== boundRevision) {
+      return {
+        ok: false,
+        reason: `capture_candidate_moved: the capture for ${target.ticket} was bound to HEAD ${boundRevision} in ${JSON.stringify(path.resolve(cwd))}, but HEAD there is ${after?.value || "unresolvable"} now that the command has finished, so the run cannot be attributed to a single commit and was not recorded. Leave the worktree alone while the wrapper runs, then rerun it.`
+      };
+    }
+  }
+  const candidate = workingTreeCandidate?.candidate || (boundRevision ? Object.freeze({ source: "git", value: boundRevision }) : verifiedRevision(cwd));
   if (!candidate) {
     return {
       ok: false,
