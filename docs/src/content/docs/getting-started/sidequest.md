@@ -154,6 +154,8 @@ SessionStart runs the audit in report-only mode with a short background budget. 
 
 **A POSIX verify command fails on Windows.** Ask Claude to inspect the recorded verification result and the shell it used.
 
+**A verify command keeps timing out on a busy machine.** Each captured verify run has a time budget: a fixed setup allowance, plus extra time for test-suite commands (`npm run test:full`, any `node --test` run, or any `npm test` script) that grows with how loaded the machine is. A run that hits the budget reports `capture_budget_exceeded` along with how long it ran, the budget and the load. That means it ran out of time, not that a test failed. Ask Claude to rerun the capture with `SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS` set higher. That setting only ever adds time, and every capture still stops at a two-hour hard limit, so a hung run cannot block other verifications forever. If a run needs more than that, ask Claude to pin a narrower verify command for the ticket.
+
 **A submitted ticket is not integrated.** Ask Claude to inspect the submission and complete the review and integration step. Do not start the same ticket again while a submitted result is waiting.
 
 **A wave left out submitted work.** Ask Claude to inspect the assembled wave and its declared participant set. Active or accepted pending candidates with overlapping scope belong in the wave. Review-rejected candidates stay visible for later supersession and do not block an accepted repair wave.

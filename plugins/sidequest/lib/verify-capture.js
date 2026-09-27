@@ -27,20 +27,97 @@ const testPhaseBudgetSafetyFactor = 1.5;
 const maximumTestPhaseTimeoutMilliseconds = 24e5;
 const minimumEffectiveTestWorkers = 0.5;
 const phaseBudgetOverrideVariable = "SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS";
-function fullSuiteCaptureTimeoutMilliseconds(availableParallelism = os.availableParallelism(), loadAverage = os.loadavg()[0] || 0, rawOverride = process.env[phaseBudgetOverrideVariable]) {
+const captureHardMaximumMilliseconds = 2 * 60 * 60 * 1e3;
+function isFullSuiteCommand(command) {
+  return /(?:^|[\s&;()])npm\s+run\s+test:full(?:\s|$)/.test(command);
+}
+const nodeTestRunnerPattern = /(?:^|[\s&;|()])["']?(?:[^\s"'&;|()]*[\\/])?node(?:\.exe)?["']?\s(?:[^&;|()\n]*\s)?--test(?=[\s&;|()]|$)/;
+const npmTestScriptPattern = /(?:^|[\s&;|()])npm(?:\.cmd)?\s+(?:-[^\s&;|()]*(?:\s+[^-\s&;|()][^\s&;|()]*)?\s+)*(?:t|tst|test|run(?:-script)?\s+test(?::[^\s&;|()]+)?)(?=[\s&;|()]|$)/;
+function isTestSuiteCommand(command) {
+  return nodeTestRunnerPattern.test(command) || npmTestScriptPattern.test(command);
+}
+function captureBudgetClass(command) {
+  if (isFullSuiteCommand(command)) return "full-suite";
+  return isTestSuiteCommand(command) ? "test-suite" : "command";
+}
+function captureBudget(command, availableParallelism = os.availableParallelism(), loadAverage = os.loadavg()[0] || 0, rawOverride = process.env[phaseBudgetOverrideVariable]) {
+  const budgetClass = captureBudgetClass(command);
   const testConcurrency = Math.min(maximumTestConcurrency, Math.max(minimumTestConcurrency, availableParallelism));
   const otherRunnableThreads = typeof loadAverage === "number" && Number.isFinite(loadAverage) && loadAverage > 0 ? loadAverage : 0;
   const effectiveTestWorkers = Math.min(
     testConcurrency,
     Math.max(minimumEffectiveTestWorkers, availableParallelism * testConcurrency / (testConcurrency + otherRunnableThreads))
   );
-  const measuredPhaseTimeoutMilliseconds = Math.min(
+  const capacityPhaseBudgetMilliseconds = Math.min(
     maximumTestPhaseTimeoutMilliseconds,
     Math.round(baselineTestPhaseDurationMilliseconds * maximumTestConcurrency / effectiveTestWorkers * testPhaseBudgetSafetyFactor)
   );
-  const requested = typeof rawOverride === "string" && /^\d+$/.test(rawOverride.trim()) ? Number(rawOverride.trim()) : 0;
-  const phaseTimeoutMilliseconds = requested > measuredPhaseTimeoutMilliseconds ? requested : measuredPhaseTimeoutMilliseconds;
-  return defaultVerificationTimeoutMilliseconds + phaseTimeoutMilliseconds;
+  const measuredPhaseBudgetMilliseconds = budgetClass === "command" ? 0 : capacityPhaseBudgetMilliseconds;
+  const requestedText = typeof rawOverride === "string" ? rawOverride.trim() : "";
+  const requested = /^\d+$/.test(requestedText) ? Number(requestedText) : 0;
+  const widened = requested > measuredPhaseBudgetMilliseconds;
+  const phaseBudgetMilliseconds = widened ? requested : measuredPhaseBudgetMilliseconds;
+  const uncappedMilliseconds = defaultVerificationTimeoutMilliseconds + phaseBudgetMilliseconds;
+  const clampedToHardMaximum = uncappedMilliseconds > captureHardMaximumMilliseconds;
+  const timeoutMilliseconds = clampedToHardMaximum ? captureHardMaximumMilliseconds : uncappedMilliseconds;
+  let notice = null;
+  if (requestedText && requested <= 0) {
+    notice = `${phaseBudgetOverrideVariable}=${requestedText} is not a positive whole number of milliseconds, so the measured ${measuredPhaseBudgetMilliseconds}ms phase budget stands.`;
+  } else if (requested > 0 && !widened) {
+    notice = `${phaseBudgetOverrideVariable}=${requested} cannot shorten the measured ${measuredPhaseBudgetMilliseconds}ms phase budget, so the measured budget stands. The override only ever grants more wall clock.`;
+  } else if (clampedToHardMaximum) {
+    notice = `${phaseBudgetOverrideVariable}=${requested} asked for a ${uncappedMilliseconds}ms capture budget, above the ${captureHardMaximumMilliseconds}ms hard maximum, so the capture stops at ${captureHardMaximumMilliseconds}ms.`;
+  } else if (widened) {
+    notice = `${phaseBudgetOverrideVariable} raised the phase budget from a measured ${measuredPhaseBudgetMilliseconds}ms to ${requested}ms. Every test still has to pass inside it: this grants wall clock, it does not skip the gate.`;
+  }
+  return Object.freeze({
+    budgetClass,
+    timeoutMilliseconds,
+    setupAllowanceMilliseconds: defaultVerificationTimeoutMilliseconds,
+    measuredPhaseBudgetMilliseconds,
+    phaseBudgetMilliseconds,
+    hardMaximumMilliseconds: captureHardMaximumMilliseconds,
+    availableParallelism,
+    loadAverage: otherRunnableThreads,
+    effectiveTestWorkers,
+    overrideVariable: phaseBudgetOverrideVariable,
+    overrideMilliseconds: widened ? requested : null,
+    clampedToHardMaximum,
+    notice
+  });
+}
+function fullSuiteCaptureTimeoutMilliseconds(availableParallelism = os.availableParallelism(), loadAverage = os.loadavg()[0] || 0, rawOverride = process.env[phaseBudgetOverrideVariable]) {
+  return captureBudget("npm run test:full", availableParallelism, loadAverage, rawOverride).timeoutMilliseconds;
+}
+const captureBudgetClassDescriptions = Object.freeze({
+  "full-suite": "the npm run test:full suite, serialized per host",
+  "test-suite": "a node --test or npm test script run",
+  command: "not a recognized test runner, so it gets no capacity phase budget"
+});
+function formatLoad(value) {
+  return Number.isFinite(value) && value > 0 ? value.toFixed(2) : "0.00";
+}
+function describeCaptureBudget(budget) {
+  const phaseSource = budget.overrideMilliseconds !== null ? `widened by ${budget.overrideVariable} from a measured ${budget.measuredPhaseBudgetMilliseconds}ms` : budget.budgetClass === "command" ? "none for this class" : "derived from host capacity";
+  return `${budget.budgetClass} class (${captureBudgetClassDescriptions[budget.budgetClass]}): ${budget.setupAllowanceMilliseconds}ms setup allowance + ${budget.phaseBudgetMilliseconds}ms phase budget (${phaseSource}), capped at the ${budget.hardMaximumMilliseconds}ms hard maximum; derived at ${budget.availableParallelism} available cores and a 1-minute load average of ${formatLoad(budget.loadAverage)} (${budget.effectiveTestWorkers.toFixed(2)} effective test workers)`;
+}
+function captureBudgetLever(budget) {
+  if (budget.clampedToHardMaximum || budget.timeoutMilliseconds >= budget.hardMaximumMilliseconds) {
+    return `The budget is already at the ${budget.hardMaximumMilliseconds}ms hard maximum, so no override can raise it: ask the orchestrator to re-pin a narrower verify command, or rerun once the host is quieter.`;
+  }
+  return `To give it more wall clock, rerun the same wrapper with ${budget.overrideVariable}=<milliseconds> above ${budget.phaseBudgetMilliseconds} in its environment. The override only widens the phase budget, never shortens it or skips a test, and the capture still stops at the ${budget.hardMaximumMilliseconds}ms hard maximum.`;
+}
+function captureBudgetTimeoutReason(budget, elapsedMilliseconds, loadAtDeadline, processReason) {
+  return `capture_budget_exceeded: the verify command ran ${elapsedMilliseconds}ms and was stopped at its ${budget.timeoutMilliseconds}ms capture budget. This is a budget verdict, not a test failure: the command had not finished, so whatever it would have reported is unknown. Budget: ${describeCaptureBudget(budget)}; the load average was ${formatLoad(loadAtDeadline)} at the deadline. ${captureBudgetLever(budget)} ${processReason}`.trim();
+}
+function appendCaptureBudgetEvidence(logPath, budget, elapsedMilliseconds) {
+  if (!logPath) return;
+  try {
+    fs.appendFileSync(logPath, `
+[sidequest] Verification capture budget: ${budget.timeoutMilliseconds}ms, ${describeCaptureBudget(budget)}. Elapsed ${elapsedMilliseconds}ms.${budget.notice ? ` ${budget.notice}` : ""}
+`);
+  } catch {
+  }
 }
 function captureRequirement(command) {
   return Object.freeze({ kind: "command", command, evidenceContract: "command output" });
@@ -57,8 +134,18 @@ async function runVerifyCapture(command, cwd = process.cwd(), timeoutMillisecond
     ...result.status === "passed" ? {} : { reason: result.evidence }
   });
 }
-function isFullSuiteCommand(command) {
-  return /(?:^|[\s&;()])npm\s+run\s+test:full(?:\s|$)/.test(command);
+async function runBudgetedCapture(command, cwd, budget, environment, announce) {
+  if (announce) {
+    announce(`verify-capture: capture budget ${budget.timeoutMilliseconds}ms, ${describeCaptureBudget(budget)}.`);
+    if (budget.notice) announce(`verify-capture: ${budget.notice}`);
+  }
+  const startedAt = Date.now();
+  const capture = await runVerifyCapture(command, cwd, budget.timeoutMilliseconds, environment);
+  const elapsedMilliseconds = Math.max(0, Date.now() - startedAt);
+  appendCaptureBudgetEvidence(capture.logPath, budget, elapsedMilliseconds);
+  if (capture.status !== "timeout") return Object.freeze({ ...capture, budget, elapsedMilliseconds });
+  const reason = captureBudgetTimeoutReason(budget, elapsedMilliseconds, os.loadavg()[0] || 0, String(capture.reason || capture.evidence || ""));
+  return Object.freeze({ ...capture, evidence: reason, reason, budget, elapsedMilliseconds });
 }
 function captureSlotDirectory(project) {
   const projectKey = path.resolve(project).toLocaleLowerCase();
@@ -255,7 +342,7 @@ function captureSlotCouldNotRun(command, slot) {
     reason: slot.reason
   });
 }
-async function runFullSuiteCapture(command, project, cwd, fileSystem = fs) {
+async function runFullSuiteCapture(command, project, cwd, fileSystem = fs, options = {}) {
   let slot;
   try {
     slot = await acquireCaptureSlot(project, captureSlotTimeoutMilliseconds, fileSystem);
@@ -272,10 +359,11 @@ async function runFullSuiteCapture(command, project, cwd, fileSystem = fs) {
   let capture;
   let releaseFailure = null;
   try {
-    capture = await runVerifyCapture(command, cwd, fullSuiteCaptureTimeoutMilliseconds(), {
+    const budget = (options.resolveBudget || captureBudget)(command);
+    capture = await runBudgetedCapture(command, cwd, budget, {
       ...process.env,
       SIDEQUEST_FULL_SUITE_SIBLING_CAPTURE_COUNT: String(slot.queuePosition - 1)
-    });
+    }, options.announce);
   } finally {
     releaseFailure = await slot.release();
   }
@@ -423,7 +511,7 @@ function preflightCapture(command, target, project) {
     reason
   });
 }
-async function runCapturedVerification(command, target, cwd = process.cwd(), fileSystem = fs) {
+async function runCapturedVerification(command, target, cwd = process.cwd(), fileSystem = fs, options = {}) {
   const resolution = target ? resolveCaptureProject(target) : null;
   const project = resolution?.ok ? resolution.project : null;
   const preflight = target ? preflightCapture(command, target, project) : null;
@@ -433,7 +521,7 @@ async function runCapturedVerification(command, target, cwd = process.cwd(), fil
     return Object.freeze({ capture: capture2, recorded: Object.freeze({ ok: false, reason: binding.reason.split(":")[0] || "capture_binding_refused", message: binding.reason }) });
   }
   const captureCwd = binding?.ok ? binding.cwd : cwd;
-  const capture = preflight || (target && isFullSuiteCommand(command) ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem) : await runVerifyCapture(command, captureCwd));
+  const capture = preflight || (target && isFullSuiteCommand(command) ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem, options) : await runBudgetedCapture(command, captureCwd, (options.resolveBudget || captureBudget)(command), void 0, options.announce));
   const recorded = target ? recordCapture(target, capture, captureCwd, resolution, binding?.ok ? binding.head : void 0) : null;
   return Object.freeze({ capture, recorded });
 }
@@ -500,6 +588,11 @@ function report(capture, recorded) {
     process.stdout.write(`capture-slot waitedForSlotMs=${capture.waitedForSlotMs} queuePosition=${capture.queuePosition || 1}
 `);
   }
+  if (capture.budget) {
+    const budget = capture.budget;
+    process.stdout.write(`capture-budget class=${budget.budgetClass} budgetMs=${budget.timeoutMilliseconds} elapsedMs=${capture.elapsedMilliseconds ?? ""} setupMs=${budget.setupAllowanceMilliseconds} phaseMs=${budget.phaseBudgetMilliseconds} measuredPhaseMs=${budget.measuredPhaseBudgetMilliseconds} hardMaxMs=${budget.hardMaximumMilliseconds} cores=${budget.availableParallelism} load=${formatLoad(budget.loadAverage)} effectiveWorkers=${budget.effectiveTestWorkers.toFixed(2)}
+`);
+  }
   if (recorded?.ok && recorded.capture) {
     process.stdout.write(`capture=${recorded.capture.id} candidate=${recorded.capture.candidate.source}:${recorded.capture.candidate.value}
 `);
@@ -518,9 +611,12 @@ async function main() {
     return;
   }
   const target = captureTarget(args);
-  const { capture, recorded } = await runCapturedVerification(command, target);
+  const { capture, recorded } = await runCapturedVerification(command, target, process.cwd(), fs, {
+    announce: (line) => process.stderr.write(`${line}
+`)
+  });
   report(capture, recorded);
   process.exitCode = capture.exitCode === 0 && (!target || recorded?.ok) ? 0 : 2;
 }
-module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, acquireCaptureSlot, isFullSuiteCommand, fullSuiteCaptureTimeoutMilliseconds, recordCapture, verifiedRevision };
+module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, acquireCaptureSlot, isFullSuiteCommand, isTestSuiteCommand, captureBudgetClass, captureBudget, captureHardMaximumMilliseconds, runBudgetedCapture, fullSuiteCaptureTimeoutMilliseconds, recordCapture, verifiedRevision };
 if (require.main === module) void main();
