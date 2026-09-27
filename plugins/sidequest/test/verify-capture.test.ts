@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 
-const { runVerifyCapture, runCapturedVerification, recordCapture, shellCommand, captureSlotDirectory, acquireCaptureSlot, fullSuiteCaptureTimeoutMilliseconds } = require('../lib/verify-capture.js');
+const { runVerifyCapture, runCapturedVerification, recordCapture, shellCommand, captureSlotDirectory, acquireCaptureSlot, fullSuiteCaptureTimeoutMilliseconds, captureBudget, captureBudgetClass, captureHardMaximumMilliseconds, runBudgetedCapture } = require('../lib/verify-capture.js');
 const store = require('../lib/store.js');
 const SIDEQUEST_DIR = path.resolve(__dirname, '..');
 
@@ -75,6 +75,161 @@ test('full-suite capture uses the capacity phase budget plus ordinary setup allo
     if (originalOverride === undefined) delete process.env.SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS;
     else process.env.SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS = originalOverride;
   }
+});
+
+// SQ-169: only `npm run test:full` got a capacity-derived budget, so a scoped `node --test`
+// verify (SQ-45's `node --test scripts/release/test`, SQ-128's 1047s run) died at a fixed
+// 600000ms however often it was retried.
+test('SQ-169: any node --test command or npm test script is classified for the extended budget', () => {
+  const testSuites = [
+    'node --test scripts/release/test',
+    'cd plugins/sidequest && npm run typecheck && node --import tsx --import ./test/_sidequest-test-home.ts --test test/hooks.test.ts',
+    '/usr/local/bin/node --test test/a.test.js',
+    `"${process.execPath}" --test test`,
+    'npm test',
+    'npm t',
+    'npm run test',
+    'npm run test:files -- test/verify-capture.test.ts',
+    'npm --prefix plugins/sidequest test',
+    'npm run lint && npm test',
+  ];
+  for (const command of testSuites) assert.equal(captureBudgetClass(command), 'test-suite', command);
+  assert.equal(captureBudgetClass('npm run test:full'), 'full-suite');
+  assert.equal(captureBudgetClass('cd plugins/sidequest && npm run test:full'), 'full-suite');
+  for (const command of ['npm run check', 'npm run typecheck', 'node scripts/build.mjs', 'node --test-reporter=spec x.js', 'git diff --check']) {
+    assert.equal(captureBudgetClass(command), 'command', command);
+  }
+});
+
+test('SQ-169: a test-suite capture gets the capacity budget; other commands keep the setup allowance', () => {
+  const quiet = captureBudget('node --test scripts/release/test', 8, 0, '');
+  assert.equal(quiet.budgetClass, 'test-suite');
+  assert.equal(quiet.timeoutMilliseconds, 1_320_000);
+  assert.equal(quiet.setupAllowanceMilliseconds, 600_000);
+  assert.equal(quiet.phaseBudgetMilliseconds, 720_000);
+  const loaded = captureBudget('node --test scripts/release/test', 10, 27, '');
+  assert.equal(loaded.timeoutMilliseconds, 3_000_000);
+  assert.ok(loaded.timeoutMilliseconds > 1_047_000, 'the loaded budget covers the 1047s scoped run SQ-128 measured');
+  assert.equal(loaded.loadAverage, 27);
+  assert.equal(loaded.availableParallelism, 10);
+  const plain = captureBudget('npm run check', 10, 27, '');
+  assert.deepEqual({ budgetClass: plain.budgetClass, timeout: plain.timeoutMilliseconds, phase: plain.phaseBudgetMilliseconds }, { budgetClass: 'command', timeout: 600_000, phase: 0 });
+  const widened = captureBudget('npm run check', 10, 27, '1200000');
+  assert.equal(widened.timeoutMilliseconds, 1_800_000);
+  assert.equal(widened.overrideMilliseconds, 1_200_000);
+  assert.match(widened.notice, /SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS raised the phase budget from a measured 0ms to 1200000ms/);
+  assert.match(captureBudget('node --test x', 8, 0, 'abc').notice, /is not a positive whole number of milliseconds/);
+  assert.match(captureBudget('node --test x', 8, 0, '1').notice, /cannot shorten the measured 720000ms phase budget/);
+  assert.equal(captureBudget('node --test x', 8, 0, '1').timeoutMilliseconds, 1_320_000);
+});
+
+test('SQ-169: the widen-only override is bounded by a hard maximum so a hung run cannot hold the slot forever', () => {
+  // Base returned 1_000_599_999 here: setup allowance plus whatever the override asked for.
+  assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0, '999999999'), 7_200_000);
+  assert.equal(captureHardMaximumMilliseconds, 7_200_000);
+  const clamped = captureBudget('npm run test:full', 8, 0, '999999999');
+  assert.equal(clamped.timeoutMilliseconds, 7_200_000);
+  assert.equal(clamped.clampedToHardMaximum, true);
+  assert.match(clamped.notice, /above the 7200000ms hard maximum, so the capture stops at 7200000ms/);
+  const underMaximum = captureBudget('npm run test:full', 8, 0, '6600000');
+  assert.equal(underMaximum.timeoutMilliseconds, 7_200_000);
+  assert.equal(underMaximum.clampedToHardMaximum, false);
+  assert.equal(captureBudget('node --test x', 8, 0, '999999999').timeoutMilliseconds, 7_200_000);
+});
+
+test('SQ-169: a capture budget timeout reports elapsed time, the budget, the load and the lever', { skip: process.platform === 'win32' }, async () => {
+  const measured = captureBudget('node --test scripts/release/test', 8, 0, '');
+  const atMaximum = captureBudget('npm run test:full', 8, 0, '999999999');
+  const cases = [
+    { budget: Object.freeze({ ...measured, timeoutMilliseconds: 1500 }), lever: /rerun the same wrapper with SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS=<milliseconds> above 720000 in its environment/ },
+    { budget: Object.freeze({ ...atMaximum, timeoutMilliseconds: 1500 }), lever: /already at the 7200000ms hard maximum, so no override can raise it: ask the orchestrator to re-pin a narrower verify command/ },
+  ];
+  for (const { budget, lever } of cases) {
+    const capture = await runBudgetedCapture('printf partial-output; sleep 30', process.cwd(), budget);
+    try {
+      assert.deepStrictEqual({ status: capture.status, exitCode: capture.exitCode }, { status: 'timeout', exitCode: 2 });
+      assert.ok(capture.elapsedMilliseconds >= 1500, `elapsed ${capture.elapsedMilliseconds}ms`);
+      assert.match(capture.reason, new RegExp(`^capture_budget_exceeded: the verify command ran ${capture.elapsedMilliseconds}ms and was stopped at its 1500ms capture budget\\. This is a budget verdict, not a test failure`));
+      assert.match(capture.reason, new RegExp(`${budget.budgetClass} class`));
+      assert.match(capture.reason, new RegExp(`600000ms setup allowance \\+ ${budget.phaseBudgetMilliseconds}ms phase budget`));
+      assert.match(capture.reason, /capped at the 7200000ms hard maximum; derived at 8 available cores and a 1-minute load average of 0\.00 \(8\.00 effective test workers\)/);
+      assert.match(capture.reason, /the load average was \d+\.\d\d at the deadline/);
+      assert.match(capture.reason, lever);
+      assert.match(capture.reason, /Verification timed out after 1500ms; partial output captured\./, 'the process port reason is kept');
+      assert.equal(capture.evidence, capture.reason);
+      assert.equal(capture.budget, budget);
+      const log = fs.readFileSync(capture.logPath, 'utf8');
+      assert.match(log, /partial-output/);
+      assert.match(log, new RegExp(`\\[sidequest\\] Verification capture budget: 1500ms, ${budget.budgetClass} class .* Elapsed ${capture.elapsedMilliseconds}ms\\.`));
+    } finally {
+      deleteLog(capture);
+    }
+  }
+});
+
+test('SQ-169: an npm test capture runs under the extended budget and carries it on the result', async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-169-npm-test-'));
+  fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({ scripts: { test: 'node ok.js' } }));
+  fs.writeFileSync(path.join(project, 'ok.js'), 'process.stdout.write("scoped-tests-ok\\n");\n');
+  try {
+    const { capture, recorded } = await runCapturedVerification('npm test', null, project);
+    assert.equal(capture.status, 'passed', capture.evidence);
+    assert.equal(recorded, null);
+    assert.equal(capture.budget?.budgetClass, 'test-suite');
+    assert.ok(capture.budget.timeoutMilliseconds > 600_000, `budget ${capture.budget.timeoutMilliseconds}ms`);
+    assert.ok(Number.isInteger(capture.elapsedMilliseconds) && capture.elapsedMilliseconds >= 0);
+    const log = fs.readFileSync(capture.logPath, 'utf8');
+    assert.match(log, /scoped-tests-ok/);
+    assert.match(log, new RegExp(`\\[sidequest\\] Verification capture budget: ${capture.budget.timeoutMilliseconds}ms, test-suite class`));
+    deleteLog(capture);
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('SQ-169: a full-suite capture that exceeds its budget is stopped, reported, and releases the slot', { skip: process.platform === 'win32' }, async () => {
+  const started = 'suite-started';
+  const project = captureFixtureProject('sq-169-full-suite-budget-', `require('node:fs').writeFileSync(${JSON.stringify(started)}, 'started'); setTimeout(() => {}, 10000);\n`);
+  const boardProject = store.ensureProject(project);
+  const ticket = store.createTicket(boardProject.slug, {
+    title: 'full-suite capture stops at its budget',
+    executorVerifyKind: 'command',
+    executorVerify: 'npm run test:full',
+  });
+  const announced: string[] = [];
+  try {
+    const { capture } = await runCapturedVerification('npm run test:full', { project, ticket: ticket.ref }, project, fs, {
+      resolveBudget: (command: string) => Object.freeze({ ...captureBudget(command, 8, 0, ''), timeoutMilliseconds: 1500 }),
+      announce: (line: string) => announced.push(line),
+    });
+    assert.equal(capture.status, 'timeout', capture.evidence);
+    assert.equal(capture.budget?.budgetClass, 'full-suite');
+    assert.equal(capture.queuePosition, 1);
+    assert.match(capture.reason, /^capture_budget_exceeded: the verify command ran \d+ms and was stopped at its 1500ms capture budget\./);
+    assert.match(capture.reason, /full-suite class \(the npm run test:full suite, serialized per host\)/);
+    assert.match(announced.join('\n'), /^verify-capture: capture budget 1500ms, full-suite class/);
+    assert.equal(fs.existsSync(path.join(captureSlotDirectory(project), 'active')), false, 'the per-host slot is released after a budget timeout');
+    fs.rmSync(capture.logPath, { force: true });
+  } finally {
+    fs.rmSync(captureSlotDirectory(project), { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('SQ-169: the wrapper announces the budget before the run and reports it after', () => {
+  const environment = { ...process.env };
+  delete environment.SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS;
+  const command = `"${process.execPath}" -e "process.exit(0)"`;
+  const result = require('node:child_process').spawnSync(process.execPath, [path.join(SIDEQUEST_DIR, 'lib', 'verify-capture.js'), '--base64', Buffer.from(command).toString('base64')], {
+    encoding: 'utf8',
+    env: environment,
+    windowsHide: true,
+  });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /^verify-capture: capture budget 600000ms, command class \(not a recognized test runner/m);
+  assert.match(result.stdout, /^capture-budget class=command budgetMs=600000 elapsedMs=\d+ setupMs=600000 phaseMs=0 measuredPhaseMs=0 hardMaxMs=7200000 cores=\d+ load=\d+\.\d\d effectiveWorkers=\d+\.\d\d$/m);
+  const details = /^details=(.*)$/m.exec(result.stdout)?.[1];
+  if (details) fs.rmSync(details, { force: true });
 });
 
 test('full-suite capture serializes sibling captures and records the queue wait', async () => {
