@@ -3392,11 +3392,33 @@ function currentIntegrationWaveBaseline(slug: any, fallback: any, targetOverride
   if (fallback?.revision?.source !== 'git') return fallback;
   const projectPath = String(readMeta(slug)?.path || '').trim();
   const target = targetOverride || integrationTarget(slug);
-  const commit = integrationTargetCommit(projectPath, target);
+  const commit = waveTargetCommit(slug, projectPath, target);
   return Object.freeze({
     revision: Object.freeze({ source: 'git', value: commit, observedAt: new Date().toISOString() }),
     purpose: 'wave' as const,
   });
+}
+
+// Local delivery merges into the checked-out local branch, never into the
+// remote-tracking ref. In remote mode an isolated dispatch bases on local main
+// when it is ahead of origin, so pinning the wave to origin/main refused that
+// candidate as baseline_moved even though its merge was a clean fast-forward
+// (SQ-59). Pin to the local branch only when it already contains the upstream
+// commit: every candidate admitted against the upstream stays admitted, and a
+// local branch behind or beside origin keeps the upstream pin. PR delivery
+// targets the remote branch, so it keeps the upstream pin as well.
+function waveTargetCommit(slug: any, projectPath: string, target: any) {
+  const upstreamCommit = integrationTargetCommit(projectPath, target);
+  if (target?.mode !== 'remote' || !target?.branch || deliveryChannelFor(slug).mode === 'pr') return upstreamCommit;
+  const git = (args: string[]) => execFileSync('git', args, { cwd: projectPath, encoding: 'utf8', windowsHide: true, stdio: 'pipe' }).trim();
+  try {
+    const localCommit = git(['rev-parse', '--verify', `refs/heads/${target.branch}^{commit}`]);
+    if (localCommit === upstreamCommit) return upstreamCommit;
+    git(['merge-base', '--is-ancestor', upstreamCommit, localCommit]);
+    return localCommit;
+  } catch (_: any) {
+    return upstreamCommit;
+  }
 }
 
 function candidateBaselineIsCurrentOrAncestor(slug: any, candidate: any, waveBaseline: any) {

@@ -2984,11 +2984,24 @@ ${verify.outputTail}` : null
     if (fallback?.revision?.source !== "git") return fallback;
     const projectPath = String(readMeta(slug)?.path || "").trim();
     const target = targetOverride || integrationTarget(slug);
-    const commit = integrationTargetCommit(projectPath, target);
+    const commit = waveTargetCommit(slug, projectPath, target);
     return Object.freeze({
       revision: Object.freeze({ source: "git", value: commit, observedAt: (/* @__PURE__ */ new Date()).toISOString() }),
       purpose: "wave"
     });
+  }
+  function waveTargetCommit(slug, projectPath, target) {
+    const upstreamCommit = integrationTargetCommit(projectPath, target);
+    if (target?.mode !== "remote" || !target?.branch || deliveryChannelFor(slug).mode === "pr") return upstreamCommit;
+    const git = (args) => execFileSync("git", args, { cwd: projectPath, encoding: "utf8", windowsHide: true, stdio: "pipe" }).trim();
+    try {
+      const localCommit = git(["rev-parse", "--verify", `refs/heads/${target.branch}^{commit}`]);
+      if (localCommit === upstreamCommit) return upstreamCommit;
+      git(["merge-base", "--is-ancestor", upstreamCommit, localCommit]);
+      return localCommit;
+    } catch (_) {
+      return upstreamCommit;
+    }
   }
   function candidateBaselineIsCurrentOrAncestor(slug, candidate, waveBaseline) {
     const candidateRevision = candidate?.baseline?.revision;
