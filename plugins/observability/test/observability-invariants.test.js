@@ -14,7 +14,6 @@ const { normalizeAssistantUsage, normalizeTerminalResult } = require('../lib/obs
 const { ALLOWED_EVENTS, ALLOWED_MEASUREMENTS, ATTRIBUTE_SPECS } = require('../lib/observability/schema.js');
 const { EMPTY_STATE_TITLE, generatedDashboards } = require('../observability/sinks/grafana/dashboard-generator.js');
 const { buildOtlpLogPayload, createGatewayUsageEmitter } = require('../../model-gateway/lib/usage-observability.js');
-const { ticketObservation: nativeTicketObservation } = require('../../sidequest/lib/telemetry.js');
 
 // Hooks hash the cwd Claude Code hands them, project-telemetry hashes path.resolve of its
 // project directory. They only agree on a path that is already absolute for the running
@@ -128,10 +127,7 @@ function sidequestFixtures(projectId) {
     dispatch: { id: 'dispatch-canonical', taskId: 'task-canonical', sessionId: 'session-canonical', agentId: 'agent-canonical', executor: 'sidequest-exec-dispatch-high' },
     claim: { by: 'worker-canonical', sessionId: 'session-canonical' },
   };
-  return [
-    { name: 'sidequest-adapter', observation: adapterTicketObservation(ticket, { projectId }) },
-    { name: 'sidequest-native', observation: nativeTicketObservation({ slug: 'canonical-project', path: PROJECT_DIR }, ticket) },
-  ];
+  return [{ name: 'sidequest-adapter', observation: adapterTicketObservation(ticket, { projectId }) }];
 }
 
 function rechargeFixtures(projectId) {
@@ -218,7 +214,6 @@ test('canonical project identity stays aligned across Observability emitters and
   const statusline = { ...buildStatuslineObservations({ session_id: 'session-canonical', context_window: { used_tokens: 10, window_tokens: 100 } }, NOW, { value: 42 })[0], project_id: identity.project_id };
   const sdk = sdkFixtures(identity.project_id)[0].observation;
   const adapter = sidequestFixtures(identity.project_id)[0].observation;
-  const native = sidequestFixtures(identity.project_id)[1].observation;
   const gateway = gatewayFixtures(identity.project_id)[0].observation;
   const registry = registryEntry(PROJECT_DIR, NOW);
   const resourceAttributes = new Map(telemetryEnvironment(PROJECT_DIR).OTEL_RESOURCE_ATTRIBUTES.split(',').map((entry) => entry.split('=')));
@@ -235,9 +230,6 @@ test('canonical project identity stays aligned across Observability emitters and
   assert.equal(sdk.project_id, identity.project_id);
   assert.equal(sdk.session_id, 'session-canonical');
   assert.equal(adapter.project_id, identity.project_id);
-  assert.equal(native.project_id, identity.project_id);
-  assert.equal(native.session_id, 'session-canonical');
-  assert.equal(native.agent_id, 'agent-canonical');
   assert.equal(gateway.project_id, identity.project_id);
   assert.equal(gateway.session_id, 'session-canonical');
   assert.equal(gateway.agent_id, 'agent-canonical');
@@ -260,22 +252,4 @@ test('a per-project dashboard says so when its project has no samples in the ran
   // The global dashboard already shows which projects reported; an empty state there
   // would only ever mean "no projects at all".
   assert.equal(global.dashboard.panels.some(({ title }) => title === EMPTY_STATE_TITLE), false);
-});
-
-test('native Sidequest identity joins the canonical project after ingest', () => {
-  const projectId = projectMetadata(PROJECT_DIR).project_id;
-  const [{ observation: adapter }, { observation: native }] = sidequestFixtures(projectId);
-  const store = openObservabilityStore(':memory:', { outboxEnabled: false });
-  try {
-    assert.equal(store.ingest(adapter).accepted, true);
-    assert.equal(store.ingest(native).accepted, true);
-    const rows = store.database.prepare(`
-      SELECT project_id FROM observation
-      WHERE event_name = 'sidequest.ticket'
-      ORDER BY source_schema
-    `).all();
-    assert.deepEqual(rows.map(({ project_id: value }) => value), [projectId, projectId]);
-  } finally {
-    store.close();
-  }
 });
