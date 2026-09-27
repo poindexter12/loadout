@@ -1,5 +1,7 @@
 'use strict';
 
+const { fingerprintFor } = require('./permission-fingerprint.js');
+
 const MAX_SAMPLES = 12;
 const QUOTE_CHARS = 300;
 const TOP_LIMIT = 15;
@@ -124,7 +126,7 @@ function countsOf(map) {
 }
 
 function emptyTally() {
-  return { prompts: 0, toolCalls: 0, toolErrors: 0, denials: 0, interrupts: 0, corrections: 0 };
+  return { prompts: 0, toolCalls: 0, toolErrors: 0, denials: 0, denialsByFingerprint: {}, interrupts: 0, corrections: 0 };
 }
 
 /**
@@ -216,6 +218,8 @@ function createSignalCollector() {
           if (event.denial) {
             totals.denials += 1;
             tally.denials += 1;
+            const fingerprint = fingerprintFor(event.name, event.input);
+            if (fingerprint) tally.denialsByFingerprint[fingerprint] = (tally.denialsByFingerprint[fingerprint] ?? 0) + 1;
             bump(denialsByKind, event.denial, event.sessionId);
             bump(denialsByTool, event.name ?? 'unknown', event.sessionId);
             if (denialTargets.length < MAX_SAMPLES) {
@@ -271,6 +275,7 @@ function createSignalCollector() {
           toolCalls: tally.toolCalls,
           toolErrors: tally.toolErrors,
           denials: tally.denials,
+          denialsByFingerprint: tally.denialsByFingerprint,
           interrupts: tally.interrupts,
           corrections: tally.corrections,
           title: tally.title,
@@ -338,6 +343,9 @@ function tallyFromSignals(signals) {
     tally.toolCalls += session.toolCalls;
     tally.toolErrors += session.toolErrors;
     tally.denials += session.denials;
+    for (const [fingerprint, count] of Object.entries(session.denialsByFingerprint ?? {})) {
+      tally.denialsByFingerprint[fingerprint] = (tally.denialsByFingerprint[fingerprint] ?? 0) + count;
+    }
     tally.interrupts += session.interrupts;
     tally.corrections += session.corrections;
   }

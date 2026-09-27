@@ -120,11 +120,11 @@ test('allowlist identifies rule vetoes and sighted destructive commands', () => 
 
   const result = run('allowlist', projectPath, environment);
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /permission:Bash:git push: vetoed as too broad a rule \(wildcard would cover destructive siblings\)/);
+  assert.match(result.stdout, /permission:Bash:git push: vetoed as too broad a rule \(ref-mutating git command\)/);
   assert.match(result.stdout, /permission:Bash:git log: sighted destructive command "git log --oneline; rm -f \/tmp\/quartermaster-log"/);
   const report = jsonReport(result);
   const push = report.blocked.top.find((entry) => entry.fingerprint === 'permission:Bash:git push');
   const log = report.blocked.top.find((entry) => entry.fingerprint === 'permission:Bash:git log');
-  assert.equal(push.reason, 'vetoed as too broad a rule (wildcard would cover destructive siblings)');
+  assert.equal(push.reason, 'vetoed as too broad a rule (ref-mutating git command)');
   assert.equal(log.reason, 'sighted destructive command "git log --oneline; rm -f /tmp/quartermaster-log"');
 });

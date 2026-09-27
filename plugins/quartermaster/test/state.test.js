@@ -33,7 +33,7 @@ beforeEach(() => {
 });
 
 function tallyWith(overrides = {}) {
-  return { prompts: 5, toolCalls: 20, toolErrors: 0, denials: 0, interrupts: 0, corrections: 0, ...overrides };
+  return { prompts: 5, toolCalls: 20, toolErrors: 0, denials: 0, denialsByFingerprint: {}, interrupts: 0, corrections: 0, ...overrides };
 }
 
 function alternateProjectSpelling(projectDir) {
@@ -160,7 +160,7 @@ test('decisions ledger separates applied from rejected fingerprints', () => {
 test('verifyDecisions reports improvement against the targeted signal', () => {
   const now = Date.now();
   for (let index = 0; index < 4; index += 1) {
-    recordSessionTally(PROJECT, `before-${index}`, tallyWith({ denials: 4 }), environment, now - (10 - index) * DAY_MS);
+    recordSessionTally(PROJECT, `before-${index}`, tallyWith({ denials: 4, denialsByFingerprint: { 'permission:Bash:npm': 4 } }), environment, now - (10 - index) * DAY_MS);
   }
   const decision = appendDecision(
     { projectDir: PROJECT, fingerprint: 'permission:Bash:npm', status: 'applied', title: 'allow npm', signal: 'denials' },
@@ -182,7 +182,7 @@ test('verifyDecisions matches decisions recorded through another path spelling',
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quartermaster-project-test-'));
   const alternateDir = alternateProjectSpelling(projectDir);
   for (let index = 0; index < 4; index += 1) {
-    recordSessionTally(projectDir, `before-${index}`, tallyWith({ denials: 4 }), environment, now - (10 - index) * DAY_MS);
+    recordSessionTally(projectDir, `before-${index}`, tallyWith({ denials: 4, denialsByFingerprint: { 'permission:Bash:npm': 4 } }), environment, now - (10 - index) * DAY_MS);
   }
   const decision = appendDecision(
     { projectDir: alternateDir, fingerprint: 'permission:Bash:npm', status: 'applied', title: 'allow npm', signal: 'denials' },
@@ -202,4 +202,47 @@ test('verifyDecisions declines to judge on thin data', () => {
   recordSessionTally(PROJECT, 'only-one', tallyWith(), environment, now - DAY_MS);
   appendDecision({ projectDir: PROJECT, fingerprint: 'rule:x', status: 'applied', title: 'x' }, environment, now);
   assert.equal(verifyDecisions(PROJECT, environment)[0].verdict, 'insufficient-data');
+});
+
+test('verifyDecisions never blames a permission rule for unrelated denial growth', () => {
+  // Reproduces the original defect: total per-session denials grew after the decision, but every
+  // one of those denials belongs to a DIFFERENT fingerprint (an unrelated deny rule, an automode
+  // block, a rejected TaskStop) that this rule's allow could never have affected.
+  const now = Date.now();
+  for (let index = 0; index < 4; index += 1) {
+    recordSessionTally(PROJECT, `before-${index}`, tallyWith({ denials: 0 }), environment, now - (10 - index) * DAY_MS);
+  }
+  const decision = appendDecision(
+    { projectDir: PROJECT, fingerprint: 'permission:Bash:npm test', status: 'applied', title: 'allow npm test', signal: 'denials' },
+    environment,
+    now - 5 * DAY_MS,
+  );
+  for (let index = 0; index < 4; index += 1) {
+    recordSessionTally(
+      PROJECT,
+      `after-${index}`,
+      tallyWith({ denials: 5, denialsByFingerprint: { 'permission:Bash:git push': 5 } }),
+      environment,
+      now - (4 - index) * DAY_MS,
+    );
+  }
+  const result = verifyDecisions(PROJECT, environment).find((entry) => entry.id === decision.id);
+  assert.equal(result.verdict, 'insufficient-data', 'the rule\'s own fingerprint saw zero denials on both sides');
+});
+
+test('verifyDecisions reports insufficient-data for a permission rule with no matching denials on either side', () => {
+  const now = Date.now();
+  for (let index = 0; index < 4; index += 1) {
+    recordSessionTally(PROJECT, `before-${index}`, tallyWith(), environment, now - (10 - index) * DAY_MS);
+  }
+  const decision = appendDecision(
+    { projectDir: PROJECT, fingerprint: 'permission:Bash:npm run lint', status: 'applied', title: 'allow npm run lint', signal: 'denials' },
+    environment,
+    now - 5 * DAY_MS,
+  );
+  for (let index = 0; index < 4; index += 1) {
+    recordSessionTally(PROJECT, `after-${index}`, tallyWith(), environment, now - (4 - index) * DAY_MS);
+  }
+  const result = verifyDecisions(PROJECT, environment).find((entry) => entry.id === decision.id);
+  assert.equal(result.verdict, 'insufficient-data');
 });

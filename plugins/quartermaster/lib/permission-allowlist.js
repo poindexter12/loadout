@@ -5,6 +5,7 @@ const path = require('node:path');
 
 const { resolveWindow } = require('./scan.js');
 const { appendDecision } = require('./state.js');
+const { fingerprintFor, normalizedCommandPrefix, ruleFor } = require('./permission-fingerprint.js');
 const { streamTranscript } = require('./stream.js');
 
 const MIN_APPROVALS = 3;
@@ -19,11 +20,14 @@ const DESTRUCTIVE_PHRASE = /\bgit\s+(?:push[^\n]*(?:\s--force(?:\b|=)|\s-f\b)|re
 // permits `git push --force`. These never get a rule, however often approved.
 const ARBITRARY_EXECUTION = /^(?:node|nodejs|deno|bun|python|python2|python3|py|ruby|perl|php|sh|bash|zsh|dash|pwsh|powershell|cmd|wsl|ssh|eval|exec|npx|pnpx|uvx|env|sudo|doas|xargs|start|call)$/i;
 const NEEDS_SUBCOMMAND = /^(?:git|docker|podman|kubectl|helm|terraform|aws|gcloud|az|npm|pnpm|yarn|cargo|go|dotnet|gh|systemctl|sc|net)$/i;
-const DESTRUCTIVE_FAMILY = /^(?:git\s+(?:push|reset|clean|branch|rm|checkout|restore)|docker\s+\S+|podman\s+\S+|kubectl\s+\S+|npm\s+(?:publish|unpublish|version))$/i;
+const DESTRUCTIVE_FAMILY = /^(?:docker\s+\S+|podman\s+\S+|kubectl\s+\S+|npm\s+(?:publish|unpublish|version))$/i;
+const NEVER_LEARN_GIT_SUBCOMMAND = /^(?:push|reset|clean|branch|rm|checkout|restore|tag|update-ref)$/i;
 const CHAIN_UNSAFE_EXECUTION = /^(?:cd|source|\.|export)$/i;
 const COMMAND_FRAGMENT = /^(?:&&|\|\||[;|])/;
 const VERSION_PINNED_PATH = /(?:^|\/)quartermaster\/\d+\.\d+\.\d+(?:\/|$)/i;
 const SESSION_SCRATCHPAD_PATH = /(?:^|\/)(?:scratchpad|claude-[^/]+)(?:\/|$)/i;
+const AGENT_WORKTREE_PATH = /(?:^|\/)(?:\.claude\/)?worktrees\/[^/]+\/agent-[0-9a-f]+(?:\/|$)|(?:^|\/)\.claude\/worktrees\/agent-[0-9a-f]+(?:\/|$)/i;
+const SLEEP_PREFIX = /^\s*sleep\s+\d+(?:\.\d+)?\s*;/i;
 
 function settingsFile(projectDir) {
   return path.join(projectDir, '.claude', 'settings.local.json');
@@ -43,35 +47,18 @@ function permissionAutomationEnabled(projectDir) {
   return readSettings(projectDir).quartermaster?.[ENABLED_SETTING] === true;
 }
 
-function normalizedCommandPrefix(command) {
-  const words = String(command ?? '').trim().replace(/\s+/g, ' ').replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)+/, '').split(' ');
-  if (!words[0]) return null;
-  const executable = words[0].replace(/^.*[\\/]/, '').replace(/\.exe$/i, '').toLowerCase();
-  const subcommand = words[1] && !words[1].startsWith('-')
-    ? (/[\\/]/.test(words[1]) ? words[1] : words[1].toLowerCase())
-    : null;
-  return subcommand ? `${executable} ${subcommand}` : executable;
-}
-
-function fingerprintFor(name, input) {
-  if (!name) return null;
-  if (name === 'Bash') {
-    const prefix = normalizedCommandPrefix(input?.command);
-    return prefix ? `permission:Bash:${prefix}` : null;
-  }
-  return `permission:${name}`;
-}
-
-function ruleFor(fingerprint) {
-  const match = /^permission:Bash:(.+)$/.exec(fingerprint);
-  return match ? `Bash(${match[1]}:*)` : fingerprint.slice('permission:'.length);
-}
-
 function commandWords(command) {
   return String(command ?? '')
     .split(/[\s;&|(){}<>]+/)
     .filter(Boolean)
     .map((word) => word.replace(/^.*[\\/]/, '').replace(/\.exe$/i, ''));
+}
+
+function shouldSkipLearning(input) {
+  const command = String(input?.command ?? '');
+  return SLEEP_PREFIX.test(command)
+    || AGENT_WORKTREE_PATH.test(command)
+    || SESSION_SCRATCHPAD_PATH.test(command);
 }
 
 function isDestructive(input) {
@@ -108,15 +95,17 @@ function ruleTooBroadReason(fingerprint) {
   const [executable] = prefix.split(' ');
   if (COMMAND_FRAGMENT.test(prefix) || hasUnmatchedQuote(prefix)) return 'command fragment';
   if (CHAIN_UNSAFE_EXECUTION.test(executable) || ARBITRARY_EXECUTION.test(executable)) return 'arbitrary execution';
-  if (VERSION_PINNED_PATH.test(prefix) || SESSION_SCRATCHPAD_PATH.test(prefix)) return 'ephemeral or version-pinned path';
-  if (!prefix.includes(' ') && NEEDS_SUBCOMMAND.test(executable)) return 'bare tool';
+  if (executable === 'git' && NEVER_LEARN_GIT_SUBCOMMAND.test(prefix.slice('git '.length))) return 'ref-mutating git command';
   if (DESTRUCTIVE_FAMILY.test(prefix)) return 'wildcard would cover destructive siblings';
+  if (VERSION_PINNED_PATH.test(prefix)) return 'version-pinned path';
+  if (!prefix.includes(' ') && NEEDS_SUBCOMMAND.test(executable)) return 'bare tool';
   return null;
 }
 
 function createPermissionCollector() {
   const fingerprints = new Map();
   const see = (name, input) => {
+    if (name === 'Bash' && shouldSkipLearning(input)) return null;
     const fingerprint = fingerprintFor(name, input);
     if (!fingerprint) return null;
     let entry = fingerprints.get(fingerprint);
@@ -202,6 +191,11 @@ function appendedArrayValues(raw, bounds, values) {
   return `${prefix.slice(0, prefix.length - trailingWhitespace.length)}${comma}${inserted}${raw.slice(bounds.end)}`;
 }
 
+function denyCoversRule(deny, rule) {
+  const pattern = String(deny ?? '');
+  return pattern === rule || (pattern.endsWith('*') && rule.startsWith(pattern.slice(0, -1)));
+}
+
 function appendRulesToSettings(projectDir, rules) {
   const file = settingsFile(projectDir);
   const additions = [...new Set(rules)].filter(Boolean);
@@ -219,7 +213,8 @@ function appendRulesToSettings(projectDir, rules) {
     throw new Error(`cannot update invalid JSON in ${file}`);
   }
   const existing = Array.isArray(settings.permissions?.allow) ? settings.permissions.allow : [];
-  const newRules = additions.filter((rule) => !existing.includes(rule));
+  const denies = Array.isArray(settings.permissions?.deny) ? settings.permissions.deny : [];
+  const newRules = additions.filter((rule) => !existing.includes(rule) && !denies.some((deny) => denyCoversRule(deny, rule)));
   if (!newRules.length) return [];
 
   const allowMatch = /"allow"\s*:\s*\[/.exec(raw);

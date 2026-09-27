@@ -321,8 +321,14 @@ function verifyDecisions(projectDir, env = process.env) {
   for (const decision of readDecisions(env)) {
     if (decision.status !== 'applied') continue;
     if (decision.projectDir && canonicalProjectDir(decision.projectDir) !== canonicalDir) continue;
+    // A permission rule only ever affects denials that share ITS OWN fingerprint. Scoring it
+    // against the session's total friction (or total denial rate) blames it for unrelated deny
+    // rules, automode blocks, and rejected TaskStops it could never have touched.
+    const isPermissionRule = typeof decision.fingerprint === 'string' && decision.fingerprint.startsWith('permission:');
     const signal = decision.signal && decision.signal !== 'any' ? decision.signal : null;
-    const valueOf = (tally) => (signal ? tally?.[signal] ?? 0 : frictionOf(tally));
+    const valueOf = isPermissionRule
+      ? (tally) => tally?.denialsByFingerprint?.[decision.fingerprint] ?? 0
+      : (tally) => (signal ? tally?.[signal] ?? 0 : frictionOf(tally));
     const before = state.sessions.filter((session) => session.endedAt <= decision.at);
     const after = state.sessions.filter((session) => session.endedAt > decision.at);
     if (before.length < 3 || after.length < 3) {
@@ -332,6 +338,21 @@ function verifyDecisions(projectDir, env = process.env) {
     const mean = (sessions) => sessions.reduce((total, session) => total + valueOf(session.tally), 0) / sessions.length;
     const beforeRate = mean(before);
     const afterRate = mean(after);
+    // A rule's own fingerprint may simply never have been denied, before or after — there is
+    // nothing to compare, so "flat" (which a 0-vs-0 mean would otherwise report) would be a false
+    // signal that the rule made no difference. Report the absence of data instead.
+    if (isPermissionRule && beforeRate === 0 && afterRate === 0) {
+      results.push({
+        id: decision.id,
+        title: decision.title,
+        fingerprint: decision.fingerprint,
+        signal: signal ?? 'denials',
+        verdict: 'insufficient-data',
+        sessionsBefore: before.length,
+        sessionsAfter: after.length,
+      });
+      continue;
+    }
     const verdict = afterRate < beforeRate * 0.7 ? 'improved' : afterRate > beforeRate * 1.3 ? 'worse' : 'flat';
     results.push({
       id: decision.id,
