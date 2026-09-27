@@ -111,7 +111,7 @@ test('denylisted destructive commands never enter the allowlist', async () => {
 
   assert.equal(result.additions.length, 0);
   assert.equal(result.blocked[0].fingerprint, 'permission:Bash:git reset');
-  assert.equal(result.blocked[0].vetoReason, 'wildcard would cover destructive siblings');
+  assert.equal(result.blocked[0].vetoReason, 'ref-mutating git command');
   assert.equal(result.blocked[0].destructiveCommand, 'git reset --hard HEAD');
   assert.equal(fs.existsSync(path.join(projectDir, '.claude', 'settings.local.json')), false);
 });
@@ -136,7 +136,7 @@ test('an approved command never earns a rule whose wildcard covers a destructive
 
   assert.equal(result.additions.length, 0, 'Bash(git push:*) would also permit git push --force');
   assert.equal(result.blocked[0].fingerprint, 'permission:Bash:git push');
-  assert.equal(result.blocked[0].vetoReason, 'wildcard would cover destructive siblings');
+  assert.equal(result.blocked[0].vetoReason, 'ref-mutating git command');
   assert.equal(result.blocked[0].destructiveCommand, null);
 });
 
@@ -156,7 +156,7 @@ test('chain-unsafe shell prefixes never earn wildcard rules', async () => {
   enablePermissionAutomation(projectDir);
   const environment = writeWindow(projectDir, [
     ...Array.from({ length: 3 }, () => permissionTranscript('cd /Users/joese/Code/github.com/poindexter12/loadout')),
-    ...Array.from({ length: 3 }, () => permissionTranscript('source /private/tmp/claude-session/scratchpad/muximus-env.sh')),
+    ...Array.from({ length: 3 }, () => permissionTranscript('source /Users/joese/Code/github.com/poindexter12/loadout/scripts/env.sh')),
     ...Array.from({ length: 3 }, () => permissionTranscript('export CLAUDE_PLUGIN_ROOT=/Users/joese/Code/github.com/poindexter12/loadout;')),
   ]);
 
@@ -192,18 +192,21 @@ test('path-shaped command arguments retain their case in the fingerprint', async
   assert.equal(result.blocked[0].fingerprint, 'permission:Bash:cd /Users/joese/Code/github.com/poindexter12/loadout');
 });
 
-test('ephemeral and version-pinned paths never earn wildcard rules', async () => {
+test('version-pinned paths never earn wildcard rules, and session scratchpad paths never accumulate approvals at all', async () => {
   const projectDir = temporaryProject();
   enablePermissionAutomation(projectDir);
   const environment = writeWindow(projectDir, [
     ...Array.from({ length: 3 }, () => permissionTranscript('printf /Users/joese/.claude/plugins/cache/quartermaster/0.8.1/lib/index.js')),
+    // A per-session scratchpad path never recurs, so it is skipped before it can accumulate
+    // approvals at all — it must not even appear in `blocked` alongside a genuine veto.
     ...Array.from({ length: 3 }, () => permissionTranscript('printf /private/tmp/claude-session/scratchpad/muximus-env.sh')),
   ]);
 
   const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
 
   assert.equal(result.additions.length, 0);
-  assert.deepEqual(result.blocked.map((entry) => entry.vetoReason), Array(2).fill('ephemeral or version-pinned path'));
+  assert.equal(result.blocked.length, 1);
+  assert.equal(result.blocked[0].vetoReason, 'version-pinned path');
 });
 
 test('a bare Agent permission never bypasses Sidequest routing', async () => {
@@ -227,4 +230,92 @@ test('enabling automation writes only the project-local opt-in marker', () => {
   assert.equal(enablePermissionAutomation(projectDir), true);
   assert.equal(permissionAutomationEnabled(projectDir), true);
   assert.equal(fs.existsSync(path.join(projectDir, '.claude', 'settings.local.json')), true);
+});
+
+test('a per-agent worktree path never accumulates approvals, however often it recurs', async () => {
+  const projectDir = temporaryProject();
+  enablePermissionAutomation(projectDir);
+  const worktreeCommand = 'cat "/users/joese/.iarx/claude/sidequest/worktrees/loadout-4d277aeb/agent-a328d039f6d8fa01f/plugins/sidequest/lib/board.js"';
+  const environment = writeWindow(projectDir, Array.from({ length: 5 }, () => permissionTranscript(worktreeCommand)));
+
+  const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
+
+  assert.equal(result.additions.length, 0);
+  assert.equal(result.eligible.length, 0, 'a one-off worktree path never earns eligibility, not even a blocked veto');
+  assert.equal(result.blocked.length, 0);
+});
+
+test('a bare .claude/worktrees/agent-<hex> path (no per-project segment) never accumulates approvals', async () => {
+  const projectDir = temporaryProject();
+  enablePermissionAutomation(projectDir);
+  const worktreeCommand = 'cat "/Users/joese/.claude/worktrees/agent-a328d039f6d8fa01f/plugins/sidequest/lib/board.js"';
+  const environment = writeWindow(projectDir, Array.from({ length: 5 }, () => permissionTranscript(worktreeCommand)));
+
+  const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
+
+  assert.equal(result.additions.length, 0);
+  assert.equal(result.eligible.length, 0);
+});
+
+test('a `sleep <n>;` prefix never accumulates approvals', async () => {
+  const projectDir = temporaryProject();
+  enablePermissionAutomation(projectDir);
+  const environment = writeWindow(projectDir, Array.from({ length: 5 }, () => permissionTranscript('sleep 20; echo ready')));
+
+  const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
+
+  assert.equal(result.additions.length, 0);
+  assert.equal(result.eligible.length, 0);
+});
+
+test('docker, kubectl, and npm publish families never earn wildcard rules, even for a non-destructive-looking member', async () => {
+  // None of these three commands trip the destructive-word/phrase detector (no rm/delete/prune/
+  // unpublish), so a passing test here proves the DESTRUCTIVE_FAMILY veto itself still runs inside
+  // ruleTooBroadReason and was not left dead after the never-learn-git-subcommand consolidation.
+  const projectDir = temporaryProject();
+  enablePermissionAutomation(projectDir);
+  const environment = writeWindow(projectDir, [
+    ...Array.from({ length: 3 }, () => permissionTranscript('docker ps -a')),
+    ...Array.from({ length: 3 }, () => permissionTranscript('kubectl get pods')),
+    ...Array.from({ length: 3 }, () => permissionTranscript('npm publish')),
+  ]);
+
+  const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
+
+  assert.equal(result.additions.length, 0);
+  assert.equal(result.blocked.length, 3);
+  assert.deepEqual(result.blocked.map((entry) => entry.vetoReason), Array(3).fill('wildcard would cover destructive siblings'));
+  assert.deepEqual(result.blocked.map((entry) => entry.destructiveCommand), [null, null, null], 'the family veto fires even when no destructive word/phrase was ever observed');
+});
+
+test('git tag and git update-ref never earn wildcard rules', async () => {
+  const projectDir = temporaryProject();
+  enablePermissionAutomation(projectDir);
+  const environment = writeWindow(projectDir, [
+    ...Array.from({ length: 5 }, () => permissionTranscript('git tag v1.0.0')),
+    ...Array.from({ length: 5 }, () => permissionTranscript('git update-ref refs/heads/foo abc123')),
+  ]);
+
+  const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
+
+  assert.equal(result.additions.length, 0);
+  assert.deepEqual(result.blocked.map((entry) => entry.fingerprint).sort(), ['permission:Bash:git tag', 'permission:Bash:git update-ref']);
+  assert.deepEqual(result.blocked.map((entry) => entry.vetoReason), Array(2).fill('ref-mutating git command'));
+});
+
+test('a rule already covered by an existing deny is never re-added', async () => {
+  const projectDir = temporaryProject();
+  const settingsFile = path.join(projectDir, '.claude', 'settings.local.json');
+  fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+  fs.writeFileSync(settingsFile, JSON.stringify({
+    quartermaster: { autoApprovePermissions: true },
+    permissions: { deny: ['Bash(npm test:*)'] },
+  }, null, 2), 'utf8');
+  const environment = writeWindow(projectDir, Array.from({ length: 3 }, () => permissionTranscript('npm test -- --unit')));
+
+  const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
+
+  assert.equal(result.additions.length, 0, 'the fingerprint is already covered by an existing deny rule');
+  const after = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+  assert.equal(after.permissions.allow, undefined);
 });

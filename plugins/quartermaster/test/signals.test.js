@@ -118,6 +118,32 @@ test('tallyFromSignals flattens per-session counts', async () => {
   assert.equal(tally.corrections, 1);
 });
 
+test('denials are tallied per fingerprint, and finish() carries that map through to each session', async () => {
+  const npmUse = assistantToolUse('Bash', { command: 'npm test -- --unit' });
+  const gitUse = assistantToolUse('Bash', { command: 'git push origin main' });
+  const denialOf = (use) => ({
+    type: 'user',
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: use.message.content[0].id, content: 'denied' }] },
+    toolUseResult: 'denied',
+    toolDenialKind: 'permission-rule',
+    timestamp: '2026-08-01T10:02:00Z',
+  });
+  const signals = await collect([
+    npmUse, denialOf(npmUse),
+    npmUse, denialOf(npmUse),
+    gitUse, denialOf(gitUse),
+  ]);
+
+  assert.deepEqual(signals.sessions[0].denialsByFingerprint, {
+    'permission:Bash:npm test': 2,
+    'permission:Bash:git push': 1,
+  }, 'finish() must carry denialsByFingerprint into the per-session object, not drop it');
+
+  const tally = tallyFromSignals(signals);
+  assert.equal(tally.denialsByFingerprint['permission:Bash:npm test'], 2);
+  assert.equal(tally.denialsByFingerprint['permission:Bash:git push'], 1);
+});
+
 test('captures session purpose from title, opening ask, and area touched', async () => {
   const signals = await collect([
     { type: 'ai-title', aiTitle: 'Make the ingest pipeline reliable', sessionId: 'session-1' },

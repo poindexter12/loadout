@@ -122,6 +122,12 @@ loud: **keep** when it is used and helping, **improve** when it is used but unde
 **roll back** when it is unused or making no difference. Being honest about a recommendation that
 did not work is what makes the next one credible.
 
+A permission-allowlist rule (`permission:*` fingerprint) is scored only against denials that share
+its own fingerprint, never a session's total denial rate — an unrelated deny rule, an automode
+block, or a rejected TaskStop cannot count against a rule that could never have touched them.
+`insufficient-data` on one of these means that exact fingerprint was never denied before or after,
+not that the rule failed; it is silence, not a bad result, so do not report it as one.
+
 ### 4. Find the gaps
 
 Five questions, in value order. Spend your attention at the top. This is the order to look in, not
@@ -204,7 +210,7 @@ Before ordinary friction findings, check whether the project opted into automati
 node "${CLAUDE_PLUGIN_ROOT}/bin/quartermaster.js" allowlist --project "${CLAUDE_PROJECT_DIR}"
 ```
 
-Until the project opts in, that command only reports what it would add: it considers a fingerprint with at least three user approvals and no user rejection, and never considers a destructive Bash command. Blocked fingerprints are summarized by tool with the most-approved candidates; use `--blocked` for up to 25 detailed entries, which identify an over-broad wildcard rule or the sighted destructive command. Report the safe candidates and offer the opt-in; approving it is what turns on the writing, and every later addition goes to the decision ledger:
+Until the project opts in, that command only reports what it would add: it considers a fingerprint with at least three user approvals and no user rejection, and never considers a destructive Bash command. It also never starts counting a fingerprint in the first place for a one-off path that will not recur — a per-agent worktree path, a per-session scratchpad/tmp path, or a `sleep <n>;` prefix — and it never learns a ref-mutating git subcommand (`push`, `reset`, `clean`, `branch`, `rm`, `checkout`, `restore`, `tag`, `update-ref`; tags and refs are release-owned) or a rule an existing deny already covers. Blocked fingerprints are summarized by tool with the most-approved candidates; use `--blocked` for up to 25 detailed entries, which identify an over-broad wildcard rule or the sighted destructive command. Report the safe candidates and offer the opt-in; approving it is what turns on the writing, and every later addition goes to the decision ledger:
 
 ```
 node "${CLAUDE_PLUGIN_ROOT}/bin/quartermaster.js" enable-auto-allowlist --project "${CLAUDE_PROJECT_DIR}"

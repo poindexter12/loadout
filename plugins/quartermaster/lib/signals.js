@@ -275,6 +275,7 @@ function createSignalCollector() {
           toolCalls: tally.toolCalls,
           toolErrors: tally.toolErrors,
           denials: tally.denials,
+          denialsByFingerprint: tally.denialsByFingerprint,
           interrupts: tally.interrupts,
           corrections: tally.corrections,
           title: tally.title,

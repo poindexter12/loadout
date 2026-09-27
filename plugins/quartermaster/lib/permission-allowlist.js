@@ -96,6 +96,7 @@ function ruleTooBroadReason(fingerprint) {
   if (COMMAND_FRAGMENT.test(prefix) || hasUnmatchedQuote(prefix)) return 'command fragment';
   if (CHAIN_UNSAFE_EXECUTION.test(executable) || ARBITRARY_EXECUTION.test(executable)) return 'arbitrary execution';
   if (executable === 'git' && NEVER_LEARN_GIT_SUBCOMMAND.test(prefix.slice('git '.length))) return 'ref-mutating git command';
+  if (DESTRUCTIVE_FAMILY.test(prefix)) return 'wildcard would cover destructive siblings';
   if (VERSION_PINNED_PATH.test(prefix)) return 'version-pinned path';
   if (!prefix.includes(' ') && NEEDS_SUBCOMMAND.test(executable)) return 'bare tool';
   return null;
@@ -213,7 +214,7 @@ function appendRulesToSettings(projectDir, rules) {
   }
   const existing = Array.isArray(settings.permissions?.allow) ? settings.permissions.allow : [];
   const denies = Array.isArray(settings.permissions?.deny) ? settings.permissions.deny : [];
-  const newRules = additions.filter((rule) => !existing.includes(rule) && !denies.some((deny) => denyCoversRule(deny, rule));
+  const newRules = additions.filter((rule) => !existing.includes(rule) && !denies.some((deny) => denyCoversRule(deny, rule)));
   if (!newRules.length) return [];
 
   const allowMatch = /"allow"\s*:\s*\[/.exec(raw);
