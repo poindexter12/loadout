@@ -1144,6 +1144,44 @@ ${verify.outputTail}` : null
     const method = String(value || "").trim();
     return WORKING_TREE_DELIVERY_METHODS.has(method) ? method : null;
   }
+  function integrationWorktreeForBranch(repo, branch) {
+    let listing;
+    try {
+      listing = integrationGit(repo, ["worktree", "list", "--porcelain"]);
+    } catch (_) {
+      return null;
+    }
+    const targetRef = `refs/heads/${branch}`;
+    let currentPath = null;
+    for (const line of listing.split(/\r?\n/)) {
+      if (line.startsWith("worktree ")) {
+        currentPath = line.slice("worktree ".length).trim();
+      } else if (line.startsWith("branch ")) {
+        const matched = currentPath && line.slice("branch ".length).trim() === targetRef;
+        if (matched) return currentPath;
+        currentPath = null;
+      } else if (line === "") {
+        currentPath = null;
+      }
+    }
+    return null;
+  }
+  function targetBranchMergedIntoHead(repo, branch, deliveryCommit, head) {
+    const candidates = [deliveryCommit];
+    try {
+      candidates.push(integrationGit(repo, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]).toLowerCase());
+    } catch (_) {
+    }
+    return candidates.some((commit) => {
+      try {
+        integrationGit(repo, ["merge-base", "--is-ancestor", commit, head]);
+        return true;
+      } catch (error) {
+        if (error?.status === 1) return false;
+        throw error;
+      }
+    });
+  }
   function recordDeliveredSubmission(slug, idOrRef, opts) {
     opts = opts || {};
     const preflight = validateIntegrationSubmission(slug, idOrRef, { deliveryInteractionCommit: opts.deliveryInteractionCommit });
@@ -1156,16 +1194,23 @@ ${verify.outputTail}` : null
     const requestedCommit = String(opts.deliveryCommit || "").trim();
     if (!reason) return { ok: false, reason: "evidence_required", ticket, message: `${ticket.ref} reconciliation requires delivery evidence.` };
     if (!SUBMISSION_COMMIT_RE.test(requestedCommit)) return { ok: false, reason: "delivery_commit_required", ticket, message: `${ticket.ref} reconciliation requires the delivery commit hash.` };
-    const repo = String(readMeta(slug)?.path || "").trim();
+    let repo = String(readMeta(slug)?.path || "").trim();
     const target = opts.target;
     if (!repo || !target?.branch) return { ok: false, reason: "integration_target_unavailable", ticket };
     try {
-      const currentBranch = integrationGit(repo, ["branch", "--show-current"]);
+      let currentBranch = integrationGit(repo, ["branch", "--show-current"]);
       if (currentBranch !== target.branch) {
-        return { ok: false, reason: "branch_not_checked_out", ticket, message: `${target.branch} must be checked out before recording an external delivery; currently on ${currentBranch || "detached HEAD"}.` };
+        const worktreePath = integrationWorktreeForBranch(repo, target.branch);
+        if (worktreePath) {
+          repo = worktreePath;
+          currentBranch = target.branch;
+        }
       }
       const deliveryCommit = integrationGit(repo, ["rev-parse", "--verify", `${requestedCommit}^{commit}`]).toLowerCase();
       const resultingHead = integrationGit(repo, ["rev-parse", "HEAD"]).toLowerCase();
+      if (currentBranch !== target.branch && !targetBranchMergedIntoHead(repo, target.branch, deliveryCommit, resultingHead)) {
+        return { ok: false, reason: "branch_not_checked_out", ticket, message: `${target.branch} must be checked out before recording an external delivery; currently on ${currentBranch || "detached HEAD"}.` };
+      }
       const deliveryRevision = {
         source: `git:${target.upstream}`,
         value: resultingHead,
