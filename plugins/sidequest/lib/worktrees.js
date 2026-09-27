@@ -1106,11 +1106,13 @@ function reclaimUnclaimedDispatchWorktree(repository, dispatch, facts = {}) {
   }
   const incompleteCreation = !dispatchHasCompletedWorktreeCreation(dispatch);
   if (incompleteCreation && dispatch?.worktreeBindingSource !== "worktree-create") {
+    const bindingSource = String(dispatch?.worktreeBindingSource || "").trim();
     return {
       worktree: entry.worktree,
       reclaimed: false,
       reason: "lease_refused",
-      message: "WorktreeCreate binding was incomplete and could not be matched to this checkout; preserved the checkout."
+      bindingSource: bindingSource || null,
+      message: bindingSource ? `the checkout ${entry.worktree} is bound by "${bindingSource}", not by a board WorktreeCreate, so the board will not reclaim it; preserved the checkout. A retained checkout resumes only while it still matches its release (same revision, registration, and checkout identity, and either uncommitted work on the release base or committed progress with a checkpoint or handback). Restore it to that state, or remove it with \`git worktree remove\` once its work is saved elsewhere, then dispatch again.` : "WorktreeCreate binding was incomplete and could not be matched to this checkout; preserved the checkout."
     };
   }
   const resolveGitPath = (value) => path.isAbsolute(value) ? value : path.resolve(entry.worktree, value);

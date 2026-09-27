@@ -952,22 +952,39 @@ function createDispatch(dependencies) {
     const reportedWorktree = String(worktree || "").trim();
     return Boolean(projectPath && reportedWorktree && canonicalPath(projectPath) === canonicalPath(reportedWorktree));
   }
+  function inheritedReleasedContinuation(state) {
+    if (!state?.terminalAt || state.sharedTree !== false || state.worktreeBindingSource !== "continuation") return null;
+    if (state.boundAt || state.agentId || state.claimedAt) return null;
+    const continuation = state.continuation;
+    if (!continuation || typeof continuation !== "object" || !continuation.sourceWorktree || !continuation.lease) return null;
+    if (!["dirty_worktree_resume", "retained_worktree_resume"].includes(continuation.mode)) return null;
+    return continuation;
+  }
   function retainedWorktreeContinuationState(slug, ticket, state) {
     const attempts = Array.isArray(state?.attempts) ? state.attempts : [];
-    const attempt = attempts[attempts.length - 1] || null;
+    const inherited = inheritedReleasedContinuation(state);
+    const inheritedAttempt = inherited ? attempts.slice().reverse().find((candidate) => candidate?.terminalAt && candidate.terminalAt === inherited.releasedAt) || {
+      release: inherited.releaseKind ? { kind: inherited.releaseKind } : null,
+      ...inherited.releaseKind === "checkpoint" && inherited.commit ? { commit: inherited.commit } : {}
+    } : null;
+    const attempt = inheritedAttempt || attempts[attempts.length - 1] || null;
     const checkpointCommit = String(attempt?.commit || "").trim();
     const checkpointedTerminalFailure = Boolean(state?.terminalAt && checkpointCommit && ["failed", "died"].includes(state.outcome));
-    if (!state || !checkpointedTerminalFailure && state.outcome !== "released" || !state.terminalAt || state.sharedTree !== false) return null;
-    const recordedWorktree = String(state.worktree || "").trim();
+    if (!state || !inherited && !checkpointedTerminalFailure && state.outcome !== "released" || !state.terminalAt || state.sharedTree !== false) return null;
+    const releasedAt = inherited ? String(inherited.releasedAt || state.terminalAt) : state.terminalAt;
+    const recordedWorktree = String(state.worktree || inherited?.sourceWorktree || "").trim();
     if (!recordedWorktree || !fs.existsSync(recordedWorktree)) {
       return { fallback: continuationFallback("released_worktree_missing", recordedWorktree) };
     }
     let worktree = recordedWorktree;
     try {
-      const recordedGitDirectory = String(state.worktreeGitDirectory || "").trim();
-      const recordedCommonGitDirectory = String(state.worktreeCommonGitDirectory || "").trim();
-      const recordedCheckoutInstance = String(state.worktreeCheckoutInstance || "").trim();
-      const recordedRevision = String(state.terminalWorktreeRevision || "").trim();
+      const inheritedLease = inherited ? inherited.lease : null;
+      const recordedGitDirectory = String(state.worktreeGitDirectory || inheritedLease?.boundGitDirectory || "").trim();
+      const recordedCommonGitDirectory = String(state.worktreeCommonGitDirectory || inheritedLease?.boundCommonGitDirectory || "").trim();
+      const recordedCheckoutInstance = String(state.worktreeCheckoutInstance || inheritedLease?.boundCheckoutInstance || "").trim();
+      const recordedRevision = String(inheritedLease ? inheritedLease.boundRevision || "" : state.terminalWorktreeRevision || "").trim();
+      const recordedBaseCommit = String(inherited ? inherited.baseCommit || inheritedLease?.dispatchBaseline || "" : state.baseCommit || "").trim();
+      const recordedIdentity = inheritedLease?.identity?.status === "bound" && inheritedLease.identity.agentId ? { status: "bound", agentId: String(inheritedLease.identity.agentId) } : state.agentId ? { status: "bound", agentId: String(state.agentId) } : { status: "unknown" };
       const worktreeFacts = immutableWorktreeFacts(slug, recordedWorktree);
       if (!worktreeFacts || !recordedGitDirectory || !recordedCommonGitDirectory || !recordedCheckoutInstance || !recordedRevision) {
         return { fallback: continuationFallback("released_worktree_identity_unavailable", recordedWorktree) };
@@ -979,7 +996,7 @@ function createDispatch(dependencies) {
         gitDirectory: worktreeFacts.gitDirectory,
         commonGitDirectory: worktreeFacts.commonGitDirectory,
         dispatchRef: String(ticket?.ref || "") || null,
-        dispatchBaseline: String(state.baseCommit || "").trim() || null,
+        dispatchBaseline: recordedBaseCommit || null,
         observedRevision,
         observedWorktree: worktree,
         boundRevision: recordedRevision,
@@ -987,10 +1004,13 @@ function createDispatch(dependencies) {
         boundGitDirectory: recordedGitDirectory,
         boundCommonGitDirectory: recordedCommonGitDirectory,
         boundCheckoutInstance: recordedCheckoutInstance,
-        identity: state.agentId ? { status: "bound", agentId: String(state.agentId) } : { status: "unknown" },
+        identity: recordedIdentity,
         phase: "terminal",
         locked: false,
-        liveness: { status: "terminal", evidence: "released at " + state.terminalAt },
+        liveness: {
+          status: "terminal",
+          evidence: "released at " + releasedAt + (inherited ? `; unbound continuation attempt ${state.outcome} at ${state.terminalAt}` : "")
+        },
         provisioning: "host"
       };
       const lease = createWorktreeLease(leaseFacts);
@@ -1001,7 +1021,7 @@ function createDispatch(dependencies) {
       if (!resume.allowed) {
         return { fallback: continuationFallback("released_worktree_lease_refused", worktree, { cause: resume.reason }) };
       }
-      const baseCommit = gitOutput(worktree, ["rev-parse", "--verify", String(state.baseCommit) + "^{commit}"]);
+      const baseCommit = gitOutput(worktree, ["rev-parse", "--verify", recordedBaseCommit + "^{commit}"]);
       const commits = gitOutput(worktree, ["rev-list", "--reverse", baseCommit + ".." + observedRevision, "--"]).split(/\r?\n/).filter(Boolean);
       let sourceBranch = null;
       try {
@@ -1019,8 +1039,8 @@ function createDispatch(dependencies) {
               baseCommit,
               commit: observedRevision,
               clean: false,
-              releasedAt: state.terminalAt,
-              releaseKind: attempt?.release?.kind || "release",
+              releasedAt,
+              releaseKind: inherited?.releaseKind || attempt?.release?.kind || "release",
               lease: leaseFacts
             }
           };
@@ -1045,8 +1065,8 @@ function createDispatch(dependencies) {
           commit: observedRevision,
           commits,
           clean: true,
-          releasedAt: state.terminalAt,
-          releaseKind: attempt?.release?.kind || (checkpointCommit ? "checkpoint" : "handback"),
+          releasedAt,
+          releaseKind: inherited?.releaseKind || attempt?.release?.kind || (checkpointCommit ? "checkpoint" : "handback"),
           lease: leaseFacts
         }
       };
@@ -1133,7 +1153,8 @@ function createDispatch(dependencies) {
           if (!retainedContinuation?.continuation) {
             const checkpointCommit = String(t.checkpoint?.commit || "").trim();
             const checkpointRecovery = checkpointCommit ? ` Restore ${current.worktree} to checkpoint ${checkpointCommit}, then dispatch again; the board will resume that retained checkout without creating another.` : "";
-            throw new Error(`prepare dispatch: ${t.ref} cannot retry because ${recovery2.message || `immutable recovery fact ${recovery2.reason || "is unreadable"}`}${checkpointRecovery}`);
+            const resumeRefusal = retainedContinuation?.fallback?.reason ? ` The retained checkout cannot resume: ${retainedContinuation.fallback.reason}${retainedContinuation.fallback.cause ? ` (${typeof retainedContinuation.fallback.cause === "string" ? retainedContinuation.fallback.cause : JSON.stringify(retainedContinuation.fallback.cause)})` : ""}.` : "";
+            throw new Error(`prepare dispatch: ${t.ref} cannot retry because ${recovery2.message || `immutable recovery fact ${recovery2.reason || "is unreadable"}`}${resumeRefusal}${checkpointRecovery}`);
           }
         }
       }
@@ -1223,7 +1244,7 @@ function createDispatch(dependencies) {
         });
       }
       const priorTokenFile = dispatchTokenFile(t);
-      const releasedBinding = current?.outcome === "released" && Array.isArray(current.declaredFiles) && current.declaredFiles.length ? current.declaredFiles.slice() : null;
+      const releasedBinding = (current?.outcome === "released" || inheritedReleasedContinuation(current)) && Array.isArray(current.declaredFiles) && current.declaredFiles.length ? current.declaredFiles.slice() : null;
       const effectiveFiles = releasedBinding ? Array.from(/* @__PURE__ */ new Set([...releasedBinding, ...effectiveScope(slug, t)])) : effectiveScope(slug, t);
       const readonly = dispatchReadOnly(t);
       const requestedSharedTree = opts.sharedTree === true || !Object.hasOwn(opts, "sharedTree") && Boolean(current?.sharedTree);
