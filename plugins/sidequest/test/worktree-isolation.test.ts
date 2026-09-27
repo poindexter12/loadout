@@ -1960,56 +1960,65 @@ test('closure refusals name the next legal action instead of only their precondi
   assert.ok(integration.message.includes('without --integration'), 'names the closure that does work here');
 });
 
-test('SQ-2089: the configured integration authority decides the isolated baseline, or the dispatch refuses', () => {
-  const repository = initRepo('sq-baseline-authority-');
-  const git = (args: string[], cwd = repository) => execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true }).trim();
-  const commit = (message: string) => {
-    fs.appendFileSync(path.join(repository, 'README.md'), `${message}\n`);
-    git(['add', 'README.md']);
-    git(['commit', '--quiet', '-m', message]);
-    return git(['rev-parse', 'HEAD']);
-  };
+// The configured integration authority must decide the isolated baseline for both a writable dispatch
+// (an executor that can commit) and a read-only one (a fact-checking reviewer). The reported incident was
+// specifically a read-only dispatch silently using the host checkout's HEAD instead of the configured base,
+// but the same authority applies regardless of whether the executor can write, so both categories are covered.
+for (const variant of [
+  { label: 'writable', readonly: false },
+  { label: 'readonly', readonly: true },
+] as const) {
+  test(`SQ-2089: the configured integration authority decides the isolated baseline for a ${variant.label} category, or the dispatch refuses`, () => {
+    const repository = initRepo(`sq-baseline-authority-${variant.label}-`);
+    const git = (args: string[], cwd = repository) => execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true }).trim();
+    const commit = (message: string) => {
+      fs.appendFileSync(path.join(repository, 'README.md'), `${message}\n`);
+      git(['add', 'README.md']);
+      git(['commit', '--quiet', '-m', message]);
+      return git(['rev-parse', 'HEAD']);
+    };
 
-  // The incident shape: a remote pinned at a stale commit, a local main ahead of it, and a third branch
-  // configured as the integration authority. All three commits differ, so any baseline names its own source.
-  const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-baseline-remote-'));
-  git(['init', '-b', 'main', '--bare', '--quiet'], remote);
-  git(['remote', 'add', 'origin', remote]);
-  git(['push', '--quiet', 'origin', 'HEAD:refs/heads/main']);
-  const staleRemoteMain = git(['rev-parse', 'refs/remotes/origin/main']);
-  const localMain = commit('local main advance');
-  git(['branch', 'terminal-wave', 'HEAD']);
-  git(['checkout', '--quiet', 'terminal-wave']);
-  const terminalTip = commit('terminal wave advance');
-  git(['checkout', '--quiet', 'main']);
-  assert.equal(new Set([staleRemoteMain, localMain, terminalTip]).size, 3, 'the fixture must keep all three refs distinct');
+    // The incident shape: a remote pinned at a stale commit, a local main ahead of it, and a third branch
+    // configured as the integration authority. All three commits differ, so any baseline names its own source.
+    const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-baseline-remote-'));
+    git(['init', '-b', 'main', '--bare', '--quiet'], remote);
+    git(['remote', 'add', 'origin', remote]);
+    git(['push', '--quiet', 'origin', 'HEAD:refs/heads/main']);
+    const staleRemoteMain = git(['rev-parse', 'refs/remotes/origin/main']);
+    const localMain = commit('local main advance');
+    git(['branch', 'terminal-wave', 'HEAD']);
+    git(['checkout', '--quiet', 'terminal-wave']);
+    const terminalTip = commit('terminal wave advance');
+    git(['checkout', '--quiet', 'main']);
+    assert.equal(new Set([staleRemoteMain, localMain, terminalTip]).size, 3, 'the fixture must keep all three refs distinct');
 
-  const commitNames = new Map([[staleRemoteMain, 'stale origin/main'], [localMain, 'local main'], [terminalTip, 'terminal-wave tip']]);
-  const baselineSlug = store.ensureProject(repository, 'baseline authority').slug;
-  store.setCategory({ id: 'baseline-authority', name: 'baseline authority', route: { model: 'sonnet', effort: 'medium' }, fallback: null, enabled: true });
-  const dispatchBaseline = (worktreeBase: string, integrationBranch: string, label: string) => {
-    store.setBoardConfig(baselineSlug, { worktreeBase, integrationBranch, worktreeIsolation: true });
-    const ticket = store.createTicket(baselineSlug, { title: label, category: 'baseline-authority', files: ['README.md'], source: 'test' });
-    store.prepareDispatch(baselineSlug, ticket.ref, { sessionId: `baseline-${label}`, sharedTree: false });
-    const baseCommit = store.getTicket(baselineSlug, ticket.ref).dispatch.baseCommit;
-    return commitNames.get(baseCommit) || `an unconfigured commit (${baseCommit})`;
-  };
+    const commitNames = new Map([[staleRemoteMain, 'stale origin/main'], [localMain, 'local main'], [terminalTip, 'terminal-wave tip']]);
+    const baselineSlug = store.ensureProject(repository, `baseline authority (${variant.label})`).slug;
+    store.setCategory({ id: 'baseline-authority', name: 'baseline authority', route: { model: 'sonnet', effort: 'medium' }, fallback: null, enabled: true, readonly: variant.readonly });
+    const dispatchBaseline = (worktreeBase: string, integrationBranch: string, label: string) => {
+      store.setBoardConfig(baselineSlug, { worktreeBase, integrationBranch, worktreeIsolation: true });
+      const ticket = store.createTicket(baselineSlug, { title: label, category: 'baseline-authority', files: ['README.md'], source: 'test' });
+      store.prepareDispatch(baselineSlug, ticket.ref, { sessionId: `baseline-${variant.label}-${label}`, sharedTree: false });
+      const baseCommit = store.getTicket(baselineSlug, ticket.ref).dispatch.baseCommit;
+      return commitNames.get(baseCommit) || `an unconfigured commit (${baseCommit})`;
+    };
 
-  assert.equal(dispatchBaseline('origin-main', 'main', 'remote-main'), 'stale origin/main', 'origin-main forks the remote ref even when local main is ahead');
-  assert.equal(dispatchBaseline('local-main', 'main', 'local-main'), 'local main', 'local-main forks the local branch');
-  assert.equal(dispatchBaseline('local-main', 'terminal-wave', 'local-terminal'), 'terminal-wave tip', 'a configured non-main branch is the authority, not main');
+    assert.equal(dispatchBaseline('origin-main', 'main', 'remote-main'), 'stale origin/main', 'origin-main forks the remote ref even when local main is ahead');
+    assert.equal(dispatchBaseline('local-main', 'main', 'local-main'), 'local main', 'local-main forks the local branch');
+    assert.equal(dispatchBaseline('local-main', 'terminal-wave', 'local-terminal'), 'terminal-wave tip', 'a configured non-main branch is the authority, not main');
 
-  // A configured branch with no remote ref used to silently fall back to whatever main happened to be, which
-  // is how an isolated executor produced a candidate parented on a commit nobody configured.
-  store.setBoardConfig(baselineSlug, { worktreeBase: 'origin-main', integrationBranch: 'terminal-wave', worktreeIsolation: true });
-  const unpushed = store.createTicket(baselineSlug, { title: 'unpushed authority', category: 'baseline-authority', files: ['README.md'], source: 'test' });
-  assert.throws(
-    () => store.prepareDispatch(baselineSlug, unpushed.ref, { sessionId: 'baseline-unpushed', sharedTree: false }),
-    /refs\/remotes\/origin\/terminal-wave" for branch "terminal-wave" does not exist[\s\S]*worktreeBase is "origin-main"[\s\S]*--worktree-base local-main/,
-  );
-  assert.equal(store.getTicket(baselineSlug, unpushed.ref).dispatchNonce, null, 'a refused baseline mints no token');
+    // A configured branch with no remote ref used to silently fall back to whatever main happened to be, which
+    // is how an isolated executor produced a candidate parented on a commit nobody configured.
+    store.setBoardConfig(baselineSlug, { worktreeBase: 'origin-main', integrationBranch: 'terminal-wave', worktreeIsolation: true });
+    const unpushed = store.createTicket(baselineSlug, { title: 'unpushed authority', category: 'baseline-authority', files: ['README.md'], source: 'test' });
+    assert.throws(
+      () => store.prepareDispatch(baselineSlug, unpushed.ref, { sessionId: `baseline-${variant.label}-unpushed`, sharedTree: false }),
+      /refs\/remotes\/origin\/terminal-wave" for branch "terminal-wave" does not exist[\s\S]*worktreeBase is "origin-main"[\s\S]*--worktree-base local-main/,
+    );
+    assert.equal(store.getTicket(baselineSlug, unpushed.ref).dispatchNonce, null, 'a refused baseline mints no token');
 
-  // Pushing it makes the same configuration legal, so the refusal is about the missing ref and nothing else.
-  git(['push', '--quiet', 'origin', 'terminal-wave:refs/heads/terminal-wave']);
-  assert.equal(dispatchBaseline('origin-main', 'terminal-wave', 'remote-terminal'), 'terminal-wave tip', 'origin-main forks the configured branch once its remote ref exists');
-});
+    // Pushing it makes the same configuration legal, so the refusal is about the missing ref and nothing else.
+    git(['push', '--quiet', 'origin', 'terminal-wave:refs/heads/terminal-wave']);
+    assert.equal(dispatchBaseline('origin-main', 'terminal-wave', 'remote-terminal'), 'terminal-wave tip', 'origin-main forks the configured branch once its remote ref exists');
+  });
+}

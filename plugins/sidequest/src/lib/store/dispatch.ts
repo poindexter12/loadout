@@ -1468,7 +1468,10 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
     const configuredIntegrationMode = String(readMeta(slug)?.integrationMode || 'auto').trim().toLowerCase();
     const configuredWorktreeBase = boardConfig(slug)?.worktreeBase || 'auto';
     const explicitIntegrationTarget = opts.integrationBranch != null || opts.integrationMode != null;
-    const isolatedRepositoryDispatch = !sharedTree && !readonly && !nonRepoOutput;
+    // An isolated checkout must begin at the configured integration authority
+    // regardless of whether its executor can write. Read-only fact-checking
+    // against the host checkout silently uses that checkout's current HEAD.
+    const isolatedRepositoryDispatch = !sharedTree && !nonRepoOutput;
     const remoteIntegrationTarget = () => {
       try {
         return integrationTarget(slug, { mode: 'remote' });

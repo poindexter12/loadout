@@ -1272,7 +1272,7 @@ function createDispatch(dependencies) {
       const configuredIntegrationMode = String(readMeta(slug)?.integrationMode || "auto").trim().toLowerCase();
       const configuredWorktreeBase = boardConfig(slug)?.worktreeBase || "auto";
       const explicitIntegrationTarget = opts.integrationBranch != null || opts.integrationMode != null;
-      const isolatedRepositoryDispatch = !sharedTree && !readonly && !nonRepoOutput;
+      const isolatedRepositoryDispatch = !sharedTree && !nonRepoOutput;
       const remoteIntegrationTarget = () => {
         try {
           return integrationTarget(slug, { mode: "remote" });
