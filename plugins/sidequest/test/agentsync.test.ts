@@ -1105,6 +1105,22 @@ test('briefings synchronize stale worktrees to their recorded integration target
   assert.ok(briefing.includes('If fetching or resetting fails, stop and report the failure instead of working from the stale base.'));
 });
 
+test('SQ-162: only an isolated briefing says the capture binds the worktree and needs a committed candidate', () => {
+  clearCatalog();
+  const root = tmpDir();
+  const render = (sharedTree: boolean) => agentsync.renderTicketBriefing({
+    ref: 'SQ-1620', title: 'Capture binding guidance', model: 'opus', effort: 'high', category: {},
+    executorVerify: 'node --test plugins/sidequest/test/agentsync.test.ts',
+    dispatch: { sharedTree, baseCommit: 'c'.repeat(40), integrationTarget: { mode: 'local', branch: 'main' } },
+  }, 'capture-binding-token', undefined, root);
+  const isolated = render(false);
+  const shared = render(true);
+  assert.match(isolated, /this is the pinned verifier/);
+  assert.match(isolated, /This dispatch is isolated, so the wrapper runs in and records your bound worktree/);
+  assert.match(shared, /this is the pinned verifier/);
+  assert.doesNotMatch(shared, /records your bound worktree/);
+});
+
 test('small-ticket lifecycle retires three optional board round trips', () => {
   clearCatalog();
   const root = tmpDir();
@@ -1130,6 +1146,9 @@ test('small-ticket lifecycle retires three optional board round trips', () => {
   assert.match(briefing, /git merge-base --is-ancestor/);
   assert.match(briefing, /git reset --hard/);
   assert.match(briefing, /in the FOREGROUND with an explicit generous timeout of up to 600000 ms/);
+  // SQ-162: an isolated dispatch's capture binds its worktree and refuses an uncommitted candidate.
+  assert.match(briefing, /runs in and records your bound worktree whatever directory you start it from/);
+  assert.match(briefing, /commit the candidate with the board commit tool first, then run the wrapper/);
   assert.match(briefing, /A backgrounded verify's completion does not wake you, so going idle on it parks the claim indefinitely/);
   assert.match(briefing, /use bounded foreground until-loops instead of backgrounding or going idle/);
   assert.doesNotMatch(briefing, /only for background verification/);
