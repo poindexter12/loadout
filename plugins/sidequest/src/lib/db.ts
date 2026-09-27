@@ -21,12 +21,50 @@ try {
   process.emitWarning = originalEmitWarning;
 }
 
+// Bump this for ANY schema script change, including a new CREATE ... IF NOT EXISTS: openDb skips the whole
+// script when the stored version is current, so an unversioned addition never reaches an existing board (SQ-125).
 export const CURRENT_SCHEMA_VERSION = 8;
 // Board writers normally finish in milliseconds; fifteen-second SQLite waits avoid failing on ordinary handoffs without hiding a wedged writer forever.
 export const SQLITE_BUSY_TIMEOUT_MS = 15_000;
 const SQLITE_BUSY_RETRY_ATTEMPTS = 3;
 const SQLITE_BUSY_RETRY_DELAYS_MS = [50, 100] as const;
 const busySleep = new Int32Array(new SharedArrayBuffer(4));
+
+// The board database is machine-global, so a process with a short external deadline cannot afford the
+// server's lock budget: 3 attempts of 15s outlast Claude Code's 10s hook timeout, and a hook killed at the
+// deadline has neither allowed nor refused anything (SQ-125). Such a process installs its own budget under
+// this global key before anything opens the board. It is a process global rather than an import so a
+// bundled hook can install it without loading this module, and so it never leaks into child processes.
+export const SQLITE_BUSY_POLICY_KEY = Symbol.for('sidequest.sqlite-busy-policy');
+
+export interface SqliteBusyPolicy {
+  /** Names the budget in lock diagnostics, e.g. `hook`. */
+  readonly label: string;
+  /** SQLite busy_timeout for each attempt. */
+  readonly timeoutMs: number;
+  /** Total attempts, including the first. */
+  readonly attempts: number;
+  /** Runs once the budget is spent, before the lock error is thrown. A hook uses it to fail open. */
+  readonly onExhausted?: (error: Error) => void;
+}
+
+const SERVER_SQLITE_BUSY_POLICY: SqliteBusyPolicy = Object.freeze({
+  label: 'server',
+  timeoutMs: SQLITE_BUSY_TIMEOUT_MS,
+  attempts: SQLITE_BUSY_RETRY_ATTEMPTS,
+});
+
+function positiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0;
+}
+
+export function sqliteBusyPolicy(): SqliteBusyPolicy {
+  const installed: unknown = Reflect.get(globalThis, SQLITE_BUSY_POLICY_KEY);
+  if (!isRecord(installed) || !positiveInteger(installed.timeoutMs) || !positiveInteger(installed.attempts)) {
+    return SERVER_SQLITE_BUSY_POLICY;
+  }
+  return installed as unknown as SqliteBusyPolicy;
+}
 
 // Pre-v5 default text; the v5 migration only refreshes rows the user never customized.
 const OLD_CODEBASE_EXPLORATION = {
@@ -201,26 +239,31 @@ function isSqliteBusy(error: unknown): boolean {
   return isSqliteBusy(Reflect.get(error, 'cause'));
 }
 
-function sqliteBusyError(operation: string, startedAt: number, cause: unknown): Error {
+function sqliteBusyError(operation: string, startedAt: number, cause: unknown, policy: SqliteBusyPolicy): Error {
   const elapsedMs = Date.now() - startedAt;
   const originalMessage = cause instanceof Error ? cause.message : String(cause);
+  const attempts = `${policy.attempts} attempt${policy.attempts === 1 ? '' : 's'}`;
+  const budget = policy === SERVER_SQLITE_BUSY_POLICY ? '' : ` (${policy.label} lock budget)`;
   return new Error(
-    `Sidequest database stayed locked while ${operation} for ${elapsedMs}ms after ${SQLITE_BUSY_RETRY_ATTEMPTS} attempts, each waiting up to ${SQLITE_BUSY_TIMEOUT_MS}ms. SQLite does not expose the locking process or claim identity. Check active Sidequest writers, then retry. Original SQLite error: ${originalMessage}`,
+    `Sidequest database stayed locked while ${operation} for ${elapsedMs}ms after ${attempts}, each waiting up to ${policy.timeoutMs}ms${budget}. SQLite does not expose the locking process or claim identity. Check active Sidequest writers, then retry. Original SQLite error: ${originalMessage}`,
     { cause },
   );
 }
 
 function retryWhenSqliteBusy<T>(operation: string, work: () => T): T {
+  const policy = sqliteBusyPolicy();
   const startedAt = Date.now();
-  for (let attempt = 0; attempt < SQLITE_BUSY_RETRY_ATTEMPTS; attempt += 1) {
+  for (let attempt = 0; attempt < policy.attempts; attempt += 1) {
     try {
       return work();
     } catch (error) {
-      if (!isSqliteBusy(error) || attempt === SQLITE_BUSY_RETRY_ATTEMPTS - 1) {
-        if (isSqliteBusy(error)) throw sqliteBusyError(operation, startedAt, error);
-        throw error;
+      if (!isSqliteBusy(error)) throw error;
+      if (attempt === policy.attempts - 1) {
+        const exhausted = sqliteBusyError(operation, startedAt, error, policy);
+        policy.onExhausted?.(exhausted);
+        throw exhausted;
       }
-      Atomics.wait(busySleep, 0, 0, SQLITE_BUSY_RETRY_DELAYS_MS[attempt] ?? 0);
+      Atomics.wait(busySleep, 0, 0, SQLITE_BUSY_RETRY_DELAYS_MS[attempt] ?? SQLITE_BUSY_RETRY_DELAYS_MS.at(-1));
     }
   }
   throw new Error(`SQLite busy retry exhausted without an error while ${operation}.`);
@@ -403,11 +446,37 @@ function applyCategoryRows(
   return [...categories.values()];
 }
 
+function newerSchemaError(schemaVersion: number): Error {
+  return new Error(`Sidequest database schema ${schemaVersion} is newer than supported schema ${CURRENT_SCHEMA_VERSION}.`);
+}
+
+// Pure reads: a WAL reader never waits on the write lock, so this answers even while a long writer holds it.
+function storedSchemaVersion(database: DatabaseSync): number | null {
+  if (!prepareCached(database, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").get()) return null;
+  const row = prepareCached(database, "SELECT value FROM meta WHERE key = 'schema_version'").get();
+  return row ? Number(JSON.parse(row.value as string)) : null;
+}
+
 export function openDb(homeRoot: string): SidequestDatabase {
   fs.mkdirSync(homeRoot, { recursive: true });
-  const database = new DatabaseSyncConstructor(path.join(homeRoot, 'sidequest.db'), { timeout: SQLITE_BUSY_TIMEOUT_MS });
+  const { timeoutMs } = sqliteBusyPolicy();
+  const database = new DatabaseSyncConstructor(path.join(homeRoot, 'sidequest.db'), { timeout: timeoutMs });
+  // Already-WAL databases answer this without the write lock; only a fresh file has to convert.
   retryWhenSqliteBusy('enabling WAL mode', () => database.exec('PRAGMA journal_mode=WAL'));
-  database.exec(`PRAGMA busy_timeout=${SQLITE_BUSY_TIMEOUT_MS}`);
+  database.exec(`PRAGMA busy_timeout=${timeoutMs}`);
+  // Every hook process opens the board, so a current schema must open without a single write statement: any
+  // DML, even an INSERT OR IGNORE that changes nothing, takes the machine-global write lock and queues this
+  // open behind whatever long writer holds it (SQ-125). Only a missing or older schema reaches the DDL.
+  const storedVersion = retryWhenSqliteBusy('reading the schema version', () => storedSchemaVersion(database));
+  if (storedVersion !== null && storedVersion > CURRENT_SCHEMA_VERSION) throw newerSchemaError(storedVersion);
+  if (storedVersion !== CURRENT_SCHEMA_VERSION) upgradeSchema(database);
+  database.exec('PRAGMA foreign_keys=ON');
+  const sidequestDatabase = database as SidequestDatabase;
+  sidequestDatabase.__sidequestSchemaVersion = CURRENT_SCHEMA_VERSION;
+  return sidequestDatabase;
+}
+
+function upgradeSchema(database: DatabaseSync): void {
   retryWhenSqliteBusy('initializing database schema', () => database.exec(`
     CREATE TABLE IF NOT EXISTS projects (
       slug TEXT PRIMARY KEY,
@@ -471,9 +540,7 @@ export function openDb(homeRoot: string): SidequestDatabase {
     });
     schemaVersion = 2;
   }
-  if (schemaVersion > CURRENT_SCHEMA_VERSION) {
-    throw new Error(`Sidequest database schema ${schemaVersion} is newer than supported schema ${CURRENT_SCHEMA_VERSION}.`);
-  }
+  if (schemaVersion > CURRENT_SCHEMA_VERSION) throw newerSchemaError(schemaVersion);
   if (schemaVersion < 3) {
     txn(database, () => {
       const prefsRow = prepareCached(database, "SELECT data FROM globals WHERE key = 'model-prefs'").get();
@@ -797,10 +864,6 @@ export function openDb(homeRoot: string): SidequestDatabase {
     });
     schemaVersion = 8;
   }
-  database.exec('PRAGMA foreign_keys=ON');
-  const sidequestDatabase = database as SidequestDatabase;
-  sidequestDatabase.__sidequestSchemaVersion = CURRENT_SCHEMA_VERSION;
-  return sidequestDatabase;
 }
 
 export function getRow<T = unknown, N extends TableName = TableName>(

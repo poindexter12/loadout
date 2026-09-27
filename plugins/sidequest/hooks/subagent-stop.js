@@ -23,13 +23,42 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
+// src/hooks/shared/sqlite-budget.ts
+var import_node_fs = __toESM(require("node:fs"));
+var import_node_path = __toESM(require("node:path"));
+var SQLITE_BUSY_POLICY_KEY = /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy");
+var HOOK_SQLITE_BUSY_TIMEOUT_MS = 1500;
+function hookName() {
+  return import_node_path.default.basename(process.argv[1] || "hook", ".js");
+}
+function installBudget(onExhausted) {
+  Reflect.set(globalThis, SQLITE_BUSY_POLICY_KEY, Object.freeze({
+    label: "hook",
+    timeoutMs: HOOK_SQLITE_BUSY_TIMEOUT_MS,
+    attempts: 1,
+    onExhausted
+  }));
+}
+function writeStderr(text) {
+  try {
+    import_node_fs.default.writeSync(2, text);
+  } catch (_) {
+  }
+}
+function failOpen(error) {
+  writeStderr(`sidequest: ${hookName()} allowed this event without its board check (fail-open, board lock busy): ${error.message}
+`);
+  process.exit(0);
+}
+installBudget(failOpen);
+
 // src/hooks/subagent-stop.ts
-var import_node_fs2 = __toESM(require("node:fs"));
+var import_node_fs3 = __toESM(require("node:fs"));
 var import_node_os = __toESM(require("node:os"));
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_path3 = __toESM(require("node:path"));
 
 // src/hooks/shared/input.ts
-var import_node_fs = __toESM(require("node:fs"));
+var import_node_fs2 = __toESM(require("node:fs"));
 
 // src/lib/exec-names.ts
 var EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
@@ -64,7 +93,7 @@ function isRecord(value) {
 }
 function readStdin() {
   try {
-    const raw = import_node_fs.default.readFileSync(0, "utf8");
+    const raw = import_node_fs2.default.readFileSync(0, "utf8");
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!isRecord(parsed)) return null;
@@ -142,12 +171,12 @@ function writeContext(hookEventName, additionalContext, initialUserMessage = "")
 }
 
 // src/hooks/shared/paths.ts
-var import_node_path = __toESM(require("node:path"));
+var import_node_path2 = __toESM(require("node:path"));
 function pluginRoot() {
-  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path.default.join(__dirname, "..");
+  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path2.default.join(__dirname, "..");
 }
 function runtimeModule(name) {
-  return import_node_path.default.join(pluginRoot(), "lib", `${name}.js`);
+  return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
 // src/hooks/subagent-stop.ts
@@ -281,9 +310,9 @@ function stopVerdict(store, claims, classification, dispatchStopped, terminalTic
 }
 function clearNearTurnCapCounter(agentId) {
   if (!agentId) return;
-  const counter = import_node_path2.default.join(import_node_os.default.tmpdir(), "sidequest-near-turn-cap", encodeURIComponent(agentId));
+  const counter = import_node_path3.default.join(import_node_os.default.tmpdir(), "sidequest-near-turn-cap", encodeURIComponent(agentId));
   try {
-    import_node_fs2.default.unlinkSync(counter);
+    import_node_fs3.default.unlinkSync(counter);
   } catch (_) {
   }
 }

@@ -23,12 +23,41 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
+// src/hooks/shared/sqlite-budget.ts
+var import_node_fs = __toESM(require("node:fs"));
+var import_node_path = __toESM(require("node:path"));
+var SQLITE_BUSY_POLICY_KEY = /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy");
+var HOOK_SQLITE_BUSY_TIMEOUT_MS = 1500;
+function hookName() {
+  return import_node_path.default.basename(process.argv[1] || "hook", ".js");
+}
+function installBudget(onExhausted) {
+  Reflect.set(globalThis, SQLITE_BUSY_POLICY_KEY, Object.freeze({
+    label: "hook",
+    timeoutMs: HOOK_SQLITE_BUSY_TIMEOUT_MS,
+    attempts: 1,
+    onExhausted
+  }));
+}
+function writeStderr(text) {
+  try {
+    import_node_fs.default.writeSync(2, text);
+  } catch (_) {
+  }
+}
+function failOpen(error) {
+  writeStderr(`sidequest: ${hookName()} allowed this event without its board check (fail-open, board lock busy): ${error.message}
+`);
+  process.exit(0);
+}
+installBudget(failOpen);
+
 // src/hooks/guard-home-delete.ts
 var import_node_os = __toESM(require("node:os"));
-var import_node_path = __toESM(require("node:path"));
+var import_node_path2 = __toESM(require("node:path"));
 
 // src/hooks/shared/input.ts
-var import_node_fs = __toESM(require("node:fs"));
+var import_node_fs2 = __toESM(require("node:fs"));
 
 // src/lib/exec-names.ts
 var EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
@@ -63,7 +92,7 @@ function isRecord(value) {
 }
 function readStdin() {
   try {
-    const raw = import_node_fs.default.readFileSync(0, "utf8");
+    const raw = import_node_fs2.default.readFileSync(0, "utf8");
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!isRecord(parsed)) return null;
@@ -154,13 +183,13 @@ function normalizePath(value) {
 }
 function isProtectedPath(command) {
   if (/\$home\b|\$env:userprofile\b|%userprofile%|(?<!\w)~(?=[\\/\s"']|$)/i.test(command)) return true;
-  const home = import_node_path.default.resolve(import_node_os.default.homedir());
-  const protectedRoots = [home, import_node_path.default.join(home, ".claude"), import_node_path.default.dirname(home), import_node_path.default.parse(home).root].map(normalizePath);
-  return command.replace(/["']/g, "").split(/\s+/).filter((target) => target !== "\\" && import_node_path.default.isAbsolute(target)).some((target) => {
-    const resolved = import_node_path.default.resolve(target);
-    if (import_node_path.default.parse(resolved).root === resolved) return true;
+  const home = import_node_path2.default.resolve(import_node_os.default.homedir());
+  const protectedRoots = [home, import_node_path2.default.join(home, ".claude"), import_node_path2.default.dirname(home), import_node_path2.default.parse(home).root].map(normalizePath);
+  return command.replace(/["']/g, "").split(/\s+/).filter((target) => target !== "\\" && import_node_path2.default.isAbsolute(target)).some((target) => {
+    const resolved = import_node_path2.default.resolve(target);
+    if (import_node_path2.default.parse(resolved).root === resolved) return true;
     const normalized = normalizePath(resolved);
-    return protectedRoots.some((root) => root === normalized || root.startsWith(`${normalized}${import_node_path.default.sep}`));
+    return protectedRoots.some((root) => root === normalized || root.startsWith(`${normalized}${import_node_path2.default.sep}`));
   });
 }
 function main() {

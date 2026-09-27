@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './shared/sqlite-budget.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';

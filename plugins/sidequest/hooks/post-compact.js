@@ -23,8 +23,37 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// src/hooks/shared/input.ts
+// src/hooks/shared/sqlite-budget.ts
 var import_node_fs = __toESM(require("node:fs"));
+var import_node_path = __toESM(require("node:path"));
+var SQLITE_BUSY_POLICY_KEY = /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy");
+var HOOK_SQLITE_BUSY_TIMEOUT_MS = 1500;
+function hookName() {
+  return import_node_path.default.basename(process.argv[1] || "hook", ".js");
+}
+function installBudget(onExhausted) {
+  Reflect.set(globalThis, SQLITE_BUSY_POLICY_KEY, Object.freeze({
+    label: "hook",
+    timeoutMs: HOOK_SQLITE_BUSY_TIMEOUT_MS,
+    attempts: 1,
+    onExhausted
+  }));
+}
+function writeStderr(text) {
+  try {
+    import_node_fs.default.writeSync(2, text);
+  } catch (_) {
+  }
+}
+function failOpen(error) {
+  writeStderr(`sidequest: ${hookName()} allowed this event without its board check (fail-open, board lock busy): ${error.message}
+`);
+  process.exit(0);
+}
+installBudget(failOpen);
+
+// src/hooks/shared/input.ts
+var import_node_fs2 = __toESM(require("node:fs"));
 
 // src/lib/exec-names.ts
 var EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
@@ -59,7 +88,7 @@ function isRecord(value) {
 }
 function readStdin() {
   try {
-    const raw = import_node_fs.default.readFileSync(0, "utf8");
+    const raw = import_node_fs2.default.readFileSync(0, "utf8");
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!isRecord(parsed)) return null;
@@ -87,12 +116,12 @@ function isSubagent(input) {
 }
 
 // src/hooks/shared/compaction.ts
-var import_node_fs2 = __toESM(require("node:fs"));
+var import_node_fs3 = __toESM(require("node:fs"));
 var import_node_os = __toESM(require("node:os"));
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_path3 = __toESM(require("node:path"));
 
 // src/hooks/shared/paths.ts
-var import_node_path = __toESM(require("node:path"));
+var import_node_path2 = __toESM(require("node:path"));
 
 // src/hooks/shared/compaction.ts
 var TRANSCRIPT_BYTES_THRESHOLD = 3 * 1024 * 1024;
@@ -100,23 +129,23 @@ function isPrimarySession(input) {
   return !isSubagent(input);
 }
 function stateDirectory() {
-  const home = String(process.env.SIDEQUEST_HOME || "").trim() || import_node_path2.default.join(import_node_os.default.homedir(), ".claude", "sidequest");
-  return import_node_path2.default.join(home, "compaction-suggestions");
+  const home = String(process.env.SIDEQUEST_HOME || "").trim() || import_node_path3.default.join(import_node_os.default.homedir(), ".claude", "sidequest");
+  return import_node_path3.default.join(home, "compaction-suggestions");
 }
 function stateFile(sessionId) {
-  return import_node_path2.default.join(stateDirectory(), `${encodeURIComponent(sessionId)}.json`);
+  return import_node_path3.default.join(stateDirectory(), `${encodeURIComponent(sessionId)}.json`);
 }
 function transcriptBytes(transcriptPath) {
   try {
-    return import_node_fs2.default.statSync(String(transcriptPath || "")).size;
+    return import_node_fs3.default.statSync(String(transcriptPath || "")).size;
   } catch (_) {
     return 0;
   }
 }
 function writeState(sessionId, state) {
   try {
-    import_node_fs2.default.mkdirSync(stateDirectory(), { recursive: true });
-    import_node_fs2.default.writeFileSync(stateFile(sessionId), JSON.stringify(state));
+    import_node_fs3.default.mkdirSync(stateDirectory(), { recursive: true });
+    import_node_fs3.default.writeFileSync(stateFile(sessionId), JSON.stringify(state));
     return true;
   } catch (_) {
     return false;

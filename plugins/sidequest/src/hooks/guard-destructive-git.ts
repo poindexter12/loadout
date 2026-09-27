@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { failClosedOnBoardBusy, refuseWhenBoardBusy } from './shared/sqlite-budget.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -6,6 +7,9 @@ import { createRequire } from 'node:module';
 import { readStdin, stringField, isRecord } from './shared/input.js';
 import { writeDeny } from './shared/output.js';
 import { withoutHereDocBodies } from './shared/heredocs.js';
+
+// A publication guard: refuse under board lock contention rather than allow a push unchecked (SQ-133).
+failClosedOnBoardBusy();
 
 const runtimeRequire = createRequire(__filename);
 const store = runtimeRequire(['..', 'lib', 'store'].join('/'));
@@ -127,9 +131,18 @@ function configuredIntegrationBranch(repo: string): string {
     const project = store.findProject(repo);
     if (project.ok) return store.boardConfig(project.slug).integrationBranch;
   } catch {
-    // An unavailable board must not make ordinary Git commands fail closed.
+    // An unregistered or unreadable board falls back to main. Board lock contention never lands here: the
+    // fail-closed budget refuses the call from inside the board read.
   }
   return 'main';
+}
+
+// Only a push that targets the remote's published branch needs the board, so the integration branch is read
+// then, at most once. Tags, destructive-reset checks and feature-branch pushes never touch the board, so board
+// lock contention cannot refuse them.
+function lazyIntegrationBranch(repo: string): () => string {
+  let branch: string | undefined;
+  return () => (branch ??= configuredIntegrationBranch(repo));
 }
 
 function defaultBranch(repo: string, remote: string): string {
@@ -171,7 +184,7 @@ function tagAction(args: string): boolean {
   return !lists && tokens.some((token) => !token.startsWith('-'));
 }
 
-function pushAction(args: string, repo: string, integrationBranch: string): boolean {
+function pushAction(args: string, repo: string, integrationBranch: () => string): boolean {
   const tokens = shellTokens(args);
   if (tokens.some((token) => token === '--tags' || token === '--follow-tags' || token === '--all' || token === '--mirror')) return true;
   const positional = tokens.filter((token) => !token.startsWith('-'));
@@ -182,12 +195,12 @@ function pushAction(args: string, repo: string, integrationBranch: string): bool
   const defaultTarget = upstream(repo)?.branch || currentBranch(repo);
   const published = defaultBranch(repo, remote);
   return specs.length === 0
-    ? defaultTarget === published && defaultTarget !== integrationBranch
+    ? defaultTarget === published && defaultTarget !== integrationBranch()
     : specs.some((spec) => {
       const destination = spec.includes(':') ? spec.slice(spec.indexOf(':') + 1) : spec;
       if (!destination || isTagRef(destination)) return true;
       const target = destination === 'HEAD' ? defaultTarget : branchName(destination);
-      return target === published && target !== integrationBranch;
+      return target === published && target !== integrationBranch();
     });
 }
 
@@ -199,9 +212,8 @@ function publicationAction(command: string, cwd: string): { label: string; repo:
     const action = match[2] || '';
     const args = match[3] || '';
     const repo = actionRepo(command, cwd, match.index || 0, optionPath ? `-C ${optionPath}` : '');
-    const integrationBranch = configuredIntegrationBranch(repo);
     if (action.toLowerCase() === 'tag' && tagAction(args)) return { label: 'manual git tag', repo };
-    if (action.toLowerCase() === 'push' && pushAction(args, repo, integrationBranch)) {
+    if (action.toLowerCase() === 'push' && pushAction(args, repo, lazyIntegrationBranch(repo))) {
       return { label: `a push to the published branch (${defaultBranch(repo, upstream(repo)?.remote || 'origin')})`, repo };
     }
   }
@@ -248,6 +260,7 @@ function main(): void {
 
 try {
   main();
-} catch (_) {
+} catch (error) {
+  refuseWhenBoardBusy(error);
   process.exit(0);
 }

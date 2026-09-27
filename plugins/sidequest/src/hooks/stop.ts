@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './shared/sqlite-budget.js';
 import { boardReconciliationReminder } from './board-reconciliation-reminder.js';
 import { compactionSuggestion } from './shared/compaction.js';
 import { readStdin } from './shared/input.js';

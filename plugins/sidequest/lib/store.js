@@ -1294,14 +1294,14 @@ function installedProviderSeedProfiles() {
 function refreshRoutingProfileSeeds(handle) {
   const pending = [];
   for (const seed of installedProviderSeedProfiles()) {
-    const profile = handle.prepare(`
+    const profile = db.selectRow(handle, `
       SELECT id, seed_revision FROM routing_profiles WHERE source = 'seed' AND seed_key = ?
-    `).get(seed.id);
+    `, [seed.id]);
     if (!profile || profile.seed_revision == null) continue;
-    const existing = handle.prepare(`
+    const existing = db.selectRows(handle, `
       SELECT category_id, data, position FROM routing_profile_entries
       WHERE profile_id = ? ORDER BY position, category_id
-    `).all(profile.id);
+    `, [profile.id]);
     const matchesSeed = existing.length === seed.categories.length && existing.every((entry, position) => entry.category_id === seed.categories[position].id && entry.data === JSON.stringify(seed.categories[position]) && Number(entry.position) === position);
     if (Number(profile.seed_revision) >= ROUTING_PROFILE_SEED_REVISION && matchesSeed) continue;
     pending.push({ seed, profileId: profile.id });
@@ -1330,11 +1330,26 @@ function refreshRoutingProfileSeeds(handle) {
   });
   invalidateStoreCaches();
 }
+function unflaggedReadonlyCategory(data, readonlyIds, id) {
+  let category;
+  try {
+    category = JSON.parse(data);
+  } catch (_) {
+    return null;
+  }
+  if (!category || typeof category !== "object" || Array.isArray(category)) return null;
+  if (!readonlyIds.has(String(id === void 0 ? category.id : id)) || category.readonly !== void 0) return null;
+  return category;
+}
+function readonlyCategorySeedsPending(handle, readonlyIds) {
+  return db.selectRows(handle, "SELECT data FROM routing_profile_entries").some((row) => unflaggedReadonlyCategory(row.data, readonlyIds)) || db.selectRows(handle, "SELECT id, data FROM project_categories").some((row) => unflaggedReadonlyCategory(row.data, readonlyIds, row.id));
+}
 function refreshReadonlyCategorySeeds(handle) {
   const readonlyIds = /* @__PURE__ */ new Set([
     ...DEFAULT_CATEGORIES.filter((category) => category.readonly === true).map((category) => category.id),
     "hand-analysis"
   ]);
+  if (!readonlyCategorySeedsPending(handle, readonlyIds)) return false;
   const affected = /* @__PURE__ */ new Set();
   let changed = false;
   withinTransaction(handle, () => {
@@ -1342,26 +1357,16 @@ function refreshReadonlyCategorySeeds(handle) {
     const updateProjectEntry = handle.prepare("UPDATE project_categories SET data = ? WHERE project = ? AND id = ?");
     const now = (/* @__PURE__ */ new Date()).toISOString();
     for (const row of handle.prepare("SELECT profile_id, category_id, data FROM routing_profile_entries").all()) {
-      let category;
-      try {
-        category = JSON.parse(row.data);
-      } catch (_) {
-        continue;
-      }
-      if (!readonlyIds.has(category?.id) || category.readonly !== void 0) continue;
+      const category = unflaggedReadonlyCategory(row.data, readonlyIds);
+      if (!category) continue;
       category.readonly = true;
       updateProfileEntry.run(JSON.stringify(category), now, row.profile_id, row.category_id);
       for (const project of handle.prepare("SELECT project FROM project_routing_profiles WHERE profile_id = ?").all(row.profile_id)) affected.add(String(project.project));
       changed = true;
     }
     for (const row of handle.prepare("SELECT project, id, data FROM project_categories").all()) {
-      let category;
-      try {
-        category = JSON.parse(row.data);
-      } catch (_) {
-        continue;
-      }
-      if (!readonlyIds.has(row.id) || category.readonly !== void 0) continue;
+      const category = unflaggedReadonlyCategory(row.data, readonlyIds, row.id);
+      if (!category) continue;
       category.readonly = true;
       updateProjectEntry.run(JSON.stringify(category), row.project, row.id);
       affected.add(String(row.project));
@@ -1369,6 +1374,22 @@ function refreshReadonlyCategorySeeds(handle) {
     }
     if (changed) refreshPreparedDispatches(handle, [...affected], [...readonlyIds]);
   });
+  return changed;
+}
+const readonlySeedCheckedVersions = /* @__PURE__ */ new WeakMap();
+let refreshingReadonlySeeds = false;
+function refreshReadonlyCategorySeedsForDataVersion(handle) {
+  if (refreshingReadonlySeeds || transactionDepth.get(handle)) return;
+  const version = Number(db.selectRow(handle, "PRAGMA data_version")?.data_version) || 0;
+  if (readonlySeedCheckedVersions.get(handle) === version) return;
+  refreshingReadonlySeeds = true;
+  try {
+    const changed = refreshReadonlyCategorySeeds(handle);
+    readonlySeedCheckedVersions.set(handle, version);
+    if (changed) invalidateStoreCaches();
+  } finally {
+    refreshingReadonlySeeds = false;
+  }
 }
 function refreshRoutingProfileSeedsForCatalogState(handle, root) {
   const currentState = catalogStateFingerprint();
@@ -1383,8 +1404,8 @@ function database() {
     handle = db.openDb(root);
     migrateIfNeeded(handle, root);
     dbByHome.set(root, handle);
-    refreshReadonlyCategorySeeds(handle);
   }
+  refreshReadonlyCategorySeedsForDataVersion(handle);
   if (!refreshingRoutingProfileSeeds) {
     refreshingRoutingProfileSeeds = true;
     try {

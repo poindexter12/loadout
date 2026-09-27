@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './shared/sqlite-budget.js';
 import { readStdin } from './shared/input.js';
 import { compactionPolicyOutput } from './shared/compaction-policy.js';
 

@@ -29,6 +29,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var db_exports = {};
 __export(db_exports, {
   CURRENT_SCHEMA_VERSION: () => CURRENT_SCHEMA_VERSION,
+  SQLITE_BUSY_POLICY_KEY: () => SQLITE_BUSY_POLICY_KEY,
   SQLITE_BUSY_TIMEOUT_MS: () => SQLITE_BUSY_TIMEOUT_MS,
   assertWritable: () => assertWritable,
   countRows: () => countRows,
@@ -42,6 +43,7 @@ __export(db_exports, {
   putRow: () => putRow,
   selectRow: () => selectRow,
   selectRows: () => selectRows,
+  sqliteBusyPolicy: () => sqliteBusyPolicy,
   txn: () => txn
 });
 module.exports = __toCommonJS(db_exports);
@@ -68,6 +70,22 @@ const SQLITE_BUSY_TIMEOUT_MS = 15e3;
 const SQLITE_BUSY_RETRY_ATTEMPTS = 3;
 const SQLITE_BUSY_RETRY_DELAYS_MS = [50, 100];
 const busySleep = new Int32Array(new SharedArrayBuffer(4));
+const SQLITE_BUSY_POLICY_KEY = /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy");
+const SERVER_SQLITE_BUSY_POLICY = Object.freeze({
+  label: "server",
+  timeoutMs: SQLITE_BUSY_TIMEOUT_MS,
+  attempts: SQLITE_BUSY_RETRY_ATTEMPTS
+});
+function positiveInteger(value) {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+function sqliteBusyPolicy() {
+  const installed = Reflect.get(globalThis, SQLITE_BUSY_POLICY_KEY);
+  if (!isRecord(installed) || !positiveInteger(installed.timeoutMs) || !positiveInteger(installed.attempts)) {
+    return SERVER_SQLITE_BUSY_POLICY;
+  }
+  return installed;
+}
 const OLD_CODEBASE_EXPLORATION = {
   description: "Locate and explain how an unfamiliar code path, feature, or convention works. The deliverable is a grounded map of existing code, not an implementation or a design recommendation.",
   contract: "Read before concluding; cite files and symbols, with no edits."
@@ -108,25 +126,30 @@ function isSqliteBusy(error) {
   if (/database is (?:locked|busy)/i.test(error.message)) return true;
   return isSqliteBusy(Reflect.get(error, "cause"));
 }
-function sqliteBusyError(operation, startedAt, cause) {
+function sqliteBusyError(operation, startedAt, cause, policy) {
   const elapsedMs = Date.now() - startedAt;
   const originalMessage = cause instanceof Error ? cause.message : String(cause);
+  const attempts = `${policy.attempts} attempt${policy.attempts === 1 ? "" : "s"}`;
+  const budget = policy === SERVER_SQLITE_BUSY_POLICY ? "" : ` (${policy.label} lock budget)`;
   return new Error(
-    `Sidequest database stayed locked while ${operation} for ${elapsedMs}ms after ${SQLITE_BUSY_RETRY_ATTEMPTS} attempts, each waiting up to ${SQLITE_BUSY_TIMEOUT_MS}ms. SQLite does not expose the locking process or claim identity. Check active Sidequest writers, then retry. Original SQLite error: ${originalMessage}`,
+    `Sidequest database stayed locked while ${operation} for ${elapsedMs}ms after ${attempts}, each waiting up to ${policy.timeoutMs}ms${budget}. SQLite does not expose the locking process or claim identity. Check active Sidequest writers, then retry. Original SQLite error: ${originalMessage}`,
     { cause }
   );
 }
 function retryWhenSqliteBusy(operation, work) {
+  const policy = sqliteBusyPolicy();
   const startedAt = Date.now();
-  for (let attempt = 0; attempt < SQLITE_BUSY_RETRY_ATTEMPTS; attempt += 1) {
+  for (let attempt = 0; attempt < policy.attempts; attempt += 1) {
     try {
       return work();
     } catch (error) {
-      if (!isSqliteBusy(error) || attempt === SQLITE_BUSY_RETRY_ATTEMPTS - 1) {
-        if (isSqliteBusy(error)) throw sqliteBusyError(operation, startedAt, error);
-        throw error;
+      if (!isSqliteBusy(error)) throw error;
+      if (attempt === policy.attempts - 1) {
+        const exhausted = sqliteBusyError(operation, startedAt, error, policy);
+        policy.onExhausted?.(exhausted);
+        throw exhausted;
       }
-      Atomics.wait(busySleep, 0, 0, SQLITE_BUSY_RETRY_DELAYS_MS[attempt] ?? 0);
+      Atomics.wait(busySleep, 0, 0, SQLITE_BUSY_RETRY_DELAYS_MS[attempt] ?? SQLITE_BUSY_RETRY_DELAYS_MS.at(-1));
     }
   }
   throw new Error(`SQLite busy retry exhausted without an error while ${operation}.`);
@@ -269,11 +292,29 @@ function applyCategoryRows(baseCategories, rows) {
   }
   return [...categories.values()];
 }
+function newerSchemaError(schemaVersion) {
+  return new Error(`Sidequest database schema ${schemaVersion} is newer than supported schema ${CURRENT_SCHEMA_VERSION}.`);
+}
+function storedSchemaVersion(database) {
+  if (!prepareCached(database, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").get()) return null;
+  const row = prepareCached(database, "SELECT value FROM meta WHERE key = 'schema_version'").get();
+  return row ? Number(JSON.parse(row.value)) : null;
+}
 function openDb(homeRoot) {
   import_node_fs.default.mkdirSync(homeRoot, { recursive: true });
-  const database = new DatabaseSyncConstructor(import_node_path.default.join(homeRoot, "sidequest.db"), { timeout: SQLITE_BUSY_TIMEOUT_MS });
+  const { timeoutMs } = sqliteBusyPolicy();
+  const database = new DatabaseSyncConstructor(import_node_path.default.join(homeRoot, "sidequest.db"), { timeout: timeoutMs });
   retryWhenSqliteBusy("enabling WAL mode", () => database.exec("PRAGMA journal_mode=WAL"));
-  database.exec(`PRAGMA busy_timeout=${SQLITE_BUSY_TIMEOUT_MS}`);
+  database.exec(`PRAGMA busy_timeout=${timeoutMs}`);
+  const storedVersion = retryWhenSqliteBusy("reading the schema version", () => storedSchemaVersion(database));
+  if (storedVersion !== null && storedVersion > CURRENT_SCHEMA_VERSION) throw newerSchemaError(storedVersion);
+  if (storedVersion !== CURRENT_SCHEMA_VERSION) upgradeSchema(database);
+  database.exec("PRAGMA foreign_keys=ON");
+  const sidequestDatabase = database;
+  sidequestDatabase.__sidequestSchemaVersion = CURRENT_SCHEMA_VERSION;
+  return sidequestDatabase;
+}
+function upgradeSchema(database) {
   retryWhenSqliteBusy("initializing database schema", () => database.exec(`
     CREATE TABLE IF NOT EXISTS projects (
       slug TEXT PRIMARY KEY,
@@ -336,9 +377,7 @@ function openDb(homeRoot) {
     });
     schemaVersion = 2;
   }
-  if (schemaVersion > CURRENT_SCHEMA_VERSION) {
-    throw new Error(`Sidequest database schema ${schemaVersion} is newer than supported schema ${CURRENT_SCHEMA_VERSION}.`);
-  }
+  if (schemaVersion > CURRENT_SCHEMA_VERSION) throw newerSchemaError(schemaVersion);
   if (schemaVersion < 3) {
     txn(database, () => {
       const prefsRow = prepareCached(database, "SELECT data FROM globals WHERE key = 'model-prefs'").get();
@@ -643,10 +682,6 @@ function openDb(homeRoot) {
     });
     schemaVersion = 8;
   }
-  database.exec("PRAGMA foreign_keys=ON");
-  const sidequestDatabase = database;
-  sidequestDatabase.__sidequestSchemaVersion = CURRENT_SCHEMA_VERSION;
-  return sidequestDatabase;
 }
 function getRow(database, table, key) {
   const spec = tableSpec(table);
@@ -732,6 +767,7 @@ function txn(database, fn) {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   CURRENT_SCHEMA_VERSION,
+  SQLITE_BUSY_POLICY_KEY,
   SQLITE_BUSY_TIMEOUT_MS,
   assertWritable,
   countRows,
@@ -745,5 +781,6 @@ function txn(database, fn) {
   putRow,
   selectRow,
   selectRows,
+  sqliteBusyPolicy,
   txn
 });

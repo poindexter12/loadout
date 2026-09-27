@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { failClosedOnBoardBusy, refuseWhenBoardBusy } from './shared/sqlite-budget.js';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { readStdin, stringField, isRecord } from './shared/input.js';
@@ -16,6 +17,9 @@ import {
   type IdentityDiagnosis,
   type IsolationExpectation,
 } from './shared/runtime-identity.js';
+
+// An isolation guard: refuse under board lock contention rather than allow a write unchecked (SQ-133).
+failClosedOnBoardBusy();
 
 const leaseKernel = require(runtimeModule('kernel/worktree')) as {
   createWorktreeLease: (facts: unknown) => unknown;
@@ -46,7 +50,8 @@ function registeredProjectCheckout(root: string): boolean {
       findProject: (project: string) => { ok?: boolean };
     };
     return Boolean(store.findProject(root)?.ok);
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return false;
   }
 }
@@ -263,6 +268,7 @@ function main(): void {
 
 try {
   main();
-} catch (_) {
+} catch (error) {
+  refuseWhenBoardBusy(error);
   process.exit(0);
 }

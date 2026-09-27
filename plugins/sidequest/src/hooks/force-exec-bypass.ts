@@ -1,3 +1,4 @@
+import { failClosedOnBoardBusy, refuseWhenBoardBusy } from './shared/sqlite-budget.js';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -9,6 +10,10 @@ import { readSessionState, sessionStateFile, writeSessionState } from './shared/
 // Dependency-free, so bundling it keeps launch naming identical in the hook and
 // in the store even when the installed lib is mid-upgrade.
 import { canonicalExecutorName, dispatchLaunchName, DIAGNOSTIC_PROBE_NAME } from '../lib/exec-names.js';
+
+// The dispatch and executor-lifecycle guard: refuse under board lock contention rather than allow a launch,
+// steer or write unchecked (SQ-133).
+failClosedOnBoardBusy();
 
 const { canonicalPath } = require(path.join(__dirname, '..', 'lib', 'worktrees.js')) as { canonicalPath: (value: unknown) => string };
 const { isInScope: scopeMatch } = require(path.join(__dirname, '..', 'lib', 'scope-match.js')) as { isInScope: (file: unknown, files: unknown) => boolean };
@@ -468,7 +473,7 @@ function recordAuthoritativeLaunch(input: HookInput, type: string, agentName: st
         agentName: agentName || toolInput.name,
       });
     }
-  } catch (_) {}
+  } catch (error) { refuseWhenBoardBusy(error); }
 }
 
 function resolveStampedModel(input: HookInput): ResolveResult {
@@ -481,7 +486,8 @@ function resolveStampedModel(input: HookInput): ResolveResult {
   let store: Store;
   try {
     store = require(runtimeModule('store')) as Store;
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return { status: 'error', refs };
   }
 
@@ -508,7 +514,8 @@ function dispatchAdmission(input: HookInput): DispatchAdmission {
     const store = require(runtimeModule('store')) as Store;
     const found = store.findProject(project);
     return found.ok && found.slug ? store.projectDispatchAdmission(found.slug) : { status: 'no-project' };
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return { status: 'no-project' };
   }
 }
@@ -574,7 +581,8 @@ function preparedDispatchValidation(input: HookInput): PreparedDispatchValidatio
           : null,
       },
     };
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return { status: 'none' };
   }
 }
@@ -650,7 +658,8 @@ function activeExecutorTicketRefs(input: HookInput): Set<string> {
       }
     }
     return refs;
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return new Set();
   }
 }
@@ -677,7 +686,8 @@ function terminalExecutorTicket(input: HookInput): TerminalExecutorTicket | null
       }
     }
     return matches.length === 1 ? matches[0] || null : null;
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return null;
   }
 }
@@ -765,7 +775,8 @@ function helperScopes(input: HookInput): HelperScopeResolution {
       activeTickets.map((owner) => helperScope(store, owner.project, owner.projectPath, owner.ticket)),
       evidenceScopes,
     );
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return helperScopeResolution('no-active-ticket', [], []);
   }
 }
@@ -959,8 +970,9 @@ function guardLateSteer(input: HookInput): void {
         ? 'It is now a comment on the ticket.'
         : 'Record it on the ticket yourself.'} Re-dispatch ${terminal.ref} if the work itself must change.`,
     );
-  } catch (_) {
-    /* never block a message because the board was unreadable */
+  } catch (error) {
+    refuseWhenBoardBusy(error);
+    /* otherwise never block a message because the board was unreadable; lock contention was refused above */
   }
 }
 
@@ -1116,6 +1128,7 @@ function main(): void {
 
 try {
   main();
-} catch (_) {
+} catch (error) {
+  refuseWhenBoardBusy(error);
   process.exit(0);
 }

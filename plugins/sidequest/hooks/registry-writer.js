@@ -38,30 +38,61 @@ __export(registry_writer_exports, {
   writeBreadcrumb: () => writeBreadcrumb
 });
 module.exports = __toCommonJS(registry_writer_exports);
-var import_node_crypto = __toESM(require("node:crypto"));
+
+// src/hooks/shared/sqlite-budget.ts
 var import_node_fs = __toESM(require("node:fs"));
+var import_node_path = __toESM(require("node:path"));
+var SQLITE_BUSY_POLICY_KEY = /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy");
+var HOOK_SQLITE_BUSY_TIMEOUT_MS = 1500;
+function hookName() {
+  return import_node_path.default.basename(process.argv[1] || "hook", ".js");
+}
+function installBudget(onExhausted) {
+  Reflect.set(globalThis, SQLITE_BUSY_POLICY_KEY, Object.freeze({
+    label: "hook",
+    timeoutMs: HOOK_SQLITE_BUSY_TIMEOUT_MS,
+    attempts: 1,
+    onExhausted
+  }));
+}
+function writeStderr(text) {
+  try {
+    import_node_fs.default.writeSync(2, text);
+  } catch (_) {
+  }
+}
+function failOpen(error) {
+  writeStderr(`sidequest: ${hookName()} allowed this event without its board check (fail-open, board lock busy): ${error.message}
+`);
+  process.exit(0);
+}
+installBudget(failOpen);
+
+// src/hooks/registry-writer.ts
+var import_node_crypto = __toESM(require("node:crypto"));
+var import_node_fs2 = __toESM(require("node:fs"));
 var import_node_os = __toESM(require("node:os"));
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_path3 = __toESM(require("node:path"));
 
 // src/hooks/shared/paths.ts
-var import_node_path = __toESM(require("node:path"));
+var import_node_path2 = __toESM(require("node:path"));
 function pluginRoot() {
-  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path.default.join(__dirname, "..");
+  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path2.default.join(__dirname, "..");
 }
 
 // src/hooks/registry-writer.ts
 var SCHEMA_VERSION = 1;
 function pluginVersion(root) {
-  const parsed = JSON.parse(import_node_fs.default.readFileSync(import_node_path2.default.join(root, ".claude-plugin", "plugin.json"), "utf8"));
+  const parsed = JSON.parse(import_node_fs2.default.readFileSync(import_node_path3.default.join(root, ".claude-plugin", "plugin.json"), "utf8"));
   if (!parsed || typeof parsed !== "object" || !("version" in parsed)) throw new Error("plugin manifest has no version");
   return String(parsed.version);
 }
 function registryPath(home = import_node_os.default.homedir()) {
-  return import_node_path2.default.join(home, ".claude", "toolshed", "registry", "sidequest.json");
+  return import_node_path3.default.join(home, ".claude", "toolshed", "registry", "sidequest.json");
 }
 function futureSchema(file) {
   try {
-    const value = JSON.parse(import_node_fs.default.readFileSync(file, "utf8"));
+    const value = JSON.parse(import_node_fs2.default.readFileSync(file, "utf8"));
     if (!value || typeof value !== "object" || !("schemaVersion" in value)) return false;
     const schemaVersion = value.schemaVersion;
     return Number.isInteger(schemaVersion) && Number(schemaVersion) > SCHEMA_VERSION;
@@ -70,14 +101,14 @@ function futureSchema(file) {
   }
 }
 function writeAtomically(file, value) {
-  import_node_fs.default.mkdirSync(import_node_path2.default.dirname(file), { recursive: true });
+  import_node_fs2.default.mkdirSync(import_node_path3.default.dirname(file), { recursive: true });
   const temporary = `${file}.${process.pid}.${import_node_crypto.default.randomUUID()}.tmp`;
   try {
-    import_node_fs.default.writeFileSync(temporary, JSON.stringify(value, null, 2) + "\n", { mode: 384 });
-    import_node_fs.default.renameSync(temporary, file);
+    import_node_fs2.default.writeFileSync(temporary, JSON.stringify(value, null, 2) + "\n", { mode: 384 });
+    import_node_fs2.default.renameSync(temporary, file);
   } finally {
     try {
-      import_node_fs.default.unlinkSync(temporary);
+      import_node_fs2.default.unlinkSync(temporary);
     } catch (_) {
     }
   }

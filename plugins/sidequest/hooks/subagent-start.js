@@ -23,8 +23,37 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// src/hooks/shared/input.ts
+// src/hooks/shared/sqlite-budget.ts
 var import_node_fs = __toESM(require("node:fs"));
+var import_node_path = __toESM(require("node:path"));
+var SQLITE_BUSY_POLICY_KEY = /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy");
+var HOOK_SQLITE_BUSY_TIMEOUT_MS = 1500;
+function hookName() {
+  return import_node_path.default.basename(process.argv[1] || "hook", ".js");
+}
+function installBudget(onExhausted) {
+  Reflect.set(globalThis, SQLITE_BUSY_POLICY_KEY, Object.freeze({
+    label: "hook",
+    timeoutMs: HOOK_SQLITE_BUSY_TIMEOUT_MS,
+    attempts: 1,
+    onExhausted
+  }));
+}
+function writeStderr(text) {
+  try {
+    import_node_fs.default.writeSync(2, text);
+  } catch (_) {
+  }
+}
+function failOpen(error) {
+  writeStderr(`sidequest: ${hookName()} allowed this event without its board check (fail-open, board lock busy): ${error.message}
+`);
+  process.exit(0);
+}
+installBudget(failOpen);
+
+// src/hooks/shared/input.ts
+var import_node_fs2 = __toESM(require("node:fs"));
 
 // src/lib/exec-names.ts
 var EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
@@ -59,7 +88,7 @@ function isRecord(value) {
 }
 function readStdin() {
   try {
-    const raw = import_node_fs.default.readFileSync(0, "utf8");
+    const raw = import_node_fs2.default.readFileSync(0, "utf8");
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!isRecord(parsed)) return null;
@@ -137,38 +166,38 @@ function writeContext(hookEventName, additionalContext, initialUserMessage = "")
 }
 
 // src/hooks/shared/paths.ts
-var import_node_path = __toESM(require("node:path"));
+var import_node_path2 = __toESM(require("node:path"));
 function pluginRoot() {
-  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path.default.join(__dirname, "..");
+  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path2.default.join(__dirname, "..");
 }
 function runtimeModule(name) {
-  return import_node_path.default.join(pluginRoot(), "lib", `${name}.js`);
+  return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
 // src/hooks/diagnostic-worktree-warning.ts
-var import_node_fs2 = __toESM(require("node:fs"));
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_fs3 = __toESM(require("node:fs"));
+var import_node_path3 = __toESM(require("node:path"));
 var ENDED_RUN_WINDOW_MS = 2 * 60 * 60 * 1e3;
 function gitDirectory(entry) {
   try {
-    if (import_node_fs2.default.statSync(entry).isDirectory()) return entry;
-    const linkedGitDirectory = /^gitdir:\s*(.+)$/m.exec(import_node_fs2.default.readFileSync(entry, "utf8"))?.[1];
-    return linkedGitDirectory ? import_node_path2.default.resolve(import_node_path2.default.dirname(entry), linkedGitDirectory.trim()) : null;
+    if (import_node_fs3.default.statSync(entry).isDirectory()) return entry;
+    const linkedGitDirectory = /^gitdir:\s*(.+)$/m.exec(import_node_fs3.default.readFileSync(entry, "utf8"))?.[1];
+    return linkedGitDirectory ? import_node_path3.default.resolve(import_node_path3.default.dirname(entry), linkedGitDirectory.trim()) : null;
   } catch (_) {
     return null;
   }
 }
 function checkoutLocation(start) {
-  let current = import_node_path2.default.resolve(start);
+  let current = import_node_path3.default.resolve(start);
   for (; ; ) {
-    const found = gitDirectory(import_node_path2.default.join(current, ".git"));
+    const found = gitDirectory(import_node_path3.default.join(current, ".git"));
     if (found) {
-      if (import_node_path2.default.basename(found) === ".git") return { checkoutRoot: current, projectRoot: current };
-      const commonGitDirectory = import_node_path2.default.resolve(found, "..", "..");
-      if (import_node_path2.default.basename(commonGitDirectory) === ".git") return { checkoutRoot: current, projectRoot: import_node_path2.default.dirname(commonGitDirectory) };
+      if (import_node_path3.default.basename(found) === ".git") return { checkoutRoot: current, projectRoot: current };
+      const commonGitDirectory = import_node_path3.default.resolve(found, "..", "..");
+      if (import_node_path3.default.basename(commonGitDirectory) === ".git") return { checkoutRoot: current, projectRoot: import_node_path3.default.dirname(commonGitDirectory) };
       return null;
     }
-    const parent = import_node_path2.default.dirname(current);
+    const parent = import_node_path3.default.dirname(current);
     if (parent === current) return null;
     current = parent;
   }
@@ -178,7 +207,7 @@ function comparablePath(value) {
     const lease = require(runtimeModule("kernel/worktree"));
     return lease.canonicalPath(value);
   } catch (_) {
-    const resolved = import_node_path2.default.resolve(value);
+    const resolved = import_node_path3.default.resolve(value);
     return process.platform === "win32" ? resolved.toLowerCase() : resolved;
   }
 }
@@ -187,7 +216,7 @@ function agentWorktreeRoots(projectRoot) {
     const worktrees = require(runtimeModule("worktrees"));
     return worktrees.agentWorktreeRoots(projectRoot);
   } catch (_) {
-    return [import_node_path2.default.join(projectRoot, ".claude", "worktrees")];
+    return [import_node_path3.default.join(projectRoot, ".claude", "worktrees")];
   }
 }
 function endedRecently(dispatch, now) {
@@ -209,7 +238,7 @@ function boardWorktrees(projectRoot, now) {
       if (!dispatch || !worktree || dispatch.sharedTree !== false) return [];
       const lifecycle = lifecycleOf(store, ticket, dispatch, now);
       if (lifecycle === "ended" && !endedRecently(dispatch, now)) return [];
-      return [{ worktree, ref: String(ticket.ref || ""), lifecycle, onDisk: import_node_fs2.default.existsSync(worktree) }];
+      return [{ worktree, ref: String(ticket.ref || ""), lifecycle, onDisk: import_node_fs3.default.existsSync(worktree) }];
     });
   } catch (_) {
     return [];
@@ -218,7 +247,7 @@ function boardWorktrees(projectRoot, now) {
 function unclaimedWorktreeDirectories(roots) {
   return roots.flatMap((root) => {
     try {
-      return import_node_fs2.default.readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name.startsWith("agent-")).map((entry) => ({ worktree: import_node_path2.default.join(root, entry.name), ref: "", lifecycle: "ended", onDisk: true }));
+      return import_node_fs3.default.readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name.startsWith("agent-")).map((entry) => ({ worktree: import_node_path3.default.join(root, entry.name), ref: "", lifecycle: "ended", onDisk: true }));
     } catch (_) {
       return [];
     }

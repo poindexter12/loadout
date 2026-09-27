@@ -23,14 +23,79 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// src/hooks/guard-destructive-git.ts
-var import_node_fs2 = __toESM(require("node:fs"));
+// src/hooks/shared/sqlite-budget.ts
+var import_node_fs = __toESM(require("node:fs"));
 var import_node_path = __toESM(require("node:path"));
+var SQLITE_BUSY_POLICY_KEY = /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy");
+var HOOK_SQLITE_BUSY_TIMEOUT_MS = 1500;
+var failClosedEvent = null;
+function hookName() {
+  return import_node_path.default.basename(process.argv[1] || "hook", ".js");
+}
+function installBudget(onExhausted) {
+  Reflect.set(globalThis, SQLITE_BUSY_POLICY_KEY, Object.freeze({
+    label: "hook",
+    timeoutMs: HOOK_SQLITE_BUSY_TIMEOUT_MS,
+    attempts: 1,
+    onExhausted
+  }));
+}
+function writeStderr(text) {
+  try {
+    import_node_fs.default.writeSync(2, text);
+  } catch (_) {
+  }
+}
+function failOpen(error) {
+  writeStderr(`sidequest: ${hookName()} allowed this event without its board check (fail-open, board lock busy): ${error.message}
+`);
+  process.exit(0);
+}
+function failClosed(error) {
+  const hook = hookName();
+  const reason = `sidequest: ${hook} refused this call because of board lock contention: another process holds the Sidequest board database lock, so this security guard could not finish its board check, and it refuses rather than allow the call unchecked. The call did not run. Retry the same call in a few seconds; if it keeps failing, a long-running Sidequest writer is holding the board lock.`;
+  let denied = false;
+  try {
+    import_node_fs.default.writeSync(1, JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: failClosedEvent || "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: reason
+      }
+    }));
+    denied = true;
+  } catch (_) {
+  }
+  writeStderr(`${denied ? "" : `${reason}
+`}sidequest: ${hook} refused this event without its board check (fail-closed, board lock busy): ${error.message}
+`);
+  process.exit(denied ? 0 : 2);
+}
+function boardBusy(error) {
+  if (!(error instanceof Error)) return false;
+  const code = Reflect.get(error, "code");
+  const errcode = Reflect.get(error, "errcode");
+  if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" || errcode === 5 || errcode === 6) return true;
+  if (/database (?:table )?is (?:locked|busy)/i.test(error.message)) return true;
+  return boardBusy(Reflect.get(error, "cause"));
+}
+installBudget(failOpen);
+function failClosedOnBoardBusy(hookEventName = "PreToolUse") {
+  failClosedEvent = hookEventName;
+  installBudget(failClosed);
+}
+function refuseWhenBoardBusy(error) {
+  if (failClosedEvent && boardBusy(error)) failClosed(error);
+}
+
+// src/hooks/guard-destructive-git.ts
+var import_node_fs3 = __toESM(require("node:fs"));
+var import_node_path2 = __toESM(require("node:path"));
 var import_node_child_process = require("node:child_process");
 var import_node_module = require("node:module");
 
 // src/hooks/shared/input.ts
-var import_node_fs = __toESM(require("node:fs"));
+var import_node_fs2 = __toESM(require("node:fs"));
 
 // src/lib/exec-names.ts
 var EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
@@ -65,7 +130,7 @@ function isRecord(value) {
 }
 function readStdin() {
   try {
-    const raw = import_node_fs.default.readFileSync(0, "utf8");
+    const raw = import_node_fs2.default.readFileSync(0, "utf8");
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!isRecord(parsed)) return null;
@@ -223,6 +288,7 @@ function withoutHereDocBodies(command) {
 }
 
 // src/hooks/guard-destructive-git.ts
+failClosedOnBoardBusy();
 var runtimeRequire = (0, import_node_module.createRequire)(__filename);
 var store = runtimeRequire(["..", "lib", "store"].join("/"));
 var publish = runtimeRequire(["..", "lib", "publish"].join("/"));
@@ -247,7 +313,7 @@ function unquote(value) {
   return value.replace(/^["']|["']$/g, "");
 }
 function resolvedShellPath(cwd, value) {
-  return import_node_path.default.resolve(worktrees.gitBashPath(cwd || "."), worktrees.gitBashPath(value));
+  return import_node_path2.default.resolve(worktrees.gitBashPath(cwd || "."), worktrees.gitBashPath(value));
 }
 function targetRepo(command, cwd) {
   const dashCs = Array.from(command.matchAll(/git\s+-C\s+("[^"]+"|'[^']+'|\S+)/gi));
@@ -293,7 +359,7 @@ function repoRoot(repo) {
 }
 function sharedCheckout(repo) {
   try {
-    return import_node_fs2.default.statSync(import_node_path.default.join(repo, ".git")).isDirectory();
+    return import_node_fs3.default.statSync(import_node_path2.default.join(repo, ".git")).isDirectory();
   } catch (_) {
     return false;
   }
@@ -332,6 +398,10 @@ function configuredIntegrationBranch(repo) {
   } catch {
   }
   return "main";
+}
+function lazyIntegrationBranch(repo) {
+  let branch;
+  return () => branch ??= configuredIntegrationBranch(repo);
 }
 function defaultBranch(repo, remote) {
   const ref = gitOutput(repo, ["symbolic-ref", "--quiet", "--short", `refs/remotes/${remote}/HEAD`]);
@@ -373,11 +443,11 @@ function pushAction(args, repo, integrationBranch) {
   if (specs.some((spec) => isTagRef(spec) || spec.includes("*"))) return true;
   const defaultTarget = upstream(repo)?.branch || currentBranch(repo);
   const published = defaultBranch(repo, remote);
-  return specs.length === 0 ? defaultTarget === published && defaultTarget !== integrationBranch : specs.some((spec) => {
+  return specs.length === 0 ? defaultTarget === published && defaultTarget !== integrationBranch() : specs.some((spec) => {
     const destination = spec.includes(":") ? spec.slice(spec.indexOf(":") + 1) : spec;
     if (!destination || isTagRef(destination)) return true;
     const target = destination === "HEAD" ? defaultTarget : branchName(destination);
-    return target === published && target !== integrationBranch;
+    return target === published && target !== integrationBranch();
   });
 }
 function publicationAction(command, cwd) {
@@ -388,9 +458,8 @@ function publicationAction(command, cwd) {
     const action = match[2] || "";
     const args = match[3] || "";
     const repo = actionRepo(command, cwd, match.index || 0, optionPath ? `-C ${optionPath}` : "");
-    const integrationBranch = configuredIntegrationBranch(repo);
     if (action.toLowerCase() === "tag" && tagAction(args)) return { label: "manual git tag", repo };
-    if (action.toLowerCase() === "push" && pushAction(args, repo, integrationBranch)) {
+    if (action.toLowerCase() === "push" && pushAction(args, repo, lazyIntegrationBranch(repo))) {
       return { label: `a push to the published branch (${defaultBranch(repo, upstream(repo)?.remote || "origin")})`, repo };
     }
   }
@@ -433,6 +502,7 @@ function main() {
 }
 try {
   main();
-} catch (_) {
+} catch (error) {
+  refuseWhenBoardBusy(error);
   process.exit(0);
 }

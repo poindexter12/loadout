@@ -22,14 +22,79 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
+// src/hooks/shared/sqlite-budget.ts
+var import_node_fs = __toESM(require("node:fs"));
+var import_node_path = __toESM(require("node:path"));
+var SQLITE_BUSY_POLICY_KEY = /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy");
+var HOOK_SQLITE_BUSY_TIMEOUT_MS = 1500;
+var failClosedEvent = null;
+function hookName() {
+  return import_node_path.default.basename(process.argv[1] || "hook", ".js");
+}
+function installBudget(onExhausted) {
+  Reflect.set(globalThis, SQLITE_BUSY_POLICY_KEY, Object.freeze({
+    label: "hook",
+    timeoutMs: HOOK_SQLITE_BUSY_TIMEOUT_MS,
+    attempts: 1,
+    onExhausted
+  }));
+}
+function writeStderr(text) {
+  try {
+    import_node_fs.default.writeSync(2, text);
+  } catch (_) {
+  }
+}
+function failOpen(error) {
+  writeStderr(`sidequest: ${hookName()} allowed this event without its board check (fail-open, board lock busy): ${error.message}
+`);
+  process.exit(0);
+}
+function failClosed(error) {
+  const hook = hookName();
+  const reason = `sidequest: ${hook} refused this call because of board lock contention: another process holds the Sidequest board database lock, so this security guard could not finish its board check, and it refuses rather than allow the call unchecked. The call did not run. Retry the same call in a few seconds; if it keeps failing, a long-running Sidequest writer is holding the board lock.`;
+  let denied = false;
+  try {
+    import_node_fs.default.writeSync(1, JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: failClosedEvent || "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: reason
+      }
+    }));
+    denied = true;
+  } catch (_) {
+  }
+  writeStderr(`${denied ? "" : `${reason}
+`}sidequest: ${hook} refused this event without its board check (fail-closed, board lock busy): ${error.message}
+`);
+  process.exit(denied ? 0 : 2);
+}
+function boardBusy(error) {
+  if (!(error instanceof Error)) return false;
+  const code = Reflect.get(error, "code");
+  const errcode = Reflect.get(error, "errcode");
+  if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" || errcode === 5 || errcode === 6) return true;
+  if (/database (?:table )?is (?:locked|busy)/i.test(error.message)) return true;
+  return boardBusy(Reflect.get(error, "cause"));
+}
+installBudget(failOpen);
+function failClosedOnBoardBusy(hookEventName = "PreToolUse") {
+  failClosedEvent = hookEventName;
+  installBudget(failClosed);
+}
+function refuseWhenBoardBusy(error) {
+  if (failClosedEvent && boardBusy(error)) failClosed(error);
+}
+
 // src/hooks/force-exec-bypass.ts
 var import_node_child_process = require("node:child_process");
-var import_node_fs3 = __toESM(require("node:fs"));
+var import_node_fs4 = __toESM(require("node:fs"));
 var import_node_os2 = __toESM(require("node:os"));
-var import_node_path3 = __toESM(require("node:path"));
+var import_node_path4 = __toESM(require("node:path"));
 
 // src/hooks/shared/input.ts
-var import_node_fs = __toESM(require("node:fs"));
+var import_node_fs2 = __toESM(require("node:fs"));
 
 // src/lib/exec-names.ts
 var EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
@@ -146,7 +211,7 @@ function isRecord(value) {
 }
 function readStdin() {
   try {
-    const raw = import_node_fs.default.readFileSync(0, "utf8");
+    const raw = import_node_fs2.default.readFileSync(0, "utf8");
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!isRecord(parsed)) return null;
@@ -244,38 +309,39 @@ function writeToolUpdate(updatedInput, systemMessage) {
 }
 
 // src/hooks/shared/paths.ts
-var import_node_path = __toESM(require("node:path"));
+var import_node_path2 = __toESM(require("node:path"));
 function pluginRoot() {
-  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path.default.join(__dirname, "..");
+  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path2.default.join(__dirname, "..");
 }
 function runtimeModule(name) {
-  return import_node_path.default.join(pluginRoot(), "lib", `${name}.js`);
+  return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
 // src/hooks/shared/session-state.ts
-var import_node_fs2 = __toESM(require("node:fs"));
+var import_node_fs3 = __toESM(require("node:fs"));
 var import_node_os = __toESM(require("node:os"));
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_path3 = __toESM(require("node:path"));
 function sessionStateFile(prefix, sessionId) {
-  const home = process.env.SIDEQUEST_HOME || import_node_path2.default.join(import_node_os.default.homedir(), ".claude", "sidequest");
-  return import_node_path2.default.join(home, "tmp", "state", `${prefix}-${encodeURIComponent(sessionId)}.json`);
+  const home = process.env.SIDEQUEST_HOME || import_node_path3.default.join(import_node_os.default.homedir(), ".claude", "sidequest");
+  return import_node_path3.default.join(home, "tmp", "state", `${prefix}-${encodeURIComponent(sessionId)}.json`);
 }
 function readSessionState(file) {
   try {
-    const parsed = JSON.parse(import_node_fs2.default.readFileSync(file, "utf8"));
+    const parsed = JSON.parse(import_node_fs3.default.readFileSync(file, "utf8"));
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   } catch (_) {
     return {};
   }
 }
 function writeSessionState(file, state) {
-  import_node_fs2.default.mkdirSync(import_node_path2.default.dirname(file), { recursive: true });
-  import_node_fs2.default.writeFileSync(file, JSON.stringify(state));
+  import_node_fs3.default.mkdirSync(import_node_path3.default.dirname(file), { recursive: true });
+  import_node_fs3.default.writeFileSync(file, JSON.stringify(state));
 }
 
 // src/hooks/force-exec-bypass.ts
-var { canonicalPath } = require(import_node_path3.default.join(__dirname, "..", "lib", "worktrees.js"));
-var { isInScope: scopeMatch } = require(import_node_path3.default.join(__dirname, "..", "lib", "scope-match.js"));
+failClosedOnBoardBusy();
+var { canonicalPath } = require(import_node_path4.default.join(__dirname, "..", "lib", "worktrees.js"));
+var { isInScope: scopeMatch } = require(import_node_path4.default.join(__dirname, "..", "lib", "scope-match.js"));
 var PASS_THROUGH_AGENT_TYPES = /* @__PURE__ */ new Set(["Explore", "claude-code-guide", "statusline-setup"]);
 var EXECUTOR_HELPER_TYPES = /* @__PURE__ */ new Set(["Explore", "claude-code-guide", "web-researcher", "general-purpose"]);
 var HELPER_REVIEW_WORK_RE = /\b(?:audits?|auditors?|auditing|audited|reviews?|reviewers?|reviewing|reviewed|review-audit)\b/i;
@@ -323,7 +389,7 @@ function helperModelDenyReason(type) {
 }
 function helperEvidenceRule(input) {
   const transcriptPath = stringField(input, "transcript_path", "transcriptPath").trim();
-  const sessionPaths = transcriptPath ? [transcriptPath, import_node_path3.default.join(import_node_path3.default.dirname(transcriptPath), "subagents")] : [];
+  const sessionPaths = transcriptPath ? [transcriptPath, import_node_path4.default.join(import_node_path4.default.dirname(transcriptPath), "subagents")] : [];
   const knownLocations = sessionPaths.length ? ` Current session self-reference locations: ${sessionPaths.join(", ")}.` : "";
   return "\n\nEvidence rule: quoted ticket strings appear in this session’s context and generated transcripts. A match in the parent or helper session transcript, subagent transcript, or task-output files is self-reference, not evidence: report it as such. Do not search session, transcript, or task-output directories for evidence. Cite only the directly reachable artifact under investigation; if it is outside the parent worktree or otherwise unavailable, report a visibility block rather than a finding." + knownLocations;
 }
@@ -534,7 +600,8 @@ function recordAuthoritativeLaunch(input, type, agentName) {
         agentName: agentName || toolInput.name
       });
     }
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
   }
 }
 function resolveStampedModel(input) {
@@ -546,7 +613,8 @@ function resolveStampedModel(input) {
   let store;
   try {
     store = require(runtimeModule("store"));
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return { status: "error", refs };
   }
   const projectArg = extractProjectArg(prompt) || stringField(input, "cwd") || process.env.CLAUDE_PROJECT_DIR;
@@ -570,7 +638,8 @@ function dispatchAdmission(input) {
     const store = require(runtimeModule("store"));
     const found = store.findProject(project);
     return found.ok && found.slug ? store.projectDispatchAdmission(found.slug) : { status: "no-project" };
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return { status: "no-project" };
   }
 }
@@ -626,7 +695,8 @@ function preparedDispatchValidation(input) {
         route: typeof route?.model === "string" && typeof route.effort === "string" ? { model: route.model, effort: route.effort, marker: typeof route.marker === "string" && route.marker ? route.marker : null } : null
       }
     };
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return { status: "none" };
   }
 }
@@ -688,7 +758,8 @@ function activeExecutorTicketRefs(input) {
       }
     }
     return refs;
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return /* @__PURE__ */ new Set();
   }
 }
@@ -714,7 +785,8 @@ function terminalExecutorTicket(input) {
       }
     }
     return matches.length === 1 ? matches[0] || null : null;
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return null;
   }
 }
@@ -792,7 +864,8 @@ function helperScopes(input) {
       activeTickets.map((owner) => helperScope(store, owner.project, owner.projectPath, owner.ticket)),
       evidenceScopes
     );
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
     return helperScopeResolution("no-active-ticket", [], []);
   }
 }
@@ -806,7 +879,7 @@ function writeTarget(input) {
   const raw = writeTargetValue(input);
   if (!raw) return "";
   const cwd = stringField(input, "cwd") || process.cwd();
-  return import_node_path3.default.resolve(cwd, raw);
+  return import_node_path4.default.resolve(cwd, raw);
 }
 function restoresCommittedContent(input, target) {
   try {
@@ -816,7 +889,7 @@ function restoresCommittedContent(input, target) {
     if (toolName === "Write" && typeof toolInput?.content === "string") {
       restored = toolInput.content;
     } else if (toolName === "Edit" && typeof toolInput?.old_string === "string" && typeof toolInput.new_string === "string") {
-      const current = import_node_fs3.default.readFileSync(target, "utf8");
+      const current = import_node_fs4.default.readFileSync(target, "utf8");
       const first = current.indexOf(toolInput.old_string);
       if (first < 0 || !toolInput.replace_all && current.indexOf(toolInput.old_string, first + toolInput.old_string.length) >= 0) return false;
       restored = toolInput.replace_all ? current.split(toolInput.old_string).join(toolInput.new_string) : `${current.slice(0, first)}${toolInput.new_string}${current.slice(first + toolInput.old_string.length)}`;
@@ -824,12 +897,12 @@ function restoresCommittedContent(input, target) {
       return false;
     }
     const repository = canonicalPath((0, import_node_child_process.execFileSync)("git", ["rev-parse", "--show-toplevel"], {
-      cwd: import_node_path3.default.dirname(target),
+      cwd: import_node_path4.default.dirname(target),
       encoding: "utf8",
       windowsHide: true
     }).trim());
-    const relative = import_node_path3.default.relative(repository, canonicalPath(target)).replace(/\\/g, "/");
-    if (!relative || relative === ".." || relative.startsWith("../") || import_node_path3.default.isAbsolute(relative)) return false;
+    const relative = import_node_path4.default.relative(repository, canonicalPath(target)).replace(/\\/g, "/");
+    if (!relative || relative === ".." || relative.startsWith("../") || import_node_path4.default.isAbsolute(relative)) return false;
     const committed = (0, import_node_child_process.execFileSync)("git", ["show", `HEAD:${relative}`], {
       cwd: repository,
       windowsHide: true
@@ -840,13 +913,13 @@ function restoresCommittedContent(input, target) {
   }
 }
 function relativeInside(root, target) {
-  const relative = import_node_path3.default.relative(root, target).replace(/\\/g, "/");
-  return relative && relative !== ".." && !relative.startsWith("../") && !import_node_path3.default.isAbsolute(relative) ? relative : null;
+  const relative = import_node_path4.default.relative(root, target).replace(/\\/g, "/");
+  return relative && relative !== ".." && !relative.startsWith("../") && !import_node_path4.default.isAbsolute(relative) ? relative : null;
 }
 function linkedWorktreeRelative(target, projectPath) {
-  let existing = import_node_path3.default.dirname(target);
-  while (!import_node_fs3.default.existsSync(existing)) {
-    const parent = import_node_path3.default.dirname(existing);
+  let existing = import_node_path4.default.dirname(target);
+  while (!import_node_fs4.default.existsSync(existing)) {
+    const parent = import_node_path4.default.dirname(existing);
     if (parent === existing) return null;
     existing = parent;
   }
@@ -861,8 +934,8 @@ function linkedWorktreeRelative(target, projectPath) {
       encoding: "utf8",
       windowsHide: true
     }).trim();
-    const common = canonicalPath(import_node_path3.default.isAbsolute(commonOutput) ? commonOutput : import_node_path3.default.resolve(checkout, commonOutput));
-    if (common !== canonicalPath(import_node_path3.default.join(projectPath, ".git"))) return null;
+    const common = canonicalPath(import_node_path4.default.isAbsolute(commonOutput) ? commonOutput : import_node_path4.default.resolve(checkout, commonOutput));
+    if (common !== canonicalPath(import_node_path4.default.join(projectPath, ".git"))) return null;
     return relativeInside(checkout, target);
   } catch (_) {
     return null;
@@ -891,8 +964,8 @@ function evidenceTraversalAttempt(input, scope) {
   const rawTarget = writeTargetValue(input);
   if (!rawTarget) return false;
   const cwd = stringField(input, "cwd") || process.cwd();
-  const candidate = (import_node_path3.default.isAbsolute(rawTarget) ? rawTarget : import_node_path3.default.join(cwd, rawTarget)).replace(/\\/g, "/");
-  const evidenceDirectory = import_node_path3.default.resolve(scope.evidenceDirectory).replace(/\\/g, "/").replace(/\/+$/, "");
+  const candidate = (import_node_path4.default.isAbsolute(rawTarget) ? rawTarget : import_node_path4.default.join(cwd, rawTarget)).replace(/\\/g, "/");
+  const evidenceDirectory = import_node_path4.default.resolve(scope.evidenceDirectory).replace(/\\/g, "/").replace(/\/+$/, "");
   const comparableCandidate = process.platform === "win32" ? candidate.toLowerCase() : candidate;
   const comparableDirectory = process.platform === "win32" ? evidenceDirectory.toLowerCase() : evidenceDirectory;
   if (!comparableCandidate.startsWith(`${comparableDirectory}/`)) return false;
@@ -906,10 +979,10 @@ function denyEvidenceWrite(target) {
 }
 function isScratchpadPath(target) {
   const configuredRoot = process.env.CLAUDE_SCRATCHPAD_DIR || process.env.CLAUDE_CODE_SCRATCHPAD_DIR;
-  const roots = [configuredRoot, import_node_path3.default.join(import_node_os2.default.tmpdir(), "claude")].filter((root) => Boolean(root));
+  const roots = [configuredRoot, import_node_path4.default.join(import_node_os2.default.tmpdir(), "claude")].filter((root) => Boolean(root));
   return roots.some((root) => {
-    const relative = import_node_path3.default.relative(import_node_path3.default.resolve(root), target);
-    return Boolean(relative) && relative !== ".." && !relative.startsWith(`..${import_node_path3.default.sep}`) && !import_node_path3.default.isAbsolute(relative);
+    const relative = import_node_path4.default.relative(import_node_path4.default.resolve(root), target);
+    return Boolean(relative) && relative !== ".." && !relative.startsWith(`..${import_node_path4.default.sep}`) && !import_node_path4.default.isAbsolute(relative);
   });
 }
 function guardHelperWrite(input) {
@@ -971,7 +1044,8 @@ ${message.trim()}`
       "PreToolUse",
       `sidequest: ${terminal.ref} is already ${terminal.outcome} and ${recipient} has ended, so this steer would be dropped. ${recorded?.ok ? "It is now a comment on the ticket." : "Record it on the ticket yourself."} Re-dispatch ${terminal.ref} if the work itself must change.`
     );
-  } catch (_) {
+  } catch (error) {
+    refuseWhenBoardBusy(error);
   }
 }
 function main() {
@@ -1116,6 +1190,7 @@ function main() {
 }
 try {
   main();
-} catch (_) {
+} catch (error) {
+  refuseWhenBoardBusy(error);
   process.exit(0);
 }
