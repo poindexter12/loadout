@@ -58,7 +58,7 @@ test('one fragment can bump several plugins at different levels', (t) => {
   ]);
 });
 
-test('the marketplace counter takes a minor per window and a patch per hotfix', (t) => {
+test('the marketplace counter defaults to a minor per window and a patch per hotfix', (t) => {
   const fragments = { 'SQ-1': { plugins: ['sidequest'], bump: 'patch', commit: 'abcdef1' } };
   const normal = planFor(t, { fragments });
   assert.deepEqual(normal.marketplace, { from: '3.207.0', to: '3.208.0', level: 'minor' });
@@ -67,6 +67,28 @@ test('the marketplace counter takes a minor per window and a patch per hotfix', 
   const hotfix = planFor(t, { fragments, mode: 'hotfix', tickets: ['SQ-1'] });
   assert.deepEqual(hotfix.marketplace, { from: '3.207.0', to: '3.207.1', level: 'patch' });
   assert.deepEqual(hotfix.tags, ['v3.207.1', 'sidequest-v3.6.18']);
+});
+
+test('a normal window can deliberately raise the marketplace to a major', (t) => {
+  const plan = planFor(t, {
+    fragments: { 'SQ-1': { plugins: ['sidequest'], bump: 'patch', commit: 'abcdef1' } },
+    marketplaceLevel: 'major',
+  });
+
+  assert.deepEqual(plan.marketplace, { from: '3.207.0', to: '4.0.0', level: 'major' });
+  assert.deepEqual(plan.tags, ['v4.0.0', 'sidequest-v3.6.18']);
+});
+
+test('a marketplace override is unavailable to hotfix windows', (t) => {
+  assert.throws(
+    () => planFor(t, {
+      fragments: { 'SQ-1': { plugins: ['sidequest'], bump: 'patch' } },
+      mode: 'hotfix',
+      tickets: ['SQ-1'],
+      marketplaceLevel: 'major',
+    }),
+    /--marketplace-level applies to normal windows only/,
+  );
 });
 
 test('held fragments stay out of a normal window', (t) => {

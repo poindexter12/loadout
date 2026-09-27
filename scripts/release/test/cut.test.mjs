@@ -268,6 +268,24 @@ test('a normal cut moves three version fields and nothing else', async (t) => {
   assert.deepEqual(context.suites, ['sidequest', 'toolbelt'], 'only the changed plugins are verified');
 });
 
+test('a normal cut uses an explicit marketplace major for its version and tag', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  context.commit('integrate');
+
+  const result = await cut({
+    repoRoot: context.root,
+    marketplaceLevel: 'major',
+    runSuite: context.runSuite,
+    log: () => {},
+  });
+
+  assert.equal(result.plan.marketplace.to, '4.0.0');
+  assert.equal(result.plan.tag, 'v4.0.0');
+  assert.equal(context.marketplaceVersion(), '4.0.0');
+  assert.equal(context.git('tag', '--list', 'v4.0.0'), 'v4.0.0');
+});
+
 test('the release commit contains exactly what the cut generated', async (t) => {
   const context = setup(t);
   context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'minor' });
@@ -1528,6 +1546,13 @@ test('--trust-ci refuses without a CI verdict, beside --ci-override, and in a ho
     /--trust-ci applies to normal windows only/,
   );
   assert.equal(context.git('rev-parse', 'HEAD'), pinned);
+});
+
+test('--marketplace-level parses as a normal-window override', () => {
+  const { parseCutArgs } = cutModule;
+  const parsed = parseCutArgs(['--marketplace-level', 'major', '--repo', '/tmp/x']).options;
+  assert.equal(parsed.marketplaceLevel, 'major');
+  assert.equal(parseCutArgs(['--repo', '/tmp/x']).options.marketplaceLevel, null);
 });
 
 test('--trust-ci and --keep-on-failure parse to cut options that default off', () => {

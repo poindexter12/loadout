@@ -26,6 +26,8 @@ tag, then pushes the plugin tags separately.
 
   --sha <rev>              Pin the window to this commit (default HEAD). Every input is read from it
   --mode <normal|hotfix>   Window kind (default normal)
+  --marketplace-level <patch|minor|major>
+                           Override a normal window's marketplace bump (default minor; hotfixes patch)
   --tickets <a,b>          Refs to release in a hotfix, each named once
   --date <YYYY-MM-DD>      Release date (defaults to the pinned commit's date)
   --publish-branch <name>  Branch the release lands on (default main)
@@ -770,6 +772,7 @@ export async function cut(options = {}) {
   const {
     repoRoot,
     mode = 'normal',
+    marketplaceLevel = null,
     tickets = null,
     sha = null,
     date = null,
@@ -860,6 +863,7 @@ export async function cut(options = {}) {
     fragments,
     manifest,
     mode,
+    marketplaceLevel,
     tickets,
     released,
     force,
@@ -1077,6 +1081,7 @@ export function parseCutArgs(argv) {
     options: {
       sha: { type: 'string' },
       mode: { type: 'string' },
+      'marketplace-level': { type: 'string' },
       tickets: { type: 'string' },
       date: { type: 'string' },
       'publish-branch': { type: 'string' },
@@ -1103,6 +1108,7 @@ export function parseCutArgs(argv) {
     options: {
       repoRoot: path.resolve(values.repo ?? repoRootFrom(import.meta.url)),
       mode: values.mode ?? 'normal',
+      marketplaceLevel: values['marketplace-level'] ?? null,
       tickets: splitList(values.tickets),
       sha: values.sha ?? null,
       date: values.date ?? null,

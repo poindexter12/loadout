@@ -4,6 +4,10 @@
 
 `cut.mjs` owns marketplace and plugin version bumps, changelogs, release tags, and fragment consumption, and rolls back its own local commit and tags when a cut fails before anything is pushed and the remote does not already carry the release (`--keep-on-failure` keeps them). Ticket work records the fragment and does not hand-edit plugin or marketplace versions. See [`scripts/release/README.md`](../scripts/release/README.md) for the release lifecycle and recovery steps.
 
+## Marketplace version
+
+A normal release window increments the marketplace minor version by default. For a deliberate fork-line move, pass `--marketplace-level major` to `cut.mjs` (or `patch` or `minor` when explicitly needed); its dry-run prints the resulting marketplace version and `v<version>` tag. This override applies only to normal windows. Hotfix windows always patch the marketplace version and reject `--marketplace-level`. Plugin versions continue to be determined independently by each fragment's bump level.
+
 Write one with `node scripts/release/note.mjs`, never by hand if you can avoid it, because the script validates what it writes:
 
 ```bash

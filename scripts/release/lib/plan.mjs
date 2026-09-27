@@ -1,5 +1,5 @@
 import { compareRefs, fragmentFingerprint } from './fragments.mjs';
-import { bumpVersion, maxLevel } from './semver.mjs';
+import { bumpVersion, isLevel, maxLevel } from './semver.mjs';
 
 export const MODES = ['normal', 'hotfix'];
 
@@ -46,13 +46,15 @@ function selectFragments({ fragments, mode, tickets, released, force }) {
 }
 
 /**
- * The single source of truth for what a cut would do. Pure: every input comes from the tree, so
- * plan.mjs and cut.mjs cannot disagree and a rerun on the same tree produces the same answer.
+ * The single source of truth for what a cut would do. Pure: every input comes from the tree or
+ * explicit cut options, so plan.mjs and cut.mjs cannot disagree and a rerun with the same inputs
+ * produces the same answer.
  */
 export function buildPlan({
   fragments,
   manifest,
   mode = 'normal',
+  marketplaceLevel = null,
   tickets = null,
   released = new Set(),
   force = false,
@@ -63,6 +65,12 @@ export function buildPlan({
   suiteResolver = () => null,
 }) {
   if (!MODES.includes(mode)) throw new PlanError(`unknown mode "${mode}" (expected ${MODES.join(' or ')})`);
+  if (marketplaceLevel !== null) {
+    if (!isLevel(marketplaceLevel)) {
+      throw new PlanError(`unknown marketplace level "${marketplaceLevel}" (expected patch, minor, or major)`);
+    }
+    if (mode !== 'normal') throw new PlanError('--marketplace-level applies to normal windows only');
+  }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date ?? '')) throw new PlanError(`release date "${date}" must be YYYY-MM-DD`);
 
   const { selected, skipped } = selectFragments({ fragments, mode, tickets, released, force });
@@ -96,9 +104,9 @@ export function buildPlan({
     });
 
   const releasable = selected.length > 0;
-  const marketplaceLevel = MARKETPLACE_LEVEL[mode];
+  const selectedMarketplaceLevel = marketplaceLevel ?? MARKETPLACE_LEVEL[mode];
   const marketplaceTo = releasable
-    ? bumpVersion(manifest.version, marketplaceLevel, 'marketplace version')
+    ? bumpVersion(manifest.version, selectedMarketplaceLevel, 'marketplace version')
     : manifest.version;
   const tag = `v${marketplaceTo}`;
   const pluginTags = plugins.map((plugin) => `${plugin.name}-v${plugin.to}`);
@@ -120,7 +128,7 @@ export function buildPlan({
     selected,
     skipped,
     plugins,
-    marketplace: { from: manifest.version, to: marketplaceTo, level: marketplaceLevel },
+    marketplace: { from: manifest.version, to: marketplaceTo, level: selectedMarketplaceLevel },
     tag,
     pluginTags,
     tags: releasable ? [tag, ...pluginTags] : [],
