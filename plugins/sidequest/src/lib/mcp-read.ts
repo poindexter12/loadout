@@ -66,6 +66,16 @@ const {
   CATEGORY_TAXONOMY_WARNING,
   state,
 } = require('./mcp-shared');
+const backupRefs = require('./backup-refs');
+
+// Backup and ad hoc refs are a read aid; a git failure must never fail the read.
+function ticketRefSurface(projectPath: unknown, ticket: any) {
+  try { return backupRefs.ticketRefSurface(projectPath, ticket); } catch (_) { return null; }
+}
+
+function boardRefSurface(projectPath: unknown) {
+  try { return backupRefs.boardRefSurface(projectPath); } catch (_) { return null; }
+}
 
 type ToolDefinition = {
   name: string;
@@ -124,7 +134,7 @@ const tools: ToolDefinition[] = [
       if (args.ref !== undefined) {
         const ticket = store.getTicket(slug, args.ref);
         if (!ticket) throw new Error(`list: no ticket "${args.ref}" in ${meta.name}`);
-        return { project: slug, projectName: meta.name, ticket: ticketWithContextHandles(slug, ticket) };
+        return Object.assign({ project: slug, projectName: meta.name, ticket: ticketWithContextHandles(slug, ticket) }, ticketRefSurface(meta.path, ticket));
       }
       // MCP board reads are routine orchestration reads, so omit completed work
       // and ticket bodies unless the caller explicitly asks for either.
@@ -142,7 +152,7 @@ const tools: ToolDefinition[] = [
           ? payload.tickets.map(compactListRow)
           : payload.tickets.map((ticket: any) => ticketWithContextHandles(slug, ticket)),
       });
-      const out = Object.assign({ project: slug, projectName: meta.name }, withoutCategories(shapedPayload));
+      const out = Object.assign({ project: slug, projectName: meta.name }, withoutCategories(shapedPayload), boardRefSurface(meta.path));
       if (payload.nextCursor) {
         out.hint = `Page ${payload.returned}/${payload.total}; continue with cursor:"${payload.nextCursor}" until nextCursor is null.`;
         out.retrieval = listRowsContextRetrieval(slug, args, Number(payload.nextCursor));
@@ -167,7 +177,7 @@ const tools: ToolDefinition[] = [
       const pulse = store.pulsePayload(slug, args.ref);
       if (!pulse) throw new Error(`pulse: no ticket "${args.ref}" in ${meta.name}`);
       const payload = args.full ? withoutCategories(pulse) : compactPulse(pulse);
-      return Object.assign({ project: slug }, payload, { awaitingMergeWaves: pulse.awaitingMergeWaves });
+      return Object.assign({ project: slug }, payload, { awaitingMergeWaves: pulse.awaitingMergeWaves }, ticketRefSurface(meta.path, store.getTicket(slug, args.ref)));
     },
   },
   {

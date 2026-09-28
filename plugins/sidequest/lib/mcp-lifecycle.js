@@ -58,6 +58,15 @@ const {
   state
 } = require("./mcp-shared");
 const { sourceRevisionBaseline } = require("./source-revision-capability");
+const backupRefs = require("./backup-refs");
+function pruneDoneBackupRefs(slug, projectPath) {
+  try {
+    const result = backupRefs.pruneBackupRefs(projectPath, (ref) => store.getTicket(slug, ref)?.status === "done");
+    return result.pruned.length ? { backupRefsPruned: result.pruned } : null;
+  } catch (_) {
+    return null;
+  }
+}
 const VERIFICATION_WAIVER_PROP = {
   description: "Required with skipVerify. Names the human authority, reason, affected gate, and a bounded scope or future expiry. Runtime validation rejects incomplete, expired, or non-object values.",
   properties: {
@@ -106,6 +115,7 @@ function deliveredAck(slug, result, integration, changed = {}) {
   });
 }
 async function cleanupDeliveredWorktree(slug, projectPath, ticket, claimWasLive = false) {
+  pruneDoneBackupRefs(slug, projectPath);
   try {
     const dispatch = ticket?.dispatch;
     if (!dispatch?.worktree || dispatch.sharedTree !== false || dispatch.continuation || store.boardConfig(slug)?.worktreeIsolation === false) return;
@@ -364,14 +374,14 @@ const tools = [
   },
   {
     name: "checkpoint",
-    description: "Record a verified live review candidate without releasing the claim or ending the dispatch. Use the returned checkpoint id in linked review findings.",
+    description: "Record a verified live review candidate without releasing the claim or ending the dispatch. Use the returned checkpoint id in linked review findings. A commit checkpoint is also the board-owned backup: it pins the commit at refs/sidequest-backup/<REF>/<UTC stamp> with a reflog (returned as checkpoint.backupRef), and closure prunes it once the ticket is done. Never hand-create backup refs under refs/sidequest/.",
     inputSchema: {
       type: "object",
       properties: {
         ref: { type: "string" },
         project: PROJECT_PROP,
         by: { type: "string" },
-        commit: { type: "string", pattern: "^[0-9a-fA-F]{7,64}$" },
+        commit: { type: "string", pattern: "^[0-9a-fA-F]{7,64}$", description: "Also pinned at refs/sidequest-backup/<REF>/<stamp>." },
         worktree: { type: "string", description: "Absolute path to the verified candidate worktree." },
         verify: { type: "string", minLength: 1, maxLength: 4e3, description: "Verification command and result evidence." },
         ttlMinutes: { type: "integer", minimum: 1, maximum: store.MAX_CHECKPOINT_TTL_MIN }
@@ -478,7 +488,7 @@ const tools = [
         }
       }
       if (res.ok) closeDispatchExecutor(ticket);
-      return mutationAck(slug, res);
+      return mutationAck(slug, res, res.ok ? pruneDoneBackupRefs(slug, meta.path) : null);
     }
   },
   {
@@ -542,7 +552,7 @@ const tools = [
           res.worktreeSweep = { failures: [{ path: null, message: error && error.message || String(error) }] };
         }
       }
-      return mutationAck(slug, res, res.ok ? Object.assign({ completion: res.ticket.completion }, integrationBranchAck(res.integrationBranch)) : null);
+      return mutationAck(slug, res, res.ok ? Object.assign({ completion: res.ticket.completion }, integrationBranchAck(res.integrationBranch), pruneDoneBackupRefs(slug, meta.path)) : null);
     }
   },
   {

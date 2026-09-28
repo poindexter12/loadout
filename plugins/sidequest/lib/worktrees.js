@@ -357,7 +357,7 @@ function salvageRef(entry, suffix = "") {
   return `refs/salvage/${path.basename(worktreePath(entry))}${suffix}`;
 }
 async function createSalvageRef(repo, ref, revision) {
-  const created = await git(repo, ["update-ref", ref, revision, "0000000000000000000000000000000000000000"]);
+  const created = await git(repo, ["update-ref", "--create-reflog", ref, revision, "0000000000000000000000000000000000000000"]);
   if (!created.ok) throw new Error(created.stderr || `could not create salvage ref ${ref}`);
 }
 async function salvageWorktree(repo, entry) {

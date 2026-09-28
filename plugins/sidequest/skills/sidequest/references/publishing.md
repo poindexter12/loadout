@@ -189,6 +189,27 @@ is recorded against the already-done ticket; it must not be described as remotel
   rejects both routes; retain its oracle, then repair through a fresh ticket and supersede it only
   after the reviewed repair integrates.
 
+## Backup refs
+
+`refs/sidequest/<SQ-n>` is the pinned candidate namespace, never a scratch area. Do not improvise
+backup refs such as `refs/sidequest/<SQ-n>-preserve` or `refs/sidequest/<SQ-n>-checkpoint`: they
+look like candidates, nothing lists them, and nothing deletes them.
+
+- **Executor, before a risky reset or rebase**: commit the work, then call MCP `checkpoint` with
+  that `commit`. The board pins it at `refs/sidequest-backup/<SQ-n>/<UTC stamp>` (for example
+  `refs/sidequest-backup/SQ-178/20260928T101500123Z`) with a reflog, creates it without ever
+  overwriting an existing backup, and returns it as `checkpoint.backupRef`. A checkpoint whose commit
+  is not in the repository records `checkpoint.backupError` instead.
+- **Orchestrator, outside a claim**: use the same namespace and always keep a reflog:
+  `git update-ref --create-reflog -m "<why>" refs/sidequest-backup/<SQ-n>/<UTC stamp> <commit>`.
+- **Seeing them**: `pulse <SQ-n>` and `list ref:<SQ-n>` return `backupRefs` and any
+  `unrecognizedRefs` (refs under `refs/sidequest/` the board did not write). Board `list` returns
+  per-ticket backup counts and the unrecognized refs board-wide. An unrecognized ref is not a
+  candidate; the submission's recorded `gitRef` is.
+- **Cleanup**: MCP `done`, `groomClose`, and `integrate` delivery prune every backup whose ticket is
+  done, board-wide, and `done`/`groomClose` report them as `backupRefsPruned`. Delete a legacy
+  unrecognized ref by hand once its commit is reachable or deliberately abandoned.
+
 ## Dead executor salvage
 
 A dead executor's `done` only proves the board transition, never that work shipped. Inspect its

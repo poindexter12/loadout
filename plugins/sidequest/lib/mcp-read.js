@@ -65,6 +65,21 @@ const {
   CATEGORY_TAXONOMY_WARNING,
   state
 } = require("./mcp-shared");
+const backupRefs = require("./backup-refs");
+function ticketRefSurface(projectPath, ticket) {
+  try {
+    return backupRefs.ticketRefSurface(projectPath, ticket);
+  } catch (_) {
+    return null;
+  }
+}
+function boardRefSurface(projectPath) {
+  try {
+    return backupRefs.boardRefSurface(projectPath);
+  } catch (_) {
+    return null;
+  }
+}
 function readySummary(payload) {
   const tickets = payload.tickets.map((ticket) => ({ ref: ticket.ref, title: ticket.title }));
   return {
@@ -114,7 +129,7 @@ const tools = [
       if (args.ref !== void 0) {
         const ticket = store.getTicket(slug, args.ref);
         if (!ticket) throw new Error(`list: no ticket "${args.ref}" in ${meta.name}`);
-        return { project: slug, projectName: meta.name, ticket: ticketWithContextHandles(slug, ticket) };
+        return Object.assign({ project: slug, projectName: meta.name, ticket: ticketWithContextHandles(slug, ticket) }, ticketRefSurface(meta.path, ticket));
       }
       const status = args.status == null && !args.all ? ["todo", "doing", "awaiting-oracle"] : args.status;
       const brief = args.detail ? false : args.brief !== false;
@@ -131,7 +146,7 @@ const tools = [
       const shapedPayload = Object.assign({}, payload, {
         tickets: brief ? payload.tickets.map(compactListRow) : payload.tickets.map((ticket) => ticketWithContextHandles(slug, ticket))
       });
-      const out = Object.assign({ project: slug, projectName: meta.name }, withoutCategories(shapedPayload));
+      const out = Object.assign({ project: slug, projectName: meta.name }, withoutCategories(shapedPayload), boardRefSurface(meta.path));
       if (payload.nextCursor) {
         out.hint = `Page ${payload.returned}/${payload.total}; continue with cursor:"${payload.nextCursor}" until nextCursor is null.`;
         out.retrieval = listRowsContextRetrieval(slug, args, Number(payload.nextCursor));
@@ -156,7 +171,7 @@ const tools = [
       const pulse = store.pulsePayload(slug, args.ref);
       if (!pulse) throw new Error(`pulse: no ticket "${args.ref}" in ${meta.name}`);
       const payload = args.full ? withoutCategories(pulse) : compactPulse(pulse);
-      return Object.assign({ project: slug }, payload, { awaitingMergeWaves: pulse.awaitingMergeWaves });
+      return Object.assign({ project: slug }, payload, { awaitingMergeWaves: pulse.awaitingMergeWaves }, ticketRefSurface(meta.path, store.getTicket(slug, args.ref)));
     }
   },
   {

@@ -439,7 +439,7 @@ function salvageRef(entry: any, suffix = ''): string {
 }
 
 async function createSalvageRef(repo: string, ref: string, revision: string): Promise<void> {
-  const created = await git(repo, ['update-ref', ref, revision, '0000000000000000000000000000000000000000']);
+  const created = await git(repo, ['update-ref', '--create-reflog', ref, revision, '0000000000000000000000000000000000000000']);
   if (!created.ok) throw new Error(created.stderr || `could not create salvage ref ${ref}`);
 }
 

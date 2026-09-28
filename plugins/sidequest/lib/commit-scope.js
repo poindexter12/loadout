@@ -421,11 +421,11 @@ function preserveCommitRef(cwd, commit, gitRef, options) {
         return { ok: false, reason: "git_ref_collision", message: `${ref} already points to ${existing.value}` };
       }
       const emptyRef = "0000000000000000000000000000000000000000";
-      const created = gitResult(root, ["update-ref", ref, tip.value, emptyRef]);
+      const created = gitResult(root, ["update-ref", "--create-reflog", ref, tip.value, emptyRef]);
       if (!created.ok) return { ok: false, reason: "git_ref_collision", message: created.message };
       return { ok: true, commit: tip.value, gitRef: ref };
     }
-    git(root, ["update-ref", ref, tip.value]);
+    git(root, ["update-ref", "--create-reflog", ref, tip.value]);
     return { ok: true, commit: tip.value, gitRef: ref };
   } catch (error) {
     return { ok: false, reason: "git_error", message: errorMessage(error) };

@@ -229,3 +229,106 @@ test('CLI and MCP expose the checkpoint operation and compact pulse state', asyn
   assert.strictEqual(pulse.checkpoint.id, result.checkpoint.id);
   assert.strictEqual(pulse.checkpoint.state, 'active');
 });
+
+// SQ-178: backups get one board-owned namespace, a reflog, a read surface, and
+// pruning at done, instead of hand-made refs/sidequest/<REF>-preserve refs.
+const backupRefs = require('../lib/backup-refs.js');
+const { execFileSync } = require('node:child_process');
+
+function gitIn(cwd: string, args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+}
+
+function backupRepo(): { repo: string; commit: string } {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-checkpoint-backup-repo-'));
+  gitIn(repo, ['init', '-q']);
+  gitIn(repo, ['config', 'user.email', 'fixture@example.invalid']);
+  gitIn(repo, ['config', 'user.name', 'Fixture']);
+  gitIn(repo, ['config', 'commit.gpgsign', 'false']);
+  fs.writeFileSync(path.join(repo, 'file.txt'), 'backup fixture\n');
+  gitIn(repo, ['add', 'file.txt']);
+  gitIn(repo, ['commit', '-q', '-m', 'fixture']);
+  return { repo, commit: gitIn(repo, ['rev-parse', 'HEAD']) };
+}
+
+test('commit checkpoint pins a reflogged backup under refs/sidequest-backup and surfaces ad hoc refs', async () => {
+  const { repo, commit } = backupRepo();
+  const ticket = addDirect('Backup checkpoint');
+  claimDirect(ticket, 'backup-worker');
+  const result = await callTool('checkpoint', {
+    ref: ticket.ref,
+    project: PROJECT_DIR,
+    by: 'backup-worker',
+    commit: commit.slice(0, 12),
+    worktree: repo,
+    verify: 'git log -1: fixture commit present',
+  });
+  assert.strictEqual(result.ok, true);
+  const backupRef = result.checkpoint.backupRef;
+  assert.match(backupRef, new RegExp(`^refs/sidequest-backup/${ticket.ref}/\\d{8}T\\d{9}Z$`));
+  assert.strictEqual(gitIn(repo, ['rev-parse', backupRef]), commit);
+  // Board ref writes carry a reflog so every move is auditable.
+  assert.match(gitIn(repo, ['reflog', 'show', '--format=%gs', backupRef]), new RegExp(`sidequest checkpoint ${ticket.ref}`));
+  const stored = store.getTicket(slug, ticket.ref);
+  assert.ok(stored.comments.some((comment?: any) => comment.body.includes(`Backup: ${backupRef}`)));
+
+  // A second backup in the same millisecond never overwrites the first.
+  const now = Date.parse('2026-09-28T10:15:00.123Z');
+  const first = backupRefs.writeBackupRef(repo, ticket.ref, commit, { now });
+  const second = backupRefs.writeBackupRef(repo, ticket.ref, commit, { now });
+  assert.strictEqual(first.gitRef, `refs/sidequest-backup/${ticket.ref}/20260928T101500123Z`);
+  assert.strictEqual(second.gitRef, `${first.gitRef}-1`);
+
+  // An improvised ref in the candidate namespace is reported, board shapes are not.
+  gitIn(repo, ['update-ref', `refs/sidequest/${ticket.ref}-preserve`, commit]);
+  gitIn(repo, ['update-ref', `refs/sidequest/${ticket.ref}`, commit]);
+  const surface = backupRefs.ticketRefSurface(repo, stored);
+  assert.deepStrictEqual(surface.backupRefs.map((entry: any) => entry.gitRef).sort(), [backupRef, first.gitRef, second.gitRef].sort());
+  assert.strictEqual(surface.backupRefs.find((entry: any) => entry.gitRef === first.gitRef).at, '2026-09-28T10:15:00.123Z');
+  assert.deepStrictEqual(surface.unrecognizedRefs.map((entry: any) => entry.gitRef), [`refs/sidequest/${ticket.ref}-preserve`]);
+  const board = backupRefs.boardRefSurface(repo);
+  assert.deepStrictEqual(board.backupRefs, [{ ticket: ticket.ref, count: 3 }]);
+  assert.deepStrictEqual(board.unrecognizedRefs, [`refs/sidequest/${ticket.ref}-preserve`]);
+
+  // A checkpoint without a resolvable commit still records, and says why no backup exists.
+  const noRepo = await callTool('checkpoint', {
+    ref: ticket.ref, project: PROJECT_DIR, by: 'backup-worker', commit: COMMIT, verify: 'fixture',
+  });
+  assert.strictEqual(noRepo.ok, true);
+  assert.strictEqual(noRepo.checkpoint.backupRef, undefined);
+  assert.match(noRepo.checkpoint.backupError, /^missing_commit/);
+});
+
+test('pruning removes only done tickets\' backups and list/pulse surface the rest', async () => {
+  const { repo, commit } = backupRepo();
+  const repoProject = store.ensureProject(repo);
+  const live = store.createTicket(repoProject.slug, {
+    title: 'Live backup', complexity: 2, complexityWhy: 'backup prune fixture', labels: ['direct-ok'], files: ['file.txt'], source: 'cli',
+  });
+  const finished = store.createTicket(repoProject.slug, {
+    title: 'Done backup', complexity: 2, complexityWhy: 'backup prune fixture', labels: ['direct-ok'], files: ['file.txt'], source: 'cli',
+  });
+  const liveBackup = backupRefs.writeBackupRef(repo, live.ref, commit);
+  const doneBackup = backupRefs.writeBackupRef(repo, finished.ref, commit);
+  assert.strictEqual(liveBackup.ok, true);
+  assert.strictEqual(doneBackup.ok, true);
+
+  const pulse = await callTool('pulse', { ref: live.ref, project: repo });
+  assert.deepStrictEqual(pulse.backupRefs.map((entry: any) => entry.gitRef), [liveBackup.gitRef]);
+  const listed = await callTool('list', { project: repo, all: true });
+  assert.deepStrictEqual(listed.backupRefs.map((entry: any) => entry.ticket).sort(), [finished.ref, live.ref].sort());
+  const single = await callTool('list', { project: repo, ref: finished.ref });
+  assert.deepStrictEqual(single.backupRefs.map((entry: any) => entry.gitRef), [doneBackup.gitRef]);
+
+  const pruned = backupRefs.pruneBackupRefs(repo, (ref: string) => ref === finished.ref);
+  assert.deepStrictEqual(pruned.pruned, [doneBackup.gitRef]);
+  assert.deepStrictEqual(backupRefs.listBackupRefs(repo).backups.map((entry: any) => entry.gitRef), [liveBackup.gitRef]);
+  const after = await callTool('pulse', { ref: finished.ref, project: repo });
+  assert.strictEqual(after.backupRefs, undefined);
+
+  // The done closure prunes board-wide: groom-closing the live ticket removes its backup.
+  const closed = await callTool('groomClose', { ref: live.ref, project: repo, by: 'orchestrator', reason: 'backup prune fixture closes without delivery' });
+  assert.strictEqual(closed.ok, true, JSON.stringify(closed));
+  assert.deepStrictEqual(closed.backupRefsPruned, [liveBackup.gitRef]);
+  assert.deepStrictEqual(backupRefs.listBackupRefs(repo).backups, []);
+});

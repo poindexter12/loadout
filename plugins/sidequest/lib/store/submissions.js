@@ -9,6 +9,7 @@ const { assembleWave, openWave, recordAssembledWaveGate, recordWaveDelivery } = 
 const { AWAITING_MERGE_OUTCOME, isSafeBranchName, isSafeRefComponent, validateWavePullRequest, waveBranchName } = require("../kernel/pr-delivery.js");
 const { createGhPrPort, PrDeliveryUnavailableError } = require("../ports/github-pr.js");
 const { isInScope, scopedPaths } = require("../scope-match");
+const backupRefs = require("../backup-refs");
 const os = require("node:os");
 function createSubmissions(dependencies) {
   const { EXECUTOR_VERIFY_MAX, INTEGRATION_VERIFY_OUTPUT_TAIL_BYTES, MANUAL_VERIFY_PREFIX, acquireLock, addComment, appendReworkEvent, artifactWorkingState, autoReleasedClaimMessage, attestationErrors, boardConfig, boundedExcerptForSubmission, commitScope, completionTreeCheck, coerceStatus, createComment, crypto, dirtyPathKey, dispatchState, executionScope, ensureDir, execFileSync, fs, getTicket, integrationTarget, integrationTargetCommit, listTickets, manualVerify, normalizeDeliveryMode, normalizeIntegrationBranch, normalizeIntegrationVerifyTimeoutMs, nullableText, path, prepareComment, projectDir, putTicket, queueEventNotification, readMeta, recordedReviewPass, recordLifecycleAttempt, releaseLock, resolveDeliveryConfig, setDispatchTerminal, spawnSync, stampDispatchEvent, ticketLockPath, transaction, unregisterClaim, verifyCommandErrors, verifyCommandError, withTicketLock, transitionAttempt, attemptDiagnostic } = dependencies;
@@ -291,7 +292,9 @@ function createSubmissions(dependencies) {
       worktree: checkpoint.worktree || null,
       verify: verify.text,
       verifyLength: verify.length,
-      verifyTruncated: verify.truncated
+      verifyTruncated: verify.truncated,
+      ...checkpoint.backupRef ? { backupRef: checkpoint.backupRef } : {},
+      ...checkpoint.backupError ? { backupError: checkpoint.backupError } : {}
     };
   }
   function oracleProjection(ticket) {
@@ -316,9 +319,12 @@ function createSubmissions(dependencies) {
       checkpoint.commit ? `commit ${checkpoint.commit}` : null,
       checkpoint.worktree ? `worktree ${checkpoint.worktree}` : null
     ].filter(Boolean).join(", ");
+    const backup = checkpoint.backupRef ? `
+Backup: ${checkpoint.backupRef}` : checkpoint.backupError ? `
+Backup: not written (${checkpoint.backupError})` : "";
     return `Live review checkpoint ${checkpoint.id}
 Candidate: ${candidate}
-Verification: ${checkpoint.verify}
+Verification: ${checkpoint.verify}${backup}
 Expires: ${checkpoint.expiresAt}`;
   }
   function checkpointTicket(slug, idOrRef, by, opts) {
@@ -365,6 +371,17 @@ Expires: ${checkpoint.expiresAt}`;
         worktree,
         verify
       };
+      if (commit && checkpoint.kind === "review") {
+        const backup = backupRefs.writeBackupRef(worktree || readMeta(slug)?.path, t.ref, commit, {
+          now: nowMs,
+          reason: `sidequest checkpoint ${t.ref} ${checkpoint.id}`
+        });
+        if (backup.ok) {
+          checkpoint.backupRef = backup.gitRef;
+        } else {
+          checkpoint.backupError = `${backup.reason}: ${backup.message}`.slice(0, 500);
+        }
+      }
       const body = opts.commentBody == null ? checkpointCommentBody(checkpoint) : String(opts.commentBody);
       const prepared = prepareComment({ by, body, source: opts.source || "cli" });
       if (!prepared.ok) throw new Error(`checkpoint comment ${prepared.reason}`);

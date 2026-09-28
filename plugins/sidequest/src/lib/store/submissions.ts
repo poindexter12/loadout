@@ -10,6 +10,7 @@ const { assembleWave, openWave, recordAssembledWaveGate, recordWaveDelivery } = 
 const { AWAITING_MERGE_OUTCOME, isSafeBranchName, isSafeRefComponent, validateWavePullRequest, waveBranchName } = require('../kernel/pr-delivery.js');
 const { createGhPrPort, PrDeliveryUnavailableError } = require('../ports/github-pr.js');
 const { isInScope, scopedPaths } = require('../scope-match');
+const backupRefs = require('../backup-refs');
 const os = require('node:os');
 import type { VerificationResult } from '../kernel/verification.js';
 import type { GitHubPrPort } from '../ports/github-pr.js';
@@ -386,6 +387,8 @@ function checkpointProjection(ticket?: any, now?: any) {
     verify: verify.text,
     verifyLength: verify.length,
     verifyTruncated: verify.truncated,
+    ...(checkpoint.backupRef ? { backupRef: checkpoint.backupRef } : {}),
+    ...(checkpoint.backupError ? { backupError: checkpoint.backupError } : {}),
   };
 }
 
@@ -412,7 +415,10 @@ function checkpointCommentBody(checkpoint?: any) {
     checkpoint.commit ? `commit ${checkpoint.commit}` : null,
     checkpoint.worktree ? `worktree ${checkpoint.worktree}` : null,
   ].filter(Boolean).join(', ');
-  return `Live review checkpoint ${checkpoint.id}\nCandidate: ${candidate}\nVerification: ${checkpoint.verify}\nExpires: ${checkpoint.expiresAt}`;
+  const backup = checkpoint.backupRef
+    ? `\nBackup: ${checkpoint.backupRef}`
+    : checkpoint.backupError ? `\nBackup: not written (${checkpoint.backupError})` : '';
+  return `Live review checkpoint ${checkpoint.id}\nCandidate: ${candidate}\nVerification: ${checkpoint.verify}${backup}\nExpires: ${checkpoint.expiresAt}`;
 }
 
 function checkpointTicket(slug?: any, idOrRef?: any, by?: any, opts?: any) {
@@ -458,7 +464,22 @@ function checkpointTicket(slug?: any, idOrRef?: any, by?: any, opts?: any) {
       } : null,
       worktree,
       verify,
-    };
+    } as any;
+    // A commit-bearing review checkpoint is also the board's backup operation
+    // (SQ-178): the commit is pinned at refs/sidequest-backup/<REF>/<stamp>
+    // with a reflog, never under the candidate namespace. A rejected
+    // submission is already preserved at its quarantine ref, so it skips this.
+    if (commit && checkpoint.kind === 'review') {
+      const backup = backupRefs.writeBackupRef(worktree || readMeta(slug)?.path, t.ref, commit, {
+        now: nowMs,
+        reason: `sidequest checkpoint ${t.ref} ${checkpoint.id}`,
+      });
+      if (backup.ok) {
+        checkpoint.backupRef = backup.gitRef;
+      } else {
+        checkpoint.backupError = `${backup.reason}: ${backup.message}`.slice(0, 500);
+      }
+    }
     const body = opts.commentBody == null ? checkpointCommentBody(checkpoint) : String(opts.commentBody);
     const prepared = prepareComment({ by, body, source: opts.source || 'cli' });
     if (!prepared.ok) throw new Error(`checkpoint comment ${prepared.reason}`);
