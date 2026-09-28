@@ -3096,9 +3096,18 @@ function completeTicketAsControlPlane(slug?: any, idOrRef?: any, opts?: any) {
     if (Array.isArray(delivery.integration?.changedPaths)) return delivery.integration.changedPaths;
     const repo = readMeta(slug)?.path || '';
     const submissionBase = String(ticket.submission?.base || '').trim();
-    return submissionBase
-      ? commitScope.commitRangePaths(repo, submissionBase, delivery.commit)
-      : commitPaths(repo, delivery.commit);
+    const head = String(delivery.commit || '').trim();
+    if (!submissionBase || submissionBase === head) return commitPaths(repo, head);
+    try {
+      return execFileSync('git', ['diff', '--no-ext-diff', '--name-only', '-z', submissionBase, head], {
+        cwd: repo,
+        encoding: 'utf8',
+        windowsHide: true,
+        stdio: 'pipe',
+      }).split('\0').filter(Boolean).map((file: string) => file.replace(/\\/g, '/'));
+    } catch (_: any) {
+      return commitPaths(repo, head);
+    }
   })();
   const missingFragment = delivery ? missingDeliveredReleaseFragment(readMeta(slug)?.path, ticket.ref, deliveredRangePaths) : null;
   if (missingFragment) return {
