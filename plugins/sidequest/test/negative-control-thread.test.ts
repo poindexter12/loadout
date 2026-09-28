@@ -149,3 +149,31 @@ test('negative control ignores same-line prose that denies an import or collecti
   });
   assert.equal(completion.ok, true, completion.message);
 });
+
+test('negative control test names unescape source string literals instead of demanding literal backslashes', () => {
+  const by = 'sq-2485-c47a1dbe9f03';
+  const ticket = createClaimedMixedChangeTicket(by);
+  const fixtureTestDefinition = 'test';
+  // The runner prints this name unescaped: `the gateway's wrapped proxy retries once`.
+  // In source, the apostrophe must be backslash-escaped to stay inside the single-quoted
+  // string literal, so the file on disk literally contains `gateway\'s`.
+  const printedTestName = "the gateway's wrapped proxy retries once";
+  fs.writeFileSync(
+    path.join(PROJECT_DIR, 'test', 'fixture.test.js'),
+    `${fixtureTestDefinition}('the gateway\\'s wrapped proxy retries once', () => {});\n`,
+  );
+  assert.match(
+    fs.readFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), 'utf8'),
+    /gateway\\'s/,
+  );
+
+  const escapedQuoteControl = `[sidequest:negative-control] target=lib/fixture.js escaped-quote branch; assertion=printed name in ${printedTestName}; node --test test/fixture.test.js failed=1. Restored afterward.\n[sidequest:negative-control-test] failed ${printedTestName}`;
+  assert.equal(store.addComment(slug, ticket.ref, { by, body: escapedQuoteControl, source: 'mcp' }).ok, true);
+
+  const completion = store.addComment(slug, ticket.ref, {
+    by,
+    body: '[sidequest:verify-complete] passed: fixture verification passed.',
+    source: 'mcp',
+  });
+  assert.equal(completion.ok, true, completion.message);
+});

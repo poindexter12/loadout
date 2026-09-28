@@ -724,6 +724,26 @@ function negativeControlFailureKind(markerLine?: unknown) {
   return '';
 }
 
+function unescapeJsStringLiteral(raw: string): string {
+  return String(raw || '').replace(/\\(u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[\s\S])/g, (whole: string, esc: string) => {
+    if (esc[0] === 'u') {
+      const hex = esc[1] === '{' ? esc.slice(2, -1) : esc.slice(1);
+      const code = parseInt(hex, 16);
+      return Number.isNaN(code) ? whole : String.fromCodePoint(code);
+    }
+    if (esc[0] === 'x') {
+      const code = parseInt(esc.slice(1), 16);
+      return Number.isNaN(code) ? whole : String.fromCharCode(code);
+    }
+    const known: Record<string, string> = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', '0': '\0' };
+    if (esc.length === 1 && Object.prototype.hasOwnProperty.call(known, esc)) return known[esc] ?? esc;
+    // Covers \' \" \` \\ and any other escaped char: the backslash is dropped,
+    // the character itself is literal (matches what a JS engine, and every
+    // test runner's printed name, actually produces).
+    return esc;
+  });
+}
+
 function changedTestNames(delta?: any, changedPaths?: any[]) {
   if (!delta?.workspace) return [];
   const names = new Set<string>();
@@ -746,8 +766,10 @@ function changedTestNames(delta?: any, changedPaths?: any[]) {
       continue;
     }
     const definitions = source.split(/\r?\n/).map((line: string, index: number) => {
-      const match = line.match(/\b(?:test|it|specify)\s*\(\s*(['"`])((?:\\.|(?!\1).)*)\1/) || line.match(/\bdef\s+(test_[A-Za-z0-9_]+)/);
-      return match ? { line: index + 1, name: match[2] || match[1] } : null;
+      const stringMatch = line.match(/\b(?:test|it|specify)\s*\(\s*(['"`])((?:\\.|(?!\1).)*)\1/);
+      if (stringMatch) return { line: index + 1, name: unescapeJsStringLiteral(stringMatch[2] ?? '') };
+      const pyMatch = line.match(/\bdef\s+(test_[A-Za-z0-9_]+)/);
+      return pyMatch ? { line: index + 1, name: pyMatch[1] } : null;
     }).filter(Boolean) as Array<{ line: number; name: string }>;
     try {
       execFileSync('git', ['cat-file', '-e', `${delta.workspace.base}:${file}`], {
@@ -775,8 +797,9 @@ function changedTestNames(delta?: any, changedPaths?: any[]) {
       }
       if (line.startsWith('+') && !line.startsWith('+++')) {
         changedInHunk = true;
-        const addedDefinition = line.match(/\b(?:test|it|specify)(?:\.(?:only|skip|todo))?\s*\(\s*(['"`])((?:\\.|(?!\1).)*)\1/) || line.match(/\bdef\s+(test_[A-Za-z0-9_]+)/);
-        const addedName = addedDefinition?.[2] || addedDefinition?.[1];
+        const addedStringDefinition = line.match(/\b(?:test|it|specify)(?:\.(?:only|skip|todo))?\s*\(\s*(['"`])((?:\\.|(?!\1).)*)\1/);
+        const addedPyDefinition = addedStringDefinition ? null : line.match(/\bdef\s+(test_[A-Za-z0-9_]+)/);
+        const addedName = addedStringDefinition ? unescapeJsStringLiteral(addedStringDefinition[2] ?? '') : addedPyDefinition?.[1];
         if (addedName) names.add(addedName);
         addNearestDefinition(newLine);
         newLine += 1;
