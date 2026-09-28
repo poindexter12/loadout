@@ -102,7 +102,7 @@ test('negative controls collect claim-holder test markers across the whole threa
   }).ok, true);
 });
 
-test('negative control is not rejected as import/collection error when the comment negates the phrase in prose', () => {
+test('negative control ignores prose that denies an import or collection problem', () => {
   git(['checkout', '--', 'lib/fixture.js', 'test/fixture.test.js']);
   const by = 'sq-181-negation-prose';
   const ticket = createClaimedMixedChangeTicket(by);
@@ -127,7 +127,7 @@ test('negative control is not rejected as import/collection error when the comme
   assert.equal(completion.ok, true, completion.message);
 });
 
-test('negative control is not rejected as import/collection error when the marker line itself negates the phrase', () => {
+test('negative control ignores same-line prose that denies an import or collection problem', () => {
   git(['checkout', '--', 'lib/fixture.js', 'test/fixture.test.js']);
   const by = 'sq-181-negation-sameline';
   const ticket = createClaimedMixedChangeTicket(by);
