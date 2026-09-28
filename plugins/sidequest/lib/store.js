@@ -2827,7 +2827,14 @@ function completeTicketAsControlPlane(slug, idOrRef, opts) {
   }
   const delivery = purpose === "delivery" ? reconciledDelivery || recordedDelivery(slug, ticket, opts.deliveryCommit, reason) : null;
   if (delivery && !delivery.ok) return Object.assign({ ticket }, delivery);
-  const missingFragment = delivery ? missingDeliveredReleaseFragment(readMeta(slug)?.path, ticket.ref, commitPaths(readMeta(slug)?.path || "", delivery.commit)) : null;
+  const deliveredRangePaths = (() => {
+    if (!delivery) return [];
+    if (Array.isArray(delivery.integration?.changedPaths)) return delivery.integration.changedPaths;
+    const repo = readMeta(slug)?.path || "";
+    const submissionBase = String(ticket.submission?.base || "").trim();
+    return submissionBase ? commitScope.commitRangePaths(repo, submissionBase, delivery.commit) : commitPaths(repo, delivery.commit);
+  })();
+  const missingFragment = delivery ? missingDeliveredReleaseFragment(readMeta(slug)?.path, ticket.ref, deliveredRangePaths) : null;
   if (missingFragment) return {
     ok: false,
     reason: "missing_release_fragment",

@@ -3084,7 +3084,23 @@ function completeTicketAsControlPlane(slug?: any, idOrRef?: any, opts?: any) {
   }
   const delivery = purpose === 'delivery' ? reconciledDelivery || recordedDelivery(slug, ticket, opts.deliveryCommit, reason) : null;
   if (delivery && !delivery.ok) return Object.assign({ ticket }, delivery);
-  const missingFragment = delivery ? missingDeliveredReleaseFragment(readMeta(slug)?.path, ticket.ref, commitPaths(readMeta(slug)?.path || '', delivery.commit)) : null;
+  // The fragment check must cover the whole submitted range (dispatch/submission base..delivery
+  // commit), not just the delivery tip commit's own diff — a manual delivery after main has
+  // already fast-forwarded to the candidate can have a tip commit that touches nothing but the
+  // fragment landed earlier in the same range (SQ-186). Prefer the range-wide changedPaths
+  // recordDeliveredSubmission already computed via changedIntegrationPaths; recompute from the
+  // recorded submission base when that is unavailable; fall back to the tip commit only when no
+  // base was ever recorded.
+  const deliveredRangePaths = (() => {
+    if (!delivery) return [];
+    if (Array.isArray(delivery.integration?.changedPaths)) return delivery.integration.changedPaths;
+    const repo = readMeta(slug)?.path || '';
+    const submissionBase = String(ticket.submission?.base || '').trim();
+    return submissionBase
+      ? commitScope.commitRangePaths(repo, submissionBase, delivery.commit)
+      : commitPaths(repo, delivery.commit);
+  })();
+  const missingFragment = delivery ? missingDeliveredReleaseFragment(readMeta(slug)?.path, ticket.ref, deliveredRangePaths) : null;
   if (missingFragment) return {
     ok: false,
     reason: 'missing_release_fragment',
