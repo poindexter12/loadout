@@ -284,5 +284,6 @@
         ]
       }
     ]
-  }
+  },
+  "modules": ["./fn/compaction.js"]
 }

@@ -577,10 +577,161 @@ async function compactionSuggestion(input) {
   }
 }
 
+// src/hooks/shared/compaction-policy.ts
+var import_node_fs5 = __toESM(require("node:fs"));
+var import_node_os3 = __toESM(require("node:os"));
+var import_node_path5 = __toESM(require("node:path"));
+
+// src/hooks/shared/live-refs.ts
+var COMPACTION_RECOVERY_MARKER = "sidequest compaction recovery v1";
+var COMPACTION_GUARD_DEFAULT = "off";
+function compactionGuardMode(value) {
+  const mode = String(value ?? "").trim().toLowerCase();
+  return mode === "auto" || mode === "on" || mode === "off" ? mode : COMPACTION_GUARD_DEFAULT;
+}
+var LIVE_REFS_VERSION = 1;
+function trimSlashes(value) {
+  return value.replace(/[\\/]+$/, "");
+}
+function sidequestHome(sidequestHomeEnv, homeEnv) {
+  const explicit = String(sidequestHomeEnv || "").trim();
+  if (explicit) return trimSlashes(explicit);
+  const home = trimSlashes(String(homeEnv || "").trim());
+  return home ? `${home}/.claude/sidequest` : "";
+}
+function liveRefsPath(home, sessionId) {
+  return `${trimSlashes(home)}/live-refs/${encodeURIComponent(sessionId)}.json`;
+}
+function serializeLiveRefs(session, pin, closed, at = (/* @__PURE__ */ new Date()).toISOString()) {
+  const file = { version: LIVE_REFS_VERSION, session, at, pin, closed: [...new Set(closed)].sort() };
+  return `${JSON.stringify(file)}
+`;
+}
+
+// src/hooks/shared/compaction-policy.ts
+var MAX_INSTRUCTION_BYTES = 1500;
+function compactText(value, limit) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (Buffer.byteLength(text, "utf8") <= limit) return text;
+  const marker = "…";
+  let result = "";
+  let bytes = 0;
+  for (const character of text) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes + Buffer.byteLength(marker, "utf8") > limit) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return `${result}${marker}`;
+}
+function ticketLine(ticket, canonicalPreparedDispatchExecutor) {
+  const claim = ticket?.claim || {};
+  const dispatch = ticket?.dispatch || {};
+  const executor = canonicalPreparedDispatchExecutor(ticket);
+  const details = claim.by ? [
+    `claim ${compactText(claim.by, 100)}`,
+    executor ? `executor ${compactText(executor, 100)}` : "",
+    dispatch.token || ticket?.dispatchToken ? `dispatch token ${compactText(dispatch.token || ticket.dispatchToken, 160)}` : ""
+  ].filter(Boolean).join("; ") : "";
+  return `- ${compactText(ticket?.ref, 40)} — ${compactText(ticket?.title, 220)}${details ? ` (${details})` : ""}`;
+}
+function boundedInstruction(lines) {
+  const kept = ["Preserve verbatim in the summary:"];
+  for (const line of lines) {
+    const candidate = [...kept, line].join("\n");
+    if (Buffer.byteLength(candidate, "utf8") > MAX_INSTRUCTION_BYTES) {
+      const omitted = `… ${lines.length - (kept.length - 1)} more board entries omitted.`;
+      if (Buffer.byteLength([...kept, omitted].join("\n"), "utf8") <= MAX_INSTRUCTION_BYTES) kept.push(omitted);
+      break;
+    }
+    kept.push(line);
+  }
+  return kept.length > 1 ? kept.join("\n") : "";
+}
+function liveTicketLine(ticket, story) {
+  const ref = compactText(ticket?.ref, 40);
+  const claim = compactText(ticket?.claim?.by, 80);
+  const storyRef = compactText(story?.ref, 40);
+  const revisions = story ? `contractRevision=${Number(story.contractRevision) || 0} logRevision=${Number(story.logRevision) || 0}` : `watermark=${compactText(ticket?.updatedAt, 32) || "unavailable"}`;
+  const retrieval = [`mcp__plugin_sidequest_board__comments({ref:"${ref}"})`];
+  if (storyRef) {
+    retrieval.push(
+      `mcp__plugin_sidequest_board__story_contract({story:"${storyRef}"})`,
+      `mcp__plugin_sidequest_board__story_log({story:"${storyRef}"})`
+    );
+  }
+  return `Keep live ticket ${ref}${claim ? ` claim=${claim}` : ""}${storyRef ? ` story=${storyRef}` : ""} ${revisions}. ${compactText(ticket?.title, 80)}${story ? ` Story: ${compactText(story.title, 60)}.` : ""} Retrieve: ${retrieval.join(" and ")}.`;
+}
+function loadBoard(cwd, store) {
+  const found = store.findProject(store.nearestRepoRoot(cwd));
+  if (!found.ok || !found.slug || !found.meta?.path) return null;
+  return { found, tickets: store.listTickets(found.slug) };
+}
+async function boardState(cwd, store, loaded = loadBoard(cwd, store)) {
+  if (!loaded) return null;
+  const { found, tickets } = loaded;
+  if (!found.slug || !found.meta?.path) return null;
+  const liveRefs = new Set(store.worktreeGcTickets().filter((ticket) => ticket.project === found.slug && ticket.claimLive && ticket.ref).map((ticket) => String(ticket.ref)));
+  const doing = tickets.filter((ticket) => ticket?.status === "doing");
+  const fresh = doing.filter((ticket) => liveRefs.has(String(ticket.ref)));
+  const stale = doing.filter((ticket) => !liveRefs.has(String(ticket.ref)));
+  const preparedDispatch = require(runtimeModule("prepared-dispatch"));
+  const publish = require(runtimeModule("publish"));
+  const lock = await publish.publishLockStatus(found.meta.path);
+  const storyIds = [...new Set(doing.map((ticket) => String(ticket?.storyId || "")).filter(Boolean))];
+  const stories = storyIds.map((id) => store.getStory(found.slug, id)).filter((story) => Boolean(story));
+  const storiesByRef = new Map(stories.map((story) => [story.ref, story]));
+  const lines = [
+    `${COMPACTION_RECOVERY_MARKER}: board history omitted under the 1500B recovery budget.`,
+    ...fresh.map((ticket) => liveTicketLine(ticket, storiesByRef.get(String(ticket?.storyId || "")))),
+    ...stale.map((ticket) => ticketLine(ticket, preparedDispatch.canonicalPreparedDispatchExecutor)),
+    ...stories.filter((story) => !fresh.some((ticket) => String(ticket?.storyId || "") === story.ref)).map((story) => `Compaction policy story ${compactText(story.title, 80)}: id=${compactText(story.ref, 40)} contractRevision=${Number(story.contractRevision) || 0} logRevision=${Number(story.logRevision) || 0}. Retrieve: mcp__plugin_sidequest_board__story_contract({story:"${compactText(story.ref, 40)}"}) and mcp__plugin_sidequest_board__story_log({story:"${compactText(story.ref, 40)}"}).`),
+    ...lock.locked ? [`Publish lock: ${compactText(lock.holder?.by || lock.holder?.sessionId || JSON.stringify(lock.holder || "held"), 260)}`] : []
+  ];
+  if (lines.length === 1) return null;
+  const freshRefs = compactText(fresh.map((ticket) => String(ticket.ref)).join(", "), 300);
+  const unsafe = [
+    fresh.length ? `fresh claims: ${freshRefs}` : "",
+    lock.locked ? `publish lock: ${compactText(lock.holder?.by || lock.holder?.sessionId || "held", 180)}` : ""
+  ].filter(Boolean).join("; ");
+  return { instruction: boundedInstruction(lines), unsafeReason: unsafe };
+}
+async function compactionRecoverySnapshot(cwd) {
+  const store = require(runtimeModule("store"));
+  const loaded = loadBoard(cwd, store);
+  if (!loaded) return null;
+  const state = await boardState(cwd, store, loaded);
+  return {
+    pin: state?.instruction || "",
+    closed: loaded.tickets.filter((ticket) => ticket?.status === "done" || Boolean(ticket?.archived)).map((ticket) => String(ticket?.ref || "")).filter(Boolean)
+  };
+}
+async function recordLiveRefs(input) {
+  if (compactionGuardMode(process.env.CLAUDE_PLUGIN_OPTION_COMPACTIONGUARD) === "off") return "";
+  const sessionId = String(input.session_id || input.sessionId || process.env.CLAUDE_CODE_SESSION_ID || "").trim();
+  const home = sidequestHome(process.env.SIDEQUEST_HOME, import_node_os3.default.homedir());
+  if (!sessionId || !home) return "";
+  try {
+    const snapshot = await compactionRecoverySnapshot(String(input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd()));
+    if (!snapshot) return "";
+    const file = liveRefsPath(home, sessionId);
+    import_node_fs5.default.mkdirSync(import_node_path5.default.dirname(file), { recursive: true });
+    const temporary = `${file}.${process.pid}.tmp`;
+    import_node_fs5.default.writeFileSync(temporary, serializeLiveRefs(sessionId, snapshot.pin, snapshot.closed));
+    import_node_fs5.default.renameSync(temporary, file);
+    return file;
+  } catch (error) {
+    console.error(`sidequest: could not record live refs for the compaction guard: ${String(error)}`);
+    return "";
+  }
+}
+
 // src/hooks/stop.ts
 async function main2() {
   const input = readStdin();
-  if (!input || input.stop_hook_active === true) return;
+  if (!input) return;
+  await recordLiveRefs(input);
+  if (input.stop_hook_active === true) return;
   const reconciliation = boardReconciliationReminder(input);
   if (reconciliation) {
     writeContext("Stop", reconciliation);

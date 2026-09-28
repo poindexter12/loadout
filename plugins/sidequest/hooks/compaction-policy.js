@@ -116,6 +116,9 @@ function runtimeModule(name) {
   return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
+// src/hooks/shared/live-refs.ts
+var COMPACTION_RECOVERY_MARKER = "sidequest compaction recovery v1";
+
 // src/hooks/shared/compaction-policy.ts
 var MAX_INSTRUCTION_BYTES = 1500;
 function policy() {
@@ -207,10 +210,15 @@ function liveTicketLine(ticket, story) {
   }
   return `Keep live ticket ${ref}${claim ? ` claim=${claim}` : ""}${storyRef ? ` story=${storyRef}` : ""} ${revisions}. ${compactText(ticket?.title, 80)}${story ? ` Story: ${compactText(story.title, 60)}.` : ""} Retrieve: ${retrieval.join(" and ")}.`;
 }
-async function boardState(cwd, store) {
+function loadBoard(cwd, store) {
   const found = store.findProject(store.nearestRepoRoot(cwd));
   if (!found.ok || !found.slug || !found.meta?.path) return null;
-  const tickets = store.listTickets(found.slug);
+  return { found, tickets: store.listTickets(found.slug) };
+}
+async function boardState(cwd, store, loaded = loadBoard(cwd, store)) {
+  if (!loaded) return null;
+  const { found, tickets } = loaded;
+  if (!found.slug || !found.meta?.path) return null;
   const liveRefs = new Set(store.worktreeGcTickets().filter((ticket) => ticket.project === found.slug && ticket.claimLive && ticket.ref).map((ticket) => String(ticket.ref)));
   const doing = tickets.filter((ticket) => ticket?.status === "doing");
   const fresh = doing.filter((ticket) => liveRefs.has(String(ticket.ref)));
@@ -222,7 +230,7 @@ async function boardState(cwd, store) {
   const stories = storyIds.map((id) => store.getStory(found.slug, id)).filter((story) => Boolean(story));
   const storiesByRef = new Map(stories.map((story) => [story.ref, story]));
   const lines = [
-    "sidequest compaction recovery v1: board history omitted under the 1500B recovery budget.",
+    `${COMPACTION_RECOVERY_MARKER}: board history omitted under the 1500B recovery budget.`,
     ...fresh.map((ticket) => liveTicketLine(ticket, storiesByRef.get(String(ticket?.storyId || "")))),
     ...stale.map((ticket) => ticketLine(ticket, preparedDispatch.canonicalPreparedDispatchExecutor)),
     ...stories.filter((story) => !fresh.some((ticket) => String(ticket?.storyId || "") === story.ref)).map((story) => `Compaction policy story ${compactText(story.title, 80)}: id=${compactText(story.ref, 40)} contractRevision=${Number(story.contractRevision) || 0} logRevision=${Number(story.logRevision) || 0}. Retrieve: mcp__plugin_sidequest_board__story_contract({story:"${compactText(story.ref, 40)}"}) and mcp__plugin_sidequest_board__story_log({story:"${compactText(story.ref, 40)}"}).`),
@@ -250,14 +258,15 @@ async function compactionPolicyOutput(input) {
       return "";
     }
     const counter = readCounter(sessionId);
+    const alreadyPinned = String(input.custom_instructions || "").includes(COMPACTION_RECOVERY_MARKER);
     const vetoEligible = trigger === "auto" && mode === "veto" && Boolean(state.unsafeReason) && !shouldAvoidVetoForSession(store, sessionId);
     if (!vetoEligible) {
-      if (counter.instruction === state.instruction) return "";
+      if (alreadyPinned || counter.instruction === state.instruction) return "";
       writeCounter(sessionId, 0, state.instruction);
       return state.instruction;
     }
     if (counter.blocks >= 2) {
-      if (counter.instruction === state.instruction) return "";
+      if (alreadyPinned || counter.instruction === state.instruction) return "";
       writeCounter(sessionId, 0, state.instruction);
       return state.instruction;
     }

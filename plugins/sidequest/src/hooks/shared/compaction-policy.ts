@@ -2,10 +2,23 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runtimeModule } from './paths.js';
+import {
+  COMPACTION_RECOVERY_MARKER,
+  compactionGuardMode,
+  liveRefsPath,
+  serializeLiveRefs,
+  sidequestHome,
+} from './live-refs.js';
 
 type CanonicalPreparedDispatchExecutor = (ticket: unknown) => string | null;
 
 const MAX_INSTRUCTION_BYTES = 1500;
+
+// The session.compact function-hook module (hooks/fn/compaction.js) appends the same pin to a
+// compaction's instructions and skips it when this marker is already there; PreCompact skips its
+// own copy when the instructions it receives already carry it, so a compaction that reaches core
+// through both paths is pinned once.
+export { COMPACTION_RECOVERY_MARKER };
 
 interface Story {
   ref?: string;
@@ -128,11 +141,22 @@ function liveTicketLine(ticket: any, story: Story | undefined): string {
   return `Keep live ticket ${ref}${claim ? ` claim=${claim}` : ''}${storyRef ? ` story=${storyRef}` : ''} ${revisions}. ${compactText(ticket?.title, 80)}${story ? ` Story: ${compactText(story.title, 60)}.` : ''} Retrieve: ${retrieval.join(' and ')}.`;
 }
 
-async function boardState(cwd: string, store: Store): Promise<{ instruction: string; unsafeReason: string } | null> {
+interface LoadedBoard {
+  found: { ok: boolean; slug?: string; meta?: { path?: string } };
+  tickets: any[];
+}
+
+function loadBoard(cwd: string, store: Store): LoadedBoard | null {
   const found = store.findProject(store.nearestRepoRoot(cwd));
   if (!found.ok || !found.slug || !found.meta?.path) return null;
+  return { found, tickets: store.listTickets(found.slug) };
+}
 
-  const tickets = store.listTickets(found.slug);
+async function boardState(cwd: string, store: Store, loaded: LoadedBoard | null = loadBoard(cwd, store)): Promise<{ instruction: string; unsafeReason: string } | null> {
+  if (!loaded) return null;
+  const { found, tickets } = loaded;
+  if (!found.slug || !found.meta?.path) return null;
+
   const liveRefs = new Set(store.worktreeGcTickets()
     .filter((ticket) => ticket.project === found.slug && ticket.claimLive && ticket.ref)
     .map((ticket) => String(ticket.ref)));
@@ -146,7 +170,7 @@ async function boardState(cwd: string, store: Store): Promise<{ instruction: str
   const stories = storyIds.map((id) => store.getStory(found.slug!, id)).filter((story): story is Story => Boolean(story));
   const storiesByRef = new Map(stories.map((story) => [story.ref, story]));
   const lines = [
-    'sidequest compaction recovery v1: board history omitted under the 1500B recovery budget.',
+    `${COMPACTION_RECOVERY_MARKER}: board history omitted under the 1500B recovery budget.`,
     ...fresh.map((ticket) => liveTicketLine(ticket, storiesByRef.get(String(ticket?.storyId || '')))),
     ...stale.map((ticket) => ticketLine(ticket, preparedDispatch.canonicalPreparedDispatchExecutor)),
     ...stories.filter((story) => !fresh.some((ticket) => String(ticket?.storyId || '') === story.ref)).map((story) => `Compaction policy story ${compactText(story.title, 80)}: id=${compactText(story.ref, 40)} contractRevision=${Number(story.contractRevision) || 0} logRevision=${Number(story.logRevision) || 0}. Retrieve: mcp__plugin_sidequest_board__story_contract({story:"${compactText(story.ref, 40)}"}) and mcp__plugin_sidequest_board__story_log({story:"${compactText(story.ref, 40)}"}).`),
@@ -175,17 +199,20 @@ export async function compactionPolicyOutput(input: Record<string, unknown>): Pr
       return '';
     }
     const counter = readCounter(sessionId);
+    // The session.compact module already appended this pin above core: emitting it again
+    // would hand the summarizer the same board state twice.
+    const alreadyPinned = String(input.custom_instructions || '').includes(COMPACTION_RECOVERY_MARKER);
     // The veto (decision:block) only ever applies to a real auto-trigger compaction: a
     // user-typed /compact, and the plugin/jev fallback path that hardcodes trigger "manual",
     // must never be blocked. Both still receive the pin below.
     const vetoEligible = trigger === 'auto' && mode === 'veto' && Boolean(state.unsafeReason) && !shouldAvoidVetoForSession(store, sessionId);
     if (!vetoEligible) {
-      if (counter.instruction === state.instruction) return '';
+      if (alreadyPinned || counter.instruction === state.instruction) return '';
       writeCounter(sessionId, 0, state.instruction);
       return state.instruction;
     }
     if (counter.blocks >= 2) {
-      if (counter.instruction === state.instruction) return '';
+      if (alreadyPinned || counter.instruction === state.instruction) return '';
       writeCounter(sessionId, 0, state.instruction);
       return state.instruction;
     }
@@ -193,6 +220,59 @@ export async function compactionPolicyOutput(input: Record<string, unknown>): Pr
     return JSON.stringify({ decision: 'block', reason: `sidequest compaction delayed: ${state.unsafeReason}` });
   } catch (error) {
     console.error(`sidequest: compaction policy could not read board state: ${String(error)}`);
+    return '';
+  }
+}
+
+export interface CompactionRecoverySnapshot {
+  /** The PreCompact pin for this board, or '' when nothing is live. */
+  pin: string;
+  /** Refs the board has closed (done or archived). */
+  closed: string[];
+}
+
+/**
+ * What the session.compact function-hook module needs from the board and cannot read itself
+ * (a hooks module has no Node and no SQLite): the pin, and which refs are closed, so a
+ * closed ticket's dispatch and briefing results are let go. Null when cwd is not on a board.
+ */
+export async function compactionRecoverySnapshot(cwd: string): Promise<CompactionRecoverySnapshot | null> {
+  const store = require(runtimeModule('store')) as Store;
+  const loaded = loadBoard(cwd, store);
+  if (!loaded) return null;
+  const state = await boardState(cwd, store, loaded);
+  return {
+    pin: state?.instruction || '',
+    closed: loaded.tickets
+      .filter((ticket) => ticket?.status === 'done' || Boolean(ticket?.archived))
+      .map((ticket) => String(ticket?.ref || ''))
+      .filter(Boolean),
+  };
+}
+
+/**
+ * Stop-hook writer for live-refs/<session>.json, read by the session.compact module. Runs only
+ * when the compactionGuard option is not `off`; off, it touches neither the board nor the disk.
+ * Returns the path it wrote, or '' when it wrote nothing.
+ */
+export async function recordLiveRefs(input: Record<string, unknown>): Promise<string> {
+  // userConfig reaches a classic hook as CLAUDE_PLUGIN_OPTION_<KEY>, the key upper-cased.
+  if (compactionGuardMode(process.env.CLAUDE_PLUGIN_OPTION_COMPACTIONGUARD) === 'off') return '';
+  const sessionId = String(input.session_id || input.sessionId || process.env.CLAUDE_CODE_SESSION_ID || '').trim();
+  const home = sidequestHome(process.env.SIDEQUEST_HOME, os.homedir());
+  if (!sessionId || !home) return '';
+  try {
+    const snapshot = await compactionRecoverySnapshot(String(input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd()));
+    if (!snapshot) return '';
+    const file = liveRefsPath(home, sessionId);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    // Write-then-rename: the module may read while this hook writes.
+    const temporary = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, serializeLiveRefs(sessionId, snapshot.pin, snapshot.closed));
+    fs.renameSync(temporary, file);
+    return file;
+  } catch (error) {
+    console.error(`sidequest: could not record live refs for the compaction guard: ${String(error)}`);
     return '';
   }
 }

@@ -21,7 +21,21 @@ export const bundledBuildOutputs = [{
   outputDirectory: 'hooks',
   sourceExtension: '.ts',
   outputExtension: '.js',
+}, {
+  sourceDirectory: 'src/hooks/fn',
+  outputDirectory: 'hooks/fn',
+  sourceExtension: '.ts',
+  outputExtension: '.js',
 }];
+
+// Classic hooks are node processes (cjs). Function-hook modules (hooks.json "modules") run in the
+// hooks host, which gives a module no Node: ESM for a neutral platform, and nothing external, so
+// a node:* import fails the build instead of the host. Keep each bundledBuildOutputs entry to its
+// four keys: src/lib/store/warnings.ts parses them to map a source path to its compiled twin.
+const bundledBuildOptions = {
+  hooks: { platform: 'node', format: 'cjs', target: 'node22', external: ['node:*'] },
+  'hooks/fn': { platform: 'neutral', format: 'esm', target: 'es2022', external: [] },
+};
 
 // Only lib and bin mirror nested sources into output. Hook entry points stay top-level:
 // src/hooks/shared/* are bundled into each hook, and emitting them would flatten distinct
@@ -71,13 +85,10 @@ async function buildHooks() {
         entryPoints: [entryPoint],
         outfile: path.join(pluginRoot, outputDirectory, `${path.basename(entryPoint, '.ts')}${outputExtension}`),
         bundle: true,
-        platform: 'node',
-        format: 'cjs',
-        target: 'node22',
+        ...bundledBuildOptions[outputDirectory],
         charset: 'utf8',
         legalComments: 'none',
         sourcemap: false,
-        external: ['node:*'],
       });
     }
   }

@@ -18,5 +18,14 @@
     "dashboard",
     "hooks",
     "capture"
-  ]
+  ],
+  "userConfig": {
+    "compactionGuard": {
+      "type": "string",
+      "title": "Compaction guard",
+      "description": "Keeps dispatch and briefing results when a third-party compaction plugin (fast-jev-compaction) replaces the transcript. off: nothing runs. auto: acts once a compaction plugin shows up beneath sidequest. on: always pins and restores. Needs CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1, with sidequest@loadout in prependPlugins.",
+      "options": ["off", "auto", "on"],
+      "default": "off"
+    }
+  }
 }
