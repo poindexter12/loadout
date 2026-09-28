@@ -65,9 +65,6 @@ function protectedCalls(messages, closedRefs = /* @__PURE__ */ new Set()) {
   }
   return calls;
 }
-function resultTexts(message) {
-  return (message.toolResults || []).map((result) => result.text || "").join("");
-}
 function blockIds(message) {
   return [
     ...(message.toolUses || []).map((use) => use.tool_use_id),
@@ -87,14 +84,22 @@ function pointerText(call, bytes, reason) {
   const what = `${call.kind} result${call.ref ? ` for ${call.ref}` : ""}`;
   return `[${COMPACTION_RECOVERY_MARKER}: the ${what} (${bytes} B) was not restored after compaction, ${reason}. Retrieve: ${retrieval(call)}.]`;
 }
+function nonTextResult(result) {
+  const record = result.result;
+  const blocks = Array.isArray(record) ? record : record && typeof record === "object" && Array.isArray(record.content) ? record.content : null;
+  if (!blocks) return false;
+  return blocks.some((block) => Boolean(block) && typeof block === "object" && typeof block.type === "string" && block.type !== "text");
+}
+var freshUse = (use) => ({ tool_use_id: use.tool_use_id, tool: use.tool, input: use.input });
+var freshResult = (result) => ({ tool_use_id: result.tool_use_id, text: result.text, isError: result.isError });
 function restoreProtected(input, output, protectedIds, cap = { perResult: PER_RESULT_CAP_BYTES, total: TOTAL_CAP_BYTES }) {
   const calls = /* @__PURE__ */ new Map();
   for (const entry of protectedIds) {
     const call = typeof entry === "string" ? { id: entry, kind: "dispatch", ref: "" } : entry;
     calls.set(call.id, call);
   }
-  let messages = [...output];
-  const report = { messages, restored: [], pointed: [] };
+  const messages = [...output];
+  const report = { messages, restored: [], pointed: [], skipped: [] };
   if (!calls.size) return report;
   const useAt = /* @__PURE__ */ new Map();
   const resultAt = /* @__PURE__ */ new Map();
@@ -104,27 +109,24 @@ function restoreProtected(input, output, protectedIds, cap = { perResult: PER_RE
   });
   const anchors = inputAnchors(input, useAt);
   let spent = 0;
-  const done = /* @__PURE__ */ new Set();
   const pointers = [];
   for (const call of calls.values()) {
-    if (done.has(call.id)) continue;
     const useIndex = useAt.get(call.id);
     const resultIndex = resultAt.get(call.id);
     if (useIndex === void 0 || resultIndex === void 0) continue;
-    const useMessage = input[useIndex];
     const resultMessage = input[resultIndex];
-    if (!useMessage || !resultMessage) continue;
-    const original = (resultMessage.toolResults || []).find((result) => result.tool_use_id === call.id);
-    if (!original) continue;
+    const use = (input[useIndex]?.toolUses || []).find((entry) => entry.tool_use_id === call.id);
+    const original = (resultMessage?.toolResults || []).find((result) => result.tool_use_id === call.id);
+    if (!resultMessage || !use || !original) continue;
     const intact = messages.some((message) => message.handle !== void 0 && message.handle === resultMessage.handle || message.handle === void 0 && (message.toolResults || []).some((result) => result.tool_use_id === call.id && result.text === original.text));
     if (intact) continue;
-    const pairIds = /* @__PURE__ */ new Set([...blockIds(useMessage), ...blockIds(resultMessage)]);
-    for (const id of pairIds) done.add(id);
-    const bytes = utf8Bytes(resultTexts(resultMessage));
-    const adjacent = resultIndex === useIndex + 1 && (useMessage.toolUses || []).every((use) => resultAt.get(use.tool_use_id) === resultIndex) && (resultMessage.toolResults || []).every((result) => useAt.get(result.tool_use_id) === useIndex);
+    if (nonTextResult(original)) {
+      report.skipped.push(call.id);
+      continue;
+    }
+    const bytes = utf8Bytes(original.text);
     let reason = "";
-    if (!adjacent) reason = "its call and result are not one adjacent message pair";
-    else if (bytes > cap.perResult) reason = `over the ${cap.perResult} B per-result cap`;
+    if (bytes > cap.perResult) reason = `over the ${cap.perResult} B per-result cap`;
     else if (spent + bytes > cap.total) reason = `past the ${cap.total} B restore budget`;
     if (reason) {
       pointers.push({ call, text: pointerText(call, bytes, reason), anchor: useIndex });
@@ -132,29 +134,39 @@ function restoreProtected(input, output, protectedIds, cap = { perResult: PER_RE
       continue;
     }
     spent += bytes;
-    const kept = [];
-    let slot = -1;
-    for (const message of messages) {
-      const own = message.handle !== void 0 && (message.handle === useMessage.handle || message.handle === resultMessage.handle);
-      const shares = blockIds(message).some((id) => pairIds.has(id));
-      if ((own || shares) && slot < 0) slot = kept.length;
-      if (own) continue;
-      if (!shares) {
-        kept.push(message);
-      } else if (message.handle !== void 0) {
-        if (!blockIds(message).every((id) => pairIds.has(id))) kept.push(message);
-      } else {
-        const toolUses = (message.toolUses || []).filter((use) => !pairIds.has(use.tool_use_id));
-        const toolResults = (message.toolResults || []).filter((result) => !pairIds.has(result.tool_use_id));
-        if (!message.text && !toolUses.length && !toolResults.length) continue;
-        const rebuilt = { role: message.role, text: message.text, toolUses };
-        if (message.toolResults !== void 0) rebuilt.toolResults = toolResults;
-        kept.push(rebuilt);
+    const holds = (message) => (message.toolResults || []).some((result) => result.tool_use_id === call.id);
+    const callAt = messages.findIndex((message) => (message.toolUses || []).some((entry) => entry.tool_use_id === call.id));
+    if (callAt < 0) {
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (!message || message.handle !== void 0 || !holds(message)) continue;
+        const toolResults = (message.toolResults || []).filter((result) => result.tool_use_id !== call.id);
+        if (!message.text && !(message.toolUses || []).length && !toolResults.length) messages.splice(index, 1);
+        else messages[index] = { ...message, toolResults };
       }
+      messages.splice(
+        insertionPoint(messages, useIndex, anchors),
+        0,
+        { role: "assistant", text: "", toolUses: [freshUse(use)] },
+        { role: "user", text: "", toolUses: [], toolResults: [freshResult(original)] }
+      );
+      report.restored.push(call.id);
+      continue;
     }
-    messages = kept;
-    const at = slot >= 0 ? stepPastAnswers(messages, slot) : insertionPoint(messages, useIndex, anchors);
-    messages.splice(at, 0, useMessage, resultMessage);
+    const holderAt = messages.findIndex((message) => message.handle === void 0 && holds(message));
+    const holder = holderAt >= 0 ? messages[holderAt] : void 0;
+    if (holder) {
+      messages[holderAt] = {
+        ...holder,
+        toolResults: (holder.toolResults || []).map((result) => result.tool_use_id === call.id ? freshResult(original) : result)
+      };
+    } else {
+      const callMessage = messages[callAt];
+      const after = messages[callAt + 1];
+      const siblings = after !== void 0 && after.handle === void 0 && after.role === "user" && (after.toolResults || []).some((result) => (callMessage?.toolUses || []).some((entry) => entry.tool_use_id === result.tool_use_id));
+      if (after && siblings) messages[callAt + 1] = { ...after, toolResults: [...after.toolResults || [], freshResult(original)] };
+      else messages.splice(callAt + 1, 0, { role: "user", text: "", toolUses: [], toolResults: [freshResult(original)] });
+    }
     report.restored.push(call.id);
   }
   for (const pointer of pointers) {
@@ -170,7 +182,6 @@ ${pointer.text}` } : result)
       messages.splice(insertionPoint(messages, pointer.anchor, anchors), 0, { role: "user", text: pointer.text, toolUses: [] });
     }
   }
-  report.messages = messages;
   return report;
 }
 var textKey = (message) => `${message.role}\0${message.text}`;
@@ -281,6 +292,7 @@ export {
   PREPEND_NOTICE,
   TOTAL_CAP_BYTES,
   compactionPluginsBeneath,
+  nonTextResult,
   protectedCalls,
   register,
   replacedBeneath,

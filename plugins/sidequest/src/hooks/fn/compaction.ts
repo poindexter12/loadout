@@ -138,10 +138,6 @@ export function protectedCalls(messages: readonly SessionMessage[], closedRefs: 
   return calls;
 }
 
-function resultTexts(message: SessionMessage): string {
-  return (message.toolResults || []).map((result) => result.text || '').join('');
-}
-
 function blockIds(message: SessionMessage): string[] {
   return [
     ...(message.toolUses || []).map((use) => use.tool_use_id),
@@ -164,23 +160,49 @@ function pointerText(call: ProtectedCall, bytes: number, reason: string): string
   return `[${COMPACTION_RECOVERY_MARKER}: the ${what} (${bytes} B) was not restored after compaction, ${reason}. Retrieve: ${retrieval(call)}.]`;
 }
 
+/**
+ * True when the stored record of a result carries a content block that is not text (an image,
+ * say). `text` holds only the text blocks joined, so rebuilding such a result from it would
+ * hand the model less than it read.
+ */
+export function nonTextResult(result: ToolResultSummary): boolean {
+  const record = result.result;
+  const blocks = Array.isArray(record)
+    ? record
+    : record && typeof record === 'object' && Array.isArray((record as { content?: unknown }).content)
+      ? (record as { content: unknown[] }).content
+      : null;
+  if (!blocks) return false;
+  return blocks.some((block) => Boolean(block) && typeof block === 'object'
+    && typeof (block as { type?: unknown }).type === 'string' && (block as { type: string }).type !== 'text');
+}
+
+const freshUse = (use: ToolUseSummary): ToolUseSummary => ({ tool_use_id: use.tool_use_id, tool: use.tool, input: use.input });
+const freshResult = (result: ToolResultSummary): ToolResultSummary => ({ tool_use_id: result.tool_use_id, text: result.text, isError: result.isError });
+
 export interface RestoreReport {
   messages: SessionMessage[];
-  /** Protected ids put back as the engine's own message pair. */
+  /** Protected ids whose full text went back in, in hook-built messages. */
   restored: string[];
   /** Protected ids left as the compaction had them, with a retrieval pointer. */
   pointed: string[];
+  /** Protected ids with a non-text result: left exactly as the compaction had them. */
+  skipped: string[];
 }
 
 /**
  * Puts back protected tool results that a replacing compaction truncated or dropped.
  *
- * For each protected id missing from `output`, or present there with text other than the
- * engine's, the engine's own tool_use message and tool_result message from `input` go back as a
- * pair, at the place their neighbours hold in `output`. Every block of that pair is first taken
- * out of any message the compaction rebuilt, so no tool_use id appears twice and no result is
- * left without its call. A pair over `cap.perResult`, or past `cap.total` for the whole restore,
- * stays as the compaction left it, with a retrieval pointer.
+ * Every restored block is hook-built (no `handle`): the engine persists a reinserted message of
+ * its own with the parentUuid it had before the compaction boundary, which breaks the chain a
+ * later --resume rebuilds, while a hook-built message is chained to the message before it. So:
+ * - a result the compaction rebuilt with other text gets the original text back where it sits;
+ * - a result dropped while its call was kept goes back right after that call;
+ * - a call and result both dropped go back as a fresh tool_use message and tool_result message,
+ *   in that order, before the first surviving message that came after them.
+ * A result whose record holds non-text content is skipped (the compaction's version stays). A
+ * result over `cap.perResult`, or past `cap.total` for the whole restore, stays as the
+ * compaction left it, with a retrieval pointer.
  *
  * Pure: reads its arguments, returns a new message list.
  */
@@ -195,8 +217,8 @@ export function restoreProtected(
     const call = typeof entry === 'string' ? { id: entry, kind: 'dispatch' as const, ref: '' } : entry;
     calls.set(call.id, call);
   }
-  let messages = [...output];
-  const report: RestoreReport = { messages, restored: [], pointed: [] };
+  const messages = [...output];
+  const report: RestoreReport = { messages, restored: [], pointed: [], skipped: [] };
   if (!calls.size) return report;
 
   const useAt = new Map<string, number>();
@@ -208,20 +230,17 @@ export function restoreProtected(
   const anchors = inputAnchors(input, useAt);
 
   let spent = 0;
-  const done = new Set<string>();
   const pointers: Array<{ call: ProtectedCall; text: string; anchor: number }> = [];
 
   for (const call of calls.values()) {
-    if (done.has(call.id)) continue;
     const useIndex = useAt.get(call.id);
     const resultIndex = resultAt.get(call.id);
     // An unanswered call (still in flight) has nothing to lose yet.
     if (useIndex === undefined || resultIndex === undefined) continue;
-    const useMessage = input[useIndex];
     const resultMessage = input[resultIndex];
-    if (!useMessage || !resultMessage) continue;
-    const original = (resultMessage.toolResults || []).find((result) => result.tool_use_id === call.id);
-    if (!original) continue;
+    const use = (input[useIndex]?.toolUses || []).find((entry) => entry.tool_use_id === call.id);
+    const original = (resultMessage?.toolResults || []).find((result) => result.tool_use_id === call.id);
+    if (!resultMessage || !use || !original) continue;
 
     // Intact: the engine's own result message kept by handle, or a rebuilt copy with the same text.
     const intact = messages.some((message) => (
@@ -231,17 +250,14 @@ export function restoreProtected(
       )))
     ));
     if (intact) continue;
+    if (nonTextResult(original)) {
+      report.skipped.push(call.id);
+      continue;
+    }
 
-    const pairIds = new Set([...blockIds(useMessage), ...blockIds(resultMessage)]);
-    for (const id of pairIds) done.add(id);
-    const bytes = utf8Bytes(resultTexts(resultMessage));
-    // The pair must be adjacent and self-contained, or putting it back would orphan a block.
-    const adjacent = resultIndex === useIndex + 1
-      && (useMessage.toolUses || []).every((use) => resultAt.get(use.tool_use_id) === resultIndex)
-      && (resultMessage.toolResults || []).every((result) => useAt.get(result.tool_use_id) === useIndex);
+    const bytes = utf8Bytes(original.text);
     let reason = '';
-    if (!adjacent) reason = 'its call and result are not one adjacent message pair';
-    else if (bytes > cap.perResult) reason = `over the ${cap.perResult} B per-result cap`;
+    if (bytes > cap.perResult) reason = `over the ${cap.perResult} B per-result cap`;
     else if (spent + bytes > cap.total) reason = `past the ${cap.total} B restore budget`;
     if (reason) {
       pointers.push({ call, text: pointerText(call, bytes, reason), anchor: useIndex });
@@ -250,33 +266,41 @@ export function restoreProtected(
     }
     spent += bytes;
 
-    // Take every block of the pair out of what the compaction handed up, noting where the first
-    // of them sat: the pair goes back in that slot.
-    const kept: SessionMessage[] = [];
-    let slot = -1;
-    for (const message of messages) {
-      const own = message.handle !== undefined && (message.handle === useMessage.handle || message.handle === resultMessage.handle);
-      const shares = blockIds(message).some((id) => pairIds.has(id));
-      if ((own || shares) && slot < 0) slot = kept.length;
-      if (own) continue;
-      if (!shares) {
-        kept.push(message);
-      } else if (message.handle !== undefined) {
-        // An engine message of another pair that shares an id cannot be split; it is dropped
-        // only when all of its blocks belong to this pair.
-        if (!blockIds(message).every((id) => pairIds.has(id))) kept.push(message);
-      } else {
-        const toolUses = (message.toolUses || []).filter((use) => !pairIds.has(use.tool_use_id));
-        const toolResults = (message.toolResults || []).filter((result) => !pairIds.has(result.tool_use_id));
-        if (!message.text && !toolUses.length && !toolResults.length) continue;
-        const rebuilt: SessionMessage = { role: message.role, text: message.text, toolUses };
-        if (message.toolResults !== undefined) rebuilt.toolResults = toolResults;
-        kept.push(rebuilt);
+    const holds = (message: SessionMessage) => (message.toolResults || []).some((result) => result.tool_use_id === call.id);
+    const callAt = messages.findIndex((message) => (message.toolUses || []).some((entry) => entry.tool_use_id === call.id));
+    if (callAt < 0) {
+      // The call is gone: a result the compaction kept for it would be an orphan, so it goes too.
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (!message || message.handle !== undefined || !holds(message)) continue;
+        const toolResults = (message.toolResults || []).filter((result) => result.tool_use_id !== call.id);
+        if (!message.text && !(message.toolUses || []).length && !toolResults.length) messages.splice(index, 1);
+        else messages[index] = { ...message, toolResults };
       }
+      messages.splice(insertionPoint(messages, useIndex, anchors), 0,
+        { role: 'assistant', text: '', toolUses: [freshUse(use)] },
+        { role: 'user', text: '', toolUses: [], toolResults: [freshResult(original)] });
+      report.restored.push(call.id);
+      continue;
     }
-    messages = kept;
-    const at = slot >= 0 ? stepPastAnswers(messages, slot) : insertionPoint(messages, useIndex, anchors);
-    messages.splice(at, 0, useMessage, resultMessage);
+    const holderAt = messages.findIndex((message) => message.handle === undefined && holds(message));
+    const holder = holderAt >= 0 ? messages[holderAt] : undefined;
+    if (holder) {
+      // Truncated: the original text goes back in the slot the compaction left.
+      messages[holderAt] = {
+        ...holder,
+        toolResults: (holder.toolResults || []).map((result) => (result.tool_use_id === call.id ? freshResult(original) : result)),
+      };
+    } else {
+      // Dropped while the call stayed: answer the call from the message right after it, joining
+      // the rebuilt results of its sibling calls there when the compaction kept any.
+      const callMessage = messages[callAt];
+      const after = messages[callAt + 1];
+      const siblings = after !== undefined && after.handle === undefined && after.role === 'user'
+        && (after.toolResults || []).some((result) => (callMessage?.toolUses || []).some((entry) => entry.tool_use_id === result.tool_use_id));
+      if (after && siblings) messages[callAt + 1] = { ...after, toolResults: [...(after.toolResults || []), freshResult(original)] };
+      else messages.splice(callAt + 1, 0, { role: 'user', text: '', toolUses: [], toolResults: [freshResult(original)] });
+    }
     report.restored.push(call.id);
   }
 
@@ -295,7 +319,6 @@ export function restoreProtected(
       messages.splice(insertionPoint(messages, pointer.anchor, anchors), 0, { role: 'user', text: pointer.text, toolUses: [] });
     }
   }
-  report.messages = messages;
   return report;
 }
 
