@@ -324,7 +324,8 @@ test('live-refs: path, round trip, and a malformed file reads as absent', () => 
   assert.strictEqual(liveRefsPath('/sq', 'a/b'), '/sq/live-refs/a%2Fb.json');
   const parsed = parseLiveRefs(serializeLiveRefs('s', 'pin', ['SQ-1'], '2026-09-28T00:00:00.000Z'));
   assert.deepStrictEqual(parsed, { version: 1, session: 's', at: '2026-09-28T00:00:00.000Z', pin: 'pin', closed: ['SQ-1'] });
-  assert.strictEqual(parseLiveRefs('{"version":2}'), null);
+  assert.strictEqual(parseLiveRefs('{"version":2,"session":"s","at":"t","pin":"p","closed":[]}'), null, 'another version reads as absent');
+  assert.strictEqual(parseLiveRefs('{"version":1,"session":"s","at":"t","pin":"p","closed":"SQ-1"}'), null);
   assert.strictEqual(parseLiveRefs('not json'), null);
 });
 
