@@ -1,5 +1,6 @@
 'use strict';
 
+import path from 'node:path';
 import type { Diagnostic } from './index.js';
 
 export const VERIFICATION_KINDS = ['suite', 'command', 'document', 'link', 'schema', 'manual', 'attestation', 'review', 'custom'] as const;
@@ -226,7 +227,40 @@ function captureWaiverGuidance(ticket: string, eligible: readonly CompletedVerif
   ].join('');
 }
 
-export function commandVerificationResult(requirement: VerificationRequirement, evidence: string, captures: readonly CompletedVerificationCapture[], ticket: string, candidate: VerificationCandidate, dispatchNonce: string, waiverOptions: CaptureWaiverOptions = {}) {
+// SQ-185: after context compaction an executor can lose the dispatched verify-capture wrapper
+// invocation entirely. Before this, neither the refusal, the CLI help, nor the launcher printed
+// it, so recovery needed orchestrator help to rebuild it from capturedVerifyCommand() in
+// lib/agentsync.js. This mirrors that same command shape from inside the refusal itself, resolved
+// from the running plugin's own path (never a hardcoded version directory) so it survives an
+// upgrade between dispatch and resubmission, with the pinned verify command pre-encoded because
+// it is always known here. The project path is only known when a caller threads it through, so a
+// missing project degrades to guidance naming exactly what to append rather than a broken command.
+function verifyCaptureScriptPath(): string {
+  return path.join(__dirname, '..', 'verify-capture.js');
+}
+
+export function verifyCaptureWrapperCommand(command: string, ticketRef: string, project?: string): string {
+  const trimmed = String(command || '').trim();
+  if (!trimmed) return '';
+  const encoded = Buffer.from(trimmed, 'utf8').toString('base64');
+  const ref = String(ticketRef || '').trim();
+  const proj = String(project || '').trim();
+  const target = ref && proj ? ` --project ${JSON.stringify(proj)} --ticket ${JSON.stringify(ref)}` : '';
+  return `node ${JSON.stringify(verifyCaptureScriptPath())} --base64 ${encoded}${target}`;
+}
+
+function verifyCaptureRecoveryGuidance(command: string, ticketRef: string, project?: string): string {
+  const wrapper = verifyCaptureWrapperCommand(command, ticketRef, project);
+  if (!wrapper) return '';
+  const proj = String(project || '').trim();
+  const ref = String(ticketRef || '').trim();
+  const bindingNote = proj
+    ? ''
+    : ` Bind it to this ticket and attempt by adding --project ${JSON.stringify('<the absolute repo path this ticket is dispatched against>')} --ticket ${JSON.stringify(ref)}.`;
+  return ` Recover the wrapper invocation yourself: ${wrapper}${bindingNote}`;
+}
+
+export function commandVerificationResult(requirement: VerificationRequirement, evidence: string, captures: readonly CompletedVerificationCapture[], ticket: string, candidate: VerificationCandidate, dispatchNonce: string, waiverOptions: CaptureWaiverOptions = {}, project?: string) {
   const command = requirement.command || '';
   if (evidence !== command) {
     const message = 'verification must match the declared executor verify command and the prepared command verifier; executors cannot replace the required command.';
@@ -278,7 +312,7 @@ export function commandVerificationResult(requirement: VerificationRequirement, 
         });
       }
     }
-    const message = `No completed passed verification capture exists for ${ticket}, dispatch attempt ${dispatchNonce || '<none>'}, ${candidate.source}:${candidate.value}, and declared command ${JSON.stringify(command)}. Run ${JSON.stringify(command)} through the dispatched verify-capture wrapper again after finalizing that candidate, then resubmit.${captureWaiverGuidance(ticket, eligible, rejected)}`;
+    const message = `No completed passed verification capture exists for ${ticket}, dispatch attempt ${dispatchNonce || '<none>'}, ${candidate.source}:${candidate.value}, and declared command ${JSON.stringify(command)}. Run ${JSON.stringify(command)} through the dispatched verify-capture wrapper again after finalizing that candidate, then resubmit.${verifyCaptureRecoveryGuidance(command, ticket, project)}${captureWaiverGuidance(ticket, eligible, rejected)}`;
     return Object.freeze({
       result: Object.freeze({ kind: requirement.kind, status: 'failed_check' as const, evidence: message, command, failureIdentities: Object.freeze(['verification:capture-required']) }),
       expectedEvidence: null,

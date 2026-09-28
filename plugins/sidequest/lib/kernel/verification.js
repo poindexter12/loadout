@@ -1,7 +1,9 @@
 "use strict";
+var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => {
   for (var name in all)
@@ -15,6 +17,14 @@ var __copyProps = (to, from, except, desc) => {
   }
   return to;
 };
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var verification_exports = {};
 __export(verification_exports, {
@@ -34,9 +44,11 @@ __export(verification_exports, {
   verificationFailureDiagnostic: () => verificationFailureDiagnostic,
   verificationOutcome: () => verificationOutcome,
   verificationRequirement: () => verificationRequirement,
-  verificationWaiverDiagnostic: () => verificationWaiverDiagnostic
+  verificationWaiverDiagnostic: () => verificationWaiverDiagnostic,
+  verifyCaptureWrapperCommand: () => verifyCaptureWrapperCommand
 });
 module.exports = __toCommonJS(verification_exports);
+var import_node_path = __toESM(require("node:path"));
 const VERIFICATION_KINDS = ["suite", "command", "document", "link", "schema", "manual", "attestation", "review", "custom"];
 const VERIFICATION_STATUSES = ["passed", "failed_suite", "toolchain_missing", "could_not_run", "timeout", "manual", "attestation", "skipped", "failed_check"];
 function nonEmpty(value) {
@@ -153,7 +165,27 @@ function captureWaiverGuidance(ticket, eligible, rejected) {
     rejected.length ? ` Ignored capture waivers: ${rejected.join("; ")}.` : ""
   ].join("");
 }
-function commandVerificationResult(requirement, evidence, captures, ticket, candidate, dispatchNonce, waiverOptions = {}) {
+function verifyCaptureScriptPath() {
+  return import_node_path.default.join(__dirname, "..", "verify-capture.js");
+}
+function verifyCaptureWrapperCommand(command, ticketRef, project) {
+  const trimmed = String(command || "").trim();
+  if (!trimmed) return "";
+  const encoded = Buffer.from(trimmed, "utf8").toString("base64");
+  const ref = String(ticketRef || "").trim();
+  const proj = String(project || "").trim();
+  const target = ref && proj ? ` --project ${JSON.stringify(proj)} --ticket ${JSON.stringify(ref)}` : "";
+  return `node ${JSON.stringify(verifyCaptureScriptPath())} --base64 ${encoded}${target}`;
+}
+function verifyCaptureRecoveryGuidance(command, ticketRef, project) {
+  const wrapper = verifyCaptureWrapperCommand(command, ticketRef, project);
+  if (!wrapper) return "";
+  const proj = String(project || "").trim();
+  const ref = String(ticketRef || "").trim();
+  const bindingNote = proj ? "" : ` Bind it to this ticket and attempt by adding --project ${JSON.stringify("<the absolute repo path this ticket is dispatched against>")} --ticket ${JSON.stringify(ref)}.`;
+  return ` Recover the wrapper invocation yourself: ${wrapper}${bindingNote}`;
+}
+function commandVerificationResult(requirement, evidence, captures, ticket, candidate, dispatchNonce, waiverOptions = {}, project) {
   const command = requirement.command || "";
   if (evidence !== command) {
     const message = "verification must match the declared executor verify command and the prepared command verifier; executors cannot replace the required command.";
@@ -202,7 +234,7 @@ function commandVerificationResult(requirement, evidence, captures, ticket, cand
         });
       }
     }
-    const message = `No completed passed verification capture exists for ${ticket}, dispatch attempt ${dispatchNonce || "<none>"}, ${candidate.source}:${candidate.value}, and declared command ${JSON.stringify(command)}. Run ${JSON.stringify(command)} through the dispatched verify-capture wrapper again after finalizing that candidate, then resubmit.${captureWaiverGuidance(ticket, eligible, rejected)}`;
+    const message = `No completed passed verification capture exists for ${ticket}, dispatch attempt ${dispatchNonce || "<none>"}, ${candidate.source}:${candidate.value}, and declared command ${JSON.stringify(command)}. Run ${JSON.stringify(command)} through the dispatched verify-capture wrapper again after finalizing that candidate, then resubmit.${verifyCaptureRecoveryGuidance(command, ticket, project)}${captureWaiverGuidance(ticket, eligible, rejected)}`;
     return Object.freeze({
       result: Object.freeze({ kind: requirement.kind, status: "failed_check", evidence: message, command, failureIdentities: Object.freeze(["verification:capture-required"]) }),
       expectedEvidence: null,
@@ -247,5 +279,6 @@ function captureVerificationResult(requirement, capture) {
   verificationFailureDiagnostic,
   verificationOutcome,
   verificationRequirement,
-  verificationWaiverDiagnostic
+  verificationWaiverDiagnostic,
+  verifyCaptureWrapperCommand
 });
