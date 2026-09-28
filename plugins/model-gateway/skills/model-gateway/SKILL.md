@@ -163,7 +163,7 @@ reversible workaround:
   need elevated privileges to save it; do not attempt to edit the hosts file yourself.
 - `ensure`/`setup`/`doctor` detect the entry (read-only) and, only after confirming the shim can
   actually bind loopback port 80, switch `ANTHROPIC_BASE_URL` to `http://api.anthropic.com` and
-  start a second listener on port 80 next to the usual `127.0.0.1:18764`. Exactly one line tells
+  start a second listener on port 80 next to the account's usual loopback shim port. Exactly one line tells
   the user to restart Claude Code when the mode changes either direction.
 - Removing the hosts entry, or port 80 becoming unavailable (no permission, or something else is
   using it), reverts to default mode automatically, again with one restart line.
@@ -194,9 +194,14 @@ matches: restart it through the normal `ensure` or `setup` path, then restart Cl
 picker re-discovers the rows.
 
 Logs live in `$CLAUDE_CONFIG_DIR/model-gateway/logs/`. `guardian.log` has recovery output; `lifecycle.jsonl`
-has bounded process evidence that `doctor` summarizes. Ports: shim 18764, proxy 18765 (override with
-`CODEX_GATEWAY_PORT` / `CODEX_GATEWAY_PROXY_PORT`, but the env block and running processes must
-agree).
+has bounded process evidence that `doctor` summarizes. Ports are per account tree: shim 18764 and
+proxy 18765 apply only to the default tree (the physical `~/.claude`). Every other config dir derives
+a stable even/odd pair in 20000-27999 from its path, so two accounts never share a gateway. Override
+with `CODEX_GATEWAY_PORT` / `CODEX_GATEWAY_PROXY_PORT` (also the remedy for a rare derived-port
+collision), but the env block and running processes must agree. A shim never serves another
+account's sessions. When readiness reports the port is held by a different install root, rerunning
+`ensure` cannot fix it and that process must never be stopped from here: manage it from the account
+that owns it, or set the port overrides for this account.
 
 ## Failure modes worth knowing
 
