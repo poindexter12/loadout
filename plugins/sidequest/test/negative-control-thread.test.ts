@@ -134,7 +134,7 @@ test('negative control is not rejected as import/collection error when the marke
   fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), `test('${matchingTestName}', () => {});\n`);
 
   const sameLineNegationControl = [
-    `[sidequest:negative-control] target=lib/fixture.js:1; assertion=${matchingTestName}; npm run test:files test/fixture.test.js failed=1 (none of these are import or collection errors, just assertion failures)`,
+    `[sidequest:negative-control] target=lib/fixture.js:1; assertion=${matchingTestName}; npm run test:files test/fixture.test.js failed=1 (this is not an import error or a collection error, just an assertion failure)`,
     `[sidequest:negative-control-test] failed ${matchingTestName}`,
   ].join('\n');
   assert.equal(store.addComment(slug, ticket.ref, { by, body: sameLineNegationControl, source: 'mcp' }).ok, true);
