@@ -768,10 +768,16 @@ function isTestSidePath(file) {
   const normalized = String(file || "").replace(/\\/g, "/").toLowerCase();
   return /(^|\/)(?:test|tests|__tests__)(?:\/|$)/.test(normalized) || /(?:^|\/)[^/]+\.(?:test|spec)\.[^/]+$/.test(normalized);
 }
-function negativeControlFailureKind(body) {
-  const text = String(body || "");
-  if (/\bimport\s*error\b/i.test(text)) return "import_error";
-  if (/\bcollection\s+(?:error|failed|failure)\b/i.test(text)) return "collection_error";
+function negativeControlFailureKindNegated(text, matchIndex) {
+  const preceding = text.slice(Math.max(0, matchIndex - 40), matchIndex);
+  return /\b(?:none|no|not|n't|never|isn'?t|aren'?t|wasn'?t|weren'?t|without|neither)\b/i.test(preceding);
+}
+function negativeControlFailureKind(markerLine) {
+  const text = String(markerLine || "");
+  const importMatch = /\bimport\s*error\b/i.exec(text);
+  if (importMatch && !negativeControlFailureKindNegated(text, importMatch.index)) return "import_error";
+  const collectionMatch = /\bcollection\s+(?:error|failed|failure)\b/i.exec(text);
+  if (collectionMatch && !negativeControlFailureKindNegated(text, collectionMatch.index)) return "collection_error";
   return "";
 }
 function changedTestNames(delta, changedPaths) {
@@ -875,7 +881,7 @@ function negativeControlResult(ticket, expectedTestNames = []) {
     if (failed) {
       if (!failed[1]?.trim() || !failed[2]?.trim()) return { kind: "missing_target_or_assertion" };
       if (Number(failed[4]) === 0) return { kind: "zero_failures" };
-      const failureKind = negativeControlFailureKind(body);
+      const failureKind = negativeControlFailureKind(markerLine);
       if (failureKind) return { kind: failureKind };
       const testReport = negativeControlTestReport(comments.filter((comment2) => comment2.by === claimHolder), expectedTestNames);
       return testReport.unreported.length ? { kind: "unreported_tests", tests: testReport.unreported, markerLines: testReport.markerLines } : { kind: "failed" };

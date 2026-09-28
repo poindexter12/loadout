@@ -704,10 +704,23 @@ function isTestSidePath(file?: any) {
     || /(?:^|\/)[^/]+\.(?:test|spec)\.[^/]+$/.test(normalized);
 }
 
-function negativeControlFailureKind(body?: unknown) {
-  const text = String(body || '');
-  if (/\bimport\s*error\b/i.test(text)) return 'import_error';
-  if (/\bcollection\s+(?:error|failed|failure)\b/i.test(text)) return 'collection_error';
+function negativeControlFailureKindNegated(text: string, matchIndex: number) {
+  const preceding = text.slice(Math.max(0, matchIndex - 40), matchIndex);
+  return /\b(?:none|no|not|n't|never|isn'?t|aren'?t|wasn'?t|weren'?t|without|neither)\b/i.test(preceding);
+}
+
+function negativeControlFailureKind(markerLine?: unknown) {
+  // Classifies from the marker line's own reported evidence (the structured
+  // target/assertion/command/failed=<n> report and any trailing context on
+  // that same line), never from free-text prose elsewhere in the comment —
+  // a narrative sentence discussing import/collection errors (including one
+  // that negates them, e.g. "none is an import or collection error") must
+  // not be mistaken for a reported failure kind.
+  const text = String(markerLine || '');
+  const importMatch = /\bimport\s*error\b/i.exec(text);
+  if (importMatch && !negativeControlFailureKindNegated(text, importMatch.index)) return 'import_error';
+  const collectionMatch = /\bcollection\s+(?:error|failed|failure)\b/i.exec(text);
+  if (collectionMatch && !negativeControlFailureKindNegated(text, collectionMatch.index)) return 'collection_error';
   return '';
 }
 
@@ -820,7 +833,7 @@ function negativeControlResult(ticket?: any, expectedTestNames: string[] = []) {
     if (failed) {
       if (!failed[1]?.trim() || !failed[2]?.trim()) return { kind: 'missing_target_or_assertion' };
       if (Number(failed[4]) === 0) return { kind: 'zero_failures' };
-      const failureKind = negativeControlFailureKind(body);
+      const failureKind = negativeControlFailureKind(markerLine);
       if (failureKind) return { kind: failureKind };
       const testReport = negativeControlTestReport(comments.filter((comment: { by?: unknown, body?: unknown }) => comment.by === claimHolder), expectedTestNames);
       return testReport.unreported.length ? { kind: 'unreported_tests', tests: testReport.unreported, markerLines: testReport.markerLines } : { kind: 'failed' };

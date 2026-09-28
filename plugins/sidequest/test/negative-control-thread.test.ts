@@ -101,3 +101,48 @@ test('negative controls collect claim-holder test markers across the whole threa
     source: 'mcp',
   }).ok, true);
 });
+
+test('negative control is not rejected as import/collection error when the comment negates the phrase in prose', () => {
+  git(['checkout', '--', 'lib/fixture.js', 'test/fixture.test.js']);
+  const by = 'sq-181-negation-prose';
+  const ticket = createClaimedMixedChangeTicket(by);
+  fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), `test('${matchingTestName}', () => {});\n`);
+
+  // Same repro as the SQ-175 thread: the executor's marker line reports a
+  // genuine assertion failure, and a separate prose line explicitly denies
+  // it was an import/collection error. That denial must not be keyword
+  // matched as a reported import/collection error.
+  const negatedProseControl = [
+    `[sidequest:negative-control] target=lib/fixture.js:1; assertion=${matchingTestName}; npm run test:files test/fixture.test.js failed=1`,
+    'None of these is an import or collection error, they are genuine assertion failures on the changed value.',
+    `[sidequest:negative-control-test] failed ${matchingTestName}`,
+  ].join('\n');
+  assert.equal(store.addComment(slug, ticket.ref, { by, body: negatedProseControl, source: 'mcp' }).ok, true);
+
+  const completion = store.addComment(slug, ticket.ref, {
+    by,
+    body: '[sidequest:verify-complete] passed: fixture verification passed.',
+    source: 'mcp',
+  });
+  assert.equal(completion.ok, true, completion.message);
+});
+
+test('negative control is not rejected as import/collection error when the marker line itself negates the phrase', () => {
+  git(['checkout', '--', 'lib/fixture.js', 'test/fixture.test.js']);
+  const by = 'sq-181-negation-sameline';
+  const ticket = createClaimedMixedChangeTicket(by);
+  fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), `test('${matchingTestName}', () => {});\n`);
+
+  const sameLineNegationControl = [
+    `[sidequest:negative-control] target=lib/fixture.js:1; assertion=${matchingTestName}; npm run test:files test/fixture.test.js failed=1 (none of these are import or collection errors, just assertion failures)`,
+    `[sidequest:negative-control-test] failed ${matchingTestName}`,
+  ].join('\n');
+  assert.equal(store.addComment(slug, ticket.ref, { by, body: sameLineNegationControl, source: 'mcp' }).ok, true);
+
+  const completion = store.addComment(slug, ticket.ref, {
+    by,
+    body: '[sidequest:verify-complete] passed: fixture verification passed.',
+    source: 'mcp',
+  });
+  assert.equal(completion.ok, true, completion.message);
+});
