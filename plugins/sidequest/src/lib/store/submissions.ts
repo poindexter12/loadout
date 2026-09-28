@@ -3392,11 +3392,33 @@ function currentIntegrationWaveBaseline(slug: any, fallback: any, targetOverride
   if (fallback?.revision?.source !== 'git') return fallback;
   const projectPath = String(readMeta(slug)?.path || '').trim();
   const target = targetOverride || integrationTarget(slug);
-  const commit = integrationTargetCommit(projectPath, target);
+  const commit = waveTargetCommit(slug, projectPath, target);
   return Object.freeze({
     revision: Object.freeze({ source: 'git', value: commit, observedAt: new Date().toISOString() }),
     purpose: 'wave' as const,
   });
+}
+
+// Local delivery merges into the checked-out local branch, never into the
+// remote-tracking ref. In remote mode an isolated dispatch bases on local main
+// when it is ahead of origin, so pinning the wave to origin/main refused that
+// candidate as baseline_moved even though its merge was a clean fast-forward
+// (SQ-59). Pin to the local branch only when it already contains the upstream
+// commit: every candidate admitted against the upstream stays admitted, and a
+// local branch behind or beside origin keeps the upstream pin. PR delivery
+// targets the remote branch, so it keeps the upstream pin as well.
+function waveTargetCommit(slug: any, projectPath: string, target: any) {
+  const upstreamCommit = integrationTargetCommit(projectPath, target);
+  if (target?.mode !== 'remote' || !target?.branch || deliveryChannelFor(slug).mode === 'pr') return upstreamCommit;
+  const git = (args: string[]) => execFileSync('git', args, { cwd: projectPath, encoding: 'utf8', windowsHide: true, stdio: 'pipe' }).trim();
+  try {
+    const localCommit = git(['rev-parse', '--verify', `refs/heads/${target.branch}^{commit}`]);
+    if (localCommit === upstreamCommit) return upstreamCommit;
+    git(['merge-base', '--is-ancestor', upstreamCommit, localCommit]);
+    return localCommit;
+  } catch (_: any) {
+    return upstreamCommit;
+  }
 }
 
 function candidateBaselineIsCurrentOrAncestor(slug: any, candidate: any, waveBaseline: any) {
@@ -3463,10 +3485,14 @@ function assembleSubmissionWave(slug?: any, refs?: any, opts?: any) {
   if ('code' in opened) return { ok: false, reason: opened.code, message: opened.message };
   const decision = assembleWave(opened, waveCandidatesForBaseline(slug, waveCandidates, opened.baseline));
   if (!decision.ok) {
+    // The MCP ack keeps only reason and message, so the per-candidate cause must
+    // travel in the message or the caller cannot tell a moved baseline from an
+    // out-of-scope surface without a manual git cross-check (SQ-59).
+    const causes = decision.invalidated.map((entry: { ref: string; reason: string; message: string }) => `${entry.ref} ${entry.reason}: ${entry.message}`).join(' ');
     return {
       ok: false,
       reason: 'wave_invalidated',
-      message: `Wave ${waveId} could not assemble at the current integration target. Submitted candidates remain parked with their existing verification evidence.`,
+      message: `Wave ${waveId} could not assemble at the current integration target ${opened.baseline.revision.source}:${opened.baseline.revision.value}. ${causes} Submitted candidates remain parked with their existing verification evidence.`,
       invalidated: decision.invalidated,
       wave: { id: waveId, baseline: opened.baseline },
     };

@@ -4367,6 +4367,11 @@ test('SQ-2463: a wave invalidation preserves submitted candidate status', () => 
     const refused = store.assembleSubmissionWave(slug, [primary.ref, invalid.ref], { waveId: 'invalid-wave' });
     assert.strictEqual(refused.ok, false);
     assert.strictEqual(refused.reason, 'wave_invalidated');
+    // SQ-59: the MCP ack forwards only reason and message, so the message must name the cause.
+    assert.match(refused.message, new RegExp(`${invalid.ref} baseline_moved: `));
+    // createCandidateCommit switches HEAD to a fresh branch, so the pinned target is
+    // the configured integration branch's tip, not HEAD.
+    assert.match(refused.message, new RegExp(`integration target git:${git(['rev-parse', `refs/heads/${integrationBranch}`])}\\. `));
     assert.strictEqual(store.getTicket(slug, primary.ref).status, 'doing');
     assert.strictEqual(store.getTicket(slug, invalid.ref).status, 'doing');
     assert.strictEqual(store.pendingSubmission(store.getTicket(slug, invalid.ref)), true);

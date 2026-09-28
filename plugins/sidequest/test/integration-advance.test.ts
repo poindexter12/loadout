@@ -496,6 +496,97 @@ test('sequential singleton waves use the selected local integration branch after
   assert.equal(fs.readFileSync(path.join(fixture.repo, 'second.txt'), 'utf8'), 'second sequential executor work\n');
 });
 
+test('SQ-59: remote-mode integrate assembles a candidate based on local main that is ahead of an unpushed origin', () => {
+  // Auto mode with an origin resolves to remote, so the configured target
+  // names origin/main. Delivery still merges into the checked-out local
+  // branch, and an isolated dispatch bases on local main when it is ahead of
+  // origin. Pinning the wave to origin/main refused that candidate as
+  // baseline_moved although merging it into local main is a clean fast-forward.
+  const fixture = makeRepo('remote-local-ahead');
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-advance-bare-'));
+  execFileSync('git', ['init', '-b', 'main', '--bare', bare], { encoding: 'utf8', windowsHide: true });
+  git(['remote', 'add', 'origin', bare], fixture.repo);
+  git(['push', '-u', 'origin', 'main'], fixture.repo);
+  const unpushed = commitFile(fixture.repo, 'unpushed.txt', 'local main is ahead of origin\n');
+  assert.notEqual(unpushed, head(fixture.repo, 'origin/main'));
+  const { slug } = store.ensureProject(fixture.repo);
+  const target = store.integrationTarget(slug);
+  assert.deepEqual(target, { mode: 'remote', upstream: 'origin/main', branch: 'main' });
+
+  const worktree = path.join(fixture.repo, '.claude', 'worktrees', 'agent-remote-local-ahead');
+  git(['worktree', 'add', '-b', 'worktree-agent-remote-local-ahead', worktree, 'main'], fixture.repo);
+  const candidate = commitFile(worktree, 'ahead.txt', 'work based on local main\n');
+  const ticket = store.createTicket(slug, {
+    title: 'candidate based on local main ahead of origin',
+    category: 'codebase-exploration',
+    description: 'Its baseline is local main, which origin/main does not contain.',
+    files: ['ahead.txt'],
+  });
+  const gitRef = `refs/sidequest/${ticket.ref}`;
+  git(['update-ref', gitRef, candidate], worktree);
+  const range = commitScope.submissionRange(worktree, { commit: candidate, gitRef, upstream: 'main', integrationBranch: 'main' });
+  assert.equal(range.ok, true, JSON.stringify(range));
+  assert.equal(store.claimTicket(slug, ticket.ref, 'remote-ahead-worker', { direct: true, reason: 'The remote local-ahead fixture needs a direct claim.' }).ok, true);
+  const submitted = store.submitTicket(slug, ticket.ref, 'remote-ahead-worker', { commit: candidate, gitRef, range, worktree });
+  assert.equal(submitted.ok, true, JSON.stringify(submitted));
+  assert.equal(store.getTicket(slug, ticket.ref).submission.baseline.revision.value, unpushed);
+
+  const originBefore = head(fixture.repo, 'origin/main');
+  const delivered = store.integrateSubmission(slug, ticket.ref, { mode: 'merge', target });
+  assert.equal(delivered.ok, true, JSON.stringify(delivered));
+  assert.equal(delivered.ticket.submission.wave.baseline.revision.value, unpushed);
+  assert.equal(fs.readFileSync(path.join(fixture.repo, 'ahead.txt'), 'utf8'), 'work based on local main\n');
+  assert.equal(head(fixture.repo, 'origin/main'), originBefore, 'integrate never moves the remote-tracking ref');
+});
+
+test('SQ-59: remote-mode wave stays pinned to origin when local main has diverged from it', () => {
+  // The local branch is only preferred when it contains the upstream commit.
+  // A local branch beside origin keeps the upstream pin, so a candidate based
+  // on origin/main (which that local branch lacks) is still admitted.
+  const fixture = makeRepo('remote-local-diverged');
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-advance-bare-'));
+  execFileSync('git', ['init', '-b', 'main', '--bare', bare], { encoding: 'utf8', windowsHide: true });
+  git(['remote', 'add', 'origin', bare], fixture.repo);
+  git(['push', '-u', 'origin', 'main'], fixture.repo);
+  const pushedBase = head(fixture.repo, 'main');
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-advance-other-'));
+  git(['clone', bare, other], os.tmpdir());
+  git(['config', 'user.name', 'Sidequest Test'], other);
+  git(['config', 'user.email', 'sidequest-test@example.invalid'], other);
+  const remoteOnly = commitFile(other, 'remote-only.txt', 'pushed elsewhere\n');
+  git(['push', 'origin', 'main'], other);
+  git(['fetch', 'origin'], fixture.repo);
+  git(['merge', '--ff-only', 'origin/main'], fixture.repo);
+  const { slug } = store.ensureProject(fixture.repo);
+  const target = store.integrationTarget(slug);
+  assert.equal(target.upstream, 'origin/main');
+
+  const worktree = path.join(fixture.repo, '.claude', 'worktrees', 'agent-remote-diverged');
+  git(['worktree', 'add', '-b', 'worktree-agent-remote-diverged', worktree, 'main'], fixture.repo);
+  const candidate = commitFile(worktree, 'beside.txt', 'work based on origin/main\n');
+  const ticket = store.createTicket(slug, {
+    title: 'candidate against a diverged local main',
+    category: 'codebase-exploration',
+    description: 'Wave must stay pinned to origin/main.',
+    files: ['beside.txt'],
+  });
+  const gitRef = `refs/sidequest/${ticket.ref}`;
+  git(['update-ref', gitRef, candidate], worktree);
+  const range = commitScope.submissionRange(worktree, { commit: candidate, gitRef, upstream: target.upstream, integrationBranch: target.branch });
+  assert.equal(range.ok, true, JSON.stringify(range));
+  assert.equal(store.claimTicket(slug, ticket.ref, 'remote-diverged-worker', { direct: true, reason: 'The remote diverged fixture needs a direct claim.' }).ok, true);
+  const submitted = store.submitTicket(slug, ticket.ref, 'remote-diverged-worker', { commit: candidate, gitRef, range, worktree });
+  assert.equal(submitted.ok, true, JSON.stringify(submitted));
+  assert.equal(store.getTicket(slug, ticket.ref).submission.baseline.revision.value, remoteOnly);
+
+  // Local main now sits beside origin/main: it lacks remoteOnly.
+  git(['reset', '--hard', pushedBase], fixture.repo);
+  commitFile(fixture.repo, 'local-only.txt', 'unpushed local\n');
+  const delivered = store.integrateSubmission(slug, ticket.ref, { mode: 'merge', target });
+  assert.equal(delivered.ok, true, JSON.stringify(delivered));
+  assert.equal(delivered.ticket.submission.wave.baseline.revision.value, remoteOnly);
+});
+
 test('an assembled wave preserves candidates, refuses unrelated grooming delivery, and refuses singleton integration', () => {
   const fixture = makeRepo('refused-wave-keeps-candidates');
   const secondWorktree = path.join(fixture.repo, '.claude', 'worktrees', 'agent-conflict');
