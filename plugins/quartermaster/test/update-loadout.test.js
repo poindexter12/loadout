@@ -79,11 +79,58 @@ test('routes project and local updates through the recorded project directory', 
 
 test('uses the stable model-gateway updater for upgrades and the installed command for checks', () => {
   const installs = installedPlugins(registry);
-  const update = gatewayUpdateCommand('C:/Users/example');
+  // env deliberately has no CLAUDE_CONFIG_DIR: falls back to home, never this process's real one.
+  const update = gatewayUpdateCommand('C:/Users/example', {});
   const doctor = gatewayCommand(installs, 'doctor');
 
   assert.deepEqual(update.args, [path.join('C:/Users/example', '.claude', 'model-gateway', 'update.js')]);
   assert.equal(doctor.args.at(-1), 'doctor');
+});
+
+test('resolves the updater under CLAUDE_CONFIG_DIR when set, distinct from the plain home directory', () => {
+  const installs = installedPlugins(registry);
+  const update = gatewayUpdateCommand('C:/Users/example', { CLAUDE_CONFIG_DIR: 'C:/Accounts/poindexter/claude' });
+
+  assert.deepEqual(update.args, [path.join('C:/Accounts/poindexter/claude', 'model-gateway', 'update.js')]);
+  assert.ok(installs.length > 0);
+});
+
+test('two isolated fixture homes resolve to two distinct account-scoped updater paths', () => {
+  const workFixture = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-gateway-account-work-'));
+  const personalFixture = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-gateway-account-personal-'));
+  try {
+    const work = gatewayUpdateCommand(workFixture, { CLAUDE_CONFIG_DIR: path.join(workFixture, '.iarx', 'claude') });
+    const personal = gatewayUpdateCommand(personalFixture, { CLAUDE_CONFIG_DIR: path.join(personalFixture, '.poindexter', 'claude') });
+
+    assert.notEqual(work.args[0], personal.args[0]);
+    assert.equal(work.args[0], path.join(workFixture, '.iarx', 'claude', 'model-gateway', 'update.js'));
+    assert.equal(personal.args[0], path.join(personalFixture, '.poindexter', 'claude', 'model-gateway', 'update.js'));
+  } finally {
+    fs.rmSync(workFixture, { recursive: true, force: true });
+    fs.rmSync(personalFixture, { recursive: true, force: true });
+  }
+});
+
+test('falls back to the legacy shared launcher path only when the account-scoped one has not been written yet', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-gateway-legacy-fallback-'));
+  const configDir = path.join(home, 'account-config-dir');
+  try {
+    const legacyPath = path.join(home, '.claude', 'model-gateway', 'update.js');
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+    fs.writeFileSync(legacyPath, '// legacy launcher');
+
+    const beforeMigration = gatewayUpdateCommand(home, { CLAUDE_CONFIG_DIR: configDir });
+    assert.equal(beforeMigration.args[0], legacyPath, 'falls back to the legacy path when the account-scoped launcher does not exist yet');
+
+    const accountPath = path.join(configDir, 'model-gateway', 'update.js');
+    fs.mkdirSync(path.dirname(accountPath), { recursive: true });
+    fs.writeFileSync(accountPath, '// account-scoped launcher');
+
+    const afterMigration = gatewayUpdateCommand(home, { CLAUDE_CONFIG_DIR: configDir });
+    assert.equal(afterMigration.args[0], accountPath, 'prefers the account-scoped launcher once it has been written');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('dry-run scopes the update plan to Loadout and does not enumerate third-party plugins', () => withRegistry(registry, (registryFile) => {

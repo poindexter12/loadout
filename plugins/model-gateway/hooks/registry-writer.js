@@ -58,7 +58,22 @@ function registryPath(home = os.homedir()) {
   return path.join(home, '.claude', 'toolshed', 'registry', 'model-gateway.json');
 }
 
+// The updater launcher lives under the account's own config dir, not always
+// literal `~/.claude`: CLAUDE_CONFIG_DIR (or MODEL_GATEWAY_CLAUDE_HOME, which
+// takes precedence the same way runtime.js resolves it) redirects a non-default
+// account (e.g. ~/.poindexter/claude) away from the shared default tree. Without
+// this, every account's `setup` overwrites one launcher shared across accounts.
+function activeConfigDir(home = os.homedir()) {
+  return process.env.MODEL_GATEWAY_CLAUDE_HOME || process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
+}
+
 function updateLauncherPath(home = os.homedir()) {
+  return path.join(activeConfigDir(home), 'model-gateway', 'update.js');
+}
+
+// Pre-fix installs always wrote here regardless of account. Kept so a reader
+// can fall back to it if the account-scoped launcher hasn't been (re)written yet.
+function legacyUpdateLauncherPath(home = os.homedir()) {
   return path.join(home, '.claude', 'model-gateway', 'update.js');
 }
 
@@ -114,4 +129,4 @@ if (require.main === module) {
   try { writeBreadcrumb(); } catch (_) {}
 }
 
-module.exports = { CATALOG_SCHEMA_VERSION, SCHEMA_VERSION, breadcrumb, registryPath, updateLauncherPath, writeBreadcrumb, writeUpdateLauncher };
+module.exports = { CATALOG_SCHEMA_VERSION, SCHEMA_VERSION, activeConfigDir, breadcrumb, legacyUpdateLauncherPath, registryPath, updateLauncherPath, writeBreadcrumb, writeUpdateLauncher };

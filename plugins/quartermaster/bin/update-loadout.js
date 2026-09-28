@@ -348,10 +348,27 @@ function marketplaceCommand(marketplace, claude) {
   };
 }
 
-function gatewayUpdateCommand(home = os.homedir()) {
+// Mirrors lib/paths.js's claudeDir(env), but falls back to the given `home`
+// instead of always os.homedir() so callers (and tests) can sandbox the
+// fallback location without needing CLAUDE_CONFIG_DIR set.
+function gatewayConfigDir(env, home) {
+  return env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
+}
+
+// The launcher is written under the active account's config dir (see
+// registry-writer.js's writeUpdateLauncher), not always literal `~/.claude` —
+// CLAUDE_CONFIG_DIR redirects a non-default account away from the shared
+// default tree, so every account gets its own launcher instead of clobbering
+// one shared file. Falls back to the pre-fix shared path only when the
+// account-scoped launcher has not been (re)written yet, so an install that
+// hasn't rerun setup since this fix lands still finds something to run.
+function gatewayUpdateCommand(home = os.homedir(), env = process.env) {
+  const configuredPath = path.join(gatewayConfigDir(env, home), 'model-gateway', 'update.js');
+  const legacyPath = path.join(home, '.claude', 'model-gateway', 'update.js');
+  const launcher = fs.existsSync(configuredPath) || !fs.existsSync(legacyPath) ? configuredPath : legacyPath;
   return {
     command: process.execPath,
-    args: [path.join(home, '.claude', 'model-gateway', 'update.js')],
+    args: [launcher],
     label: 'model-gateway update',
   };
 }
@@ -597,7 +614,7 @@ function runUpdate({ env = process.env, registryFile = registryPath(env), home =
   }
 
   const gateways = modelGatewayInstances(instances);
-  const gateway = gateways.length > 0 ? (options.check ? gatewayCommand(instances, 'doctor') : gatewayUpdateCommand(home)) : null;
+  const gateway = gateways.length > 0 ? (options.check ? gatewayCommand(instances, 'doctor') : gatewayUpdateCommand(home, env)) : null;
   let gatewaySetupOk = true;
   if (gateway && !options.check && !options.dryRun) {
     const launcher = installGatewayLauncher(instances, home);
