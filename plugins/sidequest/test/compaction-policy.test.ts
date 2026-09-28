@@ -117,8 +117,35 @@ test('PreCompact veto emits bounded JSON before falling back to pinning', () => 
   assert.ok(!delayed.stdout.includes('"decision":"block"'));
 });
 
-test('PreCompact ignores manual compaction', () => {
-  const result = run({ hook_event_name: 'PreCompact', trigger: 'manual', cwd: boardPath, session_id: 'manual-compaction' }, { SIDEQUEST_COMPACTION_POLICY: 'veto' });
+test('PreCompact manual trigger receives the pin under default policy', () => {
+  const { ticket } = createDoing('Manual trigger must receive the pin under default pin mode');
+  const result = run({ hook_event_name: 'PreCompact', trigger: 'manual', cwd: boardPath, session_id: 'manual-pin-default' });
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, '');
+  assert.match(result.stdout, /^Preserve verbatim in the summary:/);
+  assert.match(result.stdout, new RegExp(ticket.ref));
+});
+
+test('PreCompact manual trigger receives the pin but is never vetoed', () => {
+  const { ticket } = createDoing('Manual trigger must receive the pin without a block');
+  const result = run({ hook_event_name: 'PreCompact', trigger: 'manual', cwd: boardPath, session_id: 'manual-pin-veto-mode' }, { SIDEQUEST_COMPACTION_POLICY: 'veto' });
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, '');
+  assert.match(result.stdout, /^Preserve verbatim in the summary:/);
+  assert.match(result.stdout, new RegExp(ticket.ref));
+  assert.equal(compactionDecision(result.stdout), undefined);
+
+  // Confirm the block-free result holds across repeated manual triggers too, not just once.
+  const again = run({ hook_event_name: 'PreCompact', trigger: 'manual', cwd: boardPath, session_id: 'manual-pin-veto-mode' }, { SIDEQUEST_COMPACTION_POLICY: 'veto' });
+  assert.equal(again.status, 0);
+  assert.equal(compactionDecision(again.stdout), undefined);
+});
+
+test('PreCompact ignores unrecognized trigger values', () => {
+  createDoing('Unrecognized trigger must not receive the pin');
+  const result = run({ hook_event_name: 'PreCompact', trigger: 'unexpected', cwd: boardPath, session_id: 'unknown-trigger' }, { SIDEQUEST_COMPACTION_POLICY: 'veto' });
 
   assert.equal(result.status, 0);
   assert.equal(result.stdout, '');

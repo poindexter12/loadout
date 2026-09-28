@@ -237,7 +237,8 @@ async function boardState(cwd, store) {
   return { instruction: boundedInstruction(lines), unsafeReason: unsafe };
 }
 async function compactionPolicyOutput(input) {
-  if (input.hook_event_name !== "PreCompact" || input.trigger !== "auto") return "";
+  const trigger = input.trigger;
+  if (input.hook_event_name !== "PreCompact" || trigger !== "auto" && trigger !== "manual") return "";
   const mode = policy();
   if (mode === "off") return "";
   const sessionId = String(input.session_id || input.sessionId || process.env.CLAUDE_CODE_SESSION_ID || "").trim();
@@ -249,7 +250,8 @@ async function compactionPolicyOutput(input) {
       return "";
     }
     const counter = readCounter(sessionId);
-    if (mode !== "veto" || !state.unsafeReason || shouldAvoidVetoForSession(store, sessionId)) {
+    const vetoEligible = trigger === "auto" && mode === "veto" && Boolean(state.unsafeReason) && !shouldAvoidVetoForSession(store, sessionId);
+    if (!vetoEligible) {
       if (counter.instruction === state.instruction) return "";
       writeCounter(sessionId, 0, state.instruction);
       return state.instruction;
@@ -270,7 +272,7 @@ async function compactionPolicyOutput(input) {
 // src/hooks/compaction-policy.ts
 async function main() {
   const input = readStdin() || {};
-  if (input.hook_event_name !== "PreCompact" || input.trigger !== "auto") return;
+  if (input.hook_event_name !== "PreCompact" || input.trigger !== "auto" && input.trigger !== "manual") return;
   const output = await compactionPolicyOutput(input);
   if (output) process.stdout.write(output);
 }

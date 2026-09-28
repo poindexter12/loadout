@@ -162,7 +162,8 @@ async function boardState(cwd: string, store: Store): Promise<{ instruction: str
 }
 
 export async function compactionPolicyOutput(input: Record<string, unknown>): Promise<string> {
-  if (input.hook_event_name !== 'PreCompact' || input.trigger !== 'auto') return '';
+  const trigger = input.trigger;
+  if (input.hook_event_name !== 'PreCompact' || (trigger !== 'auto' && trigger !== 'manual')) return '';
   const mode = policy();
   if (mode === 'off') return '';
   const sessionId = String(input.session_id || input.sessionId || process.env.CLAUDE_CODE_SESSION_ID || '').trim();
@@ -174,7 +175,11 @@ export async function compactionPolicyOutput(input: Record<string, unknown>): Pr
       return '';
     }
     const counter = readCounter(sessionId);
-    if (mode !== 'veto' || !state.unsafeReason || shouldAvoidVetoForSession(store, sessionId)) {
+    // The veto (decision:block) only ever applies to a real auto-trigger compaction: a
+    // user-typed /compact, and the plugin/jev fallback path that hardcodes trigger "manual",
+    // must never be blocked. Both still receive the pin below.
+    const vetoEligible = trigger === 'auto' && mode === 'veto' && Boolean(state.unsafeReason) && !shouldAvoidVetoForSession(store, sessionId);
+    if (!vetoEligible) {
       if (counter.instruction === state.instruction) return '';
       writeCounter(sessionId, 0, state.instruction);
       return state.instruction;

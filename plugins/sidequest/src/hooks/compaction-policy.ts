@@ -5,7 +5,7 @@ import { compactionPolicyOutput } from './shared/compaction-policy.js';
 
 async function main(): Promise<void> {
   const input = readStdin() || {};
-  if (input.hook_event_name !== 'PreCompact' || input.trigger !== 'auto') return;
+  if (input.hook_event_name !== 'PreCompact' || (input.trigger !== 'auto' && input.trigger !== 'manual')) return;
   const output = await compactionPolicyOutput(input);
   if (output) process.stdout.write(output);
 }
