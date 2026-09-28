@@ -27,6 +27,10 @@
 
 'use strict';
 
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
 let lib;
 let projectRelative;
 let ledger;
@@ -36,6 +40,32 @@ try {
   ({ projectRelative } = require('./lib/canonical-path'));
 } catch (_) {
   process.exit(0);
+}
+
+// SQ-197: sidequest's PostCompact hook is the only one of the three plugins that observes
+// compact_summary, so it marks a "replacement" compaction (host kept history verbatim, no
+// summary) with a small file. This formula is duplicated (not imported — plugins don't import
+// each other) in sidequest's shared/compaction.ts and codebase-mapper's inject-context.js, and
+// must stay exactly in sync there: SIDEQUEST_HOME first (any subprocess in the session can read
+// this env var), else a CLAUDE_CONFIG_DIR-rooted path, never a bare hardcoded ~/.claude. Only
+// sidequest deletes the marker; this is a non-destructive peek, bounded by age so a marker
+// sidequest never got to consume cannot suppress re-grounding on a later, unrelated compaction.
+const REPLACEMENT_MARKER_MAX_AGE_MS = 2 * 60 * 1000;
+
+function replacementMarkerFile(sessionId) {
+  const sidequestHome = String(process.env.SIDEQUEST_HOME || '').trim();
+  const home = sidequestHome || path.join(String(process.env.CLAUDE_CONFIG_DIR || '').trim() || path.join(os.homedir(), '.claude'), 'sidequest');
+  return path.join(home, 'replacement-compactions', encodeURIComponent(sessionId) + '.json');
+}
+
+function isReplacementCompaction(sessionId) {
+  if (!sessionId) return false;
+  try {
+    const stat = fs.statSync(replacementMarkerFile(sessionId));
+    return Date.now() - stat.mtimeMs <= REPLACEMENT_MARKER_MAX_AGE_MS;
+  } catch (_) {
+    return false;
+  }
 }
 
 function main() {
@@ -53,6 +83,15 @@ function main() {
   const ruleSet = lib.loadRuleSet(projectDir);
   if (!ruleSet.rules.length) {
     if (migration.notice) lib.emit('SessionStart', migration.notice);
+    process.exit(0);
+  }
+
+  // SQ-197: a replacement compaction keeps the prior full rule re-injection sitting verbatim in
+  // history; emit a short note instead. A normal summarized compaction keeps today's behaviour
+  // (the reset-every-time re-injection below, which exists so always-on rules survive compaction).
+  if (data.source === 'compact' && isReplacementCompaction(data.session_id)) {
+    lib.emit('SessionStart', (migration.notice ? migration.notice + '\n\n' : '') +
+      'live-rules: history retained across a replacement compaction; the rule set is already in the transcript.');
     process.exit(0);
   }
 

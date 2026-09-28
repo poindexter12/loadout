@@ -80,6 +80,37 @@ function hookAsync(script, projectDir, stateDirectory, data, envOverrides = {}) 
   });
 }
 
+// SQ-197: sidequest's PostCompact hook marks a replacement compaction (no summary generated) at
+// SIDEQUEST_HOME/replacement-compactions/<encoded session id>.json. This plugin peeks at that
+// same path (duplicated formula, not imported) to skip the full map re-injection on SessionStart
+// source=compact. hook() above deliberately omits SIDEQUEST_HOME, so these tests pass it directly
+// to stay isolated from a real ~/.claude tree.
+function hookWithSidequestHome(script, projectDir, stateDirectory, sidequestHome, data) {
+  const { CLAUDE_PROJECT_DIR: _ignored, ...ambient } = process.env;
+  return childProcess.execFileSync(process.execPath, [script], {
+    cwd: projectDir,
+    env: {
+      ...ambient,
+      CODEBASE_MAPPER_STATE_DIR: stateDirectory,
+      SIDEQUEST_HOME: sidequestHome,
+    },
+    input: JSON.stringify({ cwd: projectDir, ...data }),
+    encoding: 'utf8',
+  });
+}
+
+function writeReplacementMarker(sidequestHome, sessionId, ageMs = 0) {
+  const markerDir = path.join(sidequestHome, 'replacement-compactions');
+  fs.mkdirSync(markerDir, { recursive: true });
+  const file = path.join(markerDir, encodeURIComponent(sessionId) + '.json');
+  fs.writeFileSync(file, JSON.stringify({ at: new Date().toISOString() }));
+  if (ageMs) {
+    const past = (Date.now() - ageMs) / 1000;
+    fs.utimesSync(file, past, past);
+  }
+  return file;
+}
+
 async function waitForLockContenders(lockFile, count) {
   const directory = path.dirname(lockFile);
   const prefix = path.basename(lockFile) + '.';
@@ -239,6 +270,33 @@ test('SessionStart scopes re-grounding to its source and preserves seen document
   assert.match(resumedChange, /SessionStart \(resume\)/);
   assert.match(resumedChange, /architecture\.md/);
   assert.doesNotMatch(resumedChange, /modules\.md/);
+});
+
+// SQ-197: a replacement compaction (sidequest's PostCompact saw compact_summary === '') leaves
+// the prior full map re-injection sitting verbatim in history, so SessionStart(compact) should
+// emit a short note instead of re-injecting the whole map again.
+test('a replacement-compaction marker collapses SessionStart(compact) to a short note', () => {
+  const directory = project();
+  const state = path.join(directory, 'state');
+  const sidequestHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codebase-mapper-sq197-'));
+  hookWithSidequestHome(startHook, directory, state, sidequestHome, { session_id: 'one', source: 'startup' });
+
+  const markerFile = writeReplacementMarker(sidequestHome, 'one');
+  const note = text(hookWithSidequestHome(startHook, directory, state, sidequestHome, { session_id: 'one', source: 'compact' }));
+  assert.match(note, /history retained across a replacement compaction/);
+  assert.doesNotMatch(note, /SESSIONSTART \(compact\)/);
+  assert.ok(Buffer.byteLength(note, 'utf8') <= 200, `expected <=200 bytes, got ${Buffer.byteLength(note, 'utf8')}`);
+
+  // A normal (summarized) compaction — no marker present, since only sidequest's own
+  // SessionStart(compact) hook consumes (deletes) it — keeps today's full re-grounding.
+  fs.rmSync(markerFile, { force: true });
+  const full = text(hookWithSidequestHome(startHook, directory, state, sidequestHome, { session_id: 'one', source: 'compact' }));
+  assert.match(full, /SESSIONSTART \(compact\)/);
+
+  // A marker older than the bound never suppresses re-grounding on a later, unrelated compaction.
+  writeReplacementMarker(sidequestHome, 'one', 5 * 60 * 1000);
+  const staleMarker = text(hookWithSidequestHome(startHook, directory, state, sidequestHome, { session_id: 'one', source: 'compact' }));
+  assert.match(staleMarker, /SESSIONSTART \(compact\)/);
 });
 
 test('legacy maps gain a hash manifest on SessionStart without changing documents', () => {

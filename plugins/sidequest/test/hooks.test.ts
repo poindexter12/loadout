@@ -3656,6 +3656,38 @@ test('session-start source excludes the retired lifecycle CLI fallback', () => {
   assert.match(source, /Reconnect Board MCP, re-dispatch, and spawn the exact returned executor/);
 });
 
+// SQ-197: a replacement compaction (host kept history verbatim; PostCompact saw
+// compact_summary === '') leaves the prior SessionStart re-grounding sitting in history. The
+// PostCompact->SessionStart(compact) pair should collapse to a short note instead of duplicating
+// the full board-context block again.
+test('a replacement compaction collapses SessionStart(compact) to a short note', () => {
+  const sessionId = `sq197-replacement-${++sqSeq}`;
+  const transcript = path.join(SIDEQUEST_HOME, `${sessionId}.jsonl`);
+  fs.writeFileSync(transcript, '[]');
+  runHookOutput(POST_COMPACT, { session_id: sessionId, transcript_path: transcript, compact_summary: '' });
+
+  const note = runHook(SESSION, { session_id: sessionId, source: 'compact' });
+  assert.match(note, /history retained across a replacement compaction/);
+  assert.doesNotMatch(note, /ROLE: ORCHESTRATOR/);
+  assert.ok(Buffer.byteLength(note, 'utf8') <= 200, `expected <=200 bytes, got ${Buffer.byteLength(note, 'utf8')}`);
+
+  // The marker is consumed (deleted) on first read: a second compact SessionStart for the same
+  // session, with no new PostCompact marking it, gets the full re-grounding again.
+  const full = runHook(SESSION, { session_id: sessionId, source: 'compact' });
+  assert.match(full, /ROLE: ORCHESTRATOR/);
+});
+
+test('a normal summarized compaction keeps full SessionStart(compact) re-grounding', () => {
+  const sessionId = `sq197-summarized-${++sqSeq}`;
+  const transcript = path.join(SIDEQUEST_HOME, `${sessionId}.jsonl`);
+  fs.writeFileSync(transcript, '[]');
+  runHookOutput(POST_COMPACT, { session_id: sessionId, transcript_path: transcript, compact_summary: 'a real summary' });
+
+  const full = runHook(SESSION, { session_id: sessionId, source: 'compact' });
+  assert.match(full, /ROLE: ORCHESTRATOR/);
+  assert.doesNotMatch(full, /history retained across a replacement compaction/);
+});
+
 test('session-start: SIDEQUEST_NUDGE=off silences it', () => {
   const out = execFileSync(process.execPath, [SESSION], {
     input: JSON.stringify({ session_id: 'test' }),

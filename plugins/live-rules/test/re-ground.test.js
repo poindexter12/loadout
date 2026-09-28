@@ -159,6 +159,50 @@ test('startup, resume, compact, and clear rehydrate current prompt rules once', 
   }
 });
 
+// SQ-197: sidequest's PostCompact hook marks a replacement compaction (no summary generated) at
+// SIDEQUEST_HOME/replacement-compactions/<encoded session id>.json. This plugin peeks at that
+// same path (duplicated formula, not imported) to skip full rule re-injection on
+// SessionStart(compact). Only sidequest deletes the marker, so it must be removed by hand here to
+// simulate the "marker already consumed" (normal, summarized compaction) case.
+function writeReplacementMarker(sidequestHome, sessionId, ageMs = 0) {
+  const markerDir = path.join(sidequestHome, 'replacement-compactions');
+  fs.mkdirSync(markerDir, { recursive: true });
+  const file = path.join(markerDir, encodeURIComponent(sessionId) + '.json');
+  fs.writeFileSync(file, JSON.stringify({ at: new Date().toISOString() }));
+  if (ageMs) {
+    const past = (Date.now() - ageMs) / 1000;
+    fs.utimesSync(file, past, past);
+  }
+  return file;
+}
+
+test('a replacement-compaction marker collapses SessionStart(compact) to a short note', () => {
+  const dir = project();
+  const state = path.join(dir, 'state');
+  const sidequestHome = fs.mkdtempSync(path.join(os.tmpdir(), 'live-rules-sq197-'));
+  atomic(dir, [{ data: { description: 'Always' }, body: 'Rule.' }]);
+  hook(startHook, dir, state, { session_id: 'one', source: 'startup' }, { SIDEQUEST_HOME: sidequestHome });
+
+  const markerFile = writeReplacementMarker(sidequestHome, 'one');
+  const noteOutput = hook(startHook, dir, state, { session_id: 'one', source: 'compact' }, { SIDEQUEST_HOME: sidequestHome });
+  const note = JSON.parse(noteOutput).hookSpecificOutput.additionalContext;
+  assert.match(note, /history retained across a replacement compaction/);
+  assert.doesNotMatch(note, /SessionStart \(compact\)/);
+  assert.ok(Buffer.byteLength(note, 'utf8') <= 200, `expected <=200 bytes, got ${Buffer.byteLength(note, 'utf8')}`);
+
+  // No marker (already consumed by sidequest, or a normal summarized compaction) keeps today's
+  // full re-grounding.
+  fs.rmSync(markerFile, { force: true });
+  const full = hook(startHook, dir, state, { session_id: 'one', source: 'compact' }, { SIDEQUEST_HOME: sidequestHome });
+  assert.match(full, /SessionStart \(compact\)/);
+  assert.match(full, /Rule/);
+
+  // A marker older than the bound never suppresses re-grounding on a later, unrelated compaction.
+  writeReplacementMarker(sidequestHome, 'one', 5 * 60 * 1000);
+  const staleMarker = hook(startHook, dir, state, { session_id: 'one', source: 'compact' }, { SIDEQUEST_HOME: sidequestHome });
+  assert.match(staleMarker, /SessionStart \(compact\)/);
+});
+
 test('path-scoped rules ground once when their edited path first applies', () => {
   const dir = project();
   const state = path.join(dir, 'state');

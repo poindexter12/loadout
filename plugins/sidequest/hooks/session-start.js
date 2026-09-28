@@ -228,6 +228,24 @@ function initializeCompactionState(sessionId3, transcriptPath) {
   const now = (/* @__PURE__ */ new Date()).toISOString();
   writeState(sessionId3, { resetAt: now, ticketBaselineAt: now, transcriptBytes: transcriptBytes(transcriptPath) });
 }
+function replacementMarkerHome() {
+  const sidequestHome = String(process.env.SIDEQUEST_HOME || "").trim();
+  if (sidequestHome) return sidequestHome;
+  const configDir = String(process.env.CLAUDE_CONFIG_DIR || "").trim();
+  return import_node_path3.default.join(configDir || import_node_path3.default.join(import_node_os.default.homedir(), ".claude"), "sidequest");
+}
+function replacementMarkerFile(sessionId3) {
+  return import_node_path3.default.join(replacementMarkerHome(), "replacement-compactions", `${encodeURIComponent(sessionId3)}.json`);
+}
+function consumeReplacementCompactionMarker(sessionId3) {
+  if (!sessionId3) return false;
+  try {
+    import_node_fs3.default.unlinkSync(replacementMarkerFile(sessionId3));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 
 // src/hooks/shared/sweep-handoff.ts
 var import_node_child_process = require("node:child_process");
@@ -841,8 +859,8 @@ ${context}` : context;
 async function main() {
   const data = readStdin();
   if (!data) return;
+  const sessionId3 = stringField(data, "session_id", "sessionId") || process.env.CLAUDE_CODE_SESSION_ID || "";
   if (isPrimarySession(data)) {
-    const sessionId3 = stringField(data, "session_id", "sessionId") || process.env.CLAUDE_CODE_SESSION_ID || "";
     initializeCompactionState(sessionId3, data.transcript_path || data.transcriptPath);
   }
   reportLoadedSidequestVersion(data, { pluginRoot: pluginRoot() });
@@ -873,6 +891,14 @@ async function main() {
   const recovery = "Context is UTF-8 bounded. Omitted details name a typed board retrieval call.";
   const initialUserMessage = hasMidWaveBoard(data) ? "/sidequest:sidequest" : "";
   if (source === "compact" || source === "resume") {
+    if (source === "compact" && consumeReplacementCompactionMarker(sessionId3)) {
+      emit(
+        "sidequest: history retained across a replacement compaction; prior board/session context is already in the transcript.",
+        restartNotice,
+        initialUserMessage
+      );
+      return;
+    }
     emit(
       `=== sidequest (active — context restored) ===
 ${recovery}

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { readStdin, stringField, type HookInput } from './shared/input.js';
 import { writeContext } from './shared/output.js';
 import { pluginRoot, runtimeModule } from './shared/paths.js';
-import { initializeCompactionState, isPrimarySession } from './shared/compaction.js';
+import { consumeReplacementCompactionMarker, initializeCompactionState, isPrimarySession } from './shared/compaction.js';
 import { runSweep } from './shared/sweep-handoff.js';
 import { runAuditHandoff } from './shared/audit-handoff.js';
 import { registerSweepSession } from './shared/worktree-sweep.js';
@@ -177,8 +177,8 @@ function emit(context: string, notice: string, initialUserMessage = ''): void {
 async function main(): Promise<void> {
   const data = readStdin();
   if (!data) return;
+  const sessionId = stringField(data, 'session_id', 'sessionId') || process.env.CLAUDE_CODE_SESSION_ID || '';
   if (isPrimarySession(data)) {
-    const sessionId = stringField(data, 'session_id', 'sessionId') || process.env.CLAUDE_CODE_SESSION_ID || '';
     initializeCompactionState(sessionId, data.transcript_path || data.transcriptPath);
   }
 
@@ -214,6 +214,17 @@ async function main(): Promise<void> {
   const initialUserMessage = hasMidWaveBoard(data) ? '/sidequest:sidequest' : '';
 
   if (source === 'compact' || source === 'resume') {
+    // SQ-197: a replacement compaction (PostCompact saw compact_summary === '') leaves prior
+    // SessionStart re-grounding sitting verbatim in history. Emit a short note instead of
+    // re-injecting the same block again; a normal summarized compaction keeps today's behaviour.
+    if (source === 'compact' && consumeReplacementCompactionMarker(sessionId)) {
+      emit(
+        'sidequest: history retained across a replacement compaction; prior board/session context is already in the transcript.',
+        restartNotice,
+        initialUserMessage,
+      );
+      return;
+    }
     emit(
       `=== sidequest (active — context restored) ===\n${recovery}\nROLE: ORCHESTRATOR. ${checkpoint}${checkpoint ? ' ' : ''}${boardAuthorization} ${watch} ${inlineBoundary} ${fanoutGuidance} ${upstreamDefects} Dispatch executors with the returned spawn unchanged. Ticket and dispatch before multi-file investigation. never TaskOutput. Reconnect Board MCP, re-dispatch, and spawn the exact returned executor before recovering lifecycle work. Use pulse/changes for liveness; a restored window replays background-task reminders that can name already-finished agents, so believe the board over them and do not investigate. After terminal board evidence is consumed and its handoff is preserved, retire the exact native teammate once with TaskStop({ task_id: "<agent name>" }); TaskStop is Claude Code host cleanup, not a Sidequest tool. Keep live claims, retained continuations, and integration candidates steerable. If a board path refuses verified work, deliver it yourself through groomClose with deliveryCommit and record the refusal evidence. Board MCP is the lifecycle authority; no Sidequest CLI or raw Agent fallback.`,
       restartNotice,

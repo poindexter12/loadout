@@ -156,6 +156,24 @@ function resetCompactionState(sessionId, transcriptPath) {
   const now = (/* @__PURE__ */ new Date()).toISOString();
   writeState(sessionId, { resetAt: now, ticketBaselineAt: now, transcriptBytes: transcriptBytes(transcriptPath) });
 }
+function replacementMarkerHome() {
+  const sidequestHome = String(process.env.SIDEQUEST_HOME || "").trim();
+  if (sidequestHome) return sidequestHome;
+  const configDir = String(process.env.CLAUDE_CONFIG_DIR || "").trim();
+  return import_node_path3.default.join(configDir || import_node_path3.default.join(import_node_os.default.homedir(), ".claude"), "sidequest");
+}
+function replacementMarkerFile(sessionId) {
+  return import_node_path3.default.join(replacementMarkerHome(), "replacement-compactions", `${encodeURIComponent(sessionId)}.json`);
+}
+function markReplacementCompaction(sessionId) {
+  if (!sessionId) return;
+  try {
+    const file = replacementMarkerFile(sessionId);
+    import_node_fs3.default.mkdirSync(import_node_path3.default.dirname(file), { recursive: true });
+    import_node_fs3.default.writeFileSync(file, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString() }));
+  } catch (_) {
+  }
+}
 
 // src/hooks/post-compact.ts
 function main() {
@@ -164,6 +182,7 @@ function main() {
   const sessionId = stringField(input, "session_id", "sessionId") || process.env.CLAUDE_CODE_SESSION_ID || "";
   if (!sessionId) return;
   resetCompactionState(sessionId, input.transcript_path || input.transcriptPath);
+  if (input.compact_summary === "") markReplacementCompaction(sessionId);
 }
 try {
   main();

@@ -80,6 +80,32 @@ function stateDirectory() {
   return process.env.CODEBASE_MAPPER_STATE_DIR || path.join(os.homedir(), '.claude', 'codebase-mapper-state');
 }
 
+// SQ-197: sidequest's PostCompact hook is the only one of the three plugins that observes
+// compact_summary, so it marks a "replacement" compaction (host kept history verbatim, no
+// summary) with a small file. This formula is duplicated (not imported — plugins don't import
+// each other) in sidequest's shared/compaction.ts and live-rules' session-start-rules.js, and must
+// stay exactly in sync there: SIDEQUEST_HOME first (any subprocess in the session can read this
+// env var), else a CLAUDE_CONFIG_DIR-rooted path, never a bare hardcoded ~/.claude. Only sidequest
+// deletes the marker; this is a non-destructive peek, bounded by age so a marker sidequest never
+// got to consume cannot suppress re-grounding on a later, unrelated compaction.
+const REPLACEMENT_MARKER_MAX_AGE_MS = 2 * 60 * 1000;
+
+function replacementMarkerFile(sessionId) {
+  const sidequestHome = String(process.env.SIDEQUEST_HOME || '').trim();
+  const home = sidequestHome || path.join(String(process.env.CLAUDE_CONFIG_DIR || '').trim() || path.join(os.homedir(), '.claude'), 'sidequest');
+  return path.join(home, 'replacement-compactions', encodeURIComponent(sessionId) + '.json');
+}
+
+function isReplacementCompaction(sessionId) {
+  if (!sessionId) return false;
+  try {
+    const stat = fs.statSync(replacementMarkerFile(sessionId));
+    return Date.now() - stat.mtimeMs <= REPLACEMENT_MARKER_MAX_AGE_MS;
+  } catch (_) {
+    return false;
+  }
+}
+
 function sessionKey(data) {
   const sessionId = typeof data.session_id === 'string' ? data.session_id : '';
   return sessionId ? crypto.createHash('sha256').update(sessionId).digest('hex') : '';
@@ -306,6 +332,12 @@ function main() {
   }
 
   if (source === 'compact') {
+    // SQ-197: a replacement compaction keeps the prior full map re-injection sitting verbatim in
+    // history; emit a short note instead. A normal summarized compaction keeps today's behaviour.
+    if (isReplacementCompaction(data.session_id)) {
+      output(eventName, '[codebase-mapper] history retained across a replacement compaction; the codebase map is already in the transcript.');
+      return;
+    }
     output(eventName, context(map, source, eventName === 'SubagentStart'));
     return;
   }

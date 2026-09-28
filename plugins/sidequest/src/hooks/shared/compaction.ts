@@ -86,6 +86,52 @@ export function resetCompactionState(sessionId: string, transcriptPath: unknown)
   writeState(sessionId, { resetAt: now, ticketBaselineAt: now, transcriptBytes: transcriptBytes(transcriptPath) });
 }
 
+// SQ-197: a "replacement" compaction (PostCompact's compact_summary === '') means the host kept
+// the transcript's non-tool messages verbatim rather than summarizing them, so any prior
+// SessionStart re-grounding (this plugin's board context, plus codebase-mapper's map and
+// live-rules' rule set) is still sitting in history. Re-emitting it in full duplicates that
+// content every replacement compaction. This marker lets the SessionStart(compact) hooks in all
+// three plugins detect that case and emit a short note instead.
+//
+// The path formula below is duplicated (not imported) in codebase-mapper's inject-context.js and
+// live-rules' session-start-rules.js — plugins don't import each other's code — so it must stay
+// exactly in sync there: SIDEQUEST_HOME (any subprocess in the session can read this env var,
+// regardless of which plugin defines it) first, then CLAUDE_CONFIG_DIR-rooted, never a bare
+// hardcoded ~/.claude (multi-account setups point CLAUDE_CONFIG_DIR elsewhere; see claude-home.ts).
+function replacementMarkerHome(): string {
+  const sidequestHome = String(process.env.SIDEQUEST_HOME || '').trim();
+  if (sidequestHome) return sidequestHome;
+  const configDir = String(process.env.CLAUDE_CONFIG_DIR || '').trim();
+  return path.join(configDir || path.join(os.homedir(), '.claude'), 'sidequest');
+}
+
+function replacementMarkerFile(sessionId: string): string {
+  return path.join(replacementMarkerHome(), 'replacement-compactions', `${encodeURIComponent(sessionId)}.json`);
+}
+
+export function markReplacementCompaction(sessionId: string): void {
+  if (!sessionId) return;
+  try {
+    const file = replacementMarkerFile(sessionId);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ at: new Date().toISOString() }));
+  } catch (_) {
+    // A missed marker only costs one skipped short-circuit; the full re-grounding still runs.
+  }
+}
+
+// Sidequest owns the marker (it is the only one of the three plugins with a PostCompact hook), so
+// it is the one that consumes (deletes) it. codebase-mapper and live-rules only peek at it.
+export function consumeReplacementCompactionMarker(sessionId: string): boolean {
+  if (!sessionId) return false;
+  try {
+    fs.unlinkSync(replacementMarkerFile(sessionId));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function completionAt(ticket: any): number {
   const values = [ticket?.submission?.integratedAt, ticket?.completion?.at, ticket?.updatedAt];
   for (const value of values) {
