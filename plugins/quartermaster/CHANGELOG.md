@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.8.5 (2026-09-27)
+
+Released in v4.0.0, up from 0.8.4.
+
+### Fixes
+
+- Move cross-plugin test requires into the repo-level integration suite (quartermaster→live-rules, observability→sidequest) (SQ-39)
+  Test-only: cross-plugin assertions moved to the repo-level suite; no runtime change.
+- Prevent unsafe Quartermaster permission suggestions (SQ-120)
+  Quartermaster now rejects unsafe, ephemeral, and non-matching permission suggestions before they can be added to a project allowlist.
+- Auto-allowlist stops learning one-off paths; verify scores each rule against its own denials (SQ-127)
+  The auto-allowlist no longer counts approvals toward a fingerprint for per-agent worktree paths (`worktrees/<project>/agent-<hex>`, `.claude/worktrees/agent-<hex>`), per-session scratchpad/tmp paths, or `sleep <n>;`-prefixed commands — these are one-off shapes that will never recur, so they never earned a learned rule and only diluted the ones that should. `git tag` and `git update-ref` join the existing ref-mutating never-learn list (push/reset/clean/branch/rm/checkout/restore). The learner also never re-adds an allow rule already covered by an existing deny rule.
+
+  `quartermaster verify` previously scored every applied `permission:*` decision against a session's total denial rate, so an unrelated rise in friction could make an unrelated rule look "worse." It now scores a permission decision against denials whose fingerprint matches that rule's own pattern, and reports `insufficient-data` when that fingerprint saw no denials on either side of the decision.
+
+  SKILL.md's resupply guidance (step 3 and the allowlist output description) was updated to describe the new verdict semantics and the skip/never-learn categories.
+
 ## 0.8.4 (2026-09-21)
 
 Released in v3.542.0, up from 0.8.3.
