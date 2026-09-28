@@ -632,6 +632,15 @@ function recordedVerificationCaptures(ticket: any) {
   return Array.isArray(ticket?.verificationCaptures) ? ticket.verificationCaptures : [];
 }
 
+// SQ-179: the ticket thread carries orchestrator capture waivers; the claim holder and the
+// submitter are excluded as authors so an executor can never waive its own capture.
+function captureWaiverOptions(ticket: any, by?: any) {
+  return {
+    comments: Array.isArray(ticket?.comments) ? ticket.comments : [],
+    excludedAuthors: [ticket?.claim?.by, by].map((author) => String(author || '').trim()).filter(Boolean),
+  };
+}
+
 function captureCommandDetails(pinnedCommand: string, capturedCommand: string) {
   return `Pinned command: ${JSON.stringify(pinnedCommand)}\nCaptured command: ${JSON.stringify(capturedCommand)}`;
 }
@@ -2438,7 +2447,7 @@ function sharedTreeDescendantPaths(slug: any, ticket: any, range: any, admittedS
   }
 }
 
-function submissionVerificationResult(ticket: any, sourceRevision: any, verify: any, candidateCommit?: any) {
+function submissionVerificationResult(ticket: any, sourceRevision: any, verify: any, candidateCommit?: any, by?: any) {
   const requirement = pinnedVerificationRequirement(ticket);
   const evidence = String(verify || '').trim();
   if (requirement.kind === 'attestation' || sourceRevision != null) {
@@ -2471,7 +2480,7 @@ function submissionVerificationResult(ticket: any, sourceRevision: any, verify: 
     return commandVerificationResult(requirement, evidence, recordedVerificationCaptures(ticket), ticket.ref, {
       source: 'git',
       value: String(candidateCommit || '').trim().toLowerCase(),
-    }, String(ticket.dispatchNonce || ''));
+    }, String(ticket.dispatchNonce || ''), captureWaiverOptions(ticket, by));
   }
   if (requirement.command) {
     const error = verifyCommandError(requirement.command);
@@ -2485,7 +2494,7 @@ function submissionVerificationResult(ticket: any, sourceRevision: any, verify: 
     return commandVerificationResult(requirement, evidence, recordedVerificationCaptures(ticket), ticket.ref, {
       source: 'git',
       value: String(candidateCommit || '').trim().toLowerCase(),
-    }, String(ticket.dispatchNonce || ''));
+    }, String(ticket.dispatchNonce || ''), captureWaiverOptions(ticket, by));
   }
   if (requirement.kind === 'custom' && requirement.evidenceContract === 'legacy project verifier was not recorded' && !evidence) {
     return { result: { kind: 'custom', status: 'passed', evidence: requirement.evidenceContract }, expectedEvidence: null };
@@ -2503,7 +2512,7 @@ function submissionAdmissionDecision(slug: any, ticket: any, by: string, opts: a
     ? opts.admissionFacts
     : null;
   const sourceRevisionResolution = sourceRevisionFacts?.baseline || null;
-  const verification = submissionVerificationResult(ticket, sourceRevision, verify, opts.commit);
+  const verification = submissionVerificationResult(ticket, sourceRevision, verify, opts.commit, by);
   const completion = sourceRevision
     ? { ok: true }
     : completionTreeCheck(slug, ticket, { explicitNoOp: range?.noOp === true });
@@ -2754,7 +2763,7 @@ function workingTreeVerification(ticket: any, candidate: any) {
       message: `${ticket.ref} working-tree delivery requires a command verifier and a completed verify-capture against the final working-tree state.`,
     };
   }
-  const verification = commandVerificationResult(requirement, requirement.command, recordedVerificationCaptures(ticket), ticket.ref, candidate, String(ticket.dispatchNonce || ''));
+  const verification = commandVerificationResult(requirement, requirement.command, recordedVerificationCaptures(ticket), ticket.ref, candidate, String(ticket.dispatchNonce || ''), captureWaiverOptions(ticket));
   if (!verification.diagnostic) return { ok: true, verification: verification.result };
   return { ok: false, reason: verification.diagnostic.code, message: verification.diagnostic.message, verification: verification.result };
 }

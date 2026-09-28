@@ -338,6 +338,90 @@ test('MCP submit requires a completed capture for the declared executor verifier
   }
 });
 
+test('SQ-179: an orchestrator capture waiver admits a load-only failed capture; self-authored and mis-signed waivers stay refused', async () => {
+  const command = 'node -e "process.exit(1)"';
+  const t = addTicket('load-only capture failure', { executorVerify: command, files: ['README.md'] });
+  const by = 'load-only-capture-worker';
+  const pinnedCommit = git(['rev-parse', 'origin/main']);
+  pin(t, pinnedCommit);
+  assert.strictEqual(store.claimTicket(slug, t.ref, by, { direct: true, reason: 'The submission fixture requires a local direct claim.' }).ok, true);
+  const submit = () => callMcp('submit', { project: PROJECT_DIR, ref: t.ref, by, commit: pinnedCommit, base: pinnedCommit, worktree: PROJECT_DIR, verify: command, body: 'Capture failed only from host load.' });
+
+  const capture = await runVerifyCapture(command, PROJECT_DIR);
+  try {
+    assert.deepStrictEqual({ status: capture.status, exitCode: capture.exitCode }, { status: 'failed_suite', exitCode: 1 });
+    const recorded = recordCapture({ project: PROJECT_DIR, ticket: t.ref }, capture, PROJECT_DIR);
+    assert.strictEqual(recorded.ok, true, recorded.message);
+    const captureId = recorded.capture.id;
+    const waiverLine = (signature: string) => `[sidequest:capture-waiver] capture=${captureId} signature=${signature} authority=joe; port race while three sibling full suites ran, rerun passed at load 2`;
+
+    const refused = await submit();
+    assert.strictEqual(refused.ok, false);
+    assert.strictEqual(refused.reason, 'verification_capture_required');
+    assert.match(refused.message, /do not hand-edit refs\/sidequest/);
+    assert.ok(refused.message.includes(`[sidequest:capture-waiver] capture=${captureId} signature=failed_suite:exit-1 authority=<who>`), refused.message);
+
+    store.addComment(slug, t.ref, { by, body: waiverLine('failed_suite:exit-1') });
+    const selfWaived = await submit();
+    assert.strictEqual(selfWaived.reason, 'verification_capture_required');
+    assert.match(selfWaived.message, /waiver by load-only-capture-worker \(the claim holder or submitter cannot waive its own capture\)/);
+
+    store.addComment(slug, t.ref, { by: 'orchestrator', body: waiverLine('timeout') });
+    const misSigned = await submit();
+    assert.strictEqual(misSigned.reason, 'verification_capture_required');
+    assert.match(misSigned.message, /signature timeout does not match the recorded failed_suite:exit-1/);
+    assert.strictEqual(store.getTicket(slug, t.ref).claim.by, by);
+
+    store.addComment(slug, t.ref, { by: 'orchestrator', body: `Evidence reviewed.\n${waiverLine('failed_suite:exit-1')}` });
+    const accepted = await submit();
+    assert.strictEqual(accepted.ok, true, accepted.message);
+    const result = store.getTicket(slug, t.ref).submission.verificationResult;
+    assert.strictEqual(result.status, 'skipped');
+    assert.strictEqual(result.waiver.affectedGate, 'verification_capture_required');
+    assert.strictEqual(result.waiver.authority, 'joe');
+    assert.ok(result.waiver.scope.includes(`load-only capture ${captureId} (failed_suite:exit-1) of git:${pinnedCommit}`), result.waiver.scope);
+    assert.match(result.waiver.scope, /waived by orchestrator$/);
+    assert.strictEqual(result.diagnostics[0].code, 'verification_waived');
+  } finally {
+    fs.rmSync(capture.logPath, { force: true });
+  }
+});
+
+test('SQ-179: capture waivers bind only a timeout or failed_suite capture of the same candidate, command, and dispatch attempt', () => {
+  const { commandVerificationResult } = require('../src/lib/kernel/verification.ts');
+  const requirement = { kind: 'command', command: 'npm test', evidenceContract: 'npm test' };
+  const candidate = { source: 'git', value: 'a'.repeat(40) };
+  const capture = (id: string, status: string, extra: Record<string, unknown> = {}) => ({ id, ticket: 'SQ-9', command: 'npm test', status, candidate, dispatchNonce: 'n1', completedAt: '2026-09-28T00:00:00.000Z', ...extra });
+  const captures = [
+    capture('timed-out', 'timeout'),
+    capture('no-run', 'could_not_run', { exitCode: 2 }),
+    capture('old-attempt', 'failed_suite', { exitCode: 1, dispatchNonce: 'n0' }),
+    capture('other-commit', 'failed_suite', { exitCode: 1, candidate: { source: 'git', value: 'b'.repeat(40) } }),
+  ];
+  const verdict = (body: string, by = 'orchestrator') => commandVerificationResult(requirement, 'npm test', captures, 'SQ-9', candidate, 'n1', { comments: [{ by, body }], excludedAuthors: ['worker'] });
+  const reason = 'capture budget timeout at load 14 on ten cores while other suites ran';
+
+  for (const id of ['no-run', 'old-attempt', 'other-commit']) {
+    const refused = verdict(`[sidequest:capture-waiver] capture=${id} signature=failed_suite:exit-1 authority=joe; ${reason}`);
+    assert.strictEqual(refused.diagnostic.code, 'verification_capture_required', id);
+    assert.match(refused.diagnostic.message, new RegExp(`capture ${id} waiver by orchestrator \\(not a timeout or failed_suite capture of this candidate, command, and dispatch attempt\\)`));
+  }
+  const malformed = verdict('[sidequest:capture-waiver] capture=timed-out signature=timeout authority=joe; too short');
+  assert.strictEqual(malformed.diagnostic.code, 'verification_capture_required');
+  assert.match(malformed.diagnostic.message, /Ignored capture waivers: malformed waiver by orchestrator/);
+  assert.match(malformed.diagnostic.message, /The latest waivable capture is timed-out \(timeout\)/);
+  const unattributed = verdict(`[sidequest:capture-waiver] capture=timed-out signature=timeout authority=joe; ${reason}`, '');
+  assert.strictEqual(unattributed.diagnostic.code, 'verification_capture_required');
+
+  const waived = verdict(`[sidequest:capture-waiver] capture=timed-out signature=timeout authority=joe; ${reason}`);
+  assert.strictEqual(waived.diagnostic, undefined);
+  assert.strictEqual(waived.result.status, 'skipped');
+  assert.strictEqual(waived.result.waiver.scope, `load-only capture timed-out (timeout) of git:${'a'.repeat(40)}, dispatch attempt n1, waived by orchestrator`);
+
+  const passed = commandVerificationResult(requirement, 'npm test', [...captures, capture('green', 'passed', { exitCode: 0 })], 'SQ-9', candidate, 'n1', { comments: [{ by: 'orchestrator', body: `[sidequest:capture-waiver] capture=timed-out signature=timeout authority=joe; ${reason}` }] });
+  assert.strictEqual(passed.result.status, 'passed', 'a passing capture still wins over a waiver');
+});
+
 test('capture accepts a live verify amendment and still rejects unrelated commands', async () => {
   const pinnedCommand = 'node -e "process.exit(0)" && node -e "process.exit(1)"';
   const amendedCommand = 'node -e "process.exit(0)"';

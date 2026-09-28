@@ -268,6 +268,38 @@ test('full-suite capture serializes sibling captures and records the queue wait'
   }
 });
 
+test('SQ-179: a recorded failed_suite capture names the orchestrator capture waiver; a passing capture does not', async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-capture-waiver-'));
+  fs.writeFileSync(path.join(project, 'check.js'), 'process.exit(Number(process.argv[2]));');
+  execFileSync('git', ['init', '-b', 'main', '--quiet'], { cwd: project, windowsHide: true });
+  execFileSync('git', ['add', '--all'], { cwd: project, windowsHide: true });
+  execFileSync('git', ['-c', 'user.name=Sidequest Tests', '-c', 'user.email=sidequest@example.invalid', 'commit', '--quiet', '-m', 'fixture'], { cwd: project, windowsHide: true });
+  const boardProject = store.ensureProject(project);
+  const failing = nodeCommand(path.join(project, 'check.js'), '1');
+  const passing = nodeCommand(path.join(project, 'check.js'), '0');
+  const failTicket = store.createTicket(boardProject.slug, { title: 'load-only capture failure', executorVerifyKind: 'command', executorVerify: failing });
+  const passTicket = store.createTicket(boardProject.slug, { title: 'passing capture', executorVerifyKind: 'command', executorVerify: passing });
+  const logs: string[] = [];
+
+  try {
+    const failed = await runCaptureProcess(failing, project, failTicket.ref);
+    logs.push(/^details=(.*)$/m.exec(failed.output)?.[1] || '');
+    const recorded = readRecordedCaptures(project, failTicket.ref).at(-1);
+    assert.deepEqual({ status: recorded.status, exitCode: recorded.exitCode }, { status: 'failed_suite', exitCode: 1 }, failed.output);
+    assert.match(failed.output, /^capture-waiver: if this failed_suite came only from host load and reruns keep failing, do not hand-edit refs\/sidequest;/m);
+    assert.ok(failed.output.includes(`"[sidequest:capture-waiver] capture=${recorded.id} signature=failed_suite:exit-1 authority=<who>; <reason and evidence>" on ${failTicket.ref}, then resubmit this same candidate.`), failed.output);
+
+    const passed = await runCaptureProcess(passing, project, passTicket.ref);
+    logs.push(/^details=(.*)$/m.exec(passed.output)?.[1] || '');
+    assert.equal(passed.status, 0, passed.output);
+    assert.match(passed.output, /^capture=\S+ candidate=git:/m);
+    assert.doesNotMatch(passed.output, /capture-waiver/);
+  } finally {
+    for (const log of logs.filter(Boolean)) fs.rmSync(log, { force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
 test('full-suite capture reaps a dead active lease before acquiring', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-capture-dead-active-'));
   const slotDirectory = captureSlotDirectory(project);

@@ -8,6 +8,7 @@ const path = require('node:path') as typeof import('node:path');
 const { createHash, randomUUID } = require('node:crypto') as typeof import('node:crypto');
 const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
 const { defaultVerificationTimeoutMilliseconds, runProcessVerification, shellCommand } = require('./ports/process.js') as typeof import('./ports/process.js');
+const { CAPTURE_WAIVER_MARKER, LOAD_ONLY_CAPTURE_STATUSES, captureFailureSignature } = require('./kernel/verification.js') as typeof import('./kernel/verification.js');
 
 type CaptureSlotFileSystem = Pick<typeof fs, 'existsSync' | 'mkdirSync' | 'readdirSync' | 'readFileSync' | 'renameSync' | 'rmSync' | 'statSync' | 'writeFileSync'>;
 type CaptureSlotProcessLiveness = Readonly<{ isAlive(pid: number, startedAt: number): boolean }>;
@@ -202,7 +203,7 @@ type CaptureRecordResult = Readonly<{
   ok: boolean;
   reason?: string;
   message?: string;
-  capture?: Readonly<{ id: string; candidate: Readonly<{ source: string; value: string }> }>;
+  capture?: Readonly<{ id: string; ticket?: string; candidate: Readonly<{ source: string; value: string }> }>;
 }>;
 type VerificationCaptureStore = Readonly<{
   findProject(project: string): Readonly<{ ok: boolean; slug?: string; reason?: string; meta?: Readonly<{ path?: string }> }>;
@@ -798,6 +799,10 @@ function report(capture: VerifyCapture, recorded?: CaptureRecordResult | null) {
   }
   if (recorded?.ok && recorded.capture) {
     process.stdout.write(`capture=${recorded.capture.id} candidate=${recorded.capture.candidate.source}:${recorded.capture.candidate.value}\n`);
+    if ((LOAD_ONLY_CAPTURE_STATUSES as readonly string[]).includes(capture.status)) {
+      // SQ-179: agent-facing. Name the sanctioned exit so a load-only failure never ends in a hand ref edit.
+      process.stdout.write(`capture-waiver: if this ${capture.status} came only from host load and reruns keep failing, do not hand-edit refs/sidequest; keep the claim, comment this capture's evidence, and ask the orchestrator to post "${CAPTURE_WAIVER_MARKER} capture=${recorded.capture.id} signature=${captureFailureSignature(capture)} authority=<who>; <reason and evidence>" on ${recorded.capture.ticket || 'the ticket'}, then resubmit this same candidate.\n`);
+    }
   } else if (recorded) {
     process.stdout.write(`capture=unrecorded reason=${recorded.reason || 'unknown'}\n`);
   }

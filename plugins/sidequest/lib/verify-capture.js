@@ -5,6 +5,7 @@ const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { execFileSync } = require("node:child_process");
 const { defaultVerificationTimeoutMilliseconds, runProcessVerification, shellCommand } = require("./ports/process.js");
+const { CAPTURE_WAIVER_MARKER, LOAD_ONLY_CAPTURE_STATUSES, captureFailureSignature } = require("./kernel/verification.js");
 const captureSlotProcessLiveness = Object.freeze({
   isAlive(pid) {
     try {
@@ -596,6 +597,10 @@ function report(capture, recorded) {
   if (recorded?.ok && recorded.capture) {
     process.stdout.write(`capture=${recorded.capture.id} candidate=${recorded.capture.candidate.source}:${recorded.capture.candidate.value}
 `);
+    if (LOAD_ONLY_CAPTURE_STATUSES.includes(capture.status)) {
+      process.stdout.write(`capture-waiver: if this ${capture.status} came only from host load and reruns keep failing, do not hand-edit refs/sidequest; keep the claim, comment this capture's evidence, and ask the orchestrator to post "${CAPTURE_WAIVER_MARKER} capture=${recorded.capture.id} signature=${captureFailureSignature(capture)} authority=<who>; <reason and evidence>" on ${recorded.capture.ticket || "the ticket"}, then resubmit this same candidate.
+`);
+    }
   } else if (recorded) {
     process.stdout.write(`capture=unrecorded reason=${recorded.reason || "unknown"}
 `);

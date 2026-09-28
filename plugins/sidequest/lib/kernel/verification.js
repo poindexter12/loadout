@@ -18,9 +18,14 @@ var __copyProps = (to, from, except, desc) => {
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var verification_exports = {};
 __export(verification_exports, {
+  CAPTURE_WAIVER_GATE: () => CAPTURE_WAIVER_GATE,
+  CAPTURE_WAIVER_MARKER: () => CAPTURE_WAIVER_MARKER,
+  LOAD_ONLY_CAPTURE_STATUSES: () => LOAD_ONLY_CAPTURE_STATUSES,
   VERIFICATION_KINDS: () => VERIFICATION_KINDS,
   VERIFICATION_STATUSES: () => VERIFICATION_STATUSES,
+  captureFailureSignature: () => captureFailureSignature,
   captureVerificationResult: () => captureVerificationResult,
+  captureWaiverMarkers: () => captureWaiverMarkers,
   classifyVerificationKind: () => classifyVerificationKind,
   commandVerificationResult: () => commandVerificationResult,
   validateVerificationWaiver: () => validateVerificationWaiver,
@@ -109,7 +114,46 @@ function verificationFailureDiagnostic(result) {
   const identities = result.failureIdentities?.length ? ` Failures: ${result.failureIdentities.join(", ")}.` : "";
   return validationDiagnostic(`verification_${String(result.status).replace(/[^a-z0-9]+/gi, "_").toLowerCase()}`, `Required ${result.kind} verification returned ${result.status}.${identities}`);
 }
-function commandVerificationResult(requirement, evidence, captures, ticket, candidate, dispatchNonce) {
+const CAPTURE_WAIVER_MARKER = "[sidequest:capture-waiver]";
+const CAPTURE_WAIVER_GATE = "verification_capture_required";
+const LOAD_ONLY_CAPTURE_STATUSES = Object.freeze(["timeout", "failed_suite"]);
+const CAPTURE_WAIVER_REASON_MIN = 20;
+const CAPTURE_WAIVER_LINE = /^\[sidequest:capture-waiver\]\s+capture=(\S+)\s+signature=(\S+)\s+authority=([^;]+);\s*(.*)$/i;
+function captureFailureSignature(capture) {
+  return capture.exitCode == null ? String(capture.status) : `${capture.status}:exit-${capture.exitCode}`;
+}
+function captureWaiverMarkers(comments = []) {
+  const markers = [];
+  const malformed = [];
+  for (const comment of comments) {
+    const by = String(comment?.by || "").trim();
+    for (const rawLine of String(comment?.body || "").split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line.toLowerCase().startsWith(CAPTURE_WAIVER_MARKER)) continue;
+      const match = line.match(CAPTURE_WAIVER_LINE);
+      const reason = String(match?.[4] || "").trim();
+      if (!match || reason.length < CAPTURE_WAIVER_REASON_MIN) {
+        malformed.push(`malformed waiver by ${by || "<unknown>"} (needs capture=, signature=, authority=, and a reason of at least ${CAPTURE_WAIVER_REASON_MIN} characters after ";")`);
+        continue;
+      }
+      markers.push(Object.freeze({ captureId: String(match[1]), signature: String(match[2]), authority: String(match[3]).trim(), reason, by }));
+    }
+  }
+  return { markers, malformed };
+}
+function captureWaiverGuidance(ticket, eligible, rejected) {
+  const latest = eligible[eligible.length - 1];
+  const capture = latest ? latest.id : "<id>";
+  const signature = latest ? captureFailureSignature(latest) : "<status[:exit-N]>";
+  return [
+    " If captures fail only from host load (a timeout at the capture budget, or a port or process race while other suites run) and reruns keep failing, do not hand-edit refs/sidequest or retarget the submission.",
+    ` Keep the claim, comment the capture id, failure signature, and log evidence, and ask the orchestrator to post "${CAPTURE_WAIVER_MARKER} capture=${capture} signature=${signature} authority=<who>; <reason and evidence>" on ${ticket}, then resubmit this same candidate.`,
+    latest ? ` The latest waivable capture is ${capture} (${signature}).` : " No timeout or failed_suite capture of this candidate, command, and dispatch attempt is recorded yet, so there is nothing to waive.",
+    " A waiver binds one timeout or failed_suite capture of this candidate, command, and dispatch attempt; the claim holder or submitter cannot author it; integration verification still runs.",
+    rejected.length ? ` Ignored capture waivers: ${rejected.join("; ")}.` : ""
+  ].join("");
+}
+function commandVerificationResult(requirement, evidence, captures, ticket, candidate, dispatchNonce, waiverOptions = {}) {
   const command = requirement.command || "";
   if (evidence !== command) {
     const message = "verification must match the declared executor verify command and the prepared command verifier; executors cannot replace the required command.";
@@ -119,9 +163,46 @@ function commandVerificationResult(requirement, evidence, captures, ticket, cand
       diagnostic: Object.freeze({ code: "executor_verify_mismatch", message, retryable: true })
     });
   }
-  const completedCapture = captures.find((capture) => capture.ticket === ticket && capture.command === command && capture.status === "passed" && capture.candidate.source === candidate.source && capture.candidate.value === candidate.value && capture.dispatchNonce === dispatchNonce);
+  const sameIdentity = (capture) => capture.ticket === ticket && capture.command === command && capture.candidate.source === candidate.source && capture.candidate.value === candidate.value && capture.dispatchNonce === dispatchNonce;
+  const completedCapture = captures.find((capture) => sameIdentity(capture) && capture.status === "passed");
   if (!completedCapture) {
-    const message = `No completed passed verification capture exists for ${ticket}, dispatch attempt ${dispatchNonce || "<none>"}, ${candidate.source}:${candidate.value}, and declared command ${JSON.stringify(command)}. Run ${JSON.stringify(command)} through the dispatched verify-capture wrapper again after finalizing that candidate, then resubmit.`;
+    const eligible = captures.filter((capture) => sameIdentity(capture) && LOAD_ONLY_CAPTURE_STATUSES.includes(capture.status));
+    const excluded = new Set((waiverOptions.excludedAuthors || []).map((author) => String(author || "").trim()).filter(Boolean));
+    const { markers, malformed } = captureWaiverMarkers(waiverOptions.comments);
+    const rejected = [...malformed];
+    for (const marker of markers.slice().reverse()) {
+      const waived = eligible.find((capture) => capture.id === marker.captureId);
+      if (!marker.by || excluded.has(marker.by)) {
+        rejected.push(`capture ${marker.captureId} waiver by ${marker.by || "<unknown>"} (the claim holder or submitter cannot waive its own capture)`);
+      } else if (!waived) {
+        rejected.push(`capture ${marker.captureId} waiver by ${marker.by} (not a timeout or failed_suite capture of this candidate, command, and dispatch attempt)`);
+      } else if (marker.signature !== captureFailureSignature(waived)) {
+        rejected.push(`capture ${marker.captureId} waiver by ${marker.by} (signature ${marker.signature} does not match the recorded ${captureFailureSignature(waived)})`);
+      } else {
+        const signature = captureFailureSignature(waived);
+        const waiver = Object.freeze({
+          authority: marker.authority,
+          reason: marker.reason,
+          affectedGate: CAPTURE_WAIVER_GATE,
+          scope: `load-only capture ${waived.id} (${signature}) of ${candidate.source}:${candidate.value}, dispatch attempt ${dispatchNonce || "<none>"}, waived by ${marker.by}`
+        });
+        return Object.freeze({
+          result: Object.freeze({
+            kind: requirement.kind,
+            status: "skipped",
+            evidence: command,
+            // admission matches evidence to the pinned command; the reason lives in waiver
+            command,
+            logPath: waived.logPath || null,
+            exitCode: waived.exitCode ?? null,
+            waiver,
+            diagnostics: Object.freeze([verificationWaiverDiagnostic(waiver)])
+          }),
+          expectedEvidence: command
+        });
+      }
+    }
+    const message = `No completed passed verification capture exists for ${ticket}, dispatch attempt ${dispatchNonce || "<none>"}, ${candidate.source}:${candidate.value}, and declared command ${JSON.stringify(command)}. Run ${JSON.stringify(command)} through the dispatched verify-capture wrapper again after finalizing that candidate, then resubmit.${captureWaiverGuidance(ticket, eligible, rejected)}`;
     return Object.freeze({
       result: Object.freeze({ kind: requirement.kind, status: "failed_check", evidence: message, command, failureIdentities: Object.freeze(["verification:capture-required"]) }),
       expectedEvidence: null,
@@ -150,9 +231,14 @@ function captureVerificationResult(requirement, capture) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  CAPTURE_WAIVER_GATE,
+  CAPTURE_WAIVER_MARKER,
+  LOAD_ONLY_CAPTURE_STATUSES,
   VERIFICATION_KINDS,
   VERIFICATION_STATUSES,
+  captureFailureSignature,
   captureVerificationResult,
+  captureWaiverMarkers,
   classifyVerificationKind,
   commandVerificationResult,
   validateVerificationWaiver,
