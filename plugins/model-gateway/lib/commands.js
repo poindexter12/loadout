@@ -87,9 +87,10 @@ const ENSURE_LOCK_MAX_AGE_MS = 150 * ENSURE_LOCK_WRITE_GRACE_MS; // 5 minutes
 const PLUGIN_VERSION = readPluginVersion();
 const PROXY_BIN = path.join(BIN_DIR, WIN ? 'claude-code-proxy.exe' : 'claude-code-proxy');
 const PROXY_SERVING_VERSION_PATH = path.join(STATE, 'proxy-serving-version.txt');
-const PUBLIC_SHIM_PORT = Number(process.env.CODEX_GATEWAY_PORT || 18764);
-const SHIM_PORT = Number(process.env.CODEX_GATEWAY_WORKER_PORT || PUBLIC_SHIM_PORT);
-const PROXY_PORT = Number(process.env.CODEX_GATEWAY_PROXY_PORT || 18765);
+// Per-account ports (SQ-175): one definition, in runtime.js. This file used to
+// carry its own fixed 18764/18765 copy, which would have kept every account on
+// one listener even after runtime.js learned to separate them.
+const { PROXY_PORT, PUBLIC_SHIM_PORT, SHIM_PORT } = require('./runtime.js');
 const QUIET_STARTUP_WAIT_MS = 12000;
 // Advertised ids are `claude-` + the backend's own id (`claude-gpt-5.6-sol`,
 // `claude-grok-4.5`). The `claude-` part is not decoration: Claude Code's
@@ -129,7 +130,7 @@ const TRACE_HEADERS = ['traceparent', 'tracestate', 'baggage'];
 const AUTH_HEADERS = ['authorization', 'proxy-authorization', 'x-api-key', 'cookie'];
 
 const {
-  COMPAT_BASE_URL, COMPAT_HOST, COMPAT_PORT, DEFAULT_BASE_URL, HOSTS_BLOCK_END, HOSTS_BLOCK_LINE,
+  COMPAT_BASE_URL, COMPAT_HOST, COMPAT_PORT, DEFAULT_BASE_URL, HOSTS_BLOCK_END, HOSTS_BLOCK_LINE, LEGACY_DEFAULT_BASE_URL,
   HOSTS_BLOCK_START, PIN_ALIASES, PIN_OVERRIDE_PATH, STATIC_ENV_BLOCK, CODEX_UNKNOWN_MODEL_WINDOW,
 } = require('./runtime.js');
 const {
@@ -323,7 +324,7 @@ function releaseEnsureLock(outcome) {
 }
 
 const {
-  confirmProbeDown, createProbeChildRegistry, createProxyRecovery, fetchUrl, foreignPortOwner, killPidAsync, portListening, postJson, probeFailureReason, probeSucceeded, processOwningPort, processOwningPortAsync, proxyModelsProbe, recordedGatewayPids, reapGatewayOrphans, resolvePortOwner, portOwnerRefusal,
+  confirmProbeDown, createProbeChildRegistry, createProxyRecovery, fetchUrl, foreignPortOwner, foreignShimOwner, foreignShimOwnerMessage, killPidAsync, portListening, postJson, probeFailureReason, probeSucceeded, processOwningPort, processOwningPortAsync, proxyModelsProbe, recordedGatewayPids, reapGatewayOrphans, resolvePortOwner, portOwnerRefusal,
   removePid, restartWorkerWithDrain, shimHealthy, spawnDetached, stopAll, stopProcess, stopRunningSupervisor,
   stopShimWithDrain, waitForShimExit, writePidRecordAsync,
 } = require('./process-supervision.js');
@@ -409,6 +410,10 @@ const CODEX_READINESS_MESSAGES = {
   // "ECONNREFUSED" point at two different problems.
   'proxy-down': (checks) => `Codex dispatch refused: claude-code-proxy is not answering on /v1/models${checks?.proxyModelsReason ? ` (${checks.proxyModelsReason})` : ''}. The running shim supervisor retries recovery with bounded backoff; check ${path.join(LOGS, 'guardian.log')} if it does not recover. No Anthropic fallback was used.`,
   'shim-down': () => `Codex dispatch refused: the model-gateway shim is down. Run \`node "${CLI_PATH}" ensure\`, then retry. No Anthropic fallback was used.`,
+  // SQ-175: a port held by another install root (usually another Claude account's
+  // gateway) used to fall through to serving-version-mismatch, which prescribed an
+  // `ensure` that can only refuse to stop the foreign process.
+  'foreign-shim-owner': (checks) => foreignShimOwnerMessage(checks?.foreignShimOwner, PUBLIC_SHIM_PORT),
   'serving-version-mismatch': () => `Codex dispatch refused: model-gateway is serving a stale shim version. Run \`node "${resolveNewestInstalledCliPath()}" ensure\`, then retry. No Anthropic fallback was used.`,
   'upstream-blocked': () => `Codex is blocked by an OpenAI rejection. Run \`node "${CLI_PATH}" setup\`; if it persists, wait for a claude-code-proxy update or explicitly re-route this ticket. Codex tickets remain blocked.`,
 };
@@ -444,6 +449,9 @@ function noteCodexRequestSuccess() {
 
 function readinessState(checks, upstreamBlocked) {
   if (!checks.proxyBinary) return 'binary-missing';
+  // Before every other check: a foreign shim on this port also makes the proxy,
+  // auth and version answers describe the other account, not this one.
+  if (checks.foreignShimOwner) return 'foreign-shim-owner';
   if (!checks.proxyModels) return 'proxy-down';
   if (!checks.codexAuth) return 'auth-missing';
   if (!checks.shimRunning) return 'shim-down';
@@ -458,6 +466,7 @@ async function getCodexReadiness({
   authStatus = isAuthed,
   shimHealth = undefined,
   fetchHealth = fetchShimHealth,
+  foreignOwner = foreignShimOwner,
 } = {}) {
   const proxyBinary = Boolean(binaryPresent);
   const [proxyProbe, health] = await Promise.all([
@@ -480,6 +489,9 @@ async function getCodexReadiness({
     installedVersion: PLUGIN_VERSION,
     servingVersionMatches: shimRunning && servingVersionIsCurrentOrNewer(servingVersion, PLUGIN_VERSION),
   };
+  checks.foreignShimOwner = shimRunning
+    ? foreignOwner({ health, servingVersionMatches: checks.servingVersionMatches })
+    : null;
   const upstreamBlocked = readUpstreamBlocked();
   const state = readinessState(checks, upstreamBlocked);
   return {
@@ -993,6 +1005,12 @@ async function syncGatewayWiring() {
   const expected = envBlockFor(current.mode);
   if (Object.entries(expected).some(([key, value]) => env[key] !== value)) {
     writeEnv(current.scope, false, { mode: current.mode, quiet: true });
+    // SQ-175: a non-default account tree wired before per-account ports still
+    // points at the shared legacy port, i.e. at another account's shim. Say so:
+    // sessions already running keep that URL until Claude Code restarts.
+    if (env.ANTHROPIC_BASE_URL === LEGACY_DEFAULT_BASE_URL && expected.ANTHROPIC_BASE_URL !== LEGACY_DEFAULT_BASE_URL) {
+      log(`model-gateway: moved ${current.scope} wiring from the shared legacy port (${LEGACY_DEFAULT_BASE_URL}) to this account's own gateway (${expected.ANTHROPIC_BASE_URL}). Restart Claude Code.`);
+    }
   }
 }
 
@@ -1285,7 +1303,7 @@ async function doctor({ readiness: suppliedReadiness = null } = {}) {
   await reportLiveShimModelPolicy();
   const activeScope = selectedWiringScope();
   const effective = effectiveBaseUrl();
-  const modeFor = (base) => (base === COMPAT_BASE_URL ? 'compat' : base === DEFAULT_BASE_URL ? 'default' : null);
+  const modeFor = (base) => (base === COMPAT_BASE_URL ? 'compat' : base === DEFAULT_BASE_URL || base === LEGACY_DEFAULT_BASE_URL ? 'default' : null);
   const labelFor = {
     env: 'process env',
     'project-local': 'project settings.local.json',
@@ -2112,6 +2130,7 @@ function runShim() {
         upstream.once('end', () => {
           const health = JSON.parse(Buffer.concat(response).toString());
           health.supervisorVersion = PLUGIN_VERSION;
+          health.supervisorPid = process.pid;
           health.proxyRecovery = true;
           health.compat = { ...compatState };
           res.writeHead(upstream.statusCode || 502, upstream.headers);

@@ -603,8 +603,41 @@ function foreignPortOwner(port = PUBLIC_SHIM_PORT) {
   if (!owner || installBelongsToThisPlugin(owner.installRoot)) return null;
   return owner;
 }
+// The refusal itself is correct and stays: never stop or signal another install
+// root's process, which is usually another account's gateway (SQ-175). What it
+// must also say is that `ensure` cannot clear it, and what does.
+function foreignOwnerRemedy(port = PUBLIC_SHIM_PORT) {
+  return `that listener is another install's gateway (usually another Claude account's) and is left running. This config dir (${STATE}) needs its own ports: set CODEX_GATEWAY_PORT and CODEX_GATEWAY_PROXY_PORT to a free pair for it, or stop that gateway from the account that owns it, then run ensure again (:${port} is this config dir's port, not a shared one)`;
+}
 function foreignPortOwnerReason(owner, port = PUBLIC_SHIM_PORT) {
-  return `refusing to stop PID ${owner.pid} on :${port}; it belongs to a different install root (${owner.installRoot || 'unknown'}), not ${gatewayInstallRoot()}`;
+  return `refusing to stop PID ${owner.pid} on :${port}; it belongs to a different install root (${owner.installRoot || 'unknown'}), not ${gatewayInstallRoot()}; ${foreignOwnerRemedy(port)}`;
+}
+// Whose shim answered /healthz on this account's port. A shim reports the STATE
+// dir it serves, so a foreign answer is caught even when its version is newer
+// than ours. Shims from before SQ-175 report no identity; for those, only the
+// already-not-ready path (a version mismatch) pays for a process-table lookup,
+// because that is exactly the case that was misreported as "stale shim version"
+// with `ensure` as the remedy, while `ensure` could only refuse.
+function foreignShimOwner({
+  health,
+  servingVersionMatches,
+  stateDir = STATE,
+  lookup = () => foreignPortOwner(PUBLIC_SHIM_PORT),
+} = {}) {
+  if (!health?.ok) return null;
+  if (typeof health.stateDir === 'string' && health.stateDir) {
+    if (normalizedPath(health.stateDir) === normalizedPath(stateDir)) return null;
+    return { pid: health.supervisorPid || health.pid || null, installRoot: health.installRoot || null, stateDir: health.stateDir };
+  }
+  if (servingVersionMatches) return null;
+  try {
+    const owner = lookup();
+    return owner ? { pid: owner.pid || null, installRoot: owner.installRoot || null, stateDir: null } : null;
+  } catch { return null; }
+}
+function foreignShimOwnerMessage(owner, port = PUBLIC_SHIM_PORT) {
+  const who = [owner?.pid ? `PID ${owner.pid}` : null, owner?.installRoot || owner?.stateDir || 'unknown install root'].filter(Boolean).join(', ');
+  return `Codex dispatch refused: this account's gateway port :${port} is held by a shim supervisor from a different install root (${who}), not this account's gateway. This is not a stale shim version, and \`ensure\` cannot replace it: ${foreignOwnerRemedy(port)}. No Anthropic fallback was used.`;
 }
 function isDescendantInProcessTable(pid, ancestorPid, processes) {
   const visited = new Set();
@@ -1066,7 +1099,7 @@ function createProxyRecovery({
 }
 
 module.exports = {
-  commandIncludesFile, commandResultAsync, confirmProbeDown, createProbeChildRegistry, createProxyRecovery, describeFetchFailure, fetchUrl, foreignPortOwner, foreignPortOwnerReason, gatewayInstallRoot, installBelongsToThisPlugin, isDescendantOfAsync, killPid, killPidAsync, pidFile, pidRecordFile, pluginCacheIdentity, portListening, postJson,
+  commandIncludesFile, commandResultAsync, confirmProbeDown, createProbeChildRegistry, createProxyRecovery, describeFetchFailure, fetchUrl, foreignOwnerRemedy, foreignPortOwner, foreignPortOwnerReason, foreignShimOwner, foreignShimOwnerMessage, gatewayInstallRoot, installBelongsToThisPlugin, isDescendantOfAsync, killPid, killPidAsync, pidFile, pidRecordFile, pluginCacheIdentity, portListening, postJson,
   processInfoAsync, processIsOwnedByThisInstall, processIsOwnedByThisInstallAsync, processOwningPort: processOwningPortSync, processOwningPortAsync, processOwningPortInProcAsync, processTableAsync, resolvePortOwner, portOwnerRefusal, PROBE_FAILURE_THRESHOLD, PROBE_TIMEOUT_MS,
   probeFailureReason, probeSucceeded, proxyModelsAnswering, proxyModelsProbe, readPid, readPidRecord, recordedGatewayPids, reapGatewayOrphans, removePid, restartWorkerWithDrain, shimHealthy, spawnDetached,
   spawnSupervisedProxy, stopAll, stopProcess, stopRunningSupervisor, stopShimWithDrain, waitForPortRelease, waitForShimExit, writePidRecord, writePidRecordAsync,

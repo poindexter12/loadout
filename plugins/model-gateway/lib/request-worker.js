@@ -14,14 +14,14 @@ const { writeFileAtomically } = require('./atomic-file.js');
 const { createGatewayUsageEmitter, recordRequestBodyHighWater } = require('./usage-observability.js');
 const grokBackend = require('./grok-backend.js');
 const { sanitizeToolSchemas } = require('./tool-schema.js');
-const { fetchUrl, probeFailureReason, probeSucceeded, proxyModelsProbe } = require('./process-supervision.js');
+const { fetchUrl, foreignShimOwner, foreignShimOwnerMessage, gatewayInstallRoot, probeFailureReason, probeSucceeded, proxyModelsProbe } = require('./process-supervision.js');
 const { effectiveBaseUrl, wiredMode } = require('./settings-wiring.js');
 const { detectHostsCompat } = require('./remote-control.js');
 const { codexBaseFromId, ourBaseUrls } = require('./pins.js');
 const {
   ANTHROPIC_UPSTREAM, ANTIGRAVITY_ENDPOINT, AUTH_HEADERS, CODEX_FAMILY_RE, CODEX_UPSTREAM_BLOCK_PATH, COMPAT_HOST,
   COMPAT_PORT, DISPATCH_ROUTE_CACHE_PATH, GEMINI_PREFIX, GROK_ENDPOINT, GROK_PREFIX, LIST_DISPATCH_MODEL,
-  LOGS, PLUGIN_VERSION, PREFIX, PROXY_BIN, PROXY_PORT, REQUEST_ROUTE_LOG,
+  LOGS, PLUGIN_VERSION, PREFIX, PROXY_BIN, PROXY_PORT, PUBLIC_SHIM_PORT, REQUEST_ROUTE_LOG,
   REQUEST_ROUTE_LOG_PATH, ROUTE_TELEMETRY_ENABLED, ROUTE_TELEMETRY_TIMEOUT_MS, SHIM_PORT, SOCKET_PATH, WIN,
   MODEL_WINDOW_POLICY, STATE, syncGatewayDiscoveryCache, TRACE_HEADERS,
   codexContextWindow, codexContextWindowModelId, mkdirs,
@@ -58,6 +58,10 @@ const CODEX_READINESS_MESSAGES = {
   // "not answering" report diagnosable rather than a prompt to go guess (SQ-63).
   'proxy-down': (checks) => `Codex dispatch refused: claude-code-proxy is not answering on /v1/models${checks?.proxyModelsReason ? ` (${checks.proxyModelsReason})` : ''}. The running shim supervisor retries recovery with bounded backoff; check ${path.join(LOGS, 'guardian.log')} if it does not recover. No Anthropic fallback was used.`,
   'shim-down': () => `Codex dispatch refused: the model-gateway shim is down. Run \`node "${__filename}" ensure\`, then retry. No Anthropic fallback was used.`,
+  // SQ-175: a port held by another install root (usually another Claude account's
+  // gateway) used to fall through to serving-version-mismatch, which prescribed an
+  // `ensure` that can only refuse to stop the foreign process.
+  'foreign-shim-owner': (checks) => foreignShimOwnerMessage(checks?.foreignShimOwner, PUBLIC_SHIM_PORT),
   'serving-version-mismatch': () => `Codex dispatch refused: model-gateway is serving a stale shim version. Run \`node "${resolveNewestInstalledCliPath()}" ensure\`, then retry. No Anthropic fallback was used.`,
   'upstream-blocked': () => `Codex is blocked by an OpenAI rejection. Run \`node "${__filename}" setup\`; if it persists, wait for a claude-code-proxy update or explicitly re-route this ticket. Codex tickets remain blocked.`,
 };
@@ -93,6 +97,9 @@ function noteCodexRequestSuccess() {
 
 function readinessState(checks, upstreamBlocked) {
   if (!checks.proxyBinary) return 'binary-missing';
+  // Before every other check: a foreign shim on this port also makes the proxy,
+  // auth and version answers describe the other account, not this one.
+  if (checks.foreignShimOwner) return 'foreign-shim-owner';
   if (!checks.proxyModels) return 'proxy-down';
   if (!checks.codexAuth) return 'auth-missing';
   if (!checks.shimRunning) return 'shim-down';
@@ -107,6 +114,7 @@ async function getCodexReadiness({
   authStatus = isAuthed,
   shimHealth = undefined,
   fetchHealth = fetchShimHealth,
+  foreignOwner = foreignShimOwner,
 } = {}) {
   const proxyBinary = Boolean(binaryPresent);
   const [proxyProbe, health] = await Promise.all([
@@ -129,6 +137,9 @@ async function getCodexReadiness({
     installedVersion: PLUGIN_VERSION,
     servingVersionMatches: shimRunning && servingVersionIsCurrentOrNewer(servingVersion, PLUGIN_VERSION),
   };
+  checks.foreignShimOwner = shimRunning
+    ? foreignOwner({ health, servingVersionMatches: checks.servingVersionMatches })
+    : null;
   const upstreamBlocked = readUpstreamBlocked();
   const state = readinessState(checks, upstreamBlocked);
   return {
@@ -1895,6 +1906,10 @@ function runWorker() {
       const health = {
         ok: true,
         version: PLUGIN_VERSION,
+        // Identity (SQ-175): which account tree and install this shim serves, so a
+        // caller probing its own port can tell its gateway from another account's.
+        stateDir: STATE,
+        installRoot: gatewayInstallRoot(),
         models: modelCache.data.length,
         served: counters,
         draining,

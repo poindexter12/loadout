@@ -24,9 +24,42 @@ const PROJECT_WIRING_REGISTRY_PATH = path.join(STATE, 'wired-projects.json');
 const SHIM_FAILURE_PATH = path.join(STATE, 'shim-supervisor-failure.txt');
 const CODEX_UPSTREAM_BLOCK_PATH = path.join(STATE, 'codex-upstream-blocked.json');
 const PROXY_BIN = path.join(BIN_DIR, WIN ? 'claude-code-proxy.exe' : 'claude-code-proxy');
-const PUBLIC_SHIM_PORT = Number(process.env.CODEX_GATEWAY_PORT || 18764);
+// Ports are per account tree too (SQ-175). A fixed 18764/18765 for every
+// config dir meant whichever account started first owned the listener, and the
+// other account's `ensure` correctly refused to stop a foreign install root's
+// supervisor -- leaving it with no gateway at all, while its sessions (wired to
+// the same URL) silently used the first account's shim and ChatGPT credentials.
+// A shim never serves another account's sessions.
+//
+// The default tree (HOME/.claude, compared physically so a ~/.claude symlink
+// into an account tree counts as that tree) keeps the historic pair, so an
+// existing single-account install is never rewired. Any other tree gets a
+// deterministic even/odd pair derived from its physical path. The env
+// overrides still win, and remain the remedy for the rare hash collision.
+const LEGACY_SHIM_PORT = 18764;
+const LEGACY_PROXY_PORT = 18765;
+const DERIVED_PORT_BASE = 20000;
+const DERIVED_PORT_PAIRS = 4000; // 20000-27999: below every common ephemeral range
+
+function physicalConfigDir(dir) {
+  const resolved = path.resolve(dir);
+  try { return fs.realpathSync.native(resolved); } catch { return resolved; }
+}
+
+function defaultGatewayPorts(configDir = CLAUDE_CONFIG_DIR, home = os.homedir()) {
+  const physical = physicalConfigDir(configDir);
+  if (physical === physicalConfigDir(path.join(home, '.claude'))) {
+    return { shim: LEGACY_SHIM_PORT, proxy: LEGACY_PROXY_PORT };
+  }
+  const digest = crypto.createHash('sha256').update(physical).digest();
+  const shim = DERIVED_PORT_BASE + 2 * (digest.readUInt32BE(0) % DERIVED_PORT_PAIRS);
+  return { shim, proxy: shim + 1 };
+}
+
+const DEFAULT_GATEWAY_PORTS = defaultGatewayPorts();
+const PUBLIC_SHIM_PORT = Number(process.env.CODEX_GATEWAY_PORT || DEFAULT_GATEWAY_PORTS.shim);
 const SHIM_PORT = Number(process.env.CODEX_GATEWAY_WORKER_PORT || PUBLIC_SHIM_PORT);
-const PROXY_PORT = Number(process.env.CODEX_GATEWAY_PROXY_PORT || 18765);
+const PROXY_PORT = Number(process.env.CODEX_GATEWAY_PROXY_PORT || DEFAULT_GATEWAY_PORTS.proxy);
 const PREFIX = 'claude-';
 const GROK_PREFIX = 'claude-grok-';
 const GEMINI_PREFIX = 'claude-gemini-';
@@ -52,6 +85,11 @@ const AUTH_HEADERS = ['authorization', 'proxy-authorization', 'x-api-key', 'cook
 const COMPAT_HOST = 'api.anthropic.com';
 const COMPAT_PORT = Number(process.env.CODEX_GATEWAY_COMPAT_PORT || 80);
 const DEFAULT_BASE_URL = `http://127.0.0.1:${PUBLIC_SHIM_PORT}`;
+// Every install before SQ-175 wired this URL whatever its config dir. It stays
+// recognised as the gateway's own wiring so `ensure` rewrites it to this
+// account's DEFAULT_BASE_URL instead of treating it as a foreign base URL and
+// leaving the account routed through another account's shim.
+const LEGACY_DEFAULT_BASE_URL = `http://127.0.0.1:${LEGACY_SHIM_PORT}`;
 // A Windows named pipe is a flat global name, so it cannot hang off STATE the
 // way the unix socket does. Without a per-config-dir suffix every account tree
 // would still meet on one pipe and share one gateway, which is the collision
@@ -331,7 +369,8 @@ function mkdirs() {
 module.exports = {
   ANTHROPIC_UPSTREAM, AUTH_HEADERS, BIN_DIR, CLAUDE_BIN, CLAUDE_BIN_IS_BATCH, CODEX_CONTEXT_WINDOWS,
   CODEX_FAMILY_RE, CODEX_UNKNOWN_MODEL_WINDOW, CODEX_UPSTREAM_BLOCK_PATH, COMPAT_BASE_URL, COMPAT_HOST, COMPAT_PORT,
-  DEFAULT_BASE_URL, MODEL_WINDOW_POLICY,
+  DEFAULT_BASE_URL, DEFAULT_GATEWAY_PORTS, LEGACY_DEFAULT_BASE_URL, LEGACY_PROXY_PORT, LEGACY_SHIM_PORT, MODEL_WINDOW_POLICY,
+  defaultGatewayPorts, physicalConfigDir,
   ANTIGRAVITY_ENDPOINT, DISPATCH_MODEL_ID, DISPATCH_ROUTE_CACHE_PATH, GATEWAY_MODELS_CACHE, GEMINI_PREFIX, GROK_ENDPOINT, GROK_PREFIX,
   HOSTS_BLOCK_END, HOSTS_BLOCK_LINE, HOSTS_BLOCK_START, KNOWN_GOOD_PINS, LEGACY_CODEX_PREFIX,
   LEGACY_ENV_BLOCK, LIST_DISPATCH_MODEL, LOGS, MIN_PROXY_VERSION, PIN_ALIASES, PIN_CACHE_PATH,

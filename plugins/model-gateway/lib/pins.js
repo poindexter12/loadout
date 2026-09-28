@@ -6,7 +6,7 @@ const http = require('node:http');
 const { writeFileAtomically } = require('./atomic-file.js');
 const {
   CLAUDE_BIN, CLAUDE_BIN_IS_BATCH, CODEX_FAMILY_RE, COMPAT_BASE_URL, DEFAULT_BASE_URL,
-  DISPATCH_MODEL_ID, GROK_PREFIX, KNOWN_GOOD_PINS, LEGACY_CODEX_PREFIX, PIN_ALIASES,
+  DISPATCH_MODEL_ID, GROK_PREFIX, KNOWN_GOOD_PINS, LEGACY_CODEX_PREFIX, LEGACY_DEFAULT_BASE_URL, PIN_ALIASES,
   PIN_CACHE_PATH, PIN_CACHE_TTL_MS, PIN_OVERRIDE_PATH, PIN_PROBE_TIMEOUT_MS, PREFIX,
   STATE, STATIC_ENV_BLOCK, WIN,
 } = require('./runtime.js');
@@ -270,7 +270,12 @@ function envBlockFor(mode) {
   return { ANTHROPIC_BASE_URL: mode === 'compat' ? COMPAT_BASE_URL : DEFAULT_BASE_URL, ...gatewayEnvBlock() };
 }
 
-function ourBaseUrls() { return [DEFAULT_BASE_URL, COMPAT_BASE_URL]; }
+// LEGACY_DEFAULT_BASE_URL is every pre-SQ-175 install's wiring. In a
+// non-default account tree it now points at a port this account no longer
+// owns, but it is still the gateway's own write: recognising it lets `ensure`
+// migrate it (syncGatewayWiring) and `env --remove` unwire it, instead of
+// leaving the account silently routed through another account's shim.
+function ourBaseUrls() { return [...new Set([DEFAULT_BASE_URL, LEGACY_DEFAULT_BASE_URL, COMPAT_BASE_URL])]; }
 
 module.exports = {
   codexBaseFromId, detectedPinDefaults, effectivePins, envBlockFor, gatewayEnvBlock, isGatewayModelId,

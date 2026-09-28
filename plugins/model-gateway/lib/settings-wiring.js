@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { writeFileAtomically } = require('./atomic-file.js');
-const { CLAUDE_CONFIG_DIR, COMPAT_BASE_URL, DEFAULT_BASE_URL, GATEWAY_MODELS_CACHE, LEGACY_ENV_BLOCK, PIN_ALIASES, PROJECT_WIRING_REGISTRY_PATH, STATIC_ENV_BLOCK, STATE, WIRING_CONFIG_PATH } = require('./runtime.js');
+const { CLAUDE_CONFIG_DIR, COMPAT_BASE_URL, DEFAULT_BASE_URL, GATEWAY_MODELS_CACHE, LEGACY_DEFAULT_BASE_URL, LEGACY_ENV_BLOCK, PIN_ALIASES, PROJECT_WIRING_REGISTRY_PATH, STATIC_ENV_BLOCK, STATE, WIRING_CONFIG_PATH } = require('./runtime.js');
 const { isGatewayModelId, ourBaseUrls } = require('./pins.js');
 
 // Project-local wiring is the default so each repository opts into the
@@ -213,7 +213,7 @@ function migrateLegacyProjectSettings() {
 
   writeSettings(legacyFile, nextLegacy);
   const baseUrl = Object.fromEntries(entries).ANTHROPIC_BASE_URL;
-  const mode = baseUrl === COMPAT_BASE_URL ? 'compat' : baseUrl === DEFAULT_BASE_URL ? 'default' : null;
+  const mode = modeForBaseUrl(baseUrl);
   return { migrated: true, legacyFile, localFile, keys: [...entries.map(([key]) => key), ...legacyKeys], mode };
 }
 
@@ -264,7 +264,9 @@ const WRITABLE_SCOPE_BY_SOURCE = { 'project-local': 'project', 'project-shared':
 
 function modeForBaseUrl(value) {
   if (value === COMPAT_BASE_URL) return 'compat';
-  if (value === DEFAULT_BASE_URL) return 'default';
+  // The pre-SQ-175 fixed URL is default-mode wiring written by this gateway; naming
+  // its mode is what lets syncGatewayWiring rewrite it to this account's own port.
+  if (value === DEFAULT_BASE_URL || value === LEGACY_DEFAULT_BASE_URL) return 'default';
   return null;
 }
 
