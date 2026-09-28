@@ -64,11 +64,14 @@ const matchingTestName = 'sibling ensure retires dead records without deleting r
 const firstControl = `[sidequest:negative-control] target=plugins/model-gateway/lib/process-supervision.js proxy ownership branch; assertion=pidRecordLines in ${matchingTestName}; node --test --test-timeout=120000 --test-name-pattern="sibling ensure retires" test/gateway-process-isolation.test.js failed=1. Disabling proxy ownership added a live proxy retirement line, then the branch was restored.\n[sidequest:negative-control-test] failed ${matchingTestName}`;
 const secondControl = '[sidequest:negative-control] target=plugins/model-gateway/lib/process-supervision.js retirement wording; assertion=retired reused guardian message in ensure and stop discard a stale guardian PID without killing its reused process; node --test --test-timeout=120000 --test-name-pattern="ensure and stop discard" test/gateway-process-isolation.test.js failed=1. Restored the explicit retirement wording afterward.\n[sidequest:negative-control-test] failed ensure and stop discard a stale guardian PID without killing its reused process';
 const standaloneMarker = `[sidequest:negative-control-test] failed ${matchingTestName}`;
+// Written as `${fixtureTestDefinition}(...)` rather than the literal word
+// "test(" so this fixture-authoring line is never mistaken by diff-based
+// test-name extraction for a real `test(...)` definition in this file.
+const fixtureTestDefinition = 'test';
 
 test('negative controls collect claim-holder test markers across the whole thread', () => {
   const by = 'sq-2483-a2e99bb20c82';
   const ticket = createClaimedMixedChangeTicket(by);
-  const fixtureTestDefinition = 'test';
   fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), `${fixtureTestDefinition}('${matchingTestName}', () => {});\n`);
 
   for (const body of [firstControl, secondControl, standaloneMarker]) {
@@ -106,7 +109,7 @@ test('negative control ignores prose that denies an import or collection problem
   git(['checkout', '--', 'lib/fixture.js', 'test/fixture.test.js']);
   const by = 'sq-181-negation-prose';
   const ticket = createClaimedMixedChangeTicket(by);
-  fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), `test('${matchingTestName}', () => {});\n`);
+  fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), `${fixtureTestDefinition}('${matchingTestName}', () => {});\n`);
 
   // Same repro as the SQ-175 thread: the executor's marker line reports a
   // genuine assertion failure, and a separate prose line explicitly denies
@@ -131,7 +134,7 @@ test('negative control ignores same-line prose that denies an import or collecti
   git(['checkout', '--', 'lib/fixture.js', 'test/fixture.test.js']);
   const by = 'sq-181-negation-sameline';
   const ticket = createClaimedMixedChangeTicket(by);
-  fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), `test('${matchingTestName}', () => {});\n`);
+  fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), `${fixtureTestDefinition}('${matchingTestName}', () => {});\n`);
 
   const sameLineNegationControl = [
     `[sidequest:negative-control] target=lib/fixture.js:1; assertion=${matchingTestName}; npm run test:files test/fixture.test.js failed=1 (this is not an import error or a collection error, just an assertion failure)`,
