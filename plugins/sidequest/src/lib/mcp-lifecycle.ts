@@ -279,9 +279,17 @@ function submissionRangeRemedy(ticket: any, range: any, gitRef: string): string 
   const approvedBoundary = Array.isArray(range.approvedBoundaries)
     ? range.approvedBoundaries.find((boundary: any) => Array.isArray(range.approvedBases) && range.approvedBases.includes(boundary.commit))
     : null;
+  // Never point this remedy at the same base the check just rejected (SQ-184).
+  // range.dispatchBaseResubmittable says whether the recorded/pinned dispatch
+  // base would itself pass this check if resubmitted as-is; when it would
+  // not (the dispatch base has fallen off the integration target, e.g. a
+  // release rollback), the only real remedy is a rebase, not "use the pinned
+  // base" — that is the exact value that was just refused.
   const unrecognizedBaseRemedy = approvedBoundary
     ? `omit base to select ${approvedBoundary.ref}'s approved boundary ${approvedBoundary.commit} automatically, or pass \`--base ${approvedBoundary.commit}\` to use it explicitly.`
-    : `use the recorded ${pinnedBase}; no approved submitted-ticket boundary reaches this candidate.`;
+    : range.dispatchBaseResubmittable
+      ? `use the recorded ${pinnedBase}; no approved submitted-ticket boundary reaches this candidate.`
+      : `the dispatch base is no longer reachable from the current integration target; rebase this worktree onto the current integration target, re-run verify-capture, and resubmit with no base override.`;
   const remedies: Record<string, string> = {
     missing_git_ref: `${gitRef} is missing or does not point to the submitted commit. Run \`git update-ref ${gitRef} <commit>\`, then resubmit.`,
     missing_upstream: `fetch or recreate the recorded integration ref, then resubmit the preserved commit without changing its base.`,
@@ -357,6 +365,13 @@ function collectGitSubmissionFacts(options: any) {
       upstream: target.upstream,
       integrationBranch: target.branch,
       base,
+      // Purely a remedy diagnostic (SQ-184): tells submissionRange whether
+      // the ticket's recorded dispatch base is itself still reachable from
+      // the current integration target, independent of dispatchBase/
+      // allowedBases below (which stay gated by sharedTree exactly as
+      // before, since those also affect the accepted-submission base
+      // selection and must not change behavior for isolated worktrees).
+      ...(dispatchBase ? { pinnedBase: dispatchBase } : {}),
       ...(ticket.dispatch?.sharedTree === true
         ? {
           ...(dispatchBase ? { dispatchBase } : {}),

@@ -495,6 +495,10 @@ function submissionRange(cwd, options) {
   }
   const allowedBaseNames = Array.isArray(opts.allowedBases) ? opts.allowedBases : null;
   const approvedBoundaryBases = new Set((allowedBaseNames || []).map((name) => resolvedCommit(cwd, name)).filter(approvedBoundaryBase).map((candidate) => candidate.value));
+  const pinnedBase = !rootBase && opts.pinnedBase ? resolvedCommit(cwd, opts.pinnedBase) : null;
+  const pinnedBaseKnown = !!pinnedBase && pinnedBase.ok;
+  const pinnedBaseOnIntegrationBranch = pinnedBaseKnown && integrationBranch.ok && isAncestor(cwd, pinnedBase.value, integrationBranch.value);
+  const dispatchBaseResubmittable = !pinnedBaseKnown || pinnedBaseOnIntegrationBranch || approvedBoundaryBases.has(pinnedBase.value);
   if (requestedBase && requestedBase.value !== mergeBase.value && allowedBaseNames) {
     if (!baseIsIntegrated && !approvedBoundaryBases.has(requestedBase.value)) {
       return {
@@ -505,6 +509,7 @@ function submissionRange(cwd, options) {
         upstream,
         tip: tip.value,
         approvedBases: [...approvedBoundaryBases],
+        dispatchBaseResubmittable,
         message: "explicit base must be on the integration branch or match a validated submitted ticket boundary"
       };
     }

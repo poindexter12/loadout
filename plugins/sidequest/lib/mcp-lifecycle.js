@@ -223,7 +223,7 @@ function submissionRangeRemedy(ticket, range, gitRef) {
   const reason = String(range.reason || "").trim();
   const pinnedBase = dispatchBaseMessage(ticket);
   const approvedBoundary = Array.isArray(range.approvedBoundaries) ? range.approvedBoundaries.find((boundary) => Array.isArray(range.approvedBases) && range.approvedBases.includes(boundary.commit)) : null;
-  const unrecognizedBaseRemedy = approvedBoundary ? `omit base to select ${approvedBoundary.ref}'s approved boundary ${approvedBoundary.commit} automatically, or pass \`--base ${approvedBoundary.commit}\` to use it explicitly.` : `use the recorded ${pinnedBase}; no approved submitted-ticket boundary reaches this candidate.`;
+  const unrecognizedBaseRemedy = approvedBoundary ? `omit base to select ${approvedBoundary.ref}'s approved boundary ${approvedBoundary.commit} automatically, or pass \`--base ${approvedBoundary.commit}\` to use it explicitly.` : range.dispatchBaseResubmittable ? `use the recorded ${pinnedBase}; no approved submitted-ticket boundary reaches this candidate.` : `the dispatch base is no longer reachable from the current integration target; rebase this worktree onto the current integration target, re-run verify-capture, and resubmit with no base override.`;
   const remedies = {
     missing_git_ref: `${gitRef} is missing or does not point to the submitted commit. Run \`git update-ref ${gitRef} <commit>\`, then resubmit.`,
     missing_upstream: `fetch or recreate the recorded integration ref, then resubmit the preserved commit without changing its base.`,
@@ -292,6 +292,13 @@ function collectGitSubmissionFacts(options) {
     upstream: target.upstream,
     integrationBranch: target.branch,
     base,
+    // Purely a remedy diagnostic (SQ-184): tells submissionRange whether
+    // the ticket's recorded dispatch base is itself still reachable from
+    // the current integration target, independent of dispatchBase/
+    // allowedBases below (which stay gated by sharedTree exactly as
+    // before, since those also affect the accepted-submission base
+    // selection and must not change behavior for isolated worktrees).
+    ...dispatchBase ? { pinnedBase: dispatchBase } : {},
     ...ticket.dispatch?.sharedTree === true ? {
       ...dispatchBase ? { dispatchBase } : {},
       allowedBases: [...dispatchBase ? [dispatchBase] : [], ...boundaryCommits],

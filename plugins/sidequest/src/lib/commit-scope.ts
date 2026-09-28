@@ -535,6 +535,22 @@ export function submissionRange(cwd: string, options: unknown) {
     .map((name) => resolvedCommit(cwd, name))
     .filter(approvedBoundaryBase)
     .map((candidate) => candidate.value));
+  // `opts.pinnedBase` is the ticket's recorded/dispatch base purely for
+  // remedy diagnostics (SQ-184) — deliberately independent of `dispatchBase`
+  // above, which also drives allowedBases/effectiveBase selection and is
+  // sometimes withheld on purpose (e.g. isolated-worktree dispatches pass no
+  // dispatchBase at all). A refusal's remedy must never point back at the
+  // same base this check just rejected, so callers building remedy text need
+  // to know whether the recorded pinned base would itself pass this check if
+  // resubmitted as-is right now — independent of whatever base, if any, was
+  // actually supplied on this call.
+  const pinnedBase = !rootBase && opts.pinnedBase ? resolvedCommit(cwd, opts.pinnedBase) : null;
+  const pinnedBaseKnown = !!pinnedBase && pinnedBase.ok;
+  const pinnedBaseOnIntegrationBranch = pinnedBaseKnown
+    && integrationBranch.ok && isAncestor(cwd, pinnedBase.value, integrationBranch.value);
+  const dispatchBaseResubmittable = !pinnedBaseKnown
+    || pinnedBaseOnIntegrationBranch
+    || approvedBoundaryBases.has(pinnedBase.value);
   if (requestedBase && requestedBase.value !== mergeBase.value && allowedBaseNames) {
     if (!baseIsIntegrated && !approvedBoundaryBases.has(requestedBase.value)) {
       return {
@@ -545,6 +561,7 @@ export function submissionRange(cwd: string, options: unknown) {
         upstream,
         tip: tip.value,
         approvedBases: [...approvedBoundaryBases],
+        dispatchBaseResubmittable,
         message: 'explicit base must be on the integration branch or match a validated submitted ticket boundary',
       };
     }
