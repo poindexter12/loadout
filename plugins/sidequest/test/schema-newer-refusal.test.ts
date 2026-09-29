@@ -32,6 +32,10 @@ const MANIFEST_VERSION = (JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, '.cl
 const CURRENT = db.CURRENT_SCHEMA_VERSION;
 const NEXT = CURRENT + 1;
 const MIGRATOR = { version: '99.1.0', schemaVersion: NEXT, migratedAt: '2026-09-28T12:00:00.000Z' };
+// Literals, not the module's exports: a newer version writes this key and an older one reads it, so the name and
+// the error code are a contract across versions that no single build may rename.
+const MIGRATED_BY_KEY = 'schema_migrated_by';
+const NEWER_SCHEMA_CODE = 'SIDEQUEST_SCHEMA_NEWER';
 
 function makeHome(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'sq-schema-newer-'));
@@ -71,8 +75,8 @@ function newerBoard(record: unknown): string {
   db.openDb(homeRoot).close();
   withRawBoard(homeRoot, (raw) => {
     raw.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(JSON.stringify(NEXT));
-    if (record === undefined) deleteMeta(raw, db.SCHEMA_MIGRATED_BY_KEY);
-    else setMeta(raw, db.SCHEMA_MIGRATED_BY_KEY, record);
+    if (record === undefined) deleteMeta(raw, MIGRATED_BY_KEY);
+    else setMeta(raw, MIGRATED_BY_KEY, record);
   });
   return homeRoot;
 }
@@ -95,7 +99,9 @@ function refusal(work: () => unknown): NewerSchemaError {
   return caught as NewerSchemaError;
 }
 
-test('the loaded plugin version is read from this plugin\'s own manifest', () => {
+test('the loaded plugin version is read from this plugin\'s own manifest, and the cross-version names are pinned', () => {
+  assert.equal(db.SCHEMA_MIGRATED_BY_KEY, MIGRATED_BY_KEY);
+  assert.equal(db.NEWER_SCHEMA_ERROR_CODE, NEWER_SCHEMA_CODE);
   assert.equal(db.loadedPluginVersion(), MANIFEST_VERSION);
 });
 
@@ -110,11 +116,11 @@ test('a migration records the plugin version that ran it, with the schema it lef
     try {
       assert.equal(db.getRow(database, 'meta', 'schema_version'), CURRENT);
       const record = db.schemaMigrationRecord(database);
-      assert.ok(record, `${homeRoot}: a migration must leave a ${db.SCHEMA_MIGRATED_BY_KEY} record`);
+      assert.ok(record, `${homeRoot}: a migration must leave a ${MIGRATED_BY_KEY} record`);
       assert.equal(record.version, MANIFEST_VERSION);
       assert.equal(record.schemaVersion, CURRENT);
       assert.ok(record.migratedAt && Date.parse(record.migratedAt) >= before - 1000, `migratedAt ${record.migratedAt} must be the migration time`);
-      assert.deepEqual(db.getRow(database, 'meta', db.SCHEMA_MIGRATED_BY_KEY), record);
+      assert.deepEqual(db.getRow(database, 'meta', MIGRATED_BY_KEY), record);
     } finally {
       database.close();
     }
@@ -126,9 +132,9 @@ test('opening an already-current board leaves the migration record alone', () =>
   const homeRoot = makeHome();
   db.openDb(homeRoot).close();
   const sentinel = { version: '0.0.1-sentinel', schemaVersion: CURRENT, migratedAt: '2000-01-01T00:00:00.000Z' };
-  withRawBoard(homeRoot, (raw) => setMeta(raw, db.SCHEMA_MIGRATED_BY_KEY, sentinel));
+  withRawBoard(homeRoot, (raw) => setMeta(raw, MIGRATED_BY_KEY, sentinel));
   db.openDb(homeRoot).close();
-  assert.deepEqual(withRawBoard(homeRoot, (raw) => metaValue(raw, db.SCHEMA_MIGRATED_BY_KEY)), sentinel);
+  assert.deepEqual(withRawBoard(homeRoot, (raw) => metaValue(raw, MIGRATED_BY_KEY)), sentinel);
 });
 
 test('an older session refuses to open a schema N+1 board, naming /reload-plugins, its loaded version, and the migrator', () => {
@@ -138,7 +144,7 @@ test('an older session refuses to open a schema N+1 board, naming /reload-plugin
   assertIncludes(error.message, `This session has sidequest ${MANIFEST_VERSION} loaded`);
   assertIncludes(error.message, `sidequest 99.1.0 migrated the shared board database to schema ${NEXT} at 2026-09-28T12:00:00.000Z`);
   assertIncludes(error.message, 'Run /reload-plugins (or restart Claude Code)');
-  assert.equal(error.code, db.NEWER_SCHEMA_ERROR_CODE);
+  assert.equal(error.code, NEWER_SCHEMA_CODE);
   assert.equal(error.schemaVersion, NEXT);
   assert.equal(error.supportedSchemaVersion, CURRENT);
   assert.equal(error.loadedVersion, MANIFEST_VERSION);
@@ -147,7 +153,7 @@ test('an older session refuses to open a schema N+1 board, naming /reload-plugin
   // The refused open wrote nothing: the newer board and its record are exactly as the newer process left them.
   withRawBoard(homeRoot, (raw) => {
     assert.equal(metaValue(raw, 'schema_version'), NEXT);
-    assert.deepEqual(metaValue(raw, db.SCHEMA_MIGRATED_BY_KEY), MIGRATOR);
+    assert.deepEqual(metaValue(raw, MIGRATED_BY_KEY), MIGRATOR);
   });
   // Every retry gets the same answer rather than a different, opaque failure.
   assert.equal(refusal(() => db.openDb(homeRoot)).message, error.message);
@@ -166,7 +172,7 @@ test('a missing, stale, or unreadable migration record is never attributed to a 
     assertIncludes(error.message, `a newer sidequest migrated the shared board database to schema ${NEXT} (the migrating version was not recorded)`, label);
     assertIncludes(error.message, 'Run /reload-plugins');
     assert.ok(!error.message.includes('5.0.0'), `${label}: a stale record must not be named: ${error.message}`);
-    assert.equal(error.code, db.NEWER_SCHEMA_ERROR_CODE, label);
+    assert.equal(error.code, NEWER_SCHEMA_CODE, label);
     if (label === 'versionless') assert.equal(error.migratedBy?.version, null, label);
     else assert.equal(error.migratedBy, null, label);
   }
@@ -178,7 +184,7 @@ test('an open older session refuses every write after a newer process migrates t
   try {
     withRawBoard(homeRoot, (raw) => {
       raw.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(JSON.stringify(NEXT));
-      setMeta(raw, db.SCHEMA_MIGRATED_BY_KEY, MIGRATOR);
+      setMeta(raw, MIGRATED_BY_KEY, MIGRATOR);
     });
     const writes: Array<[string, () => unknown]> = [
       ['putRow', () => db.putRow(database, 'globals', { key: 'stranded-write', data: true })],
@@ -191,7 +197,7 @@ test('an open older session refuses every write after a newer process migrates t
       assertIncludes(error.message, `This session has sidequest ${MANIFEST_VERSION} loaded`);
       assertIncludes(error.message, `sidequest 99.1.0 migrated the shared board database to schema ${NEXT}`);
       assertIncludes(error.message, 'Run /reload-plugins (or restart Claude Code) to load the newer sidequest, then retry');
-      assert.equal(error.code, db.NEWER_SCHEMA_ERROR_CODE, label);
+      assert.equal(error.code, NEWER_SCHEMA_CODE, label);
     }
   } finally {
     database.close();
