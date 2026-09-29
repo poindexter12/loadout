@@ -241,7 +241,7 @@ function gitIn(cwd: string, args: string[]): string {
 
 function backupRepo(): { repo: string; commit: string } {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-checkpoint-backup-repo-'));
-  gitIn(repo, ['init', '-q']);
+  gitIn(repo, ['init', '-q', '-b', 'main']);
   gitIn(repo, ['config', 'user.email', 'fixture@example.invalid']);
   gitIn(repo, ['config', 'user.name', 'Fixture']);
   gitIn(repo, ['config', 'commit.gpgsign', 'false']);

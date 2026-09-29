@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
@@ -316,4 +318,71 @@ test('a contended timeout reports the load and the capacity it left, not just th
     contendedTimeoutError,
     'Sidequest functional tests exceeded their 2400000ms phase budget at concurrency 8 on 10 available cores, whose 1-minute load average of 27.42 left an effective 2.26 workers of capacity, after waiting behind 0 sibling full-suite captures. The runner was killed at the deadline, so every in-flight file reporting a still-pending promise resolution was cancelled, not failed. Set SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS above 2400000 to give this run more wall clock; it can only widen the budget, never shorten the deadline or skip a test.',
   );
+});
+
+const runnerScriptPath = path.join(__dirname, '..', 'scripts', 'test-full.mjs');
+
+function loadScheduling(names: string[]): { longRunning: string[]; scheduled: string[]; real: string[]; phaseRootFlag: string } {
+  const script = `
+    import fs from 'node:fs';
+    import { longRunningTestFiles, phaseRootFlag, scheduleTestFiles } from ${JSON.stringify(runnerModuleUrl)};
+    console.log(JSON.stringify({
+      longRunning: [...longRunningTestFiles],
+      scheduled: scheduleTestFiles(${JSON.stringify(names)}),
+      real: scheduleTestFiles(fs.readdirSync(${JSON.stringify(__dirname)})),
+      phaseRootFlag,
+    }));
+  `;
+  return JSON.parse(execFileSync(process.execPath, ['--input-type=module', '--eval', script], { encoding: 'utf8' }));
+}
+
+test('SQ-208: the longest serial test files start first, and every other file still runs once', () => {
+  const { longRunning, scheduled, real } = loadScheduling([
+    'zeta.test.ts',
+    'worktree-isolation.test.ts',
+    'alpha.test.ts',
+    'mcp.test.ts',
+    'bench.perf.test.ts',
+    'helper.ts',
+  ]);
+
+  assert.deepEqual(scheduled, ['mcp.test.ts', 'worktree-isolation.test.ts', 'alpha.test.ts', 'zeta.test.ts']);
+  // A renamed or deleted file would silently drop back into alphabetical order, which is the
+  // late start this list exists to prevent.
+  for (const name of longRunning) assert.ok(real.includes(name), `${name} is scheduled first but no longer exists in test/`);
+  assert.deepEqual(real.slice(0, longRunning.length), longRunning);
+  assert.equal(new Set(real).size, real.length);
+  assert.ok(real.every((name) => name.endsWith('.test.ts') && !name.endsWith('.perf.test.ts')));
+});
+
+test('SQ-208: the phase root starts files in the order it is given and fails on a failing file', () => {
+  const { phaseRootFlag } = loadScheduling([]);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sq208-phase-root-'));
+  try {
+    const startedLog = path.join(directory, 'started.txt');
+    const probe = (name: string, body: string) => {
+      const file = path.join(directory, `${name}.test.js`);
+      fs.writeFileSync(file, `const test = require('node:test');\ntest(${JSON.stringify(name)}, () => {\n  require('node:fs').appendFileSync(${JSON.stringify(startedLog)}, ${JSON.stringify(`${name}\n`)});\n  ${body}\n});\n`);
+      return file;
+    };
+    const zulu = probe('zulu', '');
+    const passing = [zulu, probe('mike', ''), probe('alpha', '')];
+    execFileSync(process.execPath, [runnerScriptPath, phaseRootFlag, '1', ...passing], { encoding: 'utf8', stdio: 'pipe' });
+    // `node --test zulu mike alpha` starts alpha first.
+    assert.deepEqual(fs.readFileSync(startedLog, 'utf8').trim().split('\n'), ['zulu', 'mike', 'alpha']);
+
+    const failing = probe('broken', "throw new Error('probe failure');");
+    let status = 0;
+    let stdout = '';
+    try {
+      execFileSync(process.execPath, [runnerScriptPath, phaseRootFlag, '1', failing, zulu], { encoding: 'utf8', stdio: 'pipe' });
+    } catch (error: any) {
+      status = error.status;
+      stdout = String(error.stdout);
+    }
+    assert.equal(status, 1, 'a failing test file must fail the phase root');
+    assert.match(stdout, /probe failure/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

@@ -34,6 +34,39 @@ const maximumTestPhaseTimeoutMilliseconds = 2_400_000;
 const minimumEffectiveTestWorkers = 0.5;
 export const phaseBudgetOverrideVariable = 'SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS';
 
+// SQ-208: the tests inside one file run in sequence, so each of these files is a serial chain
+// no amount of concurrency shortens. v4.0.0's passing run measured them at 750, 713, 635, 595,
+// 526 and 424 seconds of test time out of 5779 for the whole phase. `node --test` starts files
+// in sorted order whatever order they are passed in, so four of the six started 150-510s into
+// the phase and finished past an idle machine's 843s budget while most workers sat empty.
+// Starting the longest chains first leaves the short files to fill in around them. Keep this
+// list ordered longest first; a file missing from the directory is skipped, and the test suite
+// fails if any name here stops matching a real file.
+export const longRunningTestFiles = Object.freeze([
+  'hooks.test.ts',
+  'mcp.test.ts',
+  'dispatch-lifecycle.test.ts',
+  'integration-advance.test.ts',
+  'submission.test.ts',
+  'worktree-isolation.test.ts',
+]);
+
+// The phase root is this script run with this flag, because only the programmatic runner keeps
+// the order it is given.
+export const phaseRootFlag = '--sidequest-phase-root';
+
+export function isFunctionalTestFile(name) {
+  return name.endsWith('.test.ts') && !name.endsWith('.perf.test.ts');
+}
+
+export function scheduleTestFiles(fileNames) {
+  const suite = fileNames.filter(isFunctionalTestFile);
+  const present = new Set(suite);
+  const first = longRunningTestFiles.filter((name) => present.has(name));
+  const scheduledFirst = new Set(first);
+  return [...first, ...suite.filter((name) => !scheduledFirst.has(name)).sort()];
+}
+
 export function fullSuiteGatewayCatalog() {
   return {
     schemaVersion: 4,
@@ -209,12 +242,10 @@ const testConcurrency = phaseCapacity.testConcurrency;
 const testPhaseTimeoutMilliseconds = phaseCapacity.timeoutMilliseconds;
 const testPhaseWarningMilliseconds = phaseCapacity.expectedDurationMilliseconds;
 const siblingFullSuiteCaptures = siblingFullSuiteCaptureCount();
-// Benchmarks live behind `npm run test:perf`. Without this exclusion the glob
-// below sweeps them back into the default suite, which is the 23 seconds
-// SQ-1387 exists to remove.
-const testFiles = (await fs.readdir(testDirectory))
-  .filter((name) => name.endsWith('.test.ts') && !name.endsWith('.perf.test.ts'))
-  .sort()
+// Benchmarks live behind `npm run test:perf`. Without the exclusion in
+// isFunctionalTestFile the listing sweeps them back into the default suite,
+// which is the 23 seconds SQ-1387 exists to remove.
+const testFiles = scheduleTestFiles(await fs.readdir(testDirectory))
   .map((name) => path.join(testDirectory, name));
 
 // A deadline is a failed phase whatever the root managed to report on its way out.
@@ -230,16 +261,27 @@ export function describePhaseFailure(phase, result, capacity, siblingCaptures = 
   return null;
 }
 
-// The phase runs over pipes so its output stays bounded and its tree stays owned, which
-// costs the TTY detection node:test uses to pick the readable reporter. Ask for it back
-// when a human is watching.
-const interactiveReporterArguments = process.stdout.isTTY ? ['--test-reporter=spec'] : [];
+// The phase root. The preloads it was started with are inherited by every test file process
+// run() spawns, exactly as `node --import ... --test` passed them on. The spec reporter is
+// what that command printed here too, over pipes and on a terminal alike.
+async function runPhaseRoot(concurrencyText, files) {
+  // The root of a phase is never itself a test file. An inherited child marker makes run()
+  // report upward to a parent that is not listening and start none of the files.
+  delete process.env.NODE_TEST_CONTEXT;
+  const { run } = await import('node:test');
+  const { spec } = await import('node:test/reporters');
+  const stream = run({ files, concurrency: Number(concurrencyText) });
+  stream.on('test:fail', () => {
+    process.exitCode = 1;
+  });
+  stream.compose(spec).pipe(process.stdout);
+}
 
 async function runTests(phase, files, environment) {
   const phaseStartTime = performance.now();
   const result = await runOwnedPhase({
     command: process.execPath,
-    args: ['--import', 'tsx', '--import', './test/_sidequest-test-home.ts', '--test', `--test-concurrency=${testConcurrency}`, ...interactiveReporterArguments, ...files],
+    args: ['--import', 'tsx', '--import', './test/_sidequest-test-home.ts', fileURLToPath(import.meta.url), phaseRootFlag, String(testConcurrency), ...files],
     cwd: pluginRoot,
     env: environment,
     timeoutMilliseconds: testPhaseTimeoutMilliseconds,
@@ -289,5 +331,6 @@ async function main() {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  await main();
+  if (process.argv[2] === phaseRootFlag) await runPhaseRoot(process.argv[3], process.argv.slice(4));
+  else await main();
 }
