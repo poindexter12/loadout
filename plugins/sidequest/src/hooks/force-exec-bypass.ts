@@ -97,7 +97,7 @@ interface Store {
   findProject: (project: string) => { ok: boolean; slug?: string };
   projectDispatchAdmission: (slug: string) => DispatchAdmission;
   getTicket: (slug: string, ref: string) => Ticket | null;
-  recordDispatchLaunch: (slug: string, ref: string, options: Record<string, unknown>) => unknown;
+  recordDispatchLaunch: (slug: string, ref: string, options: Record<string, unknown>) => { ok?: boolean; reason?: string; message?: string } | null | undefined;
   listProjects: (options: { all: boolean }) => Array<{ slug: string }>;
   listTickets: (slug: string) => Ticket[];
   readMeta: (slug: string) => { path?: string } | null;
@@ -454,26 +454,42 @@ function dispatchAgentName(input: HookInput): string | null {
   return dispatchLaunchName(refs[0]);
 }
 
-function recordAuthoritativeLaunch(input: HookInput, type: string, agentName: string | null): void {
+// Returns a refusal when the store retired the prepared attempt instead of
+// recording its launch. Letting that spawn proceed only moved the failure to
+// WorktreeCreate, which then found no launched dispatch and reported the
+// misleading dispatch_binding_unavailable (SQ-230).
+function recordAuthoritativeLaunch(input: HookInput, type: string, agentName: string | null): string | null {
   const toolInput = toolInputOf(input);
-  if (!toolInput) return;
+  if (!toolInput) return null;
   const launches = dispatchLaunches(toolInput.prompt);
   const projectArg = extractProjectArg(toolInput.prompt) || stringField(input, 'cwd') || process.env.CLAUDE_PROJECT_DIR;
   const sessionId = stringField(input, 'session_id', 'sessionId') || process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID;
-  if (!launches.length || !projectArg || !sessionId) return;
+  if (!launches.length || !projectArg || !sessionId) return null;
+  const refusals: string[] = [];
   try {
     const store = require(runtimeModule('store')) as Store;
     const found = store.findProject(projectArg);
-    if (!found.ok || !found.slug) return;
+    if (!found.ok || !found.slug) return null;
     for (const launch of launches) {
-      store.recordDispatchLaunch(found.slug, launch.ref, {
+      const recorded = store.recordDispatchLaunch(found.slug, launch.ref, {
         tokenFile: launch.tokenFile,
         executor: type,
         sessionId,
         agentName: agentName || toolInput.name,
       });
+      if (recorded?.reason === 'prepared_compatibility_stale') {
+        refusals.push(recorded.message || `${launch.ref}'s prepared dispatch was retired because its Sidequest install snapshot is stale.`);
+      }
     }
   } catch (error) { refuseWhenBoardBusy(error); }
+  return refusals.length ? `sidequest: ${refusals.join(' ')}` : null;
+}
+
+function launchRefused(input: HookInput, type: string, agentName: string | null): boolean {
+  const refusal = recordAuthoritativeLaunch(input, type, agentName);
+  if (!refusal) return false;
+  writeDeny('PreToolUse', refusal);
+  return true;
 }
 
 function resolveStampedModel(input: HookInput): ResolveResult {
@@ -1084,7 +1100,7 @@ function main(): void {
   if (isDispatchExecutor) {
     const hadModel = Object.prototype.hasOwnProperty.call(toolInput, 'model');
     if (hadModel) delete updatedInput.model;
-    recordAuthoritativeLaunch(input, type, launchAgentName);
+    if (launchRefused(input, type, launchAgentName)) return;
     const messages = [
       preparedCorrection,
       hadModel ? `sidequest: removed the Agent model override for ${type}; its frontmatter pin selects the routed backend.` : null,
@@ -1098,7 +1114,7 @@ function main(): void {
     const result = resolveStampedModel(input);
     if (result.status === 'ok' && result.model) {
       updatedInput.model = result.model;
-      recordAuthoritativeLaunch(input, type, launchAgentName);
+      if (launchRefused(input, type, launchAgentName)) return;
       writeToolUpdate(updatedInput, [
         preparedCorrection,
         `sidequest: ${type} spawned without a model — injected "${result.model}" from ${result.refs.join(', ')}'s resolved category route. Always pass model: exec.model on Claude routes.`,
@@ -1115,14 +1131,14 @@ function main(): void {
     return;
   }
   if (result.status === 'ok' && result.model !== toolInput.model) {
-    recordAuthoritativeLaunch(input, type, launchAgentName);
+    if (launchRefused(input, type, launchAgentName)) return;
     writeToolUpdate(updatedInput, [
       preparedCorrection,
       `sidequest: ${type} was spawned with model "${String(toolInput.model)}" but ${result.refs.join(', ')} resolves to "${result.model}" — kept the caller's value; confirm the cap is deliberate.`,
     ].filter(Boolean).join(' '));
     return;
   }
-  recordAuthoritativeLaunch(input, type, launchAgentName);
+  if (launchRefused(input, type, launchAgentName)) return;
   writeToolUpdate(updatedInput, preparedCorrection);
 }
 

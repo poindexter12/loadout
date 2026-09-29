@@ -1979,6 +1979,34 @@ function bindDispatchWorktreeCreation(slug?: any, sessionId?: any, worktree?: an
   return { ok: false, reason: 'dispatch_binding_unavailable' };
 }
 
+// WorktreeCreate carries only the session id, the session cwd, and a name. An
+// orchestrator may dispatch onto a board other than the one its cwd resolves to
+// (the spawn prompt's --project decides where PreToolUse records the launch), so
+// the hook asks which boards hold a live worktree-create dispatch for this
+// session instead of assuming the cwd board. `excludeSlug` is the board the hook
+// already tried. Each match reports the registered repository the checkout must
+// be created from.
+function dispatchWorktreeCreationBoards(sessionId?: any, excludeSlug?: any) {
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (!normalizedSessionId) return [];
+  const excluded = String(excludeSlug || '').trim();
+  const boards: any[] = [];
+  for (const project of listProjects({ all: true })) {
+    if (!project?.slug || project.slug === excluded) continue;
+    const meta = readMeta(project.slug);
+    if (!meta?.path) continue;
+    const live = listTickets(project.slug).some((candidate?: any) => {
+      const state = dispatchState(candidate);
+      if (dispatchCreationCandidate(state, normalizedSessionId)) return true;
+      return Boolean(state && state.sessionId === normalizedSessionId && state.sharedTree === false
+        && state.outcome === 'launched' && !state.terminalAt && state.worktreeBindingSource === 'worktree-create'
+        && state.worktree);
+    });
+    if (live) boards.push({ slug: project.slug, repository: canonicalPath(meta.path) });
+  }
+  return boards;
+}
+
 function completeDispatchWorktreeCreation(slug?: any, sessionId?: any, worktree?: any) {
   const normalizedSessionId = String(sessionId || '').trim();
   const target = String(worktree || '').trim();
@@ -2746,6 +2774,7 @@ function reconcileLaunchedDispatches(sessionId?: any, opts?: any) {
     recordDispatchAgentFailure,
     recoverDispatchQuotaFailure,
     bindDispatchWorktreeCreation,
+    dispatchWorktreeCreationBoards,
     completeDispatchWorktreeCreation,
     recordDispatchWorktreeProvisioningFailure,
     recoverDispatchWorktreeCreation,

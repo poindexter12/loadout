@@ -179,11 +179,34 @@ function createWorktree(binding, name) {
 function registeredProject(store, repository) {
   return store.findProject(store.nearestRepoRoot(repository));
 }
-function bindCreation(repository, sessionId, worktree) {
+function bindCreation(cwdRepository, sessionId, name, namedWorktreePath) {
   const store = require(runtimeModule("store"));
-  const project = registeredProject(store, repository);
-  if (!project.ok || !project.slug) return { ok: false, reason: "project_unavailable" };
-  return store.bindDispatchWorktreeCreation(project.slug, sessionId, worktree);
+  let cwdSlug = null;
+  let binding = { ok: false, reason: "project_unavailable" };
+  if (cwdRepository) {
+    const project = registeredProject(store, cwdRepository);
+    if (project.ok && project.slug) {
+      cwdSlug = project.slug;
+      binding = store.bindDispatchWorktreeCreation(project.slug, sessionId, namedWorktreePath(cwdRepository, name));
+    }
+  }
+  if (binding.ok || binding.reason !== "project_unavailable" && binding.reason !== "dispatch_binding_unavailable") {
+    return binding;
+  }
+  const boards = store.dispatchWorktreeCreationBoards(sessionId, cwdSlug);
+  if (boards.length > 1) {
+    return { ok: false, reason: `ambiguous_binding (session ${sessionId} has live worktree dispatches on ${boards.map((board2) => board2.slug).join(", ")})` };
+  }
+  const board = boards[0];
+  if (boards.length !== 1 || !board) return binding;
+  return store.bindDispatchWorktreeCreation(board.slug, sessionId, namedWorktreePath(board.repository, name));
+}
+function cwdRepositoryFor(cwd) {
+  try {
+    return repositoryFor(cwd);
+  } catch (_) {
+    return null;
+  }
 }
 function completeCreation(repository, sessionId, worktree) {
   const store = require(runtimeModule("store"));
@@ -247,10 +270,8 @@ async function createWorktreeMain() {
   const cwd = stringField(input, "cwd") || process.cwd();
   if (!name) throw new Error("WorktreeCreate requires a worktree name.");
   if (!sessionId) throw new Error("WorktreeCreate requires a dispatch session binding.");
-  const repository = repositoryFor(cwd);
   const worktrees = require(runtimeModule("worktrees"));
-  const target = worktrees.namedWorktreePath(repository, name);
-  const binding = bindCreation(repository, sessionId, target);
+  const binding = bindCreation(cwdRepositoryFor(cwd), sessionId, name, worktrees.namedWorktreePath);
   if (!binding.ok || !binding.ref || !binding.baseline || !binding.repository || !binding.worktree) {
     throw new Error(`worktree lease refused creation: ${binding.reason || "dispatch binding is incomplete"}`);
   }

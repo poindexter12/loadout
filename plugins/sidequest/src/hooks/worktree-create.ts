@@ -126,13 +126,45 @@ function registeredProject(store: WorktreeStore, repository: string): ProjectLoo
   return store.findProject(store.nearestRepoRoot(repository));
 }
 
-function bindCreation(repository: string, sessionId: string, worktree: string): CreationBinding {
-  const store = require(runtimeModule('store')) as WorktreeStore & {
-    bindDispatchWorktreeCreation: (slug: string, sessionId: string, worktree: string) => CreationBinding;
-  };
-  const project = registeredProject(store, repository);
-  if (!project.ok || !project.slug) return { ok: false, reason: 'project_unavailable' };
-  return store.bindDispatchWorktreeCreation(project.slug, sessionId, worktree);
+type BindingStore = WorktreeStore & {
+  bindDispatchWorktreeCreation: (slug: string, sessionId: string, worktree: string) => CreationBinding;
+  dispatchWorktreeCreationBoards: (sessionId: string, excludeSlug?: string | null) => { slug: string; repository: string }[];
+};
+
+// The session cwd names the board to try first, but it is only where the
+// orchestrator happens to sit: a spawn prompt's --project can dispatch onto any
+// registered board, and PreToolUse records the launch there. When the cwd board
+// holds no live creation for this session, bind the one other board that does,
+// and create the checkout from that board's repository (SQ-230).
+function bindCreation(cwdRepository: string | null, sessionId: string, name: string, namedWorktreePath: (repo: string, worktreeName: string) => string): CreationBinding {
+  const store = require(runtimeModule('store')) as BindingStore;
+  let cwdSlug: string | null = null;
+  let binding: CreationBinding = { ok: false, reason: 'project_unavailable' };
+  if (cwdRepository) {
+    const project = registeredProject(store, cwdRepository);
+    if (project.ok && project.slug) {
+      cwdSlug = project.slug;
+      binding = store.bindDispatchWorktreeCreation(project.slug, sessionId, namedWorktreePath(cwdRepository, name));
+    }
+  }
+  if (binding.ok || (binding.reason !== 'project_unavailable' && binding.reason !== 'dispatch_binding_unavailable')) {
+    return binding;
+  }
+  const boards = store.dispatchWorktreeCreationBoards(sessionId, cwdSlug);
+  if (boards.length > 1) {
+    return { ok: false, reason: `ambiguous_binding (session ${sessionId} has live worktree dispatches on ${boards.map((board) => board.slug).join(', ')})` };
+  }
+  const board = boards[0];
+  if (boards.length !== 1 || !board) return binding;
+  return store.bindDispatchWorktreeCreation(board.slug, sessionId, namedWorktreePath(board.repository, name));
+}
+
+function cwdRepositoryFor(cwd: string): string | null {
+  try {
+    return repositoryFor(cwd);
+  } catch (_) {
+    return null;
+  }
 }
 
 function completeCreation(repository: string, sessionId: string, worktree: string): CreationBinding {
@@ -218,13 +250,11 @@ async function createWorktreeMain(): Promise<void> {
   const cwd = stringField(input, 'cwd') || process.cwd();
   if (!name) throw new Error('WorktreeCreate requires a worktree name.');
   if (!sessionId) throw new Error('WorktreeCreate requires a dispatch session binding.');
-  const repository = repositoryFor(cwd);
   const worktrees = require(runtimeModule('worktrees')) as {
     namedWorktreePath: (repo: string, worktreeName: string) => string;
     provisionWorktree: (repo: string, worktree: string, config: { worktreeDependencyPaths?: { path: string; mode: string }[]; worktreeSetup?: string | null }, options: { setupTimeoutMs?: number }) => Promise<{ command: string; reason: string; stderrTail: string } | null>;
   };
-  const target = worktrees.namedWorktreePath(repository, name);
-  const binding = bindCreation(repository, sessionId, target);
+  const binding = bindCreation(cwdRepositoryFor(cwd), sessionId, name, worktrees.namedWorktreePath);
   if (!binding.ok || !binding.ref || !binding.baseline || !binding.repository || !binding.worktree) {
     throw new Error(`worktree lease refused creation: ${binding.reason || 'dispatch binding is incomplete'}`);
   }

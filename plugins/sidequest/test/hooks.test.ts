@@ -3785,6 +3785,67 @@ test('worktree-create binds a linked checkout to its registered main board', () 
   }
 });
 
+// SQ-230: an orchestrator whose session cwd sits in one registered repository
+// dispatches onto another board with --project. PreToolUse records the launch on
+// the --project board, but WorktreeCreate only receives the session cwd, so
+// resolving the board from cwd alone found no launched dispatch and refused every
+// isolated executor with dispatch_binding_unavailable.
+test('worktree-create binds a dispatch launched onto another board than the session cwd (SQ-230)', () => {
+  const seedRepository = (prefix: string) => {
+    const repository = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    gitFixture(['init', '--quiet', '-b', 'main'], repository);
+    gitFixture(['config', 'user.email', 'test@example.invalid'], repository);
+    gitFixture(['config', 'user.name', 'Cross Board Worktree Hook Test'], repository);
+    fs.writeFileSync(path.join(repository, 'tracked.txt'), `${prefix}\n`);
+    gitFixture(['add', 'tracked.txt'], repository);
+    gitFixture(['commit', '--quiet', '-m', 'seed'], repository);
+    return repository;
+  };
+  const sessionRepository = seedRepository('sq-cross-board-session-repo-');
+  const dispatchRepository = seedRepository('sq-cross-board-dispatch-repo-');
+  const sessionBoard = store.ensureProject(sessionRepository, 'cross board session').slug;
+  const dispatchBoard = store.ensureProject(dispatchRepository, 'cross board dispatch').slug;
+  assert.notEqual(sessionBoard, dispatchBoard);
+  const category = `cross-board-worktree-hook-${++sqSeq}`;
+  store.setCategory({
+    id: category,
+    name: category,
+    route: { model: 'sonnet', effort: 'medium' },
+    fallback: null,
+    enabled: true,
+  });
+  const ticket = store.createTicket(dispatchBoard, { title: 'cross board worktree creation', category, files: ['tracked.txt'] });
+  const sessionId = `cross-board-worktree-hook-${sqSeq}`;
+  const prepared = store.prepareDispatch(dispatchBoard, ticket.ref, { sessionId });
+  assert.equal(store.recordDispatchLaunch(dispatchBoard, ticket.ref, {
+    token: prepared.token,
+    executor: prepared.ticket.dispatchExecutor,
+    sessionId,
+  }).ok, true);
+  const name = `agent-cross-board-${sqSeq}`;
+  const target = worktrees.namedWorktreePath(dispatchRepository, name);
+  const wrongTarget = worktrees.namedWorktreePath(sessionRepository, name);
+  try {
+    const output = execFileSync(process.execPath, [WORKTREE_CREATE], {
+      input: JSON.stringify({ hook_event_name: 'WorktreeCreate', session_id: sessionId, cwd: sessionRepository, name }),
+      encoding: 'utf8',
+      env: process.env,
+    }).trim();
+    assert.equal(output, gitFixture(['rev-parse', '--show-toplevel'], target), 'the checkout must belong to the dispatch board repository');
+    assert.equal(fs.readFileSync(path.join(target, 'tracked.txt'), 'utf8'), 'sq-cross-board-dispatch-repo-\n');
+    assert.equal(fs.existsSync(wrongTarget), false, 'the session cwd repository must not receive the checkout');
+    const dispatch = store.getTicket(dispatchBoard, ticket.ref).dispatch;
+    assert.equal(worktrees.canonicalPath(dispatch.worktree), worktrees.canonicalPath(target));
+    assert.equal(dispatch.worktreeBindingSource, 'worktree-create');
+    assert.ok(dispatch.worktreeCreationCompletedAt, 'creation completion must be recorded on the dispatch board');
+  } finally {
+    if (fs.existsSync(target)) gitFixture(['worktree', 'remove', '--force', target], dispatchRepository);
+    if (fs.existsSync(wrongTarget)) gitFixture(['worktree', 'remove', '--force', wrongTarget], sessionRepository);
+    try { gitFixture(['branch', '-D', `worktree-${name}`], dispatchRepository); } catch (_) {}
+    try { gitFixture(['branch', '-D', `worktree-${name}`], sessionRepository); } catch (_) {}
+  }
+});
+
 test('worktree-create refuses a pre-existing same-repository checkout without creation proof', () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-existing-worktree-repo-'));
   gitFixture(['init', '--quiet', '-b', 'main'], repo);
@@ -4736,6 +4797,51 @@ test('pre-tool hook: exact prepared briefing is the sole dispatch launch authori
       assert.equal(launch.hookSpecificOutput.permissionDecision, 'deny', dispatchCase.name);
       assert.ok(!store.getTicket(slug, ticket.ref).dispatch?.launchedAt, `${dispatchCase.name} denies before launch recording`);
     }
+  }
+});
+
+// SQ-230: when the loaded Sidequest drifted from the install, recordDispatchLaunch
+// retired the prepared attempt as prepared_compatibility_stale, but PreToolUse ignored
+// the refusal and let the spawn proceed. WorktreeCreate then found no launched
+// dispatch and refused with the misleading dispatch_binding_unavailable.
+test('pre-tool hook: denies a dispatch spawn whose launch the store retired as stale (SQ-230)', () => {
+  // Private claude home, same isolation as the dispatch-lifecycle stale test: flipping
+  // the shared install identity would retire concurrent launches in other files.
+  const isolatedClaudeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-stale-launch-home-'));
+  const isolatedInstallPath = path.join(isolatedClaudeHome, 'sidequest-test-install');
+  fs.mkdirSync(path.join(isolatedClaudeHome, 'plugins'), { recursive: true });
+  fs.mkdirSync(path.join(isolatedInstallPath, 'hooks'), { recursive: true });
+  fs.writeFileSync(path.join(isolatedInstallPath, 'hooks', 'hooks.json'), JSON.stringify({ hooks: {} }));
+  fs.writeFileSync(path.join(isolatedInstallPath, '.mcp.json'), JSON.stringify({ mcpServers: { board: { command: 'node', args: ['bin/sidequest-mcp.js'] } } }));
+  const loadedVersion = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '.claude-plugin', 'plugin.json'), 'utf8')).version;
+  const registryPath = path.join(isolatedClaudeHome, 'plugins', 'installed_plugins.json');
+  const writeRegistry = (version: string) => fs.writeFileSync(registryPath, JSON.stringify({
+    plugins: { 'sidequest@loadout': [{ scope: 'user', installPath: isolatedInstallPath, version }] },
+  }));
+  writeRegistry(loadedVersion);
+  const sharedClaudeHome = process.env.SIDEQUEST_CLAUDE_HOME;
+  process.env.SIDEQUEST_CLAUDE_HOME = isolatedClaudeHome;
+  try {
+    const ticket = addEffortTicket('stale prepared launch refusal', 'high');
+    const sessionId = `stale-launch-${++sqSeq}`;
+    const prepared = store.prepareDispatch(slug, ticket.ref, { allowUnscoped: true, sessionId });
+    assert.ok(prepared.ticket.dispatch.preparedCompatibility?.pluginInstall, 'the prepare must snapshot the install it ran under');
+    writeRegistry(`${loadedVersion}-stale-launch-test`);
+    const spawn = {
+      subagent_type: prepared.ticket.dispatchExecutor,
+      name: prepared.ticket.dispatch.launchName,
+      description: prepared.ticket.dispatch.description,
+      prompt: preparedPrompt(prepared),
+    };
+    const launch = runHookOutput(FORCE_BYPASS, { session_id: sessionId, tool_name: 'Agent', tool_input: spawn });
+    assert.equal(launch.hookSpecificOutput.permissionDecision, 'deny', 'a retired stale launch must not reach WorktreeCreate');
+    assert.match(launch.hookSpecificOutput.permissionDecisionReason, /install snapshot is stale/);
+    const retired = store.getTicket(slug, ticket.ref);
+    assert.equal(retired.dispatch.failureShape, 'prepared_compatibility_stale');
+    assert.equal(retired.dispatch.terminalSource, 'tokened-launch-refusal');
+  } finally {
+    if (sharedClaudeHome === undefined) delete process.env.SIDEQUEST_CLAUDE_HOME;
+    else process.env.SIDEQUEST_CLAUDE_HOME = sharedClaudeHome;
   }
 });
 

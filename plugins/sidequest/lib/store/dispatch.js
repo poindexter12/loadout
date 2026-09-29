@@ -1713,6 +1713,24 @@ function createDispatch(dependencies) {
     }
     return { ok: false, reason: "dispatch_binding_unavailable" };
   }
+  function dispatchWorktreeCreationBoards(sessionId, excludeSlug) {
+    const normalizedSessionId = String(sessionId || "").trim();
+    if (!normalizedSessionId) return [];
+    const excluded = String(excludeSlug || "").trim();
+    const boards = [];
+    for (const project of listProjects({ all: true })) {
+      if (!project?.slug || project.slug === excluded) continue;
+      const meta = readMeta(project.slug);
+      if (!meta?.path) continue;
+      const live = listTickets(project.slug).some((candidate) => {
+        const state = dispatchState(candidate);
+        if (dispatchCreationCandidate(state, normalizedSessionId)) return true;
+        return Boolean(state && state.sessionId === normalizedSessionId && state.sharedTree === false && state.outcome === "launched" && !state.terminalAt && state.worktreeBindingSource === "worktree-create" && state.worktree);
+      });
+      if (live) boards.push({ slug: project.slug, repository: canonicalPath(meta.path) });
+    }
+    return boards;
+  }
   function completeDispatchWorktreeCreation(slug, sessionId, worktree) {
     const normalizedSessionId = String(sessionId || "").trim();
     const target = String(worktree || "").trim();
@@ -2365,6 +2383,7 @@ function createDispatch(dependencies) {
     recordDispatchAgentFailure,
     recoverDispatchQuotaFailure,
     bindDispatchWorktreeCreation,
+    dispatchWorktreeCreationBoards,
     completeDispatchWorktreeCreation,
     recordDispatchWorktreeProvisioningFailure,
     recoverDispatchWorktreeCreation,

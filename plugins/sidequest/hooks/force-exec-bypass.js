@@ -583,26 +583,37 @@ function dispatchAgentName(input) {
 }
 function recordAuthoritativeLaunch(input, type, agentName) {
   const toolInput = toolInputOf(input);
-  if (!toolInput) return;
+  if (!toolInput) return null;
   const launches = dispatchLaunches(toolInput.prompt);
   const projectArg = extractProjectArg(toolInput.prompt) || stringField(input, "cwd") || process.env.CLAUDE_PROJECT_DIR;
   const sessionId = stringField(input, "session_id", "sessionId") || process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID;
-  if (!launches.length || !projectArg || !sessionId) return;
+  if (!launches.length || !projectArg || !sessionId) return null;
+  const refusals = [];
   try {
     const store = require(runtimeModule("store"));
     const found = store.findProject(projectArg);
-    if (!found.ok || !found.slug) return;
+    if (!found.ok || !found.slug) return null;
     for (const launch of launches) {
-      store.recordDispatchLaunch(found.slug, launch.ref, {
+      const recorded = store.recordDispatchLaunch(found.slug, launch.ref, {
         tokenFile: launch.tokenFile,
         executor: type,
         sessionId,
         agentName: agentName || toolInput.name
       });
+      if (recorded?.reason === "prepared_compatibility_stale") {
+        refusals.push(recorded.message || `${launch.ref}'s prepared dispatch was retired because its Sidequest install snapshot is stale.`);
+      }
     }
   } catch (error) {
     refuseWhenBoardBusy(error);
   }
+  return refusals.length ? `sidequest: ${refusals.join(" ")}` : null;
+}
+function launchRefused(input, type, agentName) {
+  const refusal = recordAuthoritativeLaunch(input, type, agentName);
+  if (!refusal) return false;
+  writeDeny("PreToolUse", refusal);
+  return true;
 }
 function resolveStampedModel(input) {
   const toolInput = toolInputOf(input);
@@ -1149,7 +1160,7 @@ function main() {
   if (isDispatchExecutor) {
     const hadModel = Object.prototype.hasOwnProperty.call(toolInput, "model");
     if (hadModel) delete updatedInput.model;
-    recordAuthoritativeLaunch(input, type, launchAgentName);
+    if (launchRefused(input, type, launchAgentName)) return;
     const messages = [
       preparedCorrection,
       hadModel ? `sidequest: removed the Agent model override for ${type}; its frontmatter pin selects the routed backend.` : null
@@ -1162,7 +1173,7 @@ function main() {
     const result2 = resolveStampedModel(input);
     if (result2.status === "ok" && result2.model) {
       updatedInput.model = result2.model;
-      recordAuthoritativeLaunch(input, type, launchAgentName);
+      if (launchRefused(input, type, launchAgentName)) return;
       writeToolUpdate(updatedInput, [
         preparedCorrection,
         `sidequest: ${type} spawned without a model — injected "${result2.model}" from ${result2.refs.join(", ")}'s resolved category route. Always pass model: exec.model on Claude routes.`
@@ -1178,14 +1189,14 @@ function main() {
     return;
   }
   if (result.status === "ok" && result.model !== toolInput.model) {
-    recordAuthoritativeLaunch(input, type, launchAgentName);
+    if (launchRefused(input, type, launchAgentName)) return;
     writeToolUpdate(updatedInput, [
       preparedCorrection,
       `sidequest: ${type} was spawned with model "${String(toolInput.model)}" but ${result.refs.join(", ")} resolves to "${result.model}" — kept the caller's value; confirm the cap is deliberate.`
     ].filter(Boolean).join(" "));
     return;
   }
-  recordAuthoritativeLaunch(input, type, launchAgentName);
+  if (launchRefused(input, type, launchAgentName)) return;
   writeToolUpdate(updatedInput, preparedCorrection);
 }
 try {
