@@ -3,6 +3,246 @@ const { resolveSuite } = require("../suite-resolver.js");
 const { VERIFICATION_KINDS, classifyVerificationKind } = require("../kernel/verification.js");
 const { canonicalPath, ignoredPathsMissingFromWorktree, parseWorktreeList } = require("../worktrees.js");
 const { unscopedWriteCannotAutoApprove } = require("./dispatch.js");
+const SHELL_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const SHELL_PARAMETER = /[A-Za-z_][A-Za-z0-9_]*|[0-9@#?$!*-]/y;
+const SHELL_ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?\+?=/;
+const SHELL_ARITHMETIC_ASSIGNMENT = /(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_]*)\s*(?:<<|>>|[-+*/%&|^])?=(?!=)/g;
+const SHELL_COMMAND_PREFIXES = /* @__PURE__ */ new Set(["!", "{", "}", "do", "done", "elif", "else", "env", "fi", "if", "then", "time", "until", "while"]);
+const SHELL_DECLARATIONS = /* @__PURE__ */ new Set(["declare", "export", "local", "readonly", "typeset"]);
+const SHELL_READ_OPTIONS_WITH_ARGUMENT = "adinNptu";
+const SHELL_EXPANDED = "\0";
+const SHELL_NESTING_LIMIT = 16;
+let shellScanCache;
+function shellSlice(source, start, end) {
+  return { text: source.text.slice(start, end), offsets: source.offsets.slice(start, end) };
+}
+function bindShellName(scan, name, last, scope) {
+  if (!SHELL_NAME.test(name) || last === void 0) return;
+  const bindings = scan.bindings.get(name) ?? [];
+  bindings.push({ end: last + 1, scope });
+  scan.bindings.set(name, bindings);
+}
+function shellQuoteEnd(text, open) {
+  const quote = text.charAt(open);
+  for (let index = open + 1; index < text.length; index += 1) {
+    const character = text.charAt(index);
+    if (character === "\\" && quote !== "'") index += 1;
+    else if (character === quote) return index;
+  }
+  return text.length;
+}
+function shellClosingIndex(text, open) {
+  const opener = text.charAt(open);
+  const closer = opener === "{" ? "}" : ")";
+  let nesting = 0;
+  for (let index = open; index < text.length; index += 1) {
+    const character = text.charAt(index);
+    if (character === "\\") index += 1;
+    else if (character === "'" || character === '"' || character === "`") index = shellQuoteEnd(text, index);
+    else if (character === opener) nesting += 1;
+    else if (character === closer && (nesting -= 1) === 0) return index;
+  }
+  return text.length;
+}
+function lexShell(source, scope, nesting, scan) {
+  const { text, offsets } = source;
+  const tokens = [];
+  const pending = { start: 0 };
+  const word = (index) => {
+    if (pending.word) return pending.word;
+    pending.start = index;
+    return pending.word = { kind: "word", text: "", offsets: [], raw: "", quoted: false };
+  };
+  const take = (start, end, target = word(start)) => {
+    const stop = Math.min(end, text.length);
+    target.text += text.slice(start, stop);
+    for (let at = start; at < stop; at += 1) target.offsets.push(offsets[at] ?? 0);
+  };
+  const finish = (end) => {
+    if (!pending.word) return;
+    pending.word.raw = text.slice(pending.start, end);
+    tokens.push(pending.word);
+    pending.word = void 0;
+  };
+  const expanded = (start, end) => {
+    const target = word(start);
+    target.text += SHELL_EXPANDED;
+    target.offsets.push(offsets[Math.min(end, text.length) - 1] ?? 0);
+    return end;
+  };
+  const arithmetic = (start, end) => {
+    const body = shellSlice(source, start, end);
+    for (let at = 0; at < body.text.length; at += 1) {
+      const offset = body.offsets[at];
+      if (body.text.charAt(at) === "$" && offset !== void 0 && !scan.expansions.has(offset)) scan.expansions.set(offset, scope);
+    }
+    for (const match of body.text.matchAll(SHELL_ARITHMETIC_ASSIGNMENT)) {
+      bindShellName(scan, match[1] ?? "", body.offsets[(match.index ?? 0) + match[0].length - 1], scope);
+    }
+  };
+  const substitute = (start, bodyStart, close) => {
+    scanShell(shellSlice(source, bodyStart, close), { parent: scope }, nesting + 1, scan);
+    return expanded(start, close + 1);
+  };
+  const expand = (index) => {
+    if (text.charAt(index) === "`") return substitute(index, index + 1, shellQuoteEnd(text, index));
+    const next = text.charAt(index + 1);
+    let end = index + 1;
+    if (next === "(" || next === "{") {
+      end = shellClosingIndex(text, index + 1) + 1;
+    } else {
+      SHELL_PARAMETER.lastIndex = index + 1;
+      if (SHELL_PARAMETER.exec(text)) end = SHELL_PARAMETER.lastIndex;
+    }
+    if (end === index + 1) {
+      take(index, end);
+      return end;
+    }
+    const offset = offsets[index];
+    if (offset !== void 0 && !scan.expansions.has(offset)) scan.expansions.set(offset, scope);
+    if (next === "(" && text.charAt(index + 2) === "(") arithmetic(index + 3, end - 2);
+    else if (next === "(") return substitute(index, index + 2, end - 1);
+    return expanded(index, end);
+  };
+  for (let index = 0; index < text.length; ) {
+    const character = text.charAt(index);
+    if (/\s/.test(character)) {
+      finish(index);
+      index += 1;
+    } else if (character === "#" && !pending.word) {
+      const lineEnd = text.indexOf("\n", index);
+      index = lineEnd < 0 ? text.length : lineEnd;
+    } else if (character === "\\") {
+      const target = word(index);
+      target.quoted = true;
+      take(index + 1, index + 2, target);
+      index += 2;
+    } else if (character === "'") {
+      const target = word(index);
+      target.quoted = true;
+      const close = shellQuoteEnd(text, index);
+      take(index + 1, close, target);
+      index = close + 1;
+    } else if (character === '"') {
+      const target = word(index);
+      target.quoted = true;
+      index += 1;
+      while (index < text.length && text.charAt(index) !== '"') {
+        const inner = text.charAt(index);
+        if (inner === "\\") {
+          const escaped = text.charAt(index + 1);
+          take(escaped && '$`"\\'.includes(escaped) ? index + 1 : index, index + 2, target);
+          index += 2;
+        } else if (inner === "$" || inner === "`") {
+          index = expand(index);
+        } else {
+          take(index, index + 1, target);
+          index += 1;
+        }
+      }
+      index += 1;
+    } else if (character === "$" || character === "`") {
+      index = expand(index);
+    } else if (character === "(" && text.charAt(index + 1) === "(") {
+      finish(index);
+      const close = shellClosingIndex(text, index);
+      arithmetic(index + 2, close - 1);
+      tokens.push({ kind: "operator" });
+      index = close + 1;
+    } else if ((character === "<" || character === ">") && text.charAt(index + 1) === "(") {
+      index = substitute(index, index + 2, shellClosingIndex(text, index + 1));
+    } else if (character === "<" || character === ">") {
+      if (pending.word && !pending.word.quoted && /^\d+$/.test(pending.word.text)) pending.word = void 0;
+      finish(index);
+      tokens.push({ kind: "redirect" });
+      while (/[<>&|]/.test(text.charAt(index))) index += 1;
+    } else if (";&|()".includes(character)) {
+      finish(index);
+      tokens.push({ kind: "operator" });
+      index += 1;
+    } else {
+      take(index, index + 1);
+      index += 1;
+    }
+  }
+  finish(text.length);
+  return tokens;
+}
+function bindShellWords(tokens, scope, nesting, scan) {
+  let position = "command";
+  let command = "";
+  let readOptionArgument = "";
+  let optionsEnded = false;
+  let redirected = false;
+  const bind = (name, token) => bindShellName(scan, name, token.offsets[token.offsets.length - 1], scope);
+  for (const token of tokens) {
+    if (token.kind !== "word") {
+      redirected = token.kind === "redirect";
+      if (!redirected) position = "command";
+      continue;
+    }
+    if (token.quoted) scanShell(token, { parent: scope }, nesting + 1, scan);
+    if (redirected) {
+      redirected = false;
+      continue;
+    }
+    if (position === "loop-name") {
+      bind(token.raw, token);
+      position = "command";
+    } else if (position === "function-name") {
+      position = "command";
+    } else if (position === "command") {
+      const assignment = SHELL_ASSIGNMENT.exec(token.raw)?.[1];
+      if (assignment) bind(assignment, token);
+      else if (!SHELL_COMMAND_PREFIXES.has(token.raw)) {
+        position = token.raw === "for" || token.raw === "select" ? "loop-name" : token.raw === "function" ? "function-name" : "arguments";
+        command = token.raw;
+        readOptionArgument = "";
+        optionsEnded = false;
+      }
+    } else if (command === "read") {
+      if (readOptionArgument) {
+        if (readOptionArgument === "a") bind(token.text, token);
+        readOptionArgument = "";
+      } else if (!optionsEnded && token.text === "--") {
+        optionsEnded = true;
+      } else if (!optionsEnded && token.text.length > 1 && token.text.startsWith("-")) {
+        const letters = token.text.slice(1);
+        const at = [...letters].findIndex((letter) => SHELL_READ_OPTIONS_WITH_ARGUMENT.includes(letter));
+        const option = at < 0 ? "" : letters.charAt(at);
+        const attached = letters.slice(at + 1);
+        if (option && !attached) readOptionArgument = option;
+        else if (option === "a") bind(attached, token);
+      } else {
+        bind(token.text, token);
+      }
+    } else if (SHELL_DECLARATIONS.has(command) && !/^[-+]/.test(token.text)) {
+      bind(SHELL_ASSIGNMENT.exec(token.text)?.[1] ?? token.text, token);
+    }
+  }
+}
+function scanShell(source, scope, nesting, scan) {
+  if (nesting > SHELL_NESTING_LIMIT) return;
+  bindShellWords(lexShell(source, scope, nesting, scan), scope, nesting, scan);
+}
+function shellScanOf(command) {
+  if (shellScanCache?.command === command) return shellScanCache.scan;
+  const scan = { bindings: /* @__PURE__ */ new Map(), expansions: /* @__PURE__ */ new Map() };
+  scanShell({ text: command, offsets: Array.from({ length: command.length }, (_, offset) => offset) }, { parent: null }, 0, scan);
+  shellScanCache = { command, scan };
+  return scan;
+}
+function shellBindsBefore(command, name, index) {
+  const scan = shellScanOf(command);
+  const reference = scan.expansions.get(index);
+  return (scan.bindings.get(name) ?? []).some((binding) => {
+    if (binding.end > index) return false;
+    for (let scope = reference; scope; scope = scope.parent) {
+      if (scope === binding.scope) return true;
+    }
+    return false;
+  });
+}
 function createWarnings({ boardConfig, categoryReadOnly, claimReclaimable, coerceEffort, commitScope, contractCollisionReasons, dispatchReadOnly, dispatchState, execFileSync, fs, getTicket, integrationTarget, listTickets, normalizeContracts, normalizeFiles, normalizeRouteModel, overlappingScopePaths, path, pulseDispatchState, readMeta, readOnlyOverrideActive, spawnSync, ticketCategory }) {
   const DISPATCH_DESCRIPTION_MIN = 80;
   const WARNING_RETURN_LIMIT = 3;
@@ -159,7 +399,7 @@ function createWarnings({ boardConfig, categoryReadOnly, claimReclaimable, coerc
     }
     for (const match of command.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)(?:\}|(?::[^}]*)\})/g)) {
       const name = match[1] || match[2];
-      if (name && process.env[name] == null && !match[0].includes(":-")) {
+      if (name && process.env[name] == null && !match[0].includes(":-") && !shellBindsBefore(command, name, match.index ?? 0)) {
         errors.push(`Verify references unset environment variable ${name}. Set a portable default such as \`${"${"}${name}:-/tmp}\`, or use \`manual: <what you checked>\`.`);
       }
     }

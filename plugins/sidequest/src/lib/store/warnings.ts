@@ -5,6 +5,302 @@ const { VERIFICATION_KINDS, classifyVerificationKind } = require('../kernel/veri
 const { canonicalPath, ignoredPathsMissingFromWorktree, parseWorktreeList } = require('../worktrees.js');
 const { unscopedWriteCannotAutoApprove } = require('./dispatch.js');
 
+// Shell names a verify command binds itself (#19). The unset-variable check reads
+// `$NAME` everywhere in a verify, inside quotes too, because a quoted argument is
+// often a nested script (`bash -c '...'`). A name the command binds before reading
+// it is not an environment reference, so this lexes the command just far enough to
+// find the bindings: assignment words (also after `env`), operands of `declare`,
+// `export`, `local`, `readonly` and `typeset`, `for`/`select` names, arithmetic
+// assignments such as `for ((i = 0; ...))` or `$((n = 3))`, and `read` targets.
+// Positional and special parameters ($1, $@, $#) never match the NAME scan at all.
+//
+// Every binding and every expanding `$` belongs to the scope that performs it: the
+// verify itself, a command substitution, or a quoted word's text, which is lexed
+// again as a script once the enclosing shell's expansions are replaced by
+// placeholders, as the shell that runs it would receive it. A binding covers a later
+// reference in its own scope or one nested inside it, never an enclosing or sibling
+// scope, so `bash -c "for p in a; do echo $p; done"` still reports $p: the outer
+// shell expands it before the loop exists. Two gaps err toward running a command,
+// where the NAME scan alone errs toward refusing one: a nested scope sees every
+// outer binding, exported or not, and a binding inside a subshell group or pipeline
+// stage still counts after it.
+interface ShellScope { parent: ShellScope | null }
+interface ShellSource { text: string; offsets: number[] }
+interface ShellWord extends ShellSource { kind: 'word'; raw: string; quoted: boolean }
+type ShellToken = ShellWord | { kind: 'operator' | 'redirect' };
+interface ShellBinding { end: number; scope: ShellScope }
+interface ShellScan { bindings: Map<string, ShellBinding[]>; expansions: Map<number, ShellScope> }
+
+const SHELL_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const SHELL_PARAMETER = /[A-Za-z_][A-Za-z0-9_]*|[0-9@#?$!*-]/y;
+const SHELL_ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?\+?=/;
+const SHELL_ARITHMETIC_ASSIGNMENT = /(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_]*)\s*(?:<<|>>|[-+*/%&|^])?=(?!=)/g;
+// After one of these words the next word is still in command position.
+const SHELL_COMMAND_PREFIXES = new Set(['!', '{', '}', 'do', 'done', 'elif', 'else', 'env', 'fi', 'if', 'then', 'time', 'until', 'while']);
+const SHELL_DECLARATIONS = new Set(['declare', 'export', 'local', 'readonly', 'typeset']);
+const SHELL_READ_OPTIONS_WITH_ARGUMENT = 'adinNptu';
+// Stands in for an expansion's value in a word's text. It is never part of a name.
+const SHELL_EXPANDED = '\u0000';
+// Quoted words and substitutions are lexed one level deeper, so nesting stops here.
+const SHELL_NESTING_LIMIT = 16;
+// The check asks once per `$NAME` in the same command, so the last scan is kept.
+let shellScanCache: { command: string; scan: ShellScan } | undefined;
+
+function shellSlice(source: ShellSource, start: number, end: number): ShellSource {
+  return { text: source.text.slice(start, end), offsets: source.offsets.slice(start, end) };
+}
+
+function bindShellName(scan: ShellScan, name: string, last: number | undefined, scope: ShellScope) {
+  if (!SHELL_NAME.test(name) || last === undefined) return;
+  const bindings = scan.bindings.get(name) ?? [];
+  bindings.push({ end: last + 1, scope });
+  scan.bindings.set(name, bindings);
+}
+
+// Index of the quote closing the one at `open`, or text.length when unclosed.
+// Backslash escapes apply inside double quotes and backticks, never single quotes.
+function shellQuoteEnd(text: string, open: number): number {
+  const quote = text.charAt(open);
+  for (let index = open + 1; index < text.length; index += 1) {
+    const character = text.charAt(index);
+    if (character === '\\' && quote !== "'") index += 1;
+    else if (character === quote) return index;
+  }
+  return text.length;
+}
+
+// Index of the bracket closing the `(` or `{` at `open`, or text.length when unclosed.
+function shellClosingIndex(text: string, open: number): number {
+  const opener = text.charAt(open);
+  const closer = opener === '{' ? '}' : ')';
+  let nesting = 0;
+  for (let index = open; index < text.length; index += 1) {
+    const character = text.charAt(index);
+    if (character === '\\') index += 1;
+    else if (character === "'" || character === '"' || character === '`') index = shellQuoteEnd(text, index);
+    else if (character === opener) nesting += 1;
+    else if (character === closer && (nesting -= 1) === 0) return index;
+  }
+  return text.length;
+}
+
+// Splits one script into words (dequoted text, source offsets, raw spelling),
+// command separators, and redirections. Records the `$` this scope expands, binds
+// arithmetic assignments, and scans each command substitution in its own scope.
+function lexShell(source: ShellSource, scope: ShellScope, nesting: number, scan: ShellScan): ShellToken[] {
+  const { text, offsets } = source;
+  const tokens: ShellToken[] = [];
+  const pending: { word?: ShellWord; start: number } = { start: 0 };
+  const word = (index: number): ShellWord => {
+    if (pending.word) return pending.word;
+    pending.start = index;
+    return (pending.word = { kind: 'word', text: '', offsets: [], raw: '', quoted: false });
+  };
+  const take = (start: number, end: number, target: ShellWord = word(start)) => {
+    const stop = Math.min(end, text.length);
+    target.text += text.slice(start, stop);
+    for (let at = start; at < stop; at += 1) target.offsets.push(offsets[at] ?? 0);
+  };
+  const finish = (end: number) => {
+    if (!pending.word) return;
+    pending.word.raw = text.slice(pending.start, end);
+    tokens.push(pending.word);
+    pending.word = undefined;
+  };
+  // Replaces the expansion from `start` to `end` with its placeholder, keeping the
+  // expansion's last offset so a binding assigned from it ends where it does.
+  const expanded = (start: number, end: number): number => {
+    const target = word(start);
+    target.text += SHELL_EXPANDED;
+    target.offsets.push(offsets[Math.min(end, text.length) - 1] ?? 0);
+    return end;
+  };
+  const arithmetic = (start: number, end: number) => {
+    const body = shellSlice(source, start, end);
+    for (let at = 0; at < body.text.length; at += 1) {
+      const offset = body.offsets[at];
+      if (body.text.charAt(at) === '$' && offset !== undefined && !scan.expansions.has(offset)) scan.expansions.set(offset, scope);
+    }
+    for (const match of body.text.matchAll(SHELL_ARITHMETIC_ASSIGNMENT)) {
+      bindShellName(scan, match[1] ?? '', body.offsets[(match.index ?? 0) + match[0].length - 1], scope);
+    }
+  };
+  const substitute = (start: number, bodyStart: number, close: number): number => {
+    scanShell(shellSlice(source, bodyStart, close), { parent: scope }, nesting + 1, scan);
+    return expanded(start, close + 1);
+  };
+  // `$` or a backtick at `index`; returns the index just past it.
+  const expand = (index: number): number => {
+    if (text.charAt(index) === '`') return substitute(index, index + 1, shellQuoteEnd(text, index));
+    const next = text.charAt(index + 1);
+    let end = index + 1;
+    if (next === '(' || next === '{') {
+      end = shellClosingIndex(text, index + 1) + 1;
+    } else {
+      SHELL_PARAMETER.lastIndex = index + 1;
+      if (SHELL_PARAMETER.exec(text)) end = SHELL_PARAMETER.lastIndex;
+    }
+    // A `$` expanding nothing, as in `$'...'` or a trailing `$`, is literal.
+    if (end === index + 1) {
+      take(index, end);
+      return end;
+    }
+    const offset = offsets[index];
+    if (offset !== undefined && !scan.expansions.has(offset)) scan.expansions.set(offset, scope);
+    if (next === '(' && text.charAt(index + 2) === '(') arithmetic(index + 3, end - 2);
+    else if (next === '(') return substitute(index, index + 2, end - 1);
+    return expanded(index, end);
+  };
+  for (let index = 0; index < text.length;) {
+    const character = text.charAt(index);
+    if (/\s/.test(character)) {
+      finish(index);
+      index += 1;
+    } else if (character === '#' && !pending.word) {
+      const lineEnd = text.indexOf('\n', index);
+      index = lineEnd < 0 ? text.length : lineEnd;
+    } else if (character === '\\') {
+      const target = word(index);
+      target.quoted = true;
+      take(index + 1, index + 2, target);
+      index += 2;
+    } else if (character === "'") {
+      const target = word(index);
+      target.quoted = true;
+      const close = shellQuoteEnd(text, index);
+      take(index + 1, close, target);
+      index = close + 1;
+    } else if (character === '"') {
+      const target = word(index);
+      target.quoted = true;
+      index += 1;
+      while (index < text.length && text.charAt(index) !== '"') {
+        const inner = text.charAt(index);
+        if (inner === '\\') {
+          const escaped = text.charAt(index + 1);
+          take(escaped && '$`"\\'.includes(escaped) ? index + 1 : index, index + 2, target);
+          index += 2;
+        } else if (inner === '$' || inner === '`') {
+          index = expand(index);
+        } else {
+          take(index, index + 1, target);
+          index += 1;
+        }
+      }
+      index += 1;
+    } else if (character === '$' || character === '`') {
+      index = expand(index);
+    } else if (character === '(' && text.charAt(index + 1) === '(') {
+      finish(index);
+      const close = shellClosingIndex(text, index);
+      arithmetic(index + 2, close - 1);
+      tokens.push({ kind: 'operator' });
+      index = close + 1;
+    } else if ((character === '<' || character === '>') && text.charAt(index + 1) === '(') {
+      index = substitute(index, index + 2, shellClosingIndex(text, index + 1));
+    } else if (character === '<' || character === '>') {
+      // A bare number before the operator is its file descriptor, as in `2>`.
+      if (pending.word && !pending.word.quoted && /^\d+$/.test(pending.word.text)) pending.word = undefined;
+      finish(index);
+      tokens.push({ kind: 'redirect' });
+      while (/[<>&|]/.test(text.charAt(index))) index += 1;
+    } else if (';&|()'.includes(character)) {
+      finish(index);
+      tokens.push({ kind: 'operator' });
+      index += 1;
+    } else {
+      take(index, index + 1);
+      index += 1;
+    }
+  }
+  finish(text.length);
+  return tokens;
+}
+
+// Walks one script's tokens in command order and records the names it binds. A
+// quoted word's text is scanned again as a possible script in a nested scope.
+function bindShellWords(tokens: ShellToken[], scope: ShellScope, nesting: number, scan: ShellScan) {
+  let position: 'command' | 'loop-name' | 'function-name' | 'arguments' = 'command';
+  let command = '';
+  let readOptionArgument = '';
+  let optionsEnded = false;
+  let redirected = false;
+  const bind = (name: string, token: ShellWord) => bindShellName(scan, name, token.offsets[token.offsets.length - 1], scope);
+  for (const token of tokens) {
+    if (token.kind !== 'word') {
+      redirected = token.kind === 'redirect';
+      if (!redirected) position = 'command';
+      continue;
+    }
+    if (token.quoted) scanShell(token, { parent: scope }, nesting + 1, scan);
+    if (redirected) {
+      redirected = false;
+      continue;
+    }
+    if (position === 'loop-name') {
+      bind(token.raw, token);
+      position = 'command';
+    } else if (position === 'function-name') {
+      position = 'command';
+    } else if (position === 'command') {
+      const assignment = SHELL_ASSIGNMENT.exec(token.raw)?.[1];
+      if (assignment) bind(assignment, token);
+      else if (!SHELL_COMMAND_PREFIXES.has(token.raw)) {
+        position = token.raw === 'for' || token.raw === 'select' ? 'loop-name' : token.raw === 'function' ? 'function-name' : 'arguments';
+        command = token.raw;
+        readOptionArgument = '';
+        optionsEnded = false;
+      }
+    } else if (command === 'read') {
+      if (readOptionArgument) {
+        if (readOptionArgument === 'a') bind(token.text, token);
+        readOptionArgument = '';
+      } else if (!optionsEnded && token.text === '--') {
+        optionsEnded = true;
+      } else if (!optionsEnded && token.text.length > 1 && token.text.startsWith('-')) {
+        const letters = token.text.slice(1);
+        const at = [...letters].findIndex((letter) => SHELL_READ_OPTIONS_WITH_ARGUMENT.includes(letter));
+        const option = at < 0 ? '' : letters.charAt(at);
+        const attached = letters.slice(at + 1);
+        if (option && !attached) readOptionArgument = option;
+        else if (option === 'a') bind(attached, token);
+      } else {
+        bind(token.text, token);
+      }
+    } else if (SHELL_DECLARATIONS.has(command) && !/^[-+]/.test(token.text)) {
+      bind(SHELL_ASSIGNMENT.exec(token.text)?.[1] ?? token.text, token);
+    }
+  }
+}
+
+function scanShell(source: ShellSource, scope: ShellScope, nesting: number, scan: ShellScan) {
+  if (nesting > SHELL_NESTING_LIMIT) return;
+  bindShellWords(lexShell(source, scope, nesting, scan), scope, nesting, scan);
+}
+
+function shellScanOf(command: string): ShellScan {
+  if (shellScanCache?.command === command) return shellScanCache.scan;
+  const scan: ShellScan = { bindings: new Map(), expansions: new Map() };
+  scanShell({ text: command, offsets: Array.from({ length: command.length }, (_, offset) => offset) }, { parent: null }, 0, scan);
+  shellScanCache = { command, scan };
+  return scan;
+}
+
+// Whether `command` binds shell name `name` before the `$` at `index` reads it, in
+// the scope that expands that `$` or one enclosing it. A `$` no scope expands, such
+// as one in a comment or past the nesting limit, is never covered.
+function shellBindsBefore(command: string, name: string, index: number): boolean {
+  const scan = shellScanOf(command);
+  const reference = scan.expansions.get(index);
+  return (scan.bindings.get(name) ?? []).some((binding) => {
+    if (binding.end > index) return false;
+    for (let scope: ShellScope | null | undefined = reference; scope; scope = scope.parent) {
+      if (scope === binding.scope) return true;
+    }
+    return false;
+  });
+}
+
 function createWarnings({ boardConfig, categoryReadOnly, claimReclaimable, coerceEffort, commitScope, contractCollisionReasons, dispatchReadOnly, dispatchState, execFileSync, fs, getTicket, integrationTarget, listTickets, normalizeContracts, normalizeFiles, normalizeRouteModel, overlappingScopePaths, path, pulseDispatchState, readMeta, readOnlyOverrideActive, spawnSync, ticketCategory }: any) {
 const DISPATCH_DESCRIPTION_MIN = 80;
   const WARNING_RETURN_LIMIT = 3;
@@ -144,7 +440,7 @@ function verifyCommandErrors(value?: any) {
   }
   for (const match of command.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)(?:\}|(?::[^}]*)\})/g)) {
     const name = match[1] || match[2];
-    if (name && process.env[name] == null && !match[0].includes(':-')) {
+    if (name && process.env[name] == null && !match[0].includes(':-') && !shellBindsBefore(command, name, match.index ?? 0)) {
       errors.push(`Verify references unset environment variable ${name}. Set a portable default such as \`${'${'}${name}:-/tmp}\`, or use \`manual: <what you checked>\`.`);
     }
   }
