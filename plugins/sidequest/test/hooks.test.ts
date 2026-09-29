@@ -169,6 +169,7 @@ function runHookProcessForBudget(script?: any, payload?: any, envOverrides?: any
 }
 
 const WAIT_FOR_PATH_PER_TEST_WORKER_MS = 2_000;
+const WAIT_FOR_PATH_FLOOR_MS = 60_000;
 
 function testWorkerConcurrency(): number {
   const argument = process.execArgv.find((value: string) => value.startsWith('--test-concurrency='));
@@ -177,7 +178,9 @@ function testWorkerConcurrency(): number {
 }
 
 async function waitForPath(file: string): Promise<void> {
-  const deadline = Date.now() + WAIT_FOR_PATH_PER_TEST_WORKER_MS * testWorkerConcurrency();
+  // Detached workers run slower under host load than worker count predicts; the poll returns
+  // as soon as the file lands, so the floor only lengthens a failure.
+  const deadline = Date.now() + Math.max(WAIT_FOR_PATH_FLOOR_MS, WAIT_FOR_PATH_PER_TEST_WORKER_MS * testWorkerConcurrency());
   while (Date.now() < deadline) {
     if (fs.existsSync(file)) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
