@@ -662,8 +662,42 @@ function captureWaiverOptions(ticket: any, by?: any) {
   };
 }
 
+// SQ-203 (#20): a mismatch refusal has to show which bytes differ, or it reads as a
+// control-plane fault. Every legal pin (EXECUTOR_VERIFY_MAX) fits the display bound in
+// full; a captured string is arbitrary, so it is cut there and the first difference is
+// shown separately with its context, wherever it falls.
+const CAPTURE_COMMAND_DISPLAY_MAX = 1200;
+const CAPTURE_COMMAND_DIFF_CONTEXT = 24;
+
+// JSON escapes quotes, backslashes and control characters; escaping every other
+// non-ASCII code unit too makes a look-alike or invisible character visible.
+function visibleCommandText(value: string) {
+  return JSON.stringify(value).replace(/[^\x20-\x7e]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
+function boundedCommandText(value: string) {
+  if (value.length <= CAPTURE_COMMAND_DISPLAY_MAX) return visibleCommandText(value);
+  return `${visibleCommandText(value.slice(0, CAPTURE_COMMAND_DISPLAY_MAX))} (+${value.length - CAPTURE_COMMAND_DISPLAY_MAX} more characters)`;
+}
+
+function firstCommandDifference(pinnedCommand: string, capturedCommand: string) {
+  const limit = Math.min(pinnedCommand.length, capturedCommand.length);
+  let index = 0;
+  while (index < limit && pinnedCommand[index] === capturedCommand[index]) index += 1;
+  return index;
+}
+
 function captureCommandDetails(pinnedCommand: string, capturedCommand: string) {
-  return `Pinned command: ${JSON.stringify(pinnedCommand)}\nCaptured command: ${JSON.stringify(capturedCommand)}`;
+  const lines = [`Pinned command: ${boundedCommandText(pinnedCommand)}`, `Captured command: ${boundedCommandText(capturedCommand)}`];
+  if (!pinnedCommand) {
+    lines.push('No command verifier is pinned for this ticket, so no wrapper capture can match it.');
+  } else if (pinnedCommand !== capturedCommand) {
+    const at = firstCommandDifference(pinnedCommand, capturedCommand);
+    const start = Math.max(0, at - CAPTURE_COMMAND_DIFF_CONTEXT);
+    const around = (value: string) => `${start > 0 ? '...' : ''}${visibleCommandText(value.slice(start, at + CAPTURE_COMMAND_DIFF_CONTEXT))}${at + CAPTURE_COMMAND_DIFF_CONTEXT < value.length ? '...' : ''}`;
+    lines.push(`First difference at character ${at} (pinned ${pinnedCommand.length} characters, captured ${capturedCommand.length}): pinned ${around(pinnedCommand)} vs captured ${around(capturedCommand)}`);
+  }
+  return lines.join('\n');
 }
 
 function captureCommandMismatchMessage(ticket: any, pinnedCommand: string, capturedCommand: string) {
@@ -674,30 +708,42 @@ function amendedVerifierCaptureMessage(ticket: any, pinnedCommand: string, captu
   return `Verification capture for ${ticket.ref} used the live ticket verifier, but the verify was amended after dispatch. This dispatch still requires its pinned command.\n${captureCommandDetails(pinnedCommand, capturedCommand)}\nCheckpoint current work, release the claim, and re-dispatch; the recovery dispatch resumes the retained worktree and pins the amended verify. If the work is already verified by other evidence, release the claim and use orchestrator groomClose with deliveryCommit.`;
 }
 
+// SQ-203 (#20): the one comparison of a captured command against the ticket's pin. The
+// verify-capture wrapper preflights through recordVerificationCapture({preflight:true}), so
+// the wrapper and the recorder resolve the same pin (pinnedVerificationRequirement, including
+// a re-pin and the legacy fallback) and apply the same trim-then-verbatim equality. Before
+// this the wrapper kept its own dispatch-only pin lookup, so a command it let run could still
+// be refused after it passed, with only the bare reason reaching the caller.
+function captureCommandRefusal(ticket: any, capturedCommand: unknown) {
+  const pinnedAtDispatch = ticket.dispatch?.verificationRequirement
+    || ticket.dispatch?.lifecycleAttempt?.verificationRequirement
+    || ticket.lifecycleAttempt?.verificationRequirement;
+  const command = String(capturedCommand || '').trim();
+  const expectedCommand = String(pinnedVerificationRequirement(ticket).command || '').trim();
+  if (expectedCommand && command === expectedCommand) return null;
+  const liveCommand = String(ticket.executorVerify || '').trim();
+  const message = pinnedAtDispatch && expectedCommand && liveCommand && command === liveCommand
+    ? amendedVerifierCaptureMessage(ticket, expectedCommand, command)
+    : captureCommandMismatchMessage(ticket, expectedCommand, command);
+  return { ok: false, reason: 'verification_capture_command_mismatch', ticket, message, pinnedCommand: expectedCommand };
+}
+
 function recordVerificationCapture(slug: any, idOrRef: any, capture: any) {
   const found = getTicket(slug, idOrRef);
   if (!found) return { ok: false, reason: 'not_found' };
+  // Read-only: answers whether this command would be recorded, and writes nothing.
+  if (capture?.preflight === true) {
+    return captureCommandRefusal(found, capture?.command) || { ok: true, preflight: true, ticket: found, command: String(capture?.command || '').trim() };
+  }
   return withTicketLock(slug, found.id, () => {
     const ticket = getTicket(slug, found.id);
     if (!ticket) return { ok: false, reason: 'not_found' };
-    const pinnedAtDispatch = ticket.dispatch?.verificationRequirement
-      || ticket.dispatch?.lifecycleAttempt?.verificationRequirement
-      || ticket.lifecycleAttempt?.verificationRequirement;
-    const requirement = pinnedVerificationRequirement(ticket);
-    const capturedCommand = String(capture?.command || '');
-    const command = capturedCommand.trim();
-    const pinnedCommand = String(requirement.command || '');
-    const expectedCommand = pinnedCommand.trim();
+    const command = String(capture?.command || '').trim();
     const status = String(capture?.status || '').trim();
     const candidateSource = String(capture?.candidate?.source || '').trim();
     const candidateValue = String(capture?.candidate?.value || '').trim().toLowerCase();
-    if (!expectedCommand || command !== expectedCommand) {
-      const liveCommand = String(ticket.executorVerify || '').trim();
-      const message = pinnedAtDispatch && expectedCommand && liveCommand && command === liveCommand
-        ? amendedVerifierCaptureMessage(ticket, pinnedCommand, capturedCommand)
-        : captureCommandMismatchMessage(ticket, pinnedCommand, capturedCommand);
-      return { ok: false, reason: 'verification_capture_command_mismatch', ticket, message };
-    }
+    const refusal = captureCommandRefusal(ticket, command);
+    if (refusal) return refusal;
     if (!['passed', 'failed_suite', 'toolchain_missing', 'could_not_run', 'timeout', 'manual', 'attestation', 'skipped', 'failed_check'].includes(status)) {
       return { ok: false, reason: 'invalid_verification_capture_status', ticket, message: `Verification capture for ${ticket.ref} has an invalid status.` };
     }

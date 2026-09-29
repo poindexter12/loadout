@@ -528,9 +528,32 @@ Expires: ${checkpoint.expiresAt}`;
       excludedAuthors: [ticket?.claim?.by, by].map((author) => String(author || "").trim()).filter(Boolean)
     };
   }
+  const CAPTURE_COMMAND_DISPLAY_MAX = 1200;
+  const CAPTURE_COMMAND_DIFF_CONTEXT = 24;
+  function visibleCommandText(value) {
+    return JSON.stringify(value).replace(/[^\x20-\x7e]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  }
+  function boundedCommandText(value) {
+    if (value.length <= CAPTURE_COMMAND_DISPLAY_MAX) return visibleCommandText(value);
+    return `${visibleCommandText(value.slice(0, CAPTURE_COMMAND_DISPLAY_MAX))} (+${value.length - CAPTURE_COMMAND_DISPLAY_MAX} more characters)`;
+  }
+  function firstCommandDifference(pinnedCommand, capturedCommand) {
+    const limit = Math.min(pinnedCommand.length, capturedCommand.length);
+    let index = 0;
+    while (index < limit && pinnedCommand[index] === capturedCommand[index]) index += 1;
+    return index;
+  }
   function captureCommandDetails(pinnedCommand, capturedCommand) {
-    return `Pinned command: ${JSON.stringify(pinnedCommand)}
-Captured command: ${JSON.stringify(capturedCommand)}`;
+    const lines = [`Pinned command: ${boundedCommandText(pinnedCommand)}`, `Captured command: ${boundedCommandText(capturedCommand)}`];
+    if (!pinnedCommand) {
+      lines.push("No command verifier is pinned for this ticket, so no wrapper capture can match it.");
+    } else if (pinnedCommand !== capturedCommand) {
+      const at = firstCommandDifference(pinnedCommand, capturedCommand);
+      const start = Math.max(0, at - CAPTURE_COMMAND_DIFF_CONTEXT);
+      const around = (value) => `${start > 0 ? "..." : ""}${visibleCommandText(value.slice(start, at + CAPTURE_COMMAND_DIFF_CONTEXT))}${at + CAPTURE_COMMAND_DIFF_CONTEXT < value.length ? "..." : ""}`;
+      lines.push(`First difference at character ${at} (pinned ${pinnedCommand.length} characters, captured ${capturedCommand.length}): pinned ${around(pinnedCommand)} vs captured ${around(capturedCommand)}`);
+    }
+    return lines.join("\n");
   }
   function captureCommandMismatchMessage(ticket, pinnedCommand, capturedCommand) {
     return `Verification capture for ${ticket.ref} must use its declared command pinned at dispatch. The command is matched verbatim and expected to run from the worktree root; preserve any \`cd ...\` segment in the pinned command rather than running it from a subdirectory.
@@ -541,26 +564,30 @@ ${captureCommandDetails(pinnedCommand, capturedCommand)}`;
 ${captureCommandDetails(pinnedCommand, capturedCommand)}
 Checkpoint current work, release the claim, and re-dispatch; the recovery dispatch resumes the retained worktree and pins the amended verify. If the work is already verified by other evidence, release the claim and use orchestrator groomClose with deliveryCommit.`;
   }
+  function captureCommandRefusal(ticket, capturedCommand) {
+    const pinnedAtDispatch = ticket.dispatch?.verificationRequirement || ticket.dispatch?.lifecycleAttempt?.verificationRequirement || ticket.lifecycleAttempt?.verificationRequirement;
+    const command = String(capturedCommand || "").trim();
+    const expectedCommand = String(pinnedVerificationRequirement(ticket).command || "").trim();
+    if (expectedCommand && command === expectedCommand) return null;
+    const liveCommand = String(ticket.executorVerify || "").trim();
+    const message = pinnedAtDispatch && expectedCommand && liveCommand && command === liveCommand ? amendedVerifierCaptureMessage(ticket, expectedCommand, command) : captureCommandMismatchMessage(ticket, expectedCommand, command);
+    return { ok: false, reason: "verification_capture_command_mismatch", ticket, message, pinnedCommand: expectedCommand };
+  }
   function recordVerificationCapture(slug, idOrRef, capture) {
     const found = getTicket(slug, idOrRef);
     if (!found) return { ok: false, reason: "not_found" };
+    if (capture?.preflight === true) {
+      return captureCommandRefusal(found, capture?.command) || { ok: true, preflight: true, ticket: found, command: String(capture?.command || "").trim() };
+    }
     return withTicketLock(slug, found.id, () => {
       const ticket = getTicket(slug, found.id);
       if (!ticket) return { ok: false, reason: "not_found" };
-      const pinnedAtDispatch = ticket.dispatch?.verificationRequirement || ticket.dispatch?.lifecycleAttempt?.verificationRequirement || ticket.lifecycleAttempt?.verificationRequirement;
-      const requirement = pinnedVerificationRequirement(ticket);
-      const capturedCommand = String(capture?.command || "");
-      const command = capturedCommand.trim();
-      const pinnedCommand = String(requirement.command || "");
-      const expectedCommand = pinnedCommand.trim();
+      const command = String(capture?.command || "").trim();
       const status = String(capture?.status || "").trim();
       const candidateSource = String(capture?.candidate?.source || "").trim();
       const candidateValue = String(capture?.candidate?.value || "").trim().toLowerCase();
-      if (!expectedCommand || command !== expectedCommand) {
-        const liveCommand = String(ticket.executorVerify || "").trim();
-        const message = pinnedAtDispatch && expectedCommand && liveCommand && command === liveCommand ? amendedVerifierCaptureMessage(ticket, pinnedCommand, capturedCommand) : captureCommandMismatchMessage(ticket, pinnedCommand, capturedCommand);
-        return { ok: false, reason: "verification_capture_command_mismatch", ticket, message };
-      }
+      const refusal = captureCommandRefusal(ticket, command);
+      if (refusal) return refusal;
       if (!["passed", "failed_suite", "toolchain_missing", "could_not_run", "timeout", "manual", "attestation", "skipped", "failed_check"].includes(status)) {
         return { ok: false, reason: "invalid_verification_capture_status", ticket, message: `Verification capture for ${ticket.ref} has an invalid status.` };
       }

@@ -203,6 +203,7 @@ type CaptureRecordResult = Readonly<{
   ok: boolean;
   reason?: string;
   message?: string;
+  pinnedCommand?: string;
   capture?: Readonly<{ id: string; ticket?: string; candidate: Readonly<{ source: string; value: string }> }>;
 }>;
 type VerificationCaptureStore = Readonly<{
@@ -668,31 +669,23 @@ function captureBindingFailure(command: string, binding: Extract<CaptureBinding,
   });
 }
 
-function pinnedCaptureCommand(target: CaptureTarget, project: CaptureProject | null): Readonly<{ ticket: unknown; command: string }> | null {
+// SQ-203 (#20): the preflight asks the recorder itself whether this command would be
+// recorded, so the wrapper never runs a command the recorder then refuses after it passes,
+// and never refuses one the recorder would accept. A ticket with no pinned command still
+// runs, as before, and the recorder's verdict on it is printed by report().
+function preflightCapture(command: string, target: CaptureTarget, project: CaptureProject | null): VerifyCapture | null {
   if (!project) return null;
+  let checked: CaptureRecordResult;
   try {
     const store = require('./store.js') as VerificationCaptureStore;
-    const ticket: any = store.getTicket(project.slug, target.ticket);
-    const requirement = ticket?.dispatch?.verificationRequirement
-      || ticket?.dispatch?.lifecycleAttempt?.verificationRequirement
-      || ticket?.lifecycleAttempt?.verificationRequirement;
-    const command = typeof requirement?.command === 'string' ? requirement.command.trim() : '';
-    return command ? Object.freeze({ ticket, command }) : null;
+    checked = store.recordVerificationCapture(project.slug, target.ticket, { command, preflight: true });
   } catch (_) {
     // The submission-time check remains authoritative when the wrapper cannot
-    // read the dispatched pin, so an unavailable board never rejects a run.
+    // read the pin, so an unavailable board never rejects a run.
     return null;
   }
-}
-
-function captureCommandMismatchMessage(ticket: any, pinnedCommand: string, capturedCommand: string): string {
-  return `Verification capture for ${ticket.ref} must use its declared command pinned at dispatch. The command is matched verbatim and expected to run from the worktree root; preserve any \`cd ...\` segment in the pinned command rather than running it from a subdirectory.\nPinned command: ${JSON.stringify(pinnedCommand)}\nCaptured command: ${JSON.stringify(capturedCommand)}`;
-}
-
-function preflightCapture(command: string, target: CaptureTarget, project: CaptureProject | null): VerifyCapture | null {
-  const pinned = pinnedCaptureCommand(target, project);
-  if (!pinned || command.trim() === pinned.command) return null;
-  const reason = captureCommandMismatchMessage(pinned.ticket, pinned.command, command);
+  if (checked?.ok || checked?.reason !== 'verification_capture_command_mismatch' || !checked.pinnedCommand) return null;
+  const reason = checked.message || checked.reason;
   return Object.freeze({
     kind: 'command',
     status: 'failed_check',
@@ -805,6 +798,11 @@ function report(capture: VerifyCapture, recorded?: CaptureRecordResult | null) {
     }
   } else if (recorded) {
     process.stdout.write(`capture=unrecorded reason=${recorded.reason || 'unknown'}\n`);
+    // SQ-203 (#20): the recorder's message names what differed; a bare reason left the
+    // caller guessing. Skip it when the verify= line already carried the same text.
+    if (recorded.message && recorded.message !== capture.reason) {
+      process.stdout.write(`capture-detail=${JSON.stringify(recorded.message)}\n`);
+    }
   }
 }
 

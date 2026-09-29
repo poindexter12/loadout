@@ -479,27 +479,17 @@ function captureBindingFailure(command, binding) {
     reason: binding.reason
   });
 }
-function pinnedCaptureCommand(target, project) {
+function preflightCapture(command, target, project) {
   if (!project) return null;
+  let checked;
   try {
     const store = require("./store.js");
-    const ticket = store.getTicket(project.slug, target.ticket);
-    const requirement = ticket?.dispatch?.verificationRequirement || ticket?.dispatch?.lifecycleAttempt?.verificationRequirement || ticket?.lifecycleAttempt?.verificationRequirement;
-    const command = typeof requirement?.command === "string" ? requirement.command.trim() : "";
-    return command ? Object.freeze({ ticket, command }) : null;
+    checked = store.recordVerificationCapture(project.slug, target.ticket, { command, preflight: true });
   } catch (_) {
     return null;
   }
-}
-function captureCommandMismatchMessage(ticket, pinnedCommand, capturedCommand) {
-  return `Verification capture for ${ticket.ref} must use its declared command pinned at dispatch. The command is matched verbatim and expected to run from the worktree root; preserve any \`cd ...\` segment in the pinned command rather than running it from a subdirectory.
-Pinned command: ${JSON.stringify(pinnedCommand)}
-Captured command: ${JSON.stringify(capturedCommand)}`;
-}
-function preflightCapture(command, target, project) {
-  const pinned = pinnedCaptureCommand(target, project);
-  if (!pinned || command.trim() === pinned.command) return null;
-  const reason = captureCommandMismatchMessage(pinned.ticket, pinned.command, command);
+  if (checked?.ok || checked?.reason !== "verification_capture_command_mismatch" || !checked.pinnedCommand) return null;
+  const reason = checked.message || checked.reason;
   return Object.freeze({
     kind: "command",
     status: "failed_check",
@@ -604,6 +594,10 @@ function report(capture, recorded) {
   } else if (recorded) {
     process.stdout.write(`capture=unrecorded reason=${recorded.reason || "unknown"}
 `);
+    if (recorded.message && recorded.message !== capture.reason) {
+      process.stdout.write(`capture-detail=${JSON.stringify(recorded.message)}
+`);
+    }
   }
 }
 async function main() {
