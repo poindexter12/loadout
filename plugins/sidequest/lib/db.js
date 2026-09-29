@@ -29,6 +29,8 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var db_exports = {};
 __export(db_exports, {
   CURRENT_SCHEMA_VERSION: () => CURRENT_SCHEMA_VERSION,
+  NEWER_SCHEMA_ERROR_CODE: () => NEWER_SCHEMA_ERROR_CODE,
+  SCHEMA_MIGRATED_BY_KEY: () => SCHEMA_MIGRATED_BY_KEY,
   SQLITE_BUSY_POLICY_KEY: () => SQLITE_BUSY_POLICY_KEY,
   SQLITE_BUSY_TIMEOUT_MS: () => SQLITE_BUSY_TIMEOUT_MS,
   assertWritable: () => assertWritable,
@@ -38,9 +40,11 @@ __export(db_exports, {
   hasRow: () => hasRow,
   listRows: () => listRows,
   listRowsPage: () => listRowsPage,
+  loadedPluginVersion: () => loadedPluginVersion,
   openDb: () => openDb,
   prepareCached: () => prepareCached,
   putRow: () => putRow,
+  schemaMigrationRecord: () => schemaMigrationRecord,
   selectRow: () => selectRow,
   selectRows: () => selectRows,
   sqliteBusyPolicy: () => sqliteBusyPolicy,
@@ -292,8 +296,67 @@ function applyCategoryRows(baseCategories, rows) {
   }
   return [...categories.values()];
 }
-function newerSchemaError(schemaVersion) {
-  return new Error(`Sidequest database schema ${schemaVersion} is newer than supported schema ${CURRENT_SCHEMA_VERSION}.`);
+const SCHEMA_MIGRATED_BY_KEY = "schema_migrated_by";
+const NEWER_SCHEMA_ERROR_CODE = "SIDEQUEST_SCHEMA_NEWER";
+function readLoadedPluginVersion() {
+  if (typeof __dirname !== "string") return null;
+  for (const manifestPath of [
+    import_node_path.default.join(__dirname, "..", ".claude-plugin", "plugin.json"),
+    import_node_path.default.join(__dirname, "..", "..", ".claude-plugin", "plugin.json")
+  ]) {
+    try {
+      const manifest = JSON.parse(import_node_fs.default.readFileSync(manifestPath, "utf8"));
+      if (isRecord(manifest) && manifest.name === "sidequest" && typeof manifest.version === "string" && manifest.version.trim()) {
+        return manifest.version.trim();
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+const LOADED_PLUGIN_VERSION = readLoadedPluginVersion();
+function loadedPluginVersion() {
+  return LOADED_PLUGIN_VERSION;
+}
+function recordSchemaMigration(database) {
+  const record = { version: LOADED_PLUGIN_VERSION, schemaVersion: CURRENT_SCHEMA_VERSION, migratedAt: (/* @__PURE__ */ new Date()).toISOString() };
+  txn(database, () => {
+    prepareCached(database, "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(SCHEMA_MIGRATED_BY_KEY, JSON.stringify(record));
+  });
+}
+function isNewerSchemaError(error) {
+  return error instanceof Error && error.code === NEWER_SCHEMA_ERROR_CODE;
+}
+function schemaMigrationRecord(database) {
+  try {
+    const row = prepareCached(database, "SELECT value FROM meta WHERE key = ?").get(SCHEMA_MIGRATED_BY_KEY);
+    if (!row) return null;
+    const parsed = JSON.parse(row.value);
+    if (!isRecord(parsed) || typeof parsed.schemaVersion !== "number" || !Number.isInteger(parsed.schemaVersion)) return null;
+    return {
+      version: typeof parsed.version === "string" && parsed.version.trim() ? parsed.version.trim() : null,
+      schemaVersion: parsed.schemaVersion,
+      migratedAt: typeof parsed.migratedAt === "string" && parsed.migratedAt ? parsed.migratedAt : null
+    };
+  } catch {
+    return null;
+  }
+}
+function newerSchemaError(schemaVersion, database, refusing = "refusing to open the board") {
+  const record = database ? schemaMigrationRecord(database) : null;
+  const migratedBy = record && record.schemaVersion === schemaVersion ? record : null;
+  const loaded = LOADED_PLUGIN_VERSION ? `sidequest ${LOADED_PLUGIN_VERSION}` : "a sidequest version whose manifest was unreadable";
+  const migrator = migratedBy?.version ? `sidequest ${migratedBy.version} migrated the shared board database to schema ${schemaVersion}${migratedBy.migratedAt ? ` at ${migratedBy.migratedAt}` : ""}` : `a newer sidequest migrated the shared board database to schema ${schemaVersion} (the migrating version was not recorded)`;
+  const error = new Error(
+    `Sidequest database schema ${schemaVersion} is newer than supported schema ${CURRENT_SCHEMA_VERSION}; ${refusing}. This session has ${loaded} loaded, and ${migrator}. Run /reload-plugins (or restart Claude Code) to load the newer sidequest, then retry: this call changed nothing on the board.`
+  );
+  return Object.assign(error, {
+    code: NEWER_SCHEMA_ERROR_CODE,
+    schemaVersion,
+    supportedSchemaVersion: CURRENT_SCHEMA_VERSION,
+    loadedVersion: LOADED_PLUGIN_VERSION,
+    migratedBy
+  });
 }
 function storedSchemaVersion(database) {
   if (!prepareCached(database, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").get()) return null;
@@ -304,11 +367,23 @@ function openDb(homeRoot) {
   import_node_fs.default.mkdirSync(homeRoot, { recursive: true });
   const { timeoutMs } = sqliteBusyPolicy();
   const database = new DatabaseSyncConstructor(import_node_path.default.join(homeRoot, "sidequest.db"), { timeout: timeoutMs });
-  retryWhenSqliteBusy("enabling WAL mode", () => database.exec("PRAGMA journal_mode=WAL"));
-  database.exec(`PRAGMA busy_timeout=${timeoutMs}`);
-  const storedVersion = retryWhenSqliteBusy("reading the schema version", () => storedSchemaVersion(database));
-  if (storedVersion !== null && storedVersion > CURRENT_SCHEMA_VERSION) throw newerSchemaError(storedVersion);
-  if (storedVersion !== CURRENT_SCHEMA_VERSION) upgradeSchema(database);
+  try {
+    retryWhenSqliteBusy("enabling WAL mode", () => database.exec("PRAGMA journal_mode=WAL"));
+    database.exec(`PRAGMA busy_timeout=${timeoutMs}`);
+    const storedVersion = retryWhenSqliteBusy("reading the schema version", () => storedSchemaVersion(database));
+    if (storedVersion !== null && storedVersion > CURRENT_SCHEMA_VERSION) throw newerSchemaError(storedVersion, database);
+    if (storedVersion !== CURRENT_SCHEMA_VERSION) {
+      upgradeSchema(database);
+      recordSchemaMigration(database);
+    }
+  } catch (error) {
+    const refusal = isNewerSchemaError(error) && !error.migratedBy ? newerSchemaError(error.schemaVersion, database) : error;
+    try {
+      database.close();
+    } catch {
+    }
+    throw refusal;
+  }
   database.exec("PRAGMA foreign_keys=ON");
   const sidequestDatabase = database;
   sidequestDatabase.__sidequestSchemaVersion = CURRENT_SCHEMA_VERSION;
@@ -693,9 +768,7 @@ function getRow(database, table, key) {
 function assertWritable(database) {
   const row = retryWhenSqliteBusy("checking schema version", () => prepareCached(database, "SELECT value FROM meta WHERE key = 'schema_version'").get());
   const version = Number(row && JSON.parse(row.value));
-  if (version > CURRENT_SCHEMA_VERSION) {
-    throw new Error(`Sidequest database schema ${version} is newer than supported schema ${CURRENT_SCHEMA_VERSION}; refusing write.`);
-  }
+  if (version > CURRENT_SCHEMA_VERSION) throw newerSchemaError(version, database, "refusing write");
 }
 function putRow(database, table, rowObject) {
   assertWritable(database);
@@ -767,6 +840,8 @@ function txn(database, fn) {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   CURRENT_SCHEMA_VERSION,
+  NEWER_SCHEMA_ERROR_CODE,
+  SCHEMA_MIGRATED_BY_KEY,
   SQLITE_BUSY_POLICY_KEY,
   SQLITE_BUSY_TIMEOUT_MS,
   assertWritable,
@@ -776,9 +851,11 @@ function txn(database, fn) {
   hasRow,
   listRows,
   listRowsPage,
+  loadedPluginVersion,
   openDb,
   prepareCached,
   putRow,
+  schemaMigrationRecord,
   selectRow,
   selectRows,
   sqliteBusyPolicy,

@@ -260,6 +260,10 @@ test('a schema-v6 session refuses writes after a schema-v7 process migrates the 
   const result = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /schema 8 is newer than supported schema 7; refusing write/);
+  // #22: the real migration above recorded its plugin version, and the stranded session names it and the fix.
+  const { version } = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '.claude-plugin', 'plugin.json'), 'utf8')) as { version: string };
+  assert.ok(result.stdout.includes(`This session has sidequest ${version} loaded, and sidequest ${version} migrated the shared board database to schema 8 at `), result.stdout);
+  assert.match(result.stdout, /Run \/reload-plugins \(or restart Claude Code\) to load the newer sidequest, then retry/);
 });
 
 test('migrates a JSON tree into SQLite without deleting its rollback copy', () => {

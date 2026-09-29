@@ -23,6 +23,7 @@ try {
 
 // Bump this for ANY schema script change, including a new CREATE ... IF NOT EXISTS: openDb skips the whole
 // script when the stored version is current, so an unversioned addition never reaches an existing board (SQ-125).
+// openDb records which plugin version ran a migration (recordSchemaMigration), so an older session can name it (#22).
 export const CURRENT_SCHEMA_VERSION = 8;
 // Board writers normally finish in milliseconds; fifteen-second SQLite waits avoid failing on ordinary handoffs without hiding a wedged writer forever.
 export const SQLITE_BUSY_TIMEOUT_MS = 15_000;
@@ -446,8 +447,117 @@ function applyCategoryRows(
   return [...categories.values()];
 }
 
-function newerSchemaError(schemaVersion: number): Error {
-  return new Error(`Sidequest database schema ${schemaVersion} is newer than supported schema ${CURRENT_SCHEMA_VERSION}.`);
+// The board database is shared by every session on the machine, so the first process running a newer sidequest
+// migrates it out from under sessions that still have an older one loaded (#22). Each migration step records which
+// plugin version moved the board, so the older session's refusal can name it rather than fail opaquely.
+export const SCHEMA_MIGRATED_BY_KEY = 'schema_migrated_by';
+export const NEWER_SCHEMA_ERROR_CODE = 'SIDEQUEST_SCHEMA_NEWER';
+
+export interface SchemaMigrationRecord {
+  /** Sidequest version whose code ran the migration; null when its manifest was unreadable. */
+  version: string | null;
+  /** The schema version that migration step left the board at. */
+  schemaVersion: number;
+  migratedAt: string | null;
+}
+
+export type NewerSchemaError = Error & {
+  code: typeof NEWER_SCHEMA_ERROR_CODE;
+  schemaVersion: number;
+  supportedSchemaVersion: number;
+  loadedVersion: string | null;
+  migratedBy: SchemaMigrationRecord | null;
+};
+
+function readLoadedPluginVersion(): string | null {
+  if (typeof __dirname !== 'string') return null;
+  // Built lib/db.js sits one level under the plugin root; src/lib/db.ts run through tsx sits two.
+  for (const manifestPath of [
+    path.join(__dirname, '..', '.claude-plugin', 'plugin.json'),
+    path.join(__dirname, '..', '..', '.claude-plugin', 'plugin.json'),
+  ]) {
+    try {
+      const manifest: unknown = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      if (isRecord(manifest) && manifest.name === 'sidequest' && typeof manifest.version === 'string' && manifest.version.trim()) {
+        return manifest.version.trim();
+      }
+    } catch {
+      // Try the next layout; an unreadable manifest only costs the refusal its version detail.
+    }
+  }
+  return null;
+}
+
+// Read once at load, not at refusal time: an update can delete this version's plugin cache directory while the
+// session that loaded it is still running, and that session is exactly the one that needs the answer.
+const LOADED_PLUGIN_VERSION = readLoadedPluginVersion();
+
+/** The sidequest version whose code this process loaded, or null when its manifest was unreadable. */
+export function loadedPluginVersion(): string | null {
+  return LOADED_PLUGIN_VERSION;
+}
+
+// openDb runs this right after upgradeSchema, never on an already-current open (that stays write-free, SQ-125). It
+// stays outside upgradeSchema because the record is informational: a board already at the current schema has no
+// need of it, so it is not a schema change that must reach existing boards (SQ-133). The record carries the schema it
+// was written for, so if a crash lands between the last step and this write, a later refusal says "not recorded"
+// rather than naming the previous migrator.
+function recordSchemaMigration(database: DatabaseSync): void {
+  const record: SchemaMigrationRecord = { version: LOADED_PLUGIN_VERSION, schemaVersion: CURRENT_SCHEMA_VERSION, migratedAt: new Date().toISOString() };
+  txn(database, () => {
+    prepareCached(database, 'INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(SCHEMA_MIGRATED_BY_KEY, JSON.stringify(record));
+  });
+}
+
+function isNewerSchemaError(error: unknown): error is NewerSchemaError {
+  return error instanceof Error && (error as Partial<NewerSchemaError>).code === NEWER_SCHEMA_ERROR_CODE;
+}
+
+/** The recorded migrator of this board, or null when none was recorded or the record is unreadable. */
+export function schemaMigrationRecord(database: DatabaseSync): SchemaMigrationRecord | null {
+  try {
+    const row = prepareCached(database, 'SELECT value FROM meta WHERE key = ?').get(SCHEMA_MIGRATED_BY_KEY);
+    if (!row) return null;
+    const parsed: unknown = JSON.parse(row.value as string);
+    if (!isRecord(parsed) || typeof parsed.schemaVersion !== 'number' || !Number.isInteger(parsed.schemaVersion)) return null;
+    return {
+      version: typeof parsed.version === 'string' && parsed.version.trim() ? parsed.version.trim() : null,
+      schemaVersion: parsed.schemaVersion,
+      migratedAt: typeof parsed.migratedAt === 'string' && parsed.migratedAt ? parsed.migratedAt : null,
+    };
+  } catch {
+    // The refusal is the answer; a missing or unreadable record must never replace it with a different error.
+    return null;
+  }
+}
+
+// upgradeSchema's own check (a migrator that raced this open) passes no handle; openDb re-raises it with one.
+function newerSchemaError(
+  schemaVersion: number,
+  database?: DatabaseSync,
+  refusing: 'refusing to open the board' | 'refusing write' = 'refusing to open the board',
+): NewerSchemaError {
+  const record = database ? schemaMigrationRecord(database) : null;
+  // A record written for another schema version (an older migration, or a newer one that crashed before recording)
+  // would name the wrong migrator.
+  const migratedBy = record && record.schemaVersion === schemaVersion ? record : null;
+  const loaded = LOADED_PLUGIN_VERSION ? `sidequest ${LOADED_PLUGIN_VERSION}` : 'a sidequest version whose manifest was unreadable';
+  const migrator = migratedBy?.version
+    ? `sidequest ${migratedBy.version} migrated the shared board database to schema ${schemaVersion}${migratedBy.migratedAt ? ` at ${migratedBy.migratedAt}` : ''}`
+    : `a newer sidequest migrated the shared board database to schema ${schemaVersion} (the migrating version was not recorded)`;
+  const error = new Error(
+    `Sidequest database schema ${schemaVersion} is newer than supported schema ${CURRENT_SCHEMA_VERSION}; ${refusing}. `
+    + `This session has ${loaded} loaded, and ${migrator}. `
+    + 'Run /reload-plugins (or restart Claude Code) to load the newer sidequest, then retry: this call changed nothing on the board.',
+  );
+  return Object.assign(error, {
+    code: NEWER_SCHEMA_ERROR_CODE,
+    schemaVersion,
+    supportedSchemaVersion: CURRENT_SCHEMA_VERSION,
+    loadedVersion: LOADED_PLUGIN_VERSION,
+    migratedBy,
+  } as const);
 }
 
 // Pure reads: a WAL reader never waits on the write lock, so this answers even while a long writer holds it.
@@ -461,15 +571,29 @@ export function openDb(homeRoot: string): SidequestDatabase {
   fs.mkdirSync(homeRoot, { recursive: true });
   const { timeoutMs } = sqliteBusyPolicy();
   const database = new DatabaseSyncConstructor(path.join(homeRoot, 'sidequest.db'), { timeout: timeoutMs });
-  // Already-WAL databases answer this without the write lock; only a fresh file has to convert.
-  retryWhenSqliteBusy('enabling WAL mode', () => database.exec('PRAGMA journal_mode=WAL'));
-  database.exec(`PRAGMA busy_timeout=${timeoutMs}`);
-  // Every hook process opens the board, so a current schema must open without a single write statement: any
-  // DML, even an INSERT OR IGNORE that changes nothing, takes the machine-global write lock and queues this
-  // open behind whatever long writer holds it (SQ-125). Only a missing or older schema reaches the DDL.
-  const storedVersion = retryWhenSqliteBusy('reading the schema version', () => storedSchemaVersion(database));
-  if (storedVersion !== null && storedVersion > CURRENT_SCHEMA_VERSION) throw newerSchemaError(storedVersion);
-  if (storedVersion !== CURRENT_SCHEMA_VERSION) upgradeSchema(database);
+  try {
+    // Already-WAL databases answer this without the write lock; only a fresh file has to convert.
+    retryWhenSqliteBusy('enabling WAL mode', () => database.exec('PRAGMA journal_mode=WAL'));
+    database.exec(`PRAGMA busy_timeout=${timeoutMs}`);
+    // Every hook process opens the board, so a current schema must open without a single write statement: any
+    // DML, even an INSERT OR IGNORE that changes nothing, takes the machine-global write lock and queues this
+    // open behind whatever long writer holds it (SQ-125). Only a missing or older schema reaches the DDL.
+    const storedVersion = retryWhenSqliteBusy('reading the schema version', () => storedSchemaVersion(database));
+    if (storedVersion !== null && storedVersion > CURRENT_SCHEMA_VERSION) throw newerSchemaError(storedVersion, database);
+    if (storedVersion !== CURRENT_SCHEMA_VERSION) {
+      upgradeSchema(database);
+      recordSchemaMigration(database);
+    }
+  } catch (error) {
+    const refusal = isNewerSchemaError(error) && !error.migratedBy ? newerSchemaError(error.schemaVersion, database) : error;
+    // The store retries openDb on every call, so a refused open must not leave its handle behind each time.
+    try {
+      database.close();
+    } catch {
+      // Preserve the open error.
+    }
+    throw refusal;
+  }
   database.exec('PRAGMA foreign_keys=ON');
   const sidequestDatabase = database as SidequestDatabase;
   sidequestDatabase.__sidequestSchemaVersion = CURRENT_SCHEMA_VERSION;
@@ -881,9 +1005,7 @@ export function getRow<T = unknown, N extends TableName = TableName>(
 export function assertWritable(database: DatabaseSync): void {
   const row = retryWhenSqliteBusy('checking schema version', () => prepareCached(database, "SELECT value FROM meta WHERE key = 'schema_version'").get());
   const version = Number(row && JSON.parse(row.value as string));
-  if (version > CURRENT_SCHEMA_VERSION) {
-    throw new Error(`Sidequest database schema ${version} is newer than supported schema ${CURRENT_SCHEMA_VERSION}; refusing write.`);
-  }
+  if (version > CURRENT_SCHEMA_VERSION) throw newerSchemaError(version, database, 'refusing write');
 }
 
 export function putRow<N extends TableName>(database: DatabaseSync, table: N, rowObject: DatabaseTableRowMap[N]): ChangeCount {
