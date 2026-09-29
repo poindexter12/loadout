@@ -254,51 +254,20 @@ function createWarnings({ boardConfig, categoryReadOnly, claimReclaimable, coerc
     if (text.length > max) throw new Error(`${label} exceeds the ${max}-character executor-context limit.`);
     return text;
   }
-  const VERIFY_BUILTINS = /* @__PURE__ */ new Set([
-    "bash",
-    "bun",
-    "cargo",
-    "cd",
-    "cmake",
-    "cmd",
-    "composer",
-    "ctest",
-    "dart",
-    "deno",
-    "dotnet",
-    "elixir",
-    "eslint",
-    "flutter",
-    "git",
-    "go",
-    "gradle",
-    "java",
-    "jest",
-    "just",
-    "make",
-    "mix",
-    "mvn",
-    "node",
-    "npm",
-    "npx",
-    "php",
-    "pnpm",
-    "poetry",
-    "powershell",
-    "pwsh",
-    "py",
-    "pytest",
-    "python",
-    "python3",
-    "rake",
-    "ruby",
-    "sh",
-    "tox",
-    "tsc",
-    "uv",
-    "vitest",
-    "yarn"
-  ]);
+  const VERIFY_EXECUTABLE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/;
+  const VERIFY_EXECUTABLE_PATH = /[\\/]|\.(?:bat|cmd|com|exe|ps1|sh)$/i;
+  const VERIFY_SENTENCE_WORD = /^[A-Z][a-z]+$/;
+  const VERIFY_PROSE_VERB = /^(?:check|confirm|ensure|inspect|look|open|read|review|verify)\s/i;
+  function verifyLeadingWord(command) {
+    const match = command.match(/^\s*(?:["']([^"']+)["']|([^\s;&|]+))/);
+    return match?.[1] || match?.[2] || "";
+  }
+  function verifyStartsWithExecutable(command, first) {
+    if (VERIFY_PROSE_VERB.test(command)) return false;
+    if (/^\(cd\s/.test(command)) return true;
+    if (VERIFY_EXECUTABLE_PATH.test(first)) return true;
+    return VERIFY_EXECUTABLE_NAME.test(first) && !VERIFY_SENTENCE_WORD.test(first);
+  }
   function manualVerify(value) {
     return classifyVerificationKind(value, "command") === "manual";
   }
@@ -378,9 +347,7 @@ function createWarnings({ boardConfig, categoryReadOnly, claimReclaimable, coerc
     if (/^manual\b/i.test(command)) {
       return ["Manual verification must use the exact prefix `manual: <what you checked>`. Otherwise provide a runnable command such as `npm run test` or `cd <repo-relative-dir> && <command>`."];
     }
-    const first = command.match(/^\s*(?:["']([^"']+)["']|([^\s;&|]+))/)?.[1] || command.match(/^\s*(?:["']([^"']+)["']|([^\s;&|]+))/)?.[2] || "";
-    const likelyExecutable = VERIFY_BUILTINS.has(first.toLowerCase()) || /^\(cd\s/.test(command) || /[\\/]|\.(?:bat|cmd|com|exe|ps1|sh)$/i.test(first);
-    const proseStarter = /^(?:check|confirm|ensure|inspect|look|open|read|review|verify)\s/i.test(command);
+    const first = verifyLeadingWord(command);
     const errors = [];
     if (/\r|\n/.test(command)) {
       errors.push("Verify must be one runnable command line. Use `npm run test` or `cd <repo-relative-dir> && <command>`.");
@@ -394,8 +361,9 @@ function createWarnings({ boardConfig, categoryReadOnly, claimReclaimable, coerc
     if (/(?:^|(?:&&|\|\|)\s*)npm\s+(?:test|run\s+[^\s;&|]+)\.(?=\s+[A-Z])/.test(command)) {
       errors.push("Verify cannot append prose after a command. Put the command alone, or use `manual: <what you checked>` for a non-shell check.");
     }
-    if (proseStarter || !likelyExecutable) {
-      errors.push("Verify must start with a runnable command such as `npm run test` or `cd <repo-relative-dir> && <command>`. For manual verification, use `manual: <what you checked>` so it is recorded without shell execution.");
+    if (!verifyStartsWithExecutable(command, first)) {
+      const leading = first ? ` \`${first}\` reads as prose, not an executable name or path.` : "";
+      errors.push(`Verify must start with a runnable command: an executable name or path, never prose.${leading} Any executable works, such as \`npm run test\`, \`docker build .\`, \`./scripts/check.sh\`, or \`cd <repo-relative-dir> && <command>\`. For manual verification, use \`manual: <what you checked>\` so it is recorded without shell execution.`);
     }
     for (const match of command.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)(?:\}|(?::[^}]*)\})/g)) {
       const name = match[1] || match[2];
