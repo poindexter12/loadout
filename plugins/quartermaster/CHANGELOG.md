@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.6 (2026-09-29)
+
+Released in v4.1.0, up from 0.8.5.
+
+### Fixes
+
+- model-gateway/quartermaster: updater launcher path now resolves under the active account config dir instead of a shared hardcoded ~/.claude path (SQ-177)
+  registry-writer.js and update-loadout.js both resolve the update.js launcher via CLAUDE_CONFIG_DIR (falling back to home/.claude) instead of a literal ~/.claude that every account shared. The reader falls back to the legacy shared path only until the account-scoped launcher has been (re)written.
+
 ## 0.8.5 (2026-09-27)
 
 Released in v4.0.0, up from 0.8.4.
