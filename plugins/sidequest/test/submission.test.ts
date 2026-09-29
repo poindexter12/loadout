@@ -1469,7 +1469,7 @@ test('CLI and MCP reject unauthorized or independently invalid ranges without po
   assert.strictEqual(unauthorizedMcp.reason, 'not_owner');
   assert.strictEqual(store.getTicket(slug, ticket.ref).rejectedSubmissions, undefined);
 
-  const invalidCli = runCli(['submit', ticket.ref, '--by', 'owner-worker', '--commit', commit, '--verify', 'unstructured prose']);
+  const invalidCli = runCli(['submit', ticket.ref, '--by', 'owner-worker', '--commit', commit, '--verify', 'Unstructured prose']);
   assert.strictEqual(invalidCli.status, 1);
   assert.strictEqual(store.getTicket(slug, ticket.ref).rejectedSubmissions, undefined);
   const invalidMcp = await callMcp('submit', {
@@ -1477,7 +1477,7 @@ test('CLI and MCP reject unauthorized or independently invalid ranges without po
     ref: ticket.ref,
     by: 'owner-worker',
     commit,
-    verify: 'unstructured prose',
+    verify: 'Unstructured prose',
     worktree: PROJECT_DIR,
     body: 'No paths admitted. Independent verify validation must prevent rejection history.',
   });
