@@ -1,6 +1,6 @@
 'use strict';
 
-const { spawnSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const { StringDecoder } = require('node:string_decoder');
 const crypto = require('node:crypto');
 const dns = require('node:dns');
@@ -14,7 +14,7 @@ const { writeFileAtomically } = require('./atomic-file.js');
 const { createGatewayUsageEmitter, recordRequestBodyHighWater } = require('./usage-observability.js');
 const grokBackend = require('./grok-backend.js');
 const { sanitizeToolSchemas } = require('./tool-schema.js');
-const { fetchUrl, foreignShimOwner, foreignShimOwnerMessage, gatewayInstallRoot, probeFailureReason, probeSucceeded, proxyModelsProbe } = require('./process-supervision.js');
+const { createWakeDetector, dropPooledSockets, fetchUrl, foreignShimOwner, foreignShimOwnerMessage, gatewayInstallRoot, probeFailureReason, probeSucceeded, proxyModelsProbe } = require('./process-supervision.js');
 const { effectiveBaseUrl, wiredMode } = require('./settings-wiring.js');
 const { detectHostsCompat } = require('./remote-control.js');
 const { codexBaseFromId, ourBaseUrls } = require('./pins.js');
@@ -46,10 +46,63 @@ function grokIsAdvertisable() {
   return getGrokReadiness().ready;
 }
 
-function isAuthed() {
-  const r = spawnSync(PROXY_BIN, ['codex', 'auth', 'status'], { encoding: 'utf8', timeout: 15000, windowsHide: true });
-  return r.status === 0 && /account/i.test((r.stdout || '') + (r.stderr || ''));
+// SQ-239: the worker's /healthz used to call a synchronous isAuthed(), a spawnSync of
+// `claude-code-proxy codex auth status`. That reads the macOS Keychain and took 0.7-1s
+// on an awake machine, and spawnSync blocks the worker's whole event loop meanwhile:
+// every request, not only the probe. `ensure` gives /healthz 1000ms. After a wake a
+// slow or locked Keychain held the loop for up to the 15s spawn timeout per probe, so
+// /healthz stopped answering while :PUBLIC_SHIM_PORT stayed bound (the post-sleep
+// wedge). The worker now asks asynchronously and serves the last answer while a
+// refresh runs; only the first answer after boot is awaited.
+function isAuthedAsync({ timeout = 15000, spawnProcess = spawn } = {}) {
+  return new Promise((resolve) => {
+    let output = '';
+    let settled = false;
+    const finish = (value) => { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } };
+    let child;
+    try {
+      child = spawnProcess(PROXY_BIN, ['codex', 'auth', 'status'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    } catch { return resolve(false); }
+    const timer = setTimeout(() => { try { child.kill(); } catch {} finish(false); }, timeout);
+    timer.unref?.();
+    child.stdout?.on('data', (chunk) => { output += chunk; });
+    child.stderr?.on('data', (chunk) => { output += chunk; });
+    child.once('error', () => finish(false));
+    child.once('close', (code) => finish(code === 0 && /account/i.test(output)));
+  });
 }
+
+const AUTH_STATUS_TTL_MS = 60000;
+function createAuthStatusCache({ check = isAuthedAsync, ttlMs = AUTH_STATUS_TTL_MS, now = Date.now } = {}) {
+  let value;
+  let checkedAt = 0;
+  let pending = null;
+  function refresh() {
+    if (!pending) {
+      pending = Promise.resolve()
+        .then(() => check())
+        .then((result) => { value = Boolean(result); checkedAt = now(); return value; }, () => {
+          // A failed check keeps the last answer rather than flipping readiness to
+          // auth-missing on a transient spawn error.
+          checkedAt = now();
+          if (value === undefined) value = false;
+          return value;
+        })
+        .finally(() => { pending = null; });
+    }
+    return pending;
+  }
+  return {
+    status() {
+      if (value === undefined) return refresh();
+      if (now() - checkedAt >= ttlMs) void refresh();
+      return value;
+    },
+    invalidate() { checkedAt = 0; },
+    refresh,
+  };
+}
+const authStatusCache = createAuthStatusCache();
 
 const CODEX_READINESS_MESSAGES = {
   'binary-missing': () => `Codex dispatch refused: claude-code-proxy is missing. Run \`node "${__filename}" setup\`, then retry. No Anthropic fallback was used.`,
@@ -111,7 +164,7 @@ function readinessState(checks, upstreamBlocked) {
 async function getCodexReadiness({
   binaryPresent = fs.existsSync(PROXY_BIN),
   probeProxyModels = proxyModelsProbe,
-  authStatus = isAuthed,
+  authStatus = () => authStatusCache.status(),
   shimHealth = undefined,
   fetchHealth = fetchShimHealth,
   foreignOwner = foreignShimOwner,
@@ -124,7 +177,7 @@ async function getCodexReadiness({
   // probeSucceeded keeps an injected `async () => true` working alongside the detail
   // record the real probe returns.
   const proxyModels = probeSucceeded(proxyProbe);
-  const codexAuth = proxyBinary ? Boolean(authStatus()) : false;
+  const codexAuth = proxyBinary ? Boolean(await authStatus()) : false;
   const shimRunning = Boolean(health?.ok);
   const servingVersion = servingShimVersion(health);
   const checks = {
@@ -926,6 +979,8 @@ async function reclaimStaleUnixSocket(socketPath) {
 
 function runWorker() {
   process.once('disconnect', () => process.exit(0));
+  // Prime the auth answer so the first /healthz does not wait on the Keychain.
+  void authStatusCache.refresh();
   let modelCache = {
     at: 0,
     // gatewayModel takes (id, backend); a bare .map(gatewayModel) would pass
@@ -1190,6 +1245,15 @@ function runWorker() {
 
   const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 64 });
   const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64 });
+  // SQ-239: see createWakeDetector. Idle upstream sockets pooled before a sleep are
+  // dropped on wake, and the cached auth answer is re-read in the background.
+  createWakeDetector({
+    onWake: ({ gapMs }) => {
+      const dropped = dropPooledSockets([httpAgent, httpsAgent, http.globalAgent, https.globalAgent]);
+      authStatusCache.invalidate();
+      console.error(`${new Date().toISOString()} model-gateway: worker resumed after a ${Math.round(gapMs / 1000)}s gap (sleep or suspend); dropped ${dropped} pooled idle socket${dropped === 1 ? '' : 's'}`);
+    },
+  });
 
   function filterPlanToolBlock(block) {
     return block && block.type === 'tool_use' && PLAN_TOOLS.includes(block.name);
@@ -2239,7 +2303,7 @@ function runWorker() {
 }
 
 module.exports = {
-  createHostsBypassResolver, effectiveCodexSentryPolicy, gatewayModel, runWorker,
+  createAuthStatusCache, createHostsBypassResolver, effectiveCodexSentryPolicy, gatewayModel, getCodexReadiness, isAuthedAsync, runWorker,
   probeUnixSocketLive, reclaimStaleUnixSocket,
   codexRateLimitBody, codexRateLimitMessage, upstreamConnectErrorMessage,
 };
