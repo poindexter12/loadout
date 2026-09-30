@@ -8,6 +8,30 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v4.2.0 (2026-09-30)
+
+### model-gateway 0.52.0 → 0.52.1
+
+#### Fixes
+
+- Gateway recovery survives the SessionStart hook timeout (SQ-235)
+  A shim supervisor that a SessionStart `ensure` starts during recovery now outlives that hook. Claude Code's timeout kill of the hook used to take the new supervisor down with it, which left the gateway refusing connections until the next session started. When the old supervisor is slow to drain, a detached recovery controller starts exactly one replacement as soon as the port frees, instead of leaving nothing listening. Sessions that start together now wait for that controller, and each `ensure` keeps its waits inside the hook's time budget.
+
+### sidequest 5.4.0 → 5.4.1
+
+#### Fixes
+
+- sidequest: compaction suggestion no longer miscounts jev's kept-history re-append as transcript growth (SQ-195)
+  PostCompact recorded the transcript byte baseline before the engine re-appended jev's kept history to the JSONL (530KB-1.0MB observed), so the next Stop counted that re-append toward the 3MB growth threshold. PostCompact now marks the baseline pending; the first Stop after a compaction records the post-reappend size as the real baseline and skips the suggestion for that turn. Real growth measured after that baseline is established still triggers a suggestion normally.
+- sidequest: after a replacement compaction, codebase-mapper and live-rules reliably emit their short note instead of re-injecting full context (SQ-200)
+  Claude Code runs one event's hooks in parallel. After a replacement compaction, sidequest's SessionStart(compact) hook deleted the shared replacement-compaction marker as it read it, so whenever it ran before codebase-mapper or live-rules, those two missed the marker and re-injected their full map and rule set. No SessionStart reader deletes the marker any more. All three read it with the same 2-minute age bound. PostCompact is now the marker's only writer and only deleter: every compaction removes any earlier marker first, so a summarized compaction that follows a replacement one inside the bound still gets full re-grounding, and it writes a fresh timestamped marker only when the compaction was a replacement.
+- sidequest: SessionStart audit test stays on its intended within-budget path under host load (SQ-228)
+  Sidequest's SessionStart audit-handoff coverage now gives the quiet and carried-summary branches a generous test-only audit deadline and asserts that neither silently falls into deferred reporting under a busy host. The dedicated zero-deadline branch continues to verify the user-visible deferral notice.
+- sidequest: isolated executors dispatched onto another board than the session cwd get their worktree instead of dispatch_binding_unavailable (SQ-230)
+  An orchestrator whose session cwd sits in one registered repository can dispatch onto another board with `--project`. PreToolUse records that launch on the `--project` board, but the WorktreeCreate hook only receives the session cwd and looked for the launch on the cwd board alone, so every isolated executor was refused with `worktree lease refused creation: dispatch_binding_unavailable`. The hook still tries the cwd board first. When that board holds no live worktree dispatch for the session, it binds the one other board that does and creates the checkout from that board's repository. If several boards qualify it refuses `ambiguous_binding` rather than guessing. A cwd outside any Git repository no longer aborts the hook.
+
+  A spawn whose prepared dispatch the board retires at launch as `prepared_compatibility_stale` (the loaded Sidequest differs from the install it was prepared under) is now denied at PreToolUse with the stale-install message. It used to launch anyway and then fail at WorktreeCreate with the misleading `dispatch_binding_unavailable`.
+
 ## v4.1.0 (2026-09-29)
 
 ### codebase-mapper 2.16.0 → 2.16.1
