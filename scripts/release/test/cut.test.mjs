@@ -7,7 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import * as cutModule from '../cut.mjs';
-import { assertGitHubReleasePublished, assertParentCiPassed, cut, defaultSuiteRunner } from '../cut.mjs';
+import { assertGitHubReleasePublished, assertParentCiPassed, cut, defaultSuiteRunner, isGitHubRemote } from '../cut.mjs';
 import { createGit, spawnRunner } from '../lib/git.mjs';
 import { readValue } from '../lib/jsonedit.mjs';
 import { makeGitRepo } from './realrepo.mjs';
@@ -1372,6 +1372,19 @@ test('a failed Test workflow refuses before suites or release mutations', async 
   assert.equal(context.exists('.release/unreleased/SQ-1.md'), true, 'the fragment is still queued');
   assert.equal(context.git('tag', '--list'), '', 'no release tags were created');
   assert.deepEqual(context.remoteRefs(), before);
+});
+
+test('GitHub remotes retain their identity when insteadOf rewrites them to an ssh alias', () => {
+  const runner = (command, args) => {
+    assert.equal(command, 'git');
+    assert.deepEqual(args, ['config', '--get', 'remote.origin.url']);
+    return { status: 0, stdout: 'git@github.com:poindexter12/loadout.git\n', stderr: '' };
+  };
+
+  assert.equal(isGitHubRemote('/repo', 'origin', 'git@personal-github:poindexter12/loadout.git', runner), true);
+  assert.equal(isGitHubRemote('/repo', 'origin', 'ssh://git@gitlab.example/project.git', () => ({
+    status: 0, stdout: 'ssh://git@gitlab.example/project.git\n', stderr: '',
+  })), false);
 });
 
 test('a successful GitHub Release workflow defers to the daily cap', async () => {
