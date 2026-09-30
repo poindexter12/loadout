@@ -1,6 +1,6 @@
 # Loadout codebase map
 
-Last Updated: 2026-09-08
+Last Updated: 2026-09-29
 
 Loadout is a public Claude Code plugin marketplace. It ships six published plugins, with Sidequest as the largest runtime system and its stable executor roster bundled in the plugin package, plus shared test support, docs, examples, and release automation. The current gateway plugin is Model Gateway. `sandbox/windows/` is a maintainer-only, gitignored Windows Sandbox clean-room harness — not published, not linked from docs.
 
