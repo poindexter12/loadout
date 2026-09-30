@@ -3659,6 +3659,86 @@ test('session-start source excludes the retired lifecycle CLI fallback', () => {
   assert.match(source, /Reconnect Board MCP, re-dispatch, and spawn the exact returned executor/);
 });
 
+// The marker path formula, duplicated in sidequest, codebase-mapper, and live-rules. SIDEQUEST_HOME
+// is set for this whole file, so every reader resolves the same file.
+function replacementMarkerPath(sessionId: string): string {
+  return path.join(SIDEQUEST_HOME, 'replacement-compactions', `${encodeURIComponent(sessionId)}.json`);
+}
+
+const MAPPER_SESSION_START = path.join(__dirname, '..', '..', 'codebase-mapper', 'hooks', 'inject-context.js');
+const LIVE_RULES_SESSION_START = path.join(__dirname, '..', '..', 'live-rules', 'hooks', 'session-start-rules.js');
+const REPLACEMENT_NOTE = /history retained across a replacement compaction/;
+const SESSION_START_READERS = ['sidequest', 'codebase-mapper', 'live-rules'] as const;
+type SessionStartReader = typeof SESSION_START_READERS[number];
+
+// SQ-200: one project that all three SessionStart(compact) readers re-ground from in full, with a
+// sentinel line in each full body so a short note is distinguishable from a full re-injection.
+function sessionStartReaderFixture() {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-sq200-readers-'));
+  const mapDir = path.join(projectDir, '.claude', '.codebase-info');
+  fs.mkdirSync(mapDir, { recursive: true });
+  fs.writeFileSync(path.join(mapDir, 'INDEX.md'), '# SQ-200 fixture map\n\nSQ200_MAPPER_FULL_BODY\n');
+  const liveRules = require('../../live-rules/hooks/lib/rules');
+  const ruleData = { description: 'Always' };
+  liveRules.writeAtomicRuleSet(projectDir, [{
+    rule: liveRules.buildRule('rule', ruleData, 'SQ200_LIVE_RULES_FULL_BODY'),
+    content: '---\ndescription: Always\n---\nSQ200_LIVE_RULES_FULL_BODY\n',
+  }]);
+  const readers: Record<SessionStartReader, { script: string; env: Record<string, string>; full: RegExp }> = {
+    sidequest: { script: SESSION, env: {}, full: /ROLE: ORCHESTRATOR/ },
+    'codebase-mapper': {
+      script: MAPPER_SESSION_START,
+      env: { CLAUDE_PROJECT_DIR: projectDir, CODEBASE_MAPPER_STATE_DIR: path.join(projectDir, 'mapper-state') },
+      full: /SQ200_MAPPER_FULL_BODY/,
+    },
+    'live-rules': {
+      script: LIVE_RULES_SESSION_START,
+      env: { CLAUDE_PROJECT_DIR: projectDir, LIVE_RULES_STATE_DIR: path.join(projectDir, 'live-rules-state') },
+      full: /SQ200_LIVE_RULES_FULL_BODY/,
+    },
+  };
+  // The peers resolve the project from CLAUDE_PROJECT_DIR (set per reader above); sidequest gets the
+  // same payload shape as the SQ-197 tests below.
+  const payload = (sessionId: string) => ({ session_id: sessionId, source: 'compact', hook_event_name: 'SessionStart' });
+  const contextOf = (stdout: string) => (stdout.trim() ? JSON.parse(stdout).hookSpecificOutput?.additionalContext || '' : '');
+  return {
+    readers,
+    runInOrder(sessionId: string, order: readonly SessionStartReader[]): Record<SessionStartReader, string> {
+      const contexts = {} as Record<SessionStartReader, string>;
+      for (const name of order) contexts[name] = runHook(readers[name].script, payload(sessionId), readers[name].env);
+      return contexts;
+    },
+    async runInParallel(sessionId: string): Promise<Record<SessionStartReader, string>> {
+      const results = await Promise.all(SESSION_START_READERS.map(async (name) => ({
+        name,
+        result: await runHookProcessForBudget(readers[name].script, payload(sessionId), readers[name].env),
+      })));
+      const contexts = {} as Record<SessionStartReader, string>;
+      for (const { name, result } of results) {
+        assert.equal(result.status, 0, `${name} SessionStart exited nonzero: ${result.stderr}`);
+        contexts[name] = contextOf(result.stdout);
+      }
+      return contexts;
+    },
+  };
+}
+
+type ReaderExpectations = Record<SessionStartReader, { full: RegExp }>;
+
+function assertAllShortNotes(contexts: Record<SessionStartReader, string>, readers: ReaderExpectations, label: string): void {
+  for (const name of SESSION_START_READERS) {
+    assert.match(contexts[name], REPLACEMENT_NOTE, `${label}: ${name} must emit the short replacement note`);
+    assert.doesNotMatch(contexts[name], readers[name].full, `${label}: ${name} must not re-inject its full context`);
+  }
+}
+
+function assertAllFullContexts(contexts: Record<SessionStartReader, string>, readers: ReaderExpectations, label: string): void {
+  for (const name of SESSION_START_READERS) {
+    assert.match(contexts[name], readers[name].full, `${label}: ${name} must re-ground in full`);
+    assert.doesNotMatch(contexts[name], REPLACEMENT_NOTE, `${label}: ${name} must not emit the short replacement note`);
+  }
+}
+
 // SQ-197: a replacement compaction (host kept history verbatim; PostCompact saw
 // compact_summary === '') leaves the prior SessionStart re-grounding sitting in history. The
 // PostCompact->SessionStart(compact) pair should collapse to a short note instead of duplicating
@@ -3674,10 +3754,11 @@ test('a replacement compaction collapses SessionStart(compact) to a short note',
   assert.doesNotMatch(note, /ROLE: ORCHESTRATOR/);
   assert.ok(Buffer.byteLength(note, 'utf8') <= 200, `expected <=200 bytes, got ${Buffer.byteLength(note, 'utf8')}`);
 
-  // The marker is consumed (deleted) on first read: a second compact SessionStart for the same
-  // session, with no new PostCompact marking it, gets the full re-grounding again.
-  const full = runHook(SESSION, { session_id: sessionId, source: 'compact' });
-  assert.match(full, /ROLE: ORCHESTRATOR/);
+  // SQ-200: reading is a peek, never a delete. codebase-mapper and live-rules read the same marker
+  // in parallel with this hook, so the marker survives every read inside the age bound.
+  assert.equal(fs.existsSync(replacementMarkerPath(sessionId)), true, 'SessionStart must not delete the marker');
+  const again = runHook(SESSION, { session_id: sessionId, source: 'compact' });
+  assert.match(again, /history retained across a replacement compaction/);
 });
 
 test('a normal summarized compaction keeps full SessionStart(compact) re-grounding', () => {
@@ -3689,6 +3770,84 @@ test('a normal summarized compaction keeps full SessionStart(compact) re-groundi
   const full = runHook(SESSION, { session_id: sessionId, source: 'compact' });
   assert.match(full, /ROLE: ORCHESTRATOR/);
   assert.doesNotMatch(full, /history retained across a replacement compaction/);
+});
+
+// SQ-200: Claude Code runs one event's hooks in parallel, so the three SessionStart(compact)
+// readers reach the marker in no fixed order. Before SQ-200 sidequest unlinked it on read, so
+// whenever sidequest ran first codebase-mapper and live-rules re-injected in full.
+test('all three SessionStart(compact) readers emit the short note from one marker in either order', () => {
+  const fixture = sessionStartReaderFixture();
+  const orders: Array<readonly SessionStartReader[]> = [
+    ['sidequest', 'codebase-mapper', 'live-rules'],
+    ['live-rules', 'codebase-mapper', 'sidequest'],
+  ];
+  for (const order of orders) {
+    const sessionId = `sq200-order-${++sqSeq}`;
+    const transcript = path.join(SIDEQUEST_HOME, `${sessionId}.jsonl`);
+    fs.writeFileSync(transcript, '[]');
+    runHookOutput(POST_COMPACT, { session_id: sessionId, transcript_path: transcript, compact_summary: '' });
+    const contexts = fixture.runInOrder(sessionId, order);
+    assertAllShortNotes(contexts, fixture.readers, `order ${order.join(' -> ')}`);
+    assert.equal(fs.existsSync(replacementMarkerPath(sessionId)), true, `order ${order.join(' -> ')}: no reader deletes the marker`);
+  }
+});
+
+test('all three SessionStart(compact) readers emit the short note when they run in parallel', async () => {
+  const fixture = sessionStartReaderFixture();
+  const sessionId = `sq200-parallel-${++sqSeq}`;
+  const transcript = path.join(SIDEQUEST_HOME, `${sessionId}.jsonl`);
+  fs.writeFileSync(transcript, '[]');
+  runHookOutput(POST_COMPACT, { session_id: sessionId, transcript_path: transcript, compact_summary: '' });
+  assertAllShortNotes(await fixture.runInParallel(sessionId), fixture.readers, 'parallel');
+  assert.equal(fs.existsSync(replacementMarkerPath(sessionId)), true, 'parallel: no reader deletes the marker');
+});
+
+// With no delete-on-read, a summarized compaction inside the age bound would inherit the earlier
+// replacement's marker and wrongly skip re-grounding. PostCompact, the only writer, removes it.
+test('a summarized PostCompact removes an earlier replacement marker so every reader re-grounds', () => {
+  const fixture = sessionStartReaderFixture();
+  const sessionId = `sq200-summarized-after-replacement-${++sqSeq}`;
+  const transcript = path.join(SIDEQUEST_HOME, `${sessionId}.jsonl`);
+  fs.writeFileSync(transcript, '[]');
+  runHookOutput(POST_COMPACT, { session_id: sessionId, transcript_path: transcript, compact_summary: '' });
+  assert.equal(fs.existsSync(replacementMarkerPath(sessionId)), true);
+
+  runHookOutput(POST_COMPACT, { session_id: sessionId, transcript_path: transcript, compact_summary: 'a real summary' });
+  assert.equal(fs.existsSync(replacementMarkerPath(sessionId)), false, 'a summarized PostCompact leaves no marker behind');
+  assertAllFullContexts(
+    fixture.runInOrder(sessionId, SESSION_START_READERS),
+    fixture.readers,
+    'summarized after replacement',
+  );
+});
+
+test('every reader ignores a marker past the shared age bound, and PostCompact replaces it with a fresh timestamped one', () => {
+  const fixture = sessionStartReaderFixture();
+  const sessionId = `sq200-stale-${++sqSeq}`;
+  const transcript = path.join(SIDEQUEST_HOME, `${sessionId}.jsonl`);
+  fs.writeFileSync(transcript, '[]');
+  const marker = replacementMarkerPath(sessionId);
+
+  const before = Date.now();
+  runHookOutput(POST_COMPACT, { session_id: sessionId, transcript_path: transcript, compact_summary: '' });
+  const written = JSON.parse(fs.readFileSync(marker, 'utf8'));
+  const writtenAt = Date.parse(written.at);
+  assert.ok(Number.isFinite(writtenAt), `the marker carries an ISO timestamp, got ${JSON.stringify(written)}`);
+  assert.ok(writtenAt >= before - 1000 && writtenAt <= Date.now() + 1000, 'the marker timestamp is the write time');
+
+  // Age the marker past the 2-minute bound the three readers share. Sidequest used to accept a
+  // marker of any age because it only checked that the unlink succeeded.
+  const past = (Date.now() - 5 * 60 * 1000) / 1000;
+  fs.writeFileSync(marker, JSON.stringify({ at: new Date(past * 1000).toISOString() }));
+  fs.utimesSync(marker, past, past);
+  assertAllFullContexts(fixture.runInOrder(sessionId, SESSION_START_READERS), fixture.readers, 'stale marker');
+
+  // The next replacement PostCompact removes the stale marker and writes a fresh one.
+  runHookOutput(POST_COMPACT, { session_id: sessionId, transcript_path: transcript, compact_summary: '' });
+  const refreshed = JSON.parse(fs.readFileSync(marker, 'utf8'));
+  assert.ok(Date.parse(refreshed.at) >= before - 1000, 'the rewritten marker carries a fresh timestamp');
+  assert.ok(Date.now() - fs.statSync(marker).mtimeMs < 60 * 1000, 'the rewritten marker is fresh on disk');
+  assertAllShortNotes(fixture.runInOrder(sessionId, SESSION_START_READERS), fixture.readers, 'refreshed marker');
 });
 
 test('session-start: SIDEQUEST_NUDGE=off silences it', () => {

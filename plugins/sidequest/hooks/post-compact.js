@@ -165,10 +165,15 @@ function replacementMarkerHome() {
 function replacementMarkerFile(sessionId) {
   return import_node_path3.default.join(replacementMarkerHome(), "replacement-compactions", `${encodeURIComponent(sessionId)}.json`);
 }
-function markReplacementCompaction(sessionId) {
+function recordReplacementCompaction(sessionId, replacement) {
   if (!sessionId) return;
+  const file = replacementMarkerFile(sessionId);
   try {
-    const file = replacementMarkerFile(sessionId);
+    import_node_fs3.default.rmSync(file, { force: true });
+  } catch (_) {
+  }
+  if (!replacement) return;
+  try {
     import_node_fs3.default.mkdirSync(import_node_path3.default.dirname(file), { recursive: true });
     import_node_fs3.default.writeFileSync(file, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString() }));
   } catch (_) {
@@ -182,7 +187,7 @@ function main() {
   const sessionId = stringField(input, "session_id", "sessionId") || process.env.CLAUDE_CODE_SESSION_ID || "";
   if (!sessionId) return;
   resetCompactionState(sessionId, input.transcript_path || input.transcriptPath);
-  if (input.compact_summary === "") markReplacementCompaction(sessionId);
+  recordReplacementCompaction(sessionId, input.compact_summary === "");
 }
 try {
   main();
