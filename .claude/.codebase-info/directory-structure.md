@@ -1,12 +1,12 @@
 # Directory structure
 
-Last Updated: 2026-09-15
+Last Updated: 2026-09-29
 
 - `.claude/`: project settings, live rules, generated codebase map, and the project-local `upstream-check` skill.
 - `.upstream/`: intent-first upstream tracking ledger (`ledger.md`) read by the `upstream-check` skill.
 - `scripts/test/`: transcript read-cost measurement test (`measure.test.mjs`, SQ-20).
 - `.claude-plugin/`: marketplace manifest and published plugin entries.
-- `plugins/sidequest/`: board engine, MCP server, CLI, hooks, dashboard, tests, committed build output, and bundled stable executor agents under `agents/`. Pure lifecycle and worktree decisions live in `src/lib/kernel/`; persistence is split under `src/lib/store/`, with matching compiled modules under `lib/`. `scripts/generate-bundled-agents.mjs` derives the packaged agent markdown from `lib/agentsync.js`. `plugins/sidequest/scripts/owned-process-tree.js` and `plugins/sidequest/scripts/owned-phase-supervisor.js` keep test and release subprocess ownership explicit through cleanup.
+- `plugins/sidequest/`: board engine, MCP server, CLI, hooks, dashboard, tests, committed build output, and bundled stable executor agents under `agents/`. Function hooks live in `src/hooks/fn/` and compile to `hooks/fn/`; shared hook state is in `src/hooks/shared/`. Pure lifecycle and worktree decisions live in `src/lib/kernel/`; persistence is split under `src/lib/store/`, with matching compiled modules under `lib/`, including backup-ref handling. `scripts/generate-bundled-agents.mjs` derives the packaged agent markdown from `lib/agentsync.js`. `plugins/sidequest/scripts/owned-process-tree.js` and `plugins/sidequest/scripts/owned-phase-supervisor.js` keep test and release subprocess ownership explicit through cleanup.
 - `plugins/observability/`: observer, statusline, Collector setup, and sinks under `observability/sinks/`, including Grafana model pricing and generated dashboard templates, plus the eight lifecycle hooks and the `enable-project-telemetry` skill.
 - `plugins/model-gateway/`: local model gateway CLI, registry hook, skills, and tests; `lib/` holds the shim/worker runtime, the per-model policy table, process supervision, the Windows detached launcher, lifecycle diagnostics, and cache-sibling identity checks.
 - `plugins/live-rules/`: rule-management skills and prompt/edit/session hooks.
