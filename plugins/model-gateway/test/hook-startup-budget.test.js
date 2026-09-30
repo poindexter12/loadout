@@ -26,6 +26,25 @@ test('quiet ensure stops waiting inside its hook budget when the proxy never ans
   assert.equal(now, timeout);
 });
 
+// SQ-235 (2026-09-29 21:03Z): ten SessionStart hooks started together, the ensure
+// that won recovery had already spent ~18s waiting on the ensure lock, then began
+// a 12s startup wait -- and Claude Code killed the hook at its 30s timeout with
+// recovery half done. Every wait a quiet ensure makes is now cut to what is left.
+test('quiet ensure bounds its lock and startup waits by what is left of the SessionStart hook timeout', () => {
+  const hooks = JSON.parse(require('node:fs').readFileSync(path.join(__dirname, '..', 'hooks', 'hooks.json'), 'utf8'));
+  const ensureHook = hooks.hooks.SessionStart.flatMap((entry) => entry.hooks).find((hook) => /ensure --quiet/.test(hook.command));
+  assert.ok(gateway.HOOK_BUDGET_MS < ensureHook.timeout * 1000, 'the budget ends before Claude Code kills the hook');
+
+  assert.equal(gateway.quietStartupWaitMsWithinHookBudget({ elapsedMs: 0 }), 12000, 'a fresh hook keeps the full quiet wait');
+  assert.equal(gateway.quietStartupWaitMsWithinHookBudget({ elapsedMs: 20000 }), gateway.HOOK_BUDGET_MS - 20000);
+  assert.equal(gateway.quietStartupWaitMsWithinHookBudget({ elapsedMs: 29000 }), 1000, 'an exhausted budget still takes one readiness look');
+
+  // The 21:03Z holder: lock acquired ~18s in, recovery then needs probes, a stop and a wait.
+  const lockWait = gateway.hookBudgetRemainingMs({ elapsedMs: 0 });
+  const worstCaseAfterLock = 3 * 2000 + 3000 + gateway.quietStartupWaitMsWithinHookBudget({ elapsedMs: lockWait + 9000 });
+  assert.ok(lockWait + worstCaseAfterLock < ensureHook.timeout * 1000, `lock ${lockWait}ms + recovery ${worstCaseAfterLock}ms must finish inside the hook timeout`);
+});
+
 test('a current wired shim lets login leave its listener alone', () => {
   const currentHealth = { proxyRecovery: true, supervisorVersion: gateway.PLUGIN_VERSION };
 

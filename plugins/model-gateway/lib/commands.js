@@ -826,6 +826,12 @@ const MIN_QUIET_STARTUP_WAIT_MS = 1000;
 function quietStartupWaitMsWithinHookBudget({ elapsedMs = process.uptime() * 1000 } = {}) {
   return Math.max(MIN_QUIET_STARTUP_WAIT_MS, Math.min(QUIET_STARTUP_WAIT_MS, Math.floor(HOOK_BUDGET_MS - elapsedMs)));
 }
+// The lock wait leaves room for what the holder does after it: up to three 2s health
+// probes, a 3s stop wait, and a short startup wait.
+const HOOK_RECOVERY_RESERVE_MS = 10000;
+function hookBudgetRemainingMs({ elapsedMs = process.uptime() * 1000 } = {}) {
+  return Math.max(MIN_QUIET_STARTUP_WAIT_MS, Math.floor(HOOK_BUDGET_MS - HOOK_RECOVERY_RESERVE_MS - elapsedMs));
+}
 
 // SQ-235 (2026-09-29 22:32Z): a bound-but-slow supervisor was SIGTERMed, took 3 minutes
 // to drain, and `ensure` gave up after its 3s stop wait and never started a successor,
@@ -861,6 +867,8 @@ async function recoverShimAfterIncumbent({
   pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   timeoutMs = RECOVERY_CONTROLLER_TIMEOUT_MS,
   pollMs = 250,
+  // No hook owns this process, so it can afford the interactive startup patience.
+  startupWaitMs = startupWaitMsFor(false),
 } = {}) {
   const record = (outcome, extra = {}) => recordGatewayLifecycle('recovery-controller-finished', {
     component: RECOVERY_CONTROLLER,
@@ -893,7 +901,16 @@ async function recoverShimAfterIncumbent({
     }
     let outcome = { ok: false, message: 'recovery controller did not complete' };
     try {
-      const result = await start({ quiet: true, lifecycleOperation: 'recover-shim' });
+      // A concurrent SessionStart may have started a successor between the release
+      // and this lock claim. It can still be starting (its ensure released the lock
+      // after a cut-short wait), so probing it now would find a bound-but-unhealthy
+      // listener and stop it. A bound listener under the lock means the job is done.
+      if (await isPortBound(PUBLIC_SHIM_PORT)) {
+        outcome = { ok: true, message: null };
+        record('successor-already-bound');
+        return { ok: true, started: [] };
+      }
+      const result = await start({ quiet: true, lifecycleOperation: 'recover-shim', startupWaitMs });
       outcome = { ok: result.ok, message: result.ok ? null : `model-gateway could not start: ${result.reason}` };
       record(result.ok ? 'supervisor-ready' : 'supervisor-not-ready', { started: result.started || [] });
       return result;
@@ -922,21 +939,24 @@ async function stopIncumbentForRecovery({ quiet, operation, incumbentPid, stopSu
       return owner;
     },
   });
+  // A stop that was sent but not confirmed inside the wait is handed off whether or
+  // not the listener is still bound: the controller starts the successor as soon as
+  // the port is free, which may already be now. Only a refused stop is a failure.
   const stillBound = !stopped.ok && !refused && (await isPortBound(PUBLIC_SHIM_PORT));
   recordGatewayLifecycle(`${operation}-supervisor-stop-finished`, {
     component: 'controller',
     pid: process.pid,
     child: incumbentPid ? { component: 'supervisor', pid: incumbentPid } : undefined,
-    outcome: stopped.ok ? 'exited' : (stillBound ? 'still-draining' : 'failed'),
+    outcome: stopped.ok ? 'exited' : (refused ? 'refused' : (stillBound ? 'still-draining' : 'exit-unconfirmed')),
     ...(stopped.ok ? {} : { reason: stopped.reason }),
   });
-  if (stopped.ok || !stillBound) return { stopped };
+  if (stopped.ok || refused) return { stopped };
   scheduleRecovery(incumbentPid);
   return {
     stopped,
     handedOff: {
       ok: false,
-      reason: `the shim supervisor on :${PUBLIC_SHIM_PORT} is still draining; a detached recovery controller starts its successor once it releases the port`,
+      reason: `the shim supervisor on :${PUBLIC_SHIM_PORT} did not exit within the stop wait; a detached recovery controller starts its successor once it releases the port`,
       started: [RECOVERY_CONTROLLER],
       handedOff: true,
       waitCutShort: quiet,
@@ -954,7 +974,13 @@ async function startAll({
   proxyAnswers = proxyModelsProbe,
   confirmDown = confirmProbeDown,
   isPortBound = portListening,
+  // A number, or a function read when the wait begins, so a hook-bound caller can
+  // spend only what its budget has left after the probes and any stop.
   startupWaitMs = startupWaitMsFor(quiet),
+  launchSupervisor = spawnReparented,
+  stopSupervisor = stopRunningSupervisor,
+  scheduleRecovery = scheduleDetachedShimRecovery,
+  controllerActive = recoveryControllerActive,
 } = {}) {
   const owner = await resolveOwner(PUBLIC_SHIM_PORT);
   const reason = portOwnerRefusal(owner, PUBLIC_SHIM_PORT);
@@ -966,7 +992,7 @@ async function startAll({
       recordGatewayLifecycle(`${lifecycleOperation}-recovery-finished`, {
         component: lifecycleOperation,
         pid: process.pid,
-        outcome: result.ok ? 'ready' : 'failed',
+        outcome: result.ok ? 'ready' : (result.handedOff ? 'handed-off-to-recovery-controller' : 'failed'),
       });
     }
     return { ...result, recoveryAttempted };
@@ -1001,18 +1027,49 @@ async function startAll({
   }
   const staleSessionNotice = staleSessionReloadNotice(PLUGIN_VERSION, health);
   if (staleSessionNotice) noticeForUser(staleSessionNotice, { toStderr: true });
-  if (health && shimNeedsRestart(PLUGIN_VERSION, health)) {
-    beginRecovery(`installed model-gateway ${PLUGIN_VERSION} is newer than the serving shim (${servingShimVersion(health)})`);
-    const stopped = await stopRunningSupervisor({ quiet, operation: lifecycleOperation || 'restart' });
+  // SQ-235: never leave :PUBLIC_SHIM_PORT dark after a stop. When the incumbent does
+  // not exit inside the stop wait (a graceful drain took 3 minutes at 22:32Z), the
+  // restart is handed to a detached controller instead of reported as a failure.
+  const stopIncumbent = async () => {
+    const { stopped, handedOff } = await stopIncumbentForRecovery({
+      quiet,
+      operation: lifecycleOperation || 'restart',
+      incumbentPid: portOwner,
+      stopSupervisor,
+      isPortBound,
+      scheduleRecovery,
+    });
+    if (handedOff) return finishRecovery(handedOff);
     if (!stopped.ok) return finishRecovery(stopped);
     reportSiblingSupervisorReplacement(stopped, quiet);
+    return null;
+  };
+  // A controller already waiting on the incumbent owns this recovery; stopping or
+  // starting anything here would race it for the listener.
+  const deferToController = async () => {
+    if (!(await controllerActive())) return null;
+    return finishRecovery({
+      ok: false,
+      reason: `a detached recovery controller is already restarting the shim supervisor on :${PUBLIC_SHIM_PORT}`,
+      started: [],
+      handedOff: true,
+      waitCutShort: quiet,
+    });
+  };
+  if (health && shimNeedsRestart(PLUGIN_VERSION, health)) {
+    const deferred = await deferToController();
+    if (deferred) return deferred;
+    beginRecovery(`installed model-gateway ${PLUGIN_VERSION} is newer than the serving shim (${servingShimVersion(health)})`);
+    const failed = await stopIncumbent();
+    if (failed) return failed;
   } else if (health) {
     reapGatewayOrphans(portOwner);
   } else if (portBound) {
+    const deferred = await deferToController();
+    if (deferred) return deferred;
     beginRecovery(`shim /healthz did not answer after ${healthProbeAttempts} consecutive check${healthProbeAttempts === 1 ? '' : 's'} while :${PUBLIC_SHIM_PORT} stayed bound`);
-    const stopped = await stopRunningSupervisor({ quiet, operation: lifecycleOperation || 'restart' });
-    if (!stopped.ok) return finishRecovery(stopped);
-    reportSiblingSupervisorReplacement(stopped, quiet);
+    const failed = await stopIncumbent();
+    if (failed) return failed;
   } else {
     reapGatewayOrphans(null);
   }
@@ -1028,10 +1085,13 @@ async function startAll({
   if (shimReadyProbe.down) {
     beginRecovery(`shim /healthz did not answer after ${shimReadyProbe.attempts} consecutive check${shimReadyProbe.attempts === 1 ? '' : 's'}`);
     try { fs.rmSync(SHIM_FAILURE_PATH); } catch {}
-    spawnDetached('guardian', process.execPath, [resolveNewestInstalledCliPath(), 'serve-shim'], {});
+    // SQ-235 (21:03Z): reparented, not merely detached. The hook's own timeout kill
+    // reached a supervisor this process had spawned because it was still our child.
+    launchSupervisor('guardian', process.execPath, [resolveNewestInstalledCliPath(), 'serve-shim'], {});
     started.push('shim');
   }
-  const readiness = await waitForStartupReadiness({ timeout: startupWaitMs, proxyAnswers, shimReady });
+  const waitMs = typeof startupWaitMs === 'function' ? startupWaitMs() : startupWaitMs;
+  const readiness = await waitForStartupReadiness({ timeout: waitMs, proxyAnswers, shimReady });
   if (readiness.ok) {
     if (!quiet && started.length) log(`started: ${started.join(', ')}`);
     await writeCatalog().catch(() => { /* advisory only; sidequest just won't see fresh models */ });
@@ -1052,7 +1112,7 @@ async function startAll({
   const probeReason = probeFailureReason(finalProbe) ?? readiness.probeReason;
   return finishRecovery({
     ok: false,
-    reason: `not healthy after ${Math.ceil(startupWaitMs / 1000)}s${probeReason ? `; last /v1/models probe: ${probeReason}` : ''} (check logs in ${LOGS})`,
+    reason: `not healthy after ${Math.ceil(waitMs / 1000)}s${probeReason ? `; last /v1/models probe: ${probeReason}` : ''} (check logs in ${LOGS})`,
     started,
     waitCutShort: quiet,
   });
@@ -2459,6 +2519,8 @@ const commands = {
     await statusReport();
   },
   stop: async () => {
+    // A pending recovery controller would restart what the user just stopped.
+    stopProcess(RECOVERY_CONTROLLER);
     const result = await stopAll();
     if (!result.ok) {
       console.error(`model-gateway: ${result.reason}.`);
@@ -2485,7 +2547,13 @@ const commands = {
     // `ensure` neither races the winner nor duplicates its work: it waits briefly and
     // reports the winner's actual outcome, or times out and exits cleanly having
     // never called startAll() itself.
-    const lock = await acquireEnsureLock({ timeoutMs: lockTimeoutMs ?? (startupWaitMsFor(quiet) + 8000) });
+    // SQ-235: the SessionStart hook is killed at its timeout. At 21:03Z ten sessions
+    // started at once, the holder spent ~18s of that budget waiting on this lock, and
+    // the kill landed mid-recovery. A quiet run therefore bounds both waits by what
+    // is left of the hook budget, so it always exits on its own.
+    const lock = await acquireEnsureLock({
+      timeoutMs: lockTimeoutMs ?? (quiet ? hookBudgetRemainingMs() : startupWaitMsFor(quiet) + 8000),
+    });
     if (lock.role === 'follower') {
       if (lock.outcome) {
         if (lock.outcome.message) noticeForUser(lock.outcome.message, lock.outcome.ok ? {} : { toStderr: true });
@@ -2532,14 +2600,18 @@ const commands = {
     const alreadyHealthy = initialReadiness.checks.shimRunning && initialReadiness.checks.servingVersionMatches;
     const result = alreadyHealthy
       ? await writeCatalog().then(() => ({ ok: true, started: [] }), () => ({ ok: true, started: [] }))
-      : await startAll({ quiet, lifecycleOperation: 'ensure' });
+      : await startAll({
+        quiet,
+        lifecycleOperation: 'ensure',
+        ...(quiet ? { startupWaitMs: () => quietStartupWaitMsWithinHookBudget() } : {}),
+      });
     if (!result.ok) {
       if (quiet && result.waitCutShort) {
-        if (result.started?.includes('shim')) {
+        if (result.started?.includes('shim') || result.handedOff) {
           recordGatewayLifecycle('ensure-hook-wait-cut-short', {
             component: 'SessionStart',
             pid: process.pid,
-            outcome: 'supervisor-started',
+            outcome: result.handedOff ? 'recovery-controller-owns-restart' : 'supervisor-started',
           });
         }
         noticeForUser('model-gateway is still starting; retry the Codex model in a few seconds', { toStderr: true });
@@ -2588,6 +2660,7 @@ const commands = {
   doctor: (options) => doctor(options),
   'remote-control': () => remoteControlCommand(),
   'serve-shim': () => runShim(),
+  'recover-shim': async () => { await recoverShimAfterIncumbent(); },
   'serve-worker': () => runWorker(),
 };
 
@@ -2613,6 +2686,13 @@ module.exports = {
   loginSuccessMessage,
   startupWaitMsFor,
   startAll,
+  spawnReparented,
+  recoverShimAfterIncumbent,
+  stopIncumbentForRecovery,
+  recoveryControllerActive,
+  quietStartupWaitMsWithinHookBudget,
+  hookBudgetRemainingMs,
+  HOOK_BUDGET_MS,
   waitForStartupReadiness,
   tryClaimEnsureLock,
   releaseEnsureLock,
