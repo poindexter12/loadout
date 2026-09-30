@@ -5182,16 +5182,25 @@ test('session-start audit report is quiet at zero, surfaces carried summaries, a
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-audit-handoff-home-'));
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-audit-handoff-cwd-'));
   registerProject(home, cwd);
-  const env = { SIDEQUEST_HOME: home, CLAUDE_PROJECT_DIR: cwd, CLAUDE_PLUGIN_ROOT: path.join(__dirname, '..') };
+  // The quiet and carried-summary branches require the detached audit to finish now.
+  // Keep their deadline independent of host load; only the final call pins deferral.
+  const env = {
+    SIDEQUEST_HOME: home,
+    CLAUDE_PROJECT_DIR: cwd,
+    CLAUDE_PLUGIN_ROOT: path.join(__dirname, '..'),
+    SIDEQUEST_AUDIT_DEADLINE_MS: '60000',
+  };
 
   const quiet = runHook(SESSION, { session_id: 'audit-quiet', source: 'startup', cwd }, env);
   assert.doesNotMatch(quiet, /sidequest audit:/);
+  assert.doesNotMatch(quiet, /audit report exceeded its SessionStart budget/);
 
   const auditReport = path.join(home, 'audit-reports', `${crypto.createHash('sha1').update(path.resolve(cwd)).digest('hex').slice(0, 16)}.json`);
   fs.mkdirSync(path.dirname(auditReport), { recursive: true });
   fs.writeFileSync(auditReport, JSON.stringify({ summary: 'sidequest audit: 2 untracked issues. Run `sidequest audit` for detail.' }));
   const carried = runHook(SESSION, { session_id: 'audit-carried', source: 'startup', cwd }, env);
   assert.match(carried, /sidequest audit: 2 untracked issues/);
+  assert.doesNotMatch(carried, /audit report exceeded its SessionStart budget/);
 
   const deferred = runHook(SESSION, { session_id: 'audit-deferred', source: 'startup', cwd }, { ...env, SIDEQUEST_AUDIT_DEADLINE_MS: '0' });
   assert.match(deferred, /audit report exceeded its SessionStart budget/);
