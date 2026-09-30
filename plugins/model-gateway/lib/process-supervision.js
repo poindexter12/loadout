@@ -31,7 +31,12 @@ function fetchUrl(url, { timeout = 15000, headers = {} } = {}) {
     const fail = (error) => reject(annotateFetchFailure(error, {
       url, startedAt, headersReceived, reusedSocket: req?.reusedSocket,
     }));
-    const req = mod.get(url, { headers: { 'user-agent': 'model-gateway', ...headers } }, (res) => {
+    // agent:false: a probe must never ride a pooled keep-alive socket (SQ-239). The
+    // guardian polls every 5000ms, exactly Node's global-agent idle timeout, so the
+    // free socket's idle timer fired into the reused request and failed it after
+    // 0-1ms ("no answer within 2000ms ... on a reused keep-alive socket"), and after
+    // a sleep a pooled socket can be dead while the clock that would retire it paused.
+    const req = mod.get(url, { agent: false, headers: { 'user-agent': 'model-gateway', ...headers } }, (res) => {
       headersReceived = true;
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
@@ -732,7 +737,7 @@ async function stopRunningSupervisor({ quiet = false, operation = 'restart', rep
 function postJson(url, body, timeout = 2000) {
   return new Promise((resolve, reject) => {
     const payload = Buffer.from(JSON.stringify(body));
-    const req = http.request(url, { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': payload.length } }, (res) => {
+    const req = http.request(url, { method: 'POST', agent: false, headers: { 'content-type': 'application/json', 'content-length': payload.length } }, (res) => {
       const chunks = [];
       res.on('data', (chunk) => chunks.push(chunk));
       res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }));
@@ -1098,8 +1103,61 @@ function createProxyRecovery({
   return { recover, stop: stopRecovery, stopSync: () => probeChildren.stopSync() };
 }
 
+// SQ-239: after a Mac sleeps, a keep-alive socket pooled before the sleep can be dead
+// (the peer or the network dropped it) while nothing on this side noticed. Node's timers
+// run on a monotonic clock that stops during sleep on macOS, so an idle timeout that
+// would have retired the socket never fires; the next request reuses it and waits on
+// TCP retransmits. A process that was suspended (sleep, SIGSTOP) sees one tick of its
+// interval arrive far later than scheduled, by the wall clock, the monotonic clock, or
+// both. That gap is the signal: the caller drops every pooled idle socket so the next
+// request opens a fresh connection.
+const WAKE_CHECK_INTERVAL_MS = 5000;
+const WAKE_GAP_THRESHOLD_MS = 15000;
+
+function createWakeDetector({
+  onWake,
+  intervalMs = WAKE_CHECK_INTERVAL_MS,
+  thresholdMs = WAKE_GAP_THRESHOLD_MS,
+  wallNow = Date.now,
+  monotonicNow = () => performance.now(),
+  schedule = (callback, ms) => setInterval(callback, ms),
+  cancel = (timer) => clearInterval(timer),
+} = {}) {
+  let lastWall = wallNow();
+  let lastMonotonic = monotonicNow();
+  function check() {
+    const wall = wallNow();
+    const monotonic = monotonicNow();
+    const elapsedMs = Math.max(wall - lastWall, monotonic - lastMonotonic);
+    lastWall = wall;
+    lastMonotonic = monotonic;
+    const gapMs = elapsedMs - intervalMs;
+    if (gapMs < thresholdMs) return null;
+    try { onWake?.({ gapMs: Math.round(gapMs) }); } catch {}
+    return Math.round(gapMs);
+  }
+  const timer = schedule(check, intervalMs);
+  timer?.unref?.();
+  return { check, stop: () => cancel(timer) };
+}
+
+// Destroys the idle sockets an agent holds for reuse; in-flight sockets are left alone,
+// so a long streaming response that survived the sleep is not cut.
+function dropPooledSockets(agents) {
+  let dropped = 0;
+  for (const agent of agents) {
+    for (const sockets of Object.values(agent?.freeSockets || {})) {
+      for (const socket of [...(sockets || [])]) {
+        socket.destroy();
+        dropped += 1;
+      }
+    }
+  }
+  return dropped;
+}
+
 module.exports = {
-  commandIncludesFile, commandResultAsync, confirmProbeDown, createProbeChildRegistry, createProxyRecovery, describeFetchFailure, fetchUrl, foreignOwnerRemedy, foreignPortOwner, foreignPortOwnerReason, foreignShimOwner, foreignShimOwnerMessage, gatewayInstallRoot, installBelongsToThisPlugin, isDescendantOfAsync, killPid, killPidAsync, pidFile, pidRecordFile, pluginCacheIdentity, portListening, postJson,
+  commandIncludesFile, commandResultAsync, confirmProbeDown, createProbeChildRegistry, createProxyRecovery, createWakeDetector, describeFetchFailure, dropPooledSockets, fetchUrl, foreignOwnerRemedy, foreignPortOwner, foreignPortOwnerReason, foreignShimOwner, foreignShimOwnerMessage, gatewayInstallRoot, installBelongsToThisPlugin, isDescendantOfAsync, killPid, killPidAsync, pidFile, pidRecordFile, pluginCacheIdentity, portListening, postJson,
   processInfoAsync, processIsOwnedByThisInstall, processIsOwnedByThisInstallAsync, processOwningPort: processOwningPortSync, processOwningPortAsync, processOwningPortInProcAsync, processTableAsync, resolvePortOwner, portOwnerRefusal, PROBE_FAILURE_THRESHOLD, PROBE_TIMEOUT_MS,
   probeFailureReason, probeSucceeded, proxyModelsAnswering, proxyModelsProbe, readPid, readPidRecord, recordedGatewayPids, reapGatewayOrphans, removePid, restartWorkerWithDrain, shimHealthy, spawnDetached,
   spawnSupervisedProxy, stopAll, stopProcess, stopRunningSupervisor, stopShimWithDrain, waitForPortRelease, waitForShimExit, writePidRecord, writePidRecordAsync,

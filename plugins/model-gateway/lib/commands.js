@@ -324,10 +324,15 @@ function releaseEnsureLock(outcome) {
 }
 
 const {
-  confirmProbeDown, createProbeChildRegistry, createProxyRecovery, fetchUrl, foreignPortOwner, foreignShimOwner, foreignShimOwnerMessage, killPidAsync, portListening, postJson, probeFailureReason, probeSucceeded, processOwningPort, processOwningPortAsync, proxyModelsProbe, recordedGatewayPids, reapGatewayOrphans, resolvePortOwner, portOwnerRefusal,
+  confirmProbeDown, createProbeChildRegistry, createProxyRecovery, createWakeDetector, dropPooledSockets, fetchUrl, foreignPortOwner, foreignShimOwner, foreignShimOwnerMessage, killPidAsync, portListening, postJson, probeFailureReason, probeSucceeded, processOwningPort, processOwningPortAsync, proxyModelsProbe, recordedGatewayPids, reapGatewayOrphans, resolvePortOwner, portOwnerRefusal,
   removePid, restartWorkerWithDrain, shimHealthy, spawnDetached, stopAll, stopProcess, stopRunningSupervisor,
   stopShimWithDrain, waitForShimExit, writePidRecordAsync, readPid, writePidRecord, processIsOwnedByThisInstallAsync,
 } = require('./process-supervision.js');
+
+// How long the supervisor waits for its worker to answer a relayed /healthz before it
+// answers 503 itself (SQ-239). Longer than any caller's own probe budget, so it only
+// bounds how long a stalled worker can pin relay sockets.
+const HEALTH_RELAY_TIMEOUT_MS = 5000;
 
 const {
   cleanLegacyEnvSettings, cleanLegacyGatewayModelCache, effectiveBaseUrl, isWired, migrateLegacyProjectSettings,
@@ -2328,17 +2333,27 @@ function runShim() {
     return portListening(workerPort, 100);
   }
 
-  function requestWorker(req, body, retry = 0) {
+  function requestWorker(req, body, retry = 0, { timeoutMs = 0 } = {}) {
     return new Promise((resolve, reject) => {
       if (!workerPort) {
-        if (retry < 80 && !stopped) return setTimeout(() => requestWorker(req, body, retry + 1).then(resolve, reject), 50);
+        if (retry < 80 && !stopped) return setTimeout(() => requestWorker(req, body, retry + 1, { timeoutMs }).then(resolve, reject), 50);
         return reject(new Error('shim worker did not report a listener port'));
       }
+      let timedOut = false;
       const upstream = http.request({
         host: '127.0.0.1', port: workerPort, method: req.method, path: req.url, headers: req.headers,
       }, (response) => resolve(response));
+      // SQ-239: a relay with no deadline turned a stalled worker into a /healthz
+      // that never answered while :PUBLIC_SHIM_PORT stayed bound. A worker that is
+      // not answering is not retried here: it gets a prompt 503 instead.
+      if (timeoutMs) {
+        upstream.setTimeout(timeoutMs, () => {
+          timedOut = true;
+          upstream.destroy(Object.assign(new Error(`shim worker did not answer within ${timeoutMs}ms`), { code: 'ETIMEDOUT' }));
+        });
+      }
       upstream.once('error', (error) => {
-        if (retry < 80 && !stopped) return setTimeout(() => requestWorker(req, body, retry + 1).then(resolve, reject), 50);
+        if (!timedOut && retry < 80 && !stopped) return setTimeout(() => requestWorker(req, body, retry + 1, { timeoutMs }).then(resolve, reject), 50);
         reject(error);
       });
       upstream.end(body);
@@ -2349,9 +2364,10 @@ function runShim() {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = Buffer.concat(chunks);
+    const isHealth = req.url.split('?')[0] === '/healthz';
     try {
-      const upstream = await requestWorker(req, body);
-      if (req.url.split('?')[0] === '/healthz') {
+      const upstream = await requestWorker(req, body, 0, { timeoutMs: isHealth ? HEALTH_RELAY_TIMEOUT_MS : 0 });
+      if (isHealth) {
         const response = [];
         upstream.on('data', (chunk) => response.push(chunk));
         upstream.once('end', () => {
@@ -2448,6 +2464,16 @@ function runShim() {
     monitorProxy();
     proxyRecoveryTimer = setInterval(monitorProxy, recoveryIntervalMs);
     proxyRecoveryTimer.unref();
+    // SQ-239: the relay to the worker pools keep-alive sockets in the global agent;
+    // drop the idle ones after a sleep or suspend, and leave a lifecycle record so a
+    // post-wake incident can be lined up against the gap.
+    createWakeDetector({
+      onWake: ({ gapMs }) => {
+        const dropped = dropPooledSockets([http.globalAgent]);
+        console.error(`${new Date().toISOString()} model-gateway: supervisor resumed after a ${Math.round(gapMs / 1000)}s gap (sleep or suspend); dropped ${dropped} pooled idle socket${dropped === 1 ? '' : 's'}`);
+        recordGatewayLifecycle('supervisor-resumed', { component: 'supervisor', pid: process.pid, gapMs });
+      },
+    });
   });
   main.once('error', (error) => {
     void (async () => {
