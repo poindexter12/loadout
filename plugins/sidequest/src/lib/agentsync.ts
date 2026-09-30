@@ -782,6 +782,23 @@ function briefingCommentBody(comments?: any) {
   ].join('\n\n');
 }
 
+// SQ-223: an orchestrator can amend a live dispatch's verify after the executor has read
+// its briefing. The command and wrapper this briefing prints are the current pin; the
+// notice says so explicitly, and names what was superseded, so an executor comparing an
+// earlier briefing against this one reads a recorded amendment, not a contradiction.
+function dispatchVerifyAmendmentNotice(ticket?: any) {
+  const state = ticket?.dispatch;
+  const trail = state && !state.terminalAt && Array.isArray(state.verificationAmendments) ? state.verificationAmendments : [];
+  const latest = trail[trail.length - 1];
+  if (!latest) return '';
+  const by = String(latest.by || '').trim();
+  const at = String(latest.at || '').trim();
+  const current = String(state.verificationRequirement?.command || '').trim();
+  const superseded = [...new Set(trail.map((entry: any) => String(entry?.oldCommand || '').trim()).filter((command: string) => command && command !== current))];
+  const when = [at, by ? `by ${by}` : ''].filter(Boolean).join(', ');
+  return `Verify amended after this dispatch was prepared${when ? ` (${when})` : ''}: the pinned command and wrapper invocation above are current. A briefing or wrapper invocation copied before the amendment is stale, and a capture of a superseded command is refused. Superseded: ${superseded.length ? superseded.map((command) => JSON.stringify(command)).join(', ') : '<none recorded>'}.`;
+}
+
 function executorSafetyBody(ticket?: any, nonce?: any, tokenFile?: any, project?: any, executor?: any, closeout?: any, worktreeIdentity?: any, readOnlyScratchSpace?: any, worktreeSync?: any) {
   const claimCall = [
     'mcp__plugin_sidequest_board__claim({',
@@ -814,6 +831,7 @@ function executorSafetyBody(ticket?: any, nonce?: any, tokenFile?: any, project?
         ? `${verifierPrefix}: ${verifierKind}. Command: ${requirement.command}`
         : `${verifierPrefix}: ${verifierKind}. Evidence contract: ${verifierEvidence}`;
   const verifierCommand = requirement.command || '';
+  const amendmentNotice = pinnedRequirement ? dispatchVerifyAmendmentNotice(ticket) : '';
   const evidenceGuidance = ticketEvidenceGuidance(ticket);
   const highStakes = ticket?.highStakes
     ? [
@@ -831,6 +849,7 @@ function executorSafetyBody(ticket?: any, nonce?: any, tokenFile?: any, project?
     ...(worktreeSync ? [worktreeSync] : []),
     ...(ticketIsolationContract(ticket, project) || []),
     verify,
+    amendmentNotice,
     verifierCommand
       ? 'Run it through ' + capturedVerifyCommand(verifierCommand, ticket?.ref, project) + ' in the FOREGROUND with an explicit generous timeout of up to 600000 ms; this is the pinned verifier. A successful wrapper run records its completed capture identity against this ticket and the checked Git revision, and submit refuses prose or a retyped command without that matching record. '
         + (ticket?.dispatch?.sharedTree === false && ticket?.dispatch?.workingTreeDelivery !== true

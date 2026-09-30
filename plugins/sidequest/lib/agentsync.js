@@ -571,6 +571,18 @@ function briefingCommentBody(comments) {
     ].join("\n"))
   ].join("\n\n");
 }
+function dispatchVerifyAmendmentNotice(ticket) {
+  const state = ticket?.dispatch;
+  const trail = state && !state.terminalAt && Array.isArray(state.verificationAmendments) ? state.verificationAmendments : [];
+  const latest = trail[trail.length - 1];
+  if (!latest) return "";
+  const by = String(latest.by || "").trim();
+  const at = String(latest.at || "").trim();
+  const current = String(state.verificationRequirement?.command || "").trim();
+  const superseded = [...new Set(trail.map((entry) => String(entry?.oldCommand || "").trim()).filter((command) => command && command !== current))];
+  const when = [at, by ? `by ${by}` : ""].filter(Boolean).join(", ");
+  return `Verify amended after this dispatch was prepared${when ? ` (${when})` : ""}: the pinned command and wrapper invocation above are current. A briefing or wrapper invocation copied before the amendment is stale, and a capture of a superseded command is refused. Superseded: ${superseded.length ? superseded.map((command) => JSON.stringify(command)).join(", ") : "<none recorded>"}.`;
+}
 function executorSafetyBody(ticket, nonce, tokenFile, project, executor, closeout, worktreeIdentity, readOnlyScratchSpace, worktreeSync) {
   const claimCall = [
     "mcp__plugin_sidequest_board__claim({",
@@ -597,6 +609,7 @@ function executorSafetyBody(ticket, nonce, tokenFile, project, executor, closeou
   const verifierEvidence = requirement.evidenceContract;
   const verify = verifierKind === "attestation" ? `${verifierPrefix}: attestation. Record actual evidence for ${verifierArtifact || "the declared artifact"}.` : verifierKind === "manual" ? `${verifierPrefix}: manual. Record evidence matching: ${verifierEvidence}.` : requirement.command ? `${verifierPrefix}: ${verifierKind}. Command: ${requirement.command}` : `${verifierPrefix}: ${verifierKind}. Evidence contract: ${verifierEvidence}`;
   const verifierCommand = requirement.command || "";
+  const amendmentNotice = pinnedRequirement ? dispatchVerifyAmendmentNotice(ticket) : "";
   const evidenceGuidance = ticketEvidenceGuidance(ticket);
   const highStakes = ticket?.highStakes ? [
     "High-stakes verification:",
@@ -612,6 +625,7 @@ function executorSafetyBody(ticket, nonce, tokenFile, project, executor, closeou
     ...worktreeSync ? [worktreeSync] : [],
     ...ticketIsolationContract(ticket, project) || [],
     verify,
+    amendmentNotice,
     verifierCommand ? "Run it through " + capturedVerifyCommand(verifierCommand, ticket?.ref, project) + " in the FOREGROUND with an explicit generous timeout of up to 600000 ms; this is the pinned verifier. A successful wrapper run records its completed capture identity against this ticket and the checked Git revision, and submit refuses prose or a retyped command without that matching record. " + (ticket?.dispatch?.sharedTree === false && ticket?.dispatch?.workingTreeDelivery !== true ? "This dispatch is isolated, so the wrapper runs in and records your bound worktree whatever directory you start it from, and it refuses before running anything while that worktree has uncommitted changes: commit the candidate with the board commit tool first, then run the wrapper. " : "") + "A backgrounded verify's completion does not wake you, so going idle on it parks the claim indefinitely. If it genuinely exceeds the 10-minute Bash ceiling, use bounded foreground until-loops instead of backgrounding or going idle; post [sidequest:verify-start] before it only for an expected no-op, and always post [sidequest:verify-complete] with status first after it exits. Executors may report evidence only; they cannot replace, skip, or weaken this verifier." : "Record evidence for the pinned verifier. Executors may not replace, skip, or weaken it; skipping requires an authorized bounded waiver recorded as a Diagnostic.",
     evidenceGuidance || "",
     "Execution survival: Budget tool calls and run the declared verify command early, rather than only at the end. If the budget nears exhaustion after partly completing the contract, commit and submit the verified portion with evidence and plainly name what remains: a partial submission with proof beats a dead run. Never leave verified work uncommitted. Board MCP is the executor lifecycle authority. If its transport is unavailable, do not use the Sidequest CLI or raw Agent as a fallback: reload or reconnect Sidequest, then re-dispatch.",

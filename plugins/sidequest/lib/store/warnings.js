@@ -338,6 +338,90 @@ function createWarnings({ boardConfig, categoryReadOnly, claimReclaimable, coerc
     if (segment) segments.push(segment);
     return { segments, hasSemicolon };
   }
+  const SHELL_COMMAND_KEYWORDS = /* @__PURE__ */ new Set(["if", "then", "else", "elif", "do", "while", "until", "time", "!", "{"]);
+  function shellSyntaxError(command) {
+    const text = String(command || "");
+    let quote = "";
+    let quoteStart = -1;
+    const open = [];
+    let commandStart = true;
+    let word = "";
+    let previous = "";
+    const endWord = () => {
+      if (word && SHELL_COMMAND_KEYWORDS.has(word)) commandStart = true;
+      word = "";
+    };
+    for (let index = 0; index < text.length; index += 1) {
+      const character = text.charAt(index);
+      if (quote) {
+        if (quote !== "'" && character === "\\") {
+          index += 1;
+          continue;
+        }
+        if (character === quote) quote = "";
+        continue;
+      }
+      if (character === "\\") {
+        index += 1;
+        word += "x";
+        previous = "x";
+        commandStart = false;
+        continue;
+      }
+      if (character === '"' || character === "'" || character === "`") {
+        quote = character;
+        quoteStart = index;
+        word += character;
+        previous = character;
+        commandStart = false;
+        continue;
+      }
+      if (/\s/.test(character)) {
+        endWord();
+        previous = " ";
+        continue;
+      }
+      if (character === "#" && previous === " " || character === "#" && index === 0) break;
+      if (character === "(") {
+        if (text[index + 1] === ")" && word && !commandStart) {
+          index += 1;
+          word = "";
+          previous = ")";
+          continue;
+        }
+        const allowed = commandStart || /[$<>=@!?*+(]/.test(previous);
+        if (!allowed) {
+          const after = word || text.slice(0, index).trim().split(/\s+/).pop() || "";
+          return `an unquoted \`(\` after \`${after}\` at character ${index} is a shell syntax error, so the shell refuses the whole line before anything runs. It reads as prose: put the command alone, quote the text, or use \`manual: <what you checked>\` for a non-shell check.`;
+        }
+        open.push(index);
+        word = "";
+        previous = "(";
+        commandStart = true;
+        continue;
+      }
+      if (character === ")") {
+        if (!open.length) return `the \`)\` at character ${index} closes nothing, so the shell refuses the whole line before anything runs.`;
+        open.pop();
+        endWord();
+        previous = ")";
+        commandStart = false;
+        continue;
+      }
+      if (character === ";" || character === "&" || character === "|") {
+        endWord();
+        previous = character;
+        commandStart = true;
+        continue;
+      }
+      word += character;
+      previous = character;
+      commandStart = false;
+    }
+    if (quote) return `the ${quote === "`" ? "backquote" : quote === '"' ? "double quote" : "single quote"} at character ${quoteStart} is never closed, so the shell refuses the whole line before anything runs.`;
+    if (open.length) return `the \`(\` at character ${open[open.length - 1]} is never closed, so the shell refuses the whole line before anything runs.`;
+    return null;
+  }
   function verifyCommandErrors(value) {
     const command = String(value || "").trim();
     if (!command) return [];
@@ -352,6 +436,8 @@ function createWarnings({ boardConfig, categoryReadOnly, claimReclaimable, coerc
     if (/\r|\n/.test(command)) {
       errors.push("Verify must be one runnable command line. Use `npm run test` or `cd <repo-relative-dir> && <command>`.");
     }
+    const syntax = shellSyntaxError(command);
+    if (syntax) errors.push(`Verify is not a parseable shell command: ${syntax}`);
     if (/<[^<>\r\n]+>/.test(command)) {
       errors.push("Verify contains an unresolved placeholder. Replace it with a runnable command such as `npm run test`.");
     }

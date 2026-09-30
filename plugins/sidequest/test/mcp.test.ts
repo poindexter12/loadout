@@ -714,6 +714,9 @@ test('update amends a claimed dispatch verifier and its next capture uses the am
   assert.equal(updated.verificationAmendment.status, 'applied_to_live_dispatch');
   assert.equal(updated.verificationAmendment.oldCommand, pinnedCommand);
   assert.equal(updated.verificationAmendment.newCommand, amendedCommand);
+  // SQ-223: the ack hands the orchestrator the current wrapper invocation for the executor.
+  assert.ok(updated.verificationAmendment.message.includes(`--base64 ${Buffer.from(amendedCommand, 'utf8').toString('base64')}`), updated.verificationAmendment.message);
+  assert.match(updated.verificationAmendment.message, new RegExp(`claim holder ${by}`));
   const liveTicket = store.getTicket(project, added.ref);
   assert.equal(liveTicket.executorVerify, amendedCommand);
   assert.equal(liveTicket.dispatch.verificationRequirement.command, amendedCommand);

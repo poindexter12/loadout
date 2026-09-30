@@ -57,6 +57,7 @@ const {
   withoutCategories,
   snapshotContextRetrieval
 } = require("./mcp-shared");
+const { verifyCaptureWrapperCommand } = require("./kernel/verification.js");
 function sameBasenameSiblingDetails(project, ticket, projectPath, tool) {
   const details = store.scopeConsumerWarningDetails(ticket, projectPath);
   if (!details.length) return {};
@@ -84,7 +85,13 @@ const VERIFY_ORACLE_PROP = {
 function amendmentCount(ticket) {
   return Array.isArray(ticket?.verificationAmendments) ? ticket.verificationAmendments.length : 0;
 }
-function verificationAmendmentAck(before, ticket) {
+function liveAmendmentExecutorNotice(ticket, amendment, projectPath) {
+  const command = String(amendment?.newCommand || "").trim();
+  const wrapper = command && projectPath ? verifyCaptureWrapperCommand(command, ticket.ref, projectPath) : "";
+  const holder = ticket.claim?.by ? `The claim holder ${ticket.claim.by}` : "An executor that already fetched its briefing";
+  return ` ${holder} may still hold the old wrapper invocation; its capture of the old command is refused with the current invocation, and a fresh briefing names the amendment.${wrapper ? ` Tell the executor to run: ${wrapper}` : ""}`;
+}
+function verificationAmendmentAck(before, ticket, projectPath) {
   const recorded = amendmentCount(ticket) !== amendmentCount(before) || JSON.stringify(ticket.verificationAmendments?.at(-1) || null) !== JSON.stringify(before?.verificationAmendments?.at(-1) || null);
   const amendment = recorded ? ticket.verificationAmendments.at(-1) : null;
   const liveDispatch = ticket.dispatch && !ticket.dispatch.terminalAt;
@@ -101,7 +108,7 @@ function verificationAmendmentAck(before, ticket) {
       status: "applied_to_live_dispatch",
       oldCommand: amendment.oldCommand || null,
       newCommand: amendment.newCommand || null,
-      message: `Verification was amended for ${ticket.ref}. The live dispatch now requires ${amendment.newCommand || "<none>"}; it previously required ${amendment.oldCommand || "<none>"}.`
+      message: `Verification was amended for ${ticket.ref}. The live dispatch now requires ${amendment.newCommand || "<none>"}; it previously required ${amendment.oldCommand || "<none>"}.${liveAmendmentExecutorNotice(ticket, amendment, projectPath)}`
     };
   }
   if (liveDispatch || ticket.submission && !ticket.submission.integratedAt && (ticket.submission.commit || ticket.submission.sourceRevision)) {
@@ -338,7 +345,7 @@ const tools = [
       const warnings = store.ticketReferenceWarnings(slug, patch.title, patch.description);
       warnings.push(...store.ticketPlanningWarnings(t, meta.path));
       const presentedWarnings = store.presentWarnings(t, warnings, sessionOf(args));
-      const verificationAmendment = verificationWasAmended ? verificationAmendmentAck(existing, t) : null;
+      const verificationAmendment = verificationWasAmended ? verificationAmendmentAck(existing, t, meta.path) : null;
       return mutationAck(slug, { ok: true, ticket: t }, Object.assign(
         presentedWarnings.length ? { warnings: presentedWarnings } : {},
         verificationAmendment ? { verificationAmendment } : {},
