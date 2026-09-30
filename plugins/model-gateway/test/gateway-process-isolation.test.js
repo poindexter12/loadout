@@ -640,6 +640,86 @@ test('sibling ensure retires dead records without deleting replacement worker an
   await waitForProcessesToExit([replacementGuardianPid, replacementWorkerPid, replacementProxyPid], 5000);
 });
 
+// SQ-235 (2026-09-29 21:03:31Z): the SessionStart hook running `ensure` hit its
+// timeout mid-recovery and was killed together with everything under it. The
+// replacement supervisor was spawned `detached` (its own session and process group),
+// yet its worker and proxies were SIGTERMed first and the gateway stayed down for
+// ten minutes: the kill followed parent PIDs, and a detached child is still its
+// spawner's child. This reproduces that kill -- every descendant of the hook by PPID,
+// plus its process group -- against both launchers. The plain detached child dying
+// proves the kill reaches what the 21:03 incident lost; the reparented one must not.
+function descendantPids(rootPid) {
+  const table = spawnSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8' }).stdout
+    .trim().split('\n').map((line) => line.trim().split(/\s+/).map(Number));
+  const found = [];
+  const queue = [rootPid];
+  while (queue.length) {
+    const parent = queue.shift();
+    for (const [pid, ppid] of table) {
+      if (ppid === parent && !found.includes(pid)) { found.push(pid); queue.push(pid); }
+    }
+  }
+  return found;
+}
+
+function parentPidOf(pid) {
+  return Number(spawnSync('ps', ['-o', 'ppid=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim()) || null;
+}
+
+test('a supervisor launched from the SessionStart hook survives the hook timeout killing its process tree', { skip: process.platform === 'win32' }, async (t) => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-hook-tree-')));
+  const configDir = path.join(home, '.claude');
+  const state = path.join(configDir, 'model-gateway');
+  const hook = spawn(process.execPath, ['-e', `
+    process.env.HOME = ${JSON.stringify(home)};
+    process.env.USERPROFILE = ${JSON.stringify(home)};
+    process.env.CLAUDE_CONFIG_DIR = ${JSON.stringify(configDir)};
+    require('node:fs').mkdirSync(${JSON.stringify(path.join(state, 'logs'))}, { recursive: true });
+    const gateway = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'commands.js'))});
+    const { spawnDetached } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'process-supervision.js'))});
+    const idle = ['-e', 'setInterval(() => {}, 1000)'];
+    const reparented = gateway.spawnReparented('guardian', process.execPath, idle, {});
+    const detachedOnly = spawnDetached('detached-only', process.execPath, idle, {});
+    process.stdout.write(JSON.stringify({ reparented, detachedOnly }) + '\\n');
+    setInterval(() => {}, 1000);
+  `], { detached: true, stdio: ['ignore', 'pipe', 'inherit'] });
+  let pids = null;
+  t.after(async () => {
+    for (const pid of [pids?.reparented, pids?.detachedOnly]) {
+      if (pid && processIsRunning(pid)) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    }
+    try { process.kill(-hook.pid, 'SIGKILL'); } catch {}
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  pids = await new Promise((resolve, reject) => {
+    let output = '';
+    const timeout = setTimeout(() => reject(new Error('hook fixture did not report its launched pids')), 10000);
+    hook.stdout.on('data', (chunk) => {
+      output += chunk;
+      if (!output.includes('\n')) return;
+      clearTimeout(timeout);
+      resolve(JSON.parse(output.split('\n')[0]));
+    });
+    hook.once('error', reject);
+  });
+  assert.ok(processIsRunning(pids.reparented) && processIsRunning(pids.detachedOnly), 'both fixture supervisors run before the hook is killed');
+  assert.notEqual(parentPidOf(pids.reparented), hook.pid, 'the reparented supervisor is no longer the hook process\'s child');
+  assert.equal(
+    Number(fs.readFileSync(path.join(state, 'guardian.pid'), 'utf8').trim()),
+    pids.reparented,
+    'the guardian record names the supervisor itself, not the short-lived launcher',
+  );
+
+  for (const pid of [...descendantPids(hook.pid), hook.pid]) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+  try { process.kill(-hook.pid, 'SIGKILL'); } catch {}
+  await waitForExit(hook);
+  await waitForProcessesToExit([pids.detachedOnly], 5000);
+  await pause(200);
+
+  assert.equal(processIsRunning(pids.reparented), true, 'the reparented supervisor survives the hook timeout kill');
+});
+
 // SQ-23: on 2026-09-14 two concurrent `ensure` OS processes both observed the same
 // dying supervisor, both independently decided recovery was needed, and both
 // mutated lifecycle state — one of them tore down a supervisor that had been

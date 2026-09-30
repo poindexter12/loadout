@@ -72,11 +72,159 @@ test('startAll begins recovery once shim-health failures exceed the patience thr
     probeShimHealth: async () => { healthCalls += 1; return null; },
     shimReady: async () => true,
     proxyAnswers: async () => true,
+    stopSupervisor: async () => ({ ok: true, pid: 4242 }),
+    scheduleRecovery: () => { throw new Error('a confirmed stop needs no recovery controller'); },
+    controllerActive: async () => false,
     lifecycleOperation: 'ensure',
   });
 
   assert.equal(healthCalls, 3, 'exactly three consecutive failures earn a recovery attempt');
   assert.equal(result.recoveryAttempted, true);
+});
+
+// SQ-235 (2026-09-29 22:32Z): ensure SIGTERMed a bound-but-slow supervisor, its
+// 3s stop wait expired while the incumbent spent 3 minutes draining, ensure
+// reported "failed" and nothing ever started a successor. :20216 went dark the
+// moment the drain finished. An unconfirmed stop must hand the restart to a
+// detached controller, not end the recovery.
+function boundButUnresponsive(overrides = {}) {
+  return {
+    resolveOwner: async () => ({ state: 'same-install', pid: 4242, installRoot: 'fixture-install' }),
+    proxyExists: () => true,
+    isPortBound: async () => true,
+    probeShimHealth: async () => null,
+    shimReady: async () => { throw new Error('a handed-off recovery must not wait for readiness'); },
+    launchSupervisor: () => { throw new Error('a successor cannot bind while the incumbent holds the port'); },
+    controllerActive: async () => false,
+    lifecycleOperation: 'ensure',
+    quiet: true,
+    ...overrides,
+  };
+}
+
+test('startAll hands an unconfirmed incumbent stop to a detached recovery controller instead of failing', async () => {
+  const scheduled = [];
+  const result = await gateway.startAll(boundButUnresponsive({
+    stopSupervisor: async () => ({ ok: false, reason: 'could not stop the shim supervisor on :20216 (PID 4242)' }),
+    scheduleRecovery: (incumbentPid) => { scheduled.push(incumbentPid); },
+  }));
+
+  assert.deepEqual(scheduled, [4242], 'exactly one controller is scheduled, told which incumbent it waits on');
+  assert.equal(result.handedOff, true);
+  assert.equal(result.waitCutShort, true, 'the hook reports "still starting" and exits inside its budget');
+  assert.deepEqual(result.started, ['recovery-controller']);
+  assert.equal(result.recoveryAttempted, true);
+});
+
+test('a refused incumbent stop stays a failure rather than scheduling a controller that could never finish', async () => {
+  let scheduled = 0;
+  const outcome = await gateway.stopIncumbentForRecovery({
+    quiet: true,
+    operation: 'ensure',
+    incumbentPid: 4242,
+    // stopRunningSupervisor resolves the owner through the function it is handed and
+    // sends no signal when that owner is refused, e.g. another account's gateway.
+    stopSupervisor: async ({ resolveOwner }) => {
+      await resolveOwner(20216);
+      return { ok: false, reason: 'refused a foreign owner' };
+    },
+    resolveStopOwner: async () => ({ state: 'foreign-install', pid: 4242, installRoot: 'another-account' }),
+    isPortBound: async () => true,
+    scheduleRecovery: () => { scheduled += 1; },
+  });
+
+  assert.equal(scheduled, 0, 'nothing will ever release a port whose owner was never signalled');
+  assert.equal(outcome.handedOff, undefined);
+  assert.equal(outcome.stopped.ok, false);
+});
+
+test('a concurrent ensure defers to an active recovery controller instead of stopping or starting anything', async () => {
+  let stops = 0;
+  let scheduled = 0;
+  const result = await gateway.startAll(boundButUnresponsive({
+    controllerActive: async () => true,
+    stopSupervisor: async () => { stops += 1; return { ok: true }; },
+    scheduleRecovery: () => { scheduled += 1; },
+  }));
+
+  assert.equal(stops, 0, 'the incumbent already has a stop in flight owned by the controller');
+  assert.equal(scheduled, 0, 'there is never a second controller');
+  assert.equal(result.handedOff, true);
+  assert.equal(result.waitCutShort, true);
+  assert.equal(result.recoveryAttempted, false, 'a deferring ensure did not start a recovery of its own');
+});
+
+test('startAll launches a cold-start supervisor through the reparenting launcher', async () => {
+  const launched = [];
+  let readyChecks = 0;
+  const result = await gateway.startAll({
+    resolveOwner: async () => ({ state: 'unowned', pid: null }),
+    proxyExists: () => true,
+    isPortBound: async () => false,
+    shimReady: async () => { readyChecks += 1; return readyChecks > 1; },
+    proxyAnswers: async () => true,
+    launchSupervisor: (...launchArgs) => { launched.push(launchArgs); return 5151; },
+    startupWaitMs: () => 1000,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(launched.length, 1);
+  assert.equal(launched[0][0], 'guardian');
+  assert.equal(launched[0][2].at(-1), 'serve-shim');
+});
+
+function controllerHarness({ boundSequence, lockFreeAfter = 0, startResult = { ok: true, started: ['shim'] } }) {
+  const calls = { starts: 0, claims: 0, releases: [], portChecks: 0 };
+  let clock = 0;
+  return {
+    calls,
+    options: {
+      incumbentPid: 4242,
+      isPortBound: async () => {
+        const bound = boundSequence[Math.min(calls.portChecks, boundSequence.length - 1)];
+        calls.portChecks += 1;
+        return bound;
+      },
+      claimLock: () => { calls.claims += 1; return calls.claims > lockFreeAfter; },
+      releaseLock: (outcome) => { calls.releases.push(outcome); },
+      start: async (startOptions) => { calls.starts += 1; calls.startOptions = startOptions; return startResult; },
+      now: () => clock,
+      pause: async (milliseconds) => { clock += milliseconds; },
+      timeoutMs: 5000,
+      pollMs: 250,
+      startupWaitMs: 42000,
+    },
+  };
+}
+
+test('the recovery controller waits for the incumbent to release, takes the ensure lock, and starts one successor', async () => {
+  const { calls, options } = controllerHarness({ boundSequence: [true, true, true, false, false], lockFreeAfter: 2 });
+  const result = await gateway.recoverShimAfterIncumbent(options);
+
+  assert.equal(result.ok, true);
+  assert.equal(calls.starts, 1, 'exactly one successor start');
+  assert.equal(calls.claims, 3, 'it waits out a concurrent ensure holding the lock rather than racing it');
+  assert.equal(calls.releases.length, 1, 'the lock it took is released');
+  assert.equal(calls.startOptions.quiet, true);
+  assert.equal(calls.startOptions.startupWaitMs, 42000, 'no hook budget applies to the detached controller');
+});
+
+test('the recovery controller starts nothing when a concurrent ensure already bound a successor', async () => {
+  const { calls, options } = controllerHarness({ boundSequence: [true, false, true] });
+  const result = await gateway.recoverShimAfterIncumbent(options);
+
+  assert.equal(result.ok, true);
+  assert.equal(calls.starts, 0, 'a second supervisor would race the first for the listener');
+  assert.equal(calls.releases.length, 1);
+});
+
+test('the recovery controller leaves an incumbent that never releases alone after its deadline', async () => {
+  const { calls, options } = controllerHarness({ boundSequence: [true] });
+  const result = await gateway.recoverShimAfterIncumbent(options);
+
+  assert.equal(result.ok, false);
+  assert.equal(calls.starts, 0);
+  assert.equal(calls.claims, 0, 'it never took the lock');
 });
 
 // SQ-23: waitForStartupReadiness's own timeout ("failed") was previously the final
