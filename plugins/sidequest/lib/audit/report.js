@@ -127,7 +127,7 @@ function formatAudit(report) {
 }
 function auditSummary(report) {
   const counts = [
-    [report.staleBoardTickets.length, "board tickets look already fixed"],
+    [report.staleBoardTickets.length, "board tickets have subject-tagged main commits plus delivery evidence"],
     [report.untrackedIssues.length, "untracked issues"],
     [report.linkedDrift.length, "linked issues drifting"]
   ].filter(([count]) => Number(count) > 0);

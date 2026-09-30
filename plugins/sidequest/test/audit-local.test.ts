@@ -33,25 +33,54 @@ function activeTicket(overrides: Record<string, unknown> = {}) {
   };
 }
 
-test('findLandedFixes matches a whole ref token once across the main log', () => {
+test('findLandedFixes accepts subject-tagged releases and fixes with delivery evidence', () => {
   const { git, calls } = localGit({
     log: log([
-      { sha: '78', date: '2026-01-03T00:00:00.000Z', subject: 'fix SQ-78', body: '' },
-      { sha: '7', date: '2026-01-04T00:00:00.000Z', subject: 'other work', body: 'delivers SQ-7.' },
+      { sha: '75', date: '2026-01-03T00:00:00.000Z', subject: 'release v4.0.0 (SQ-75)', body: '' },
+      { sha: '156', date: '2026-01-04T00:00:00.000Z', subject: 'fix(sidequest): tighten audit evidence (SQ-156)', body: '' },
     ]),
-    fragments: '.release/unreleased/SQ-7.md\n',
-    changelog: '# Changelog\n\n## v3.5.0 (2026-01-05)\n\n- Fix (SQ-7)\n',
+    fragments: '.release/unreleased/SQ-156.md\n',
+    changelog: '# Changelog\n\n## v4.0.0 (2026-01-05)\n\n- Release (SQ-75)\n',
   });
 
-  assert.deepEqual(findLandedFixes([activeTicket()], git), [{
-    ticketId: 'tk_7',
-    ref: 'SQ-7',
-    status: 'todo',
-    commits: [{ sha: '7', subject: 'other work', date: '2026-01-04T00:00:00.000Z' }],
-    fragment: true,
-    changelogVersion: 'v3.5.0',
-  }]);
+  assert.deepEqual(findLandedFixes([
+    activeTicket({ id: 'tk_75', ref: 'SQ-75' }),
+    activeTicket({ id: 'tk_156', ref: 'SQ-156' }),
+  ], git), [
+    {
+      ticketId: 'tk_75',
+      ref: 'SQ-75',
+      status: 'todo',
+      commits: [{ sha: '75', subject: 'release v4.0.0 (SQ-75)', date: '2026-01-03T00:00:00.000Z' }],
+      fragment: false,
+      changelogVersion: 'v4.0.0',
+    },
+    {
+      ticketId: 'tk_156',
+      ref: 'SQ-156',
+      status: 'todo',
+      commits: [{ sha: '156', subject: 'fix(sidequest): tighten audit evidence (SQ-156)', date: '2026-01-04T00:00:00.000Z' }],
+      fragment: true,
+      changelogVersion: null,
+    },
+  ]);
   assert.equal(calls.filter((args) => args[0] === 'log').length, 1);
+});
+
+test('findLandedFixes rejects body-only and unrelated delivery references', () => {
+  const { git } = localGit({
+    log: log([
+      { sha: '128', date: '2026-01-03T00:00:00.000Z', subject: 'fix(sidequest): capture verification budget', body: '(SQ-45, SQ-128) could never pass the submit gate.' },
+      { sha: '81', date: '2026-01-04T00:00:00.000Z', subject: 'fix(sidequest): repair SQ-162', body: "SQ-81's shell stood in the canonical path." },
+      { sha: '121', date: '2026-01-05T00:00:00.000Z', subject: 'chore(upstream): record UP-004 (SQ-121)', body: 'ledger note, not a fix' },
+    ]),
+  });
+
+  assert.deepEqual(findLandedFixes([
+    activeTicket({ id: 'tk_128', ref: 'SQ-128' }),
+    activeTicket({ id: 'tk_81', ref: 'SQ-81' }),
+    activeTicket({ id: 'tk_121', ref: 'SQ-121' }),
+  ], git), []);
 });
 
 test('findLandedFixes ignores a reused ref in a commit older than the ticket', () => {
