@@ -43,6 +43,7 @@ The marketplace publishes these six plugins:
 - [Set up and maintain a workspace](./quartermaster/)
 - [Track and deliver owned work](./sidequest/)
 - [Add GPT or Grok subscription models](./model-gateway/)
+- [Understand compaction with third-party plugins](./compaction/)
 - [Keep a project map nearby](./codebase-mapper/)
 - [Load project rules when they apply](./live-rules/)
 - [View selected local usage](../observability/)
