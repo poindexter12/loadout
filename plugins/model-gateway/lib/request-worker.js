@@ -1948,86 +1948,46 @@ function runWorker() {
     request.end(body);
   }
 
-  function handleRequest(req, res) {
-    const pathOnly = req.url.split('?')[0];
 
-    if (req.method === 'POST' && pathOnly === '/drain') {
-      draining = true;
-      res.once('finish', () => setImmediate(beginDrain));
-      res.writeHead(202, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, draining, activeRequests }));
-      return;
-    }
-
-    if (draining && pathOnly !== '/healthz') {
-      res.writeHead(503, { 'content-type': 'application/json' });
-      return res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'model-gateway shim is restarting; retry this request shortly' } }));
-    }
-
-    if (pathOnly !== '/healthz') trackInFlight(res);
-
-    if (pathOnly === '/healthz') {
-      const health = {
-        ok: true,
-        version: PLUGIN_VERSION,
-        // Identity (SQ-175): which account tree and install this shim serves, so a
-        // caller probing its own port can tell its gateway from another account's.
-        stateDir: STATE,
-        installRoot: gatewayInstallRoot(),
-        models: modelCache.data.length,
-        served: counters,
-        draining,
-        activeRequests,
-        compat: { ...compatState },
-        compaction: {
-          streamGuard: COMPACT_STREAM_GUARD,
-          retries: COMPACT_STREAM_RETRIES,
-          maxBufferedBytes: COMPACT_STREAM_MAX_BYTES,
-        },
-        usage: {
-          enabled: usageEmitter.enabled,
-          endpoint: usageEmitter.endpoint,
-          maxResponseBytes: usageEmitter.maxResponseBytes,
-          settingsLevelBaseUrl: !!settingsWiring,
-        },
-      };
-      getCodexReadiness({ shimHealth: health }).then((readiness) => {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ...health, codexReadiness: catalogReadiness(readiness) }));
-      }).catch((error) => {
-        res.writeHead(503, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: error.message }));
+  // A successfully parsed Messages body must select exactly one route. Parsing
+  // failures remain eligible for byte-identical Anthropic passthrough, but a
+  // failure after parsing is a gateway fault, never a credential-bearing fallback.
+  function forwardAnthropicPassthrough(req, res, pathOnly, raw, parsedPayload, requestedModel, requestedEffort, routeTelemetry) {
+      assertAnthropicPassthroughSentryIsDisabled(requestedModel);
+      counters.anthropic++;
+      requestRouteLog(req, 'anthropic', requestedModel, pathOnly);
+      routeTelemetry.setRoute({
+        selectedModel: requestedModel,
+        effectiveModel: requestedModel,
+        backend: 'anthropic',
+        effort: requestedEffort,
+        fallback: false,
+        via: 'direct',
       });
-      return;
-    }
+      const requestBodyBytes = raw?.length || 0;
+      recordRequestBodyHighWater(requestSessionId(req), requestBodyBytes);
+      const usageCapture = pathOnly === '/v1/messages' && usageEmitter.enabled && parsedPayload
+        ? usageEmitter.start({
+          payload: parsedPayload,
+          requestBodyBytes,
+          requestHeaders: req.headers,
+          route: {
+            requestedModel,
+            effectiveModel: requestedModel,
+            backend: 'anthropic',
+            effort: requestedEffort,
+            via: 'direct',
+          },
+        })
+        : null;
+      return forward(req, res, ANTHROPIC_UPSTREAM, raw, [], false, false, null, null, null, routeTelemetry, usageCapture);
+  }
 
-    if (req.method === 'GET' && pathOnly === '/v1/models') {
-      counters.models++;
-      if (Date.now() - modelCache.at > 60000) refreshModels(); // serve stale, refresh behind
-      res.writeHead(200, { 'content-type': 'application/json' });
-      return res.end(JSON.stringify({ data: modelCache.data, has_more: false }));
-    }
-
-    if (req.method === 'HEAD') { res.writeHead(200); return res.end(); }
-
-    // buffer the body so we can route on the model field; forward original
-    // bytes untouched on the Anthropic path (prompt caching keys on them)
-    const routeTelemetry = createRouteTelemetry(req);
-    const chunks = [];
-    req.on('data', (c) => chunks.push(c));
-    req.on('end', () => {
-      const raw = chunks.length ? Buffer.concat(chunks) : null;
-      let requestedModel = null;
-      let requestedEffort = null;
-      let parsedPayload = null;
-      if (raw && pathOnly.startsWith('/v1/messages')) {
-        try {
-          const parsed = JSON.parse(raw.toString());
-          parsedPayload = parsed;
-          requestedModel = typeof parsed.model === 'string' ? parsed.model : null;
-          requestedEffort = typeof parsed.output_config?.effort === 'string' ? parsed.output_config.effort : null;
-          const requestedBase = codexBaseFromId(parsed.model);
-          if (requestedBase) {
+  function routeParsedPayload(req, res, pathOnly, raw, parsedPayload, requestedModel, requestedEffort, routeTelemetry) {
+    const routingTable = {
+      codex: {
+        forward: (requestedBase) => {
+          const parsed = parsedPayload;
             const advertisedModel = parsed.model;
             let dispatchRoute = null;
             let dispatchVia = null;
@@ -2135,13 +2095,11 @@ function runWorker() {
             return forward(req, res, `http://127.0.0.1:${PROXY_PORT}`,
               forwardedBody, AUTH_HEADERS, true, !keepPlanTools, sessionId, advertisedModel, parsed.model, routeTelemetry,
               usageCapture, 0, compactGuard);
-          }
-        } catch { /* not JSON; fall through to passthrough */ }
-      }
-      if (raw && pathOnly.startsWith('/v1/messages')) {
-        try {
-          const parsed = JSON.parse(raw.toString());
-          if (typeof parsed.model === 'string' && parsed.model.startsWith(GROK_PREFIX)) {
+        },
+      },
+      grok: {
+        forward: () => {
+          const parsed = parsedPayload;
             const advertisedModel = parsed.model;
             const pickerId = parsed.model.slice(GROK_PREFIX.length).replace(/\[1m\]$/, '');
             const cachedGrokModels = grokBackend.grokModelIdsFromCache();
@@ -2167,13 +2125,11 @@ function runWorker() {
               })
               : null;
             return forwardGrok(req, res, parsed, model, advertisedModel, routeTelemetry, usageCapture);
-          }
-        } catch { /* not JSON; fall through to passthrough */ }
-      }
-      if (raw && pathOnly.startsWith('/v1/messages')) {
-        try {
-          const parsed = JSON.parse(raw.toString());
-          if (typeof parsed.model === 'string' && parsed.model.startsWith(GEMINI_PREFIX)) {
+        },
+      },
+      antigravity: {
+        forward: () => {
+          const parsed = parsedPayload;
             const advertisedModel = parsed.model;
             // antigravity-claude-proxy speaks Anthropic Messages natively, so
             // this is the Codex forwarding shape (un-prefix, strip claude.ai
@@ -2208,37 +2164,134 @@ function runWorker() {
             return forward(req, res, ANTIGRAVITY_ENDPOINT,
               forwardedBody, AUTH_HEADERS, false, !keepPlanTools, null, advertisedModel, parsed.model, routeTelemetry,
               usageCapture, 0, null);
-          }
-        } catch { /* not JSON; fall through to passthrough */ }
-      }
-      assertAnthropicPassthroughSentryIsDisabled(requestedModel);
-      counters.anthropic++;
-      requestRouteLog(req, 'anthropic', requestedModel, pathOnly);
-      routeTelemetry.setRoute({
-        selectedModel: requestedModel,
-        effectiveModel: requestedModel,
-        backend: 'anthropic',
-        effort: requestedEffort,
-        fallback: false,
-        via: 'direct',
+        },
+      },
+    };
+    const requestedBase = codexBaseFromId(parsedPayload.model);
+    const provider = requestedBase
+      ? 'codex'
+      : typeof parsedPayload.model === 'string' && parsedPayload.model.startsWith(GROK_PREFIX)
+        ? 'grok'
+        : typeof parsedPayload.model === 'string' && parsedPayload.model.startsWith(GEMINI_PREFIX)
+          ? 'antigravity'
+          : null;
+    const route = provider ? routingTable[provider] : null;
+    if (!route) {
+      return forwardAnthropicPassthrough(req, res, pathOnly, raw, parsedPayload, requestedModel, requestedEffort, routeTelemetry);
+    }
+    return route.forward(requestedBase);
+  }
+
+  function failParsedRoute(req, res, pathOnly, parsedPayload, requestedModel, requestedEffort, routeTelemetry, error) {
+    const failure = {
+      event: 'model_gateway_routing_failure',
+      path: pathOnly,
+      provider: typeof parsedPayload?.model === 'string' ? parsedPayload.model : null,
+      error: error?.code || error?.name || 'Error',
+      message: error?.message || String(error),
+    };
+    console.error(JSON.stringify(failure));
+    routeTelemetry.setRoute({
+      selectedModel: requestedModel,
+      effectiveModel: null,
+      backend: 'routing_error',
+      effort: requestedEffort,
+      fallback: false,
+      via: 'error',
+    });
+    routeTelemetry.finish(500, 'routing_error');
+    const body = JSON.stringify({
+      type: 'error',
+      error: { type: 'api_error', message: 'model-gateway: could not route the parsed request; no Anthropic fallback was used' },
+    });
+    res.writeHead(500, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
+    return res.end(body);
+  }
+
+  function handleRequest(req, res) {
+    const pathOnly = req.url.split('?')[0];
+
+    if (req.method === 'POST' && pathOnly === '/drain') {
+      draining = true;
+      res.once('finish', () => setImmediate(beginDrain));
+      res.writeHead(202, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, draining, activeRequests }));
+      return;
+    }
+
+    if (draining && pathOnly !== '/healthz') {
+      res.writeHead(503, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'model-gateway shim is restarting; retry this request shortly' } }));
+    }
+
+    if (pathOnly !== '/healthz') trackInFlight(res);
+
+    if (pathOnly === '/healthz') {
+      const health = {
+        ok: true,
+        version: PLUGIN_VERSION,
+        // Identity (SQ-175): which account tree and install this shim serves, so a
+        // caller probing its own port can tell its gateway from another account's.
+        stateDir: STATE,
+        installRoot: gatewayInstallRoot(),
+        models: modelCache.data.length,
+        served: counters,
+        draining,
+        activeRequests,
+        compat: { ...compatState },
+        compaction: {
+          streamGuard: COMPACT_STREAM_GUARD,
+          retries: COMPACT_STREAM_RETRIES,
+          maxBufferedBytes: COMPACT_STREAM_MAX_BYTES,
+        },
+        usage: {
+          enabled: usageEmitter.enabled,
+          endpoint: usageEmitter.endpoint,
+          maxResponseBytes: usageEmitter.maxResponseBytes,
+          settingsLevelBaseUrl: !!settingsWiring,
+        },
+      };
+      getCodexReadiness({ shimHealth: health }).then((readiness) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ...health, codexReadiness: catalogReadiness(readiness) }));
+      }).catch((error) => {
+        res.writeHead(503, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: error.message }));
       });
-      const requestBodyBytes = raw?.length || 0;
-      recordRequestBodyHighWater(requestSessionId(req), requestBodyBytes);
-      const usageCapture = pathOnly === '/v1/messages' && usageEmitter.enabled && parsedPayload
-        ? usageEmitter.start({
-          payload: parsedPayload,
-          requestBodyBytes,
-          requestHeaders: req.headers,
-          route: {
-            requestedModel,
-            effectiveModel: requestedModel,
-            backend: 'anthropic',
-            effort: requestedEffort,
-            via: 'direct',
-          },
-        })
-        : null;
-      forward(req, res, ANTHROPIC_UPSTREAM, raw, [], false, false, null, null, null, routeTelemetry, usageCapture);
+      return;
+    }
+
+    if (req.method === 'GET' && pathOnly === '/v1/models') {
+      counters.models++;
+      if (Date.now() - modelCache.at > 60000) refreshModels(); // serve stale, refresh behind
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ data: modelCache.data, has_more: false }));
+    }
+
+    if (req.method === 'HEAD') { res.writeHead(200); return res.end(); }
+
+    // buffer the body so we can route on the model field; forward original
+    // bytes untouched on the Anthropic path (prompt caching keys on them)
+    const routeTelemetry = createRouteTelemetry(req);
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const raw = chunks.length ? Buffer.concat(chunks) : null;
+      const isMessagesRequest = raw && pathOnly.startsWith('/v1/messages');
+      let parsedPayload = null;
+      if (isMessagesRequest) {
+        try { parsedPayload = JSON.parse(raw.toString()); } catch { /* unparseable bodies pass through untouched */ }
+      }
+      const requestedModel = typeof parsedPayload?.model === 'string' ? parsedPayload.model : null;
+      const requestedEffort = typeof parsedPayload?.output_config?.effort === 'string' ? parsedPayload.output_config.effort : null;
+      if (parsedPayload) {
+        try {
+          return routeParsedPayload(req, res, pathOnly, raw, parsedPayload, requestedModel, requestedEffort, routeTelemetry);
+        } catch (error) {
+          return failParsedRoute(req, res, pathOnly, parsedPayload, requestedModel, requestedEffort, routeTelemetry, error);
+        }
+      }
+      return forwardAnthropicPassthrough(req, res, pathOnly, raw, null, requestedModel, requestedEffort, routeTelemetry);
     });
   }
 
