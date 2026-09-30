@@ -706,6 +706,56 @@ function replaceAtomicManifest(temp, manifestFile) {
   }
 }
 
+function checkAtomicRuleSet(projectDir) {
+  const destination = getAtomicRulesDir(projectDir);
+  if (!fs.existsSync(destination)) {
+    throw new Error(destination + ' is missing. Create atomic rule files first, then run live-rules sync again.');
+  }
+
+  let manifest;
+  const manifestFile = getManifestFile(projectDir);
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+  } catch (error) {
+    throw new Error('Could not read ' + manifestFile + ': ' + error.message);
+  }
+  if (!manifest || manifest.version !== 1 || !Array.isArray(manifest.rules)) {
+    throw new Error(manifestFile + ' must contain a version 1 manifest with a rules array.');
+  }
+
+  const errors = [];
+  const ruleFiles = new Map(listAtomicRuleFiles(destination).map((file) => [file.path, file.content]));
+  const manifestPaths = new Set();
+  for (let index = 0; index < manifest.rules.length; index++) {
+    const entry = manifest.rules[index];
+    if (!entry || !isSafeRulePath(entry.path)) {
+      errors.push('manifest entry ' + (index + 1) + ' has an invalid rule path.');
+      continue;
+    }
+    const relativePath = entry.path.replace(/\\/g, '/');
+    if (manifestPaths.has(relativePath)) {
+      errors.push(relativePath + ': duplicate manifest entry.');
+      continue;
+    }
+    manifestPaths.add(relativePath);
+    const content = ruleFiles.get(relativePath);
+    if (content == null) {
+      errors.push(relativePath + ': listed in the manifest but its rule file is missing.');
+      continue;
+    }
+    const calculatedHash = hashContent(content);
+    if (entry.hash !== calculatedHash) {
+      errors.push(relativePath + ': manifest hash does not match the calculated sha256.');
+    }
+  }
+  for (const relativePath of ruleFiles.keys()) {
+    if (!manifestPaths.has(relativePath)) {
+      errors.push(relativePath + ': rule file is missing from the manifest.');
+    }
+  }
+  return errors;
+}
+
 function syncAtomicRuleSet(projectDir) {
   const destination = getAtomicRulesDir(projectDir);
   if (!fs.existsSync(destination)) {
@@ -1015,6 +1065,7 @@ module.exports = {
   atomicSchema,
   migrateLegacyRules,
   writeAtomicRuleSet,
+  checkAtomicRuleSet,
   syncAtomicRuleSet,
   resolveIncludePath,
   displayPath,

@@ -35,6 +35,8 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
+      - name: Check live-rules manifest
+        run: node plugins/live-rules/scripts/sync-atomic-rules.js --check
       - run: node --test scripts/release/test/*.test.mjs scripts/test/*.test.mjs
 
   plugin-matrix:
