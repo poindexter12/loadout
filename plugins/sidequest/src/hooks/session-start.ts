@@ -5,7 +5,7 @@ import path from 'node:path';
 import { readStdin, stringField, type HookInput } from './shared/input.js';
 import { writeContext } from './shared/output.js';
 import { pluginRoot, runtimeModule } from './shared/paths.js';
-import { consumeReplacementCompactionMarker, initializeCompactionState, isPrimarySession } from './shared/compaction.js';
+import { initializeCompactionState, isPrimarySession, isReplacementCompaction } from './shared/compaction.js';
 import { runSweep } from './shared/sweep-handoff.js';
 import { runAuditHandoff } from './shared/audit-handoff.js';
 import { registerSweepSession } from './shared/worktree-sweep.js';
@@ -217,7 +217,9 @@ async function main(): Promise<void> {
     // SQ-197: a replacement compaction (PostCompact saw compact_summary === '') leaves prior
     // SessionStart re-grounding sitting verbatim in history. Emit a short note instead of
     // re-injecting the same block again; a normal summarized compaction keeps today's behaviour.
-    if (source === 'compact' && consumeReplacementCompactionMarker(sessionId)) {
+    // Peek only, never delete: codebase-mapper and live-rules read the same marker in parallel with
+    // this hook (SQ-200).
+    if (source === 'compact' && isReplacementCompaction(sessionId)) {
       emit(
         'sidequest: history retained across a replacement compaction; prior board/session context is already in the transcript.',
         restartNotice,

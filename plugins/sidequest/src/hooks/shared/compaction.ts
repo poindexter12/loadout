@@ -106,11 +106,12 @@ export function resetCompactionState(sessionId: string, transcriptPath: unknown)
 // content every replacement compaction. This marker lets the SessionStart(compact) hooks in all
 // three plugins detect that case and emit a short note instead.
 //
-// The path formula below is duplicated (not imported) in codebase-mapper's inject-context.js and
-// live-rules' session-start-rules.js — plugins don't import each other's code — so it must stay
-// exactly in sync there: SIDEQUEST_HOME (any subprocess in the session can read this env var,
-// regardless of which plugin defines it) first, then CLAUDE_CONFIG_DIR-rooted, never a bare
-// hardcoded ~/.claude (multi-account setups point CLAUDE_CONFIG_DIR elsewhere; see claude-home.ts).
+// The path formula and the age-bounded peek below are duplicated (not imported) in
+// codebase-mapper's inject-context.js and live-rules' session-start-rules.js — plugins don't import
+// each other's code — so they must stay exactly in sync there. The path takes SIDEQUEST_HOME (any
+// subprocess in the session can read this env var, regardless of which plugin defines it) first,
+// then CLAUDE_CONFIG_DIR-rooted, never a bare hardcoded ~/.claude (multi-account setups point
+// CLAUDE_CONFIG_DIR elsewhere; see claude-home.ts).
 function replacementMarkerHome(): string {
   const sidequestHome = String(process.env.SIDEQUEST_HOME || '').trim();
   if (sidequestHome) return sidequestHome;
@@ -122,10 +123,27 @@ function replacementMarkerFile(sessionId: string): string {
   return path.join(replacementMarkerHome(), 'replacement-compactions', `${encodeURIComponent(sessionId)}.json`);
 }
 
-export function markReplacementCompaction(sessionId: string): void {
+// SQ-200: Claude Code runs one event's hooks in parallel, so all three SessionStart(compact)
+// readers race each other. None of them may delete the marker on read, or whichever reader runs
+// first silently decides what the other two see. Every reader peeks with the same 2-minute age
+// bound, measured from the marker's mtime (the predicate codebase-mapper and live-rules duplicate as
+// REPLACEMENT_MARKER_MAX_AGE_MS), so a marker a crashed or skipped PostCompact left behind cannot
+// suppress a later re-grounding.
+
+// PostCompact, in sidequest (the only one of the three plugins with a PostCompact hook), is the
+// marker's single writer and its only deleter. It runs on every compaction: it first removes any
+// marker an earlier compaction left, so a summarized compaction inside the age bound cannot inherit
+// it, then writes a fresh timestamped marker only when this compaction was a replacement.
+export function recordReplacementCompaction(sessionId: string, replacement: boolean): void {
   if (!sessionId) return;
+  const file = replacementMarkerFile(sessionId);
   try {
-    const file = replacementMarkerFile(sessionId);
+    fs.rmSync(file, { force: true });
+  } catch (_) {
+    // An unremovable marker still ages out of every reader's bound.
+  }
+  if (!replacement) return;
+  try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify({ at: new Date().toISOString() }));
   } catch (_) {
@@ -133,13 +151,14 @@ export function markReplacementCompaction(sessionId: string): void {
   }
 }
 
-// Sidequest owns the marker (it is the only one of the three plugins with a PostCompact hook), so
-// it is the one that consumes (deletes) it. codebase-mapper and live-rules only peek at it.
-export function consumeReplacementCompactionMarker(sessionId: string): boolean {
+// A non-destructive peek, identical in all three plugins. The bound lives inside the function so
+// esbuild does not copy an unused constant into every hook bundle that imports this module.
+export function isReplacementCompaction(sessionId: string): boolean {
   if (!sessionId) return false;
+  const REPLACEMENT_MARKER_MAX_AGE_MS = 2 * 60 * 1000;
   try {
-    fs.unlinkSync(replacementMarkerFile(sessionId));
-    return true;
+    const stat = fs.statSync(replacementMarkerFile(sessionId));
+    return Date.now() - stat.mtimeMs <= REPLACEMENT_MARKER_MAX_AGE_MS;
   } catch (_) {
     return false;
   }

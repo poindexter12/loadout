@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import './shared/sqlite-budget.js';
 import { readStdin, stringField } from './shared/input.js';
-import { isPrimarySession, markReplacementCompaction, resetCompactionState } from './shared/compaction.js';
+import { isPrimarySession, recordReplacementCompaction, resetCompactionState } from './shared/compaction.js';
 
 function main(): void {
   const input = readStdin();
@@ -11,7 +11,8 @@ function main(): void {
   resetCompactionState(sessionId, input.transcript_path || input.transcriptPath);
   // A replacement compaction (no summary generated) keeps prior SessionStart re-grounding in
   // history verbatim; mark it so SessionStart(compact) can emit a short note instead (SQ-197).
-  if (input.compact_summary === '') markReplacementCompaction(sessionId);
+  // Every compaction first drops any earlier marker, so a summarized one never inherits it (SQ-200).
+  recordReplacementCompaction(sessionId, input.compact_summary === '');
 }
 
 try {

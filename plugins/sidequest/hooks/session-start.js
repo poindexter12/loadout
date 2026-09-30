@@ -237,11 +237,12 @@ function replacementMarkerHome() {
 function replacementMarkerFile(sessionId3) {
   return import_node_path3.default.join(replacementMarkerHome(), "replacement-compactions", `${encodeURIComponent(sessionId3)}.json`);
 }
-function consumeReplacementCompactionMarker(sessionId3) {
+function isReplacementCompaction(sessionId3) {
   if (!sessionId3) return false;
+  const REPLACEMENT_MARKER_MAX_AGE_MS = 2 * 60 * 1e3;
   try {
-    import_node_fs3.default.unlinkSync(replacementMarkerFile(sessionId3));
-    return true;
+    const stat2 = import_node_fs3.default.statSync(replacementMarkerFile(sessionId3));
+    return Date.now() - stat2.mtimeMs <= REPLACEMENT_MARKER_MAX_AGE_MS;
   } catch (_) {
     return false;
   }
@@ -891,7 +892,7 @@ async function main() {
   const recovery = "Context is UTF-8 bounded. Omitted details name a typed board retrieval call.";
   const initialUserMessage = hasMidWaveBoard(data) ? "/sidequest:sidequest" : "";
   if (source === "compact" || source === "resume") {
-    if (source === "compact" && consumeReplacementCompactionMarker(sessionId3)) {
+    if (source === "compact" && isReplacementCompaction(sessionId3)) {
       emit(
         "sidequest: history retained across a replacement compaction; prior board/session context is already in the transcript.",
         restartNotice,
