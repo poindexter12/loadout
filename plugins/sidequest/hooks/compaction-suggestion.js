@@ -199,6 +199,12 @@ async function compactionSuggestion(input) {
   if (!sessionId) return null;
   const currentBytes = transcriptBytes(input.transcript_path || input.transcriptPath);
   const state = readState(sessionId, currentBytes);
+  if (state.baselinePending) {
+    state.baselinePending = false;
+    state.transcriptBytes = currentBytes;
+    writeState(sessionId, state);
+    return null;
+  }
   const project = projectFor(String(input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd()));
   if (!project) return null;
   try {

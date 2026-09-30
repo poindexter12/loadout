@@ -154,7 +154,12 @@ function writeState(sessionId, state) {
 function resetCompactionState(sessionId, transcriptPath) {
   if (!sessionId) return;
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  writeState(sessionId, { resetAt: now, ticketBaselineAt: now, transcriptBytes: transcriptBytes(transcriptPath) });
+  writeState(sessionId, {
+    resetAt: now,
+    ticketBaselineAt: now,
+    transcriptBytes: transcriptBytes(transcriptPath),
+    baselinePending: true
+  });
 }
 function replacementMarkerHome() {
   const sidequestHome = String(process.env.SIDEQUEST_HOME || "").trim();
