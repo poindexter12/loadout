@@ -326,7 +326,7 @@ function releaseEnsureLock(outcome) {
 const {
   confirmProbeDown, createProbeChildRegistry, createProxyRecovery, fetchUrl, foreignPortOwner, foreignShimOwner, foreignShimOwnerMessage, killPidAsync, portListening, postJson, probeFailureReason, probeSucceeded, processOwningPort, processOwningPortAsync, proxyModelsProbe, recordedGatewayPids, reapGatewayOrphans, resolvePortOwner, portOwnerRefusal,
   removePid, restartWorkerWithDrain, shimHealthy, spawnDetached, stopAll, stopProcess, stopRunningSupervisor,
-  stopShimWithDrain, waitForShimExit, writePidRecordAsync,
+  stopShimWithDrain, waitForShimExit, writePidRecordAsync, readPid, writePidRecord, processIsOwnedByThisInstallAsync,
 } = require('./process-supervision.js');
 
 const {
@@ -775,6 +775,173 @@ async function waitForStartupReadiness({
 
 function reportSiblingSupervisorReplacement(stopped, quiet) {
   if (!quiet && stopped.siblingInstallRoot) log(`model-gateway: replaced older sibling shim version at ${stopped.siblingInstallRoot}.`);
+}
+
+// SQ-235 (2026-09-29 21:03Z): spawnDetached's `detached: true` already gives a child
+// its own session, so a process-GROUP kill of the SessionStart hook cannot reach it.
+// The hook timeout reached it anyway: the worker and both proxies of the replacement
+// supervisor were SIGTERMed directly, before the supervisor itself even logged its
+// own stop request, exactly when the 30s hook timeout expired. That is a
+// descendant-tree kill -- it follows parent PIDs, and while `ensure` is alive every
+// process it spawns is its child whatever session it leads. So anything that must
+// outlive the hook is launched through a short-lived intermediate that spawns it and
+// exits at once, leaving it parented to init/launchd and out of the hook's tree
+// before `ensure` does anything else.
+const REPARENTING_LAUNCHER = [
+  "const { spawn } = require('node:child_process');",
+  "const fs = require('node:fs');",
+  'const [logPath, command, ...commandArgs] = JSON.parse(process.argv[1]);',
+  "const out = fs.openSync(logPath, 'a');",
+  "const child = spawn(command, commandArgs, { detached: true, stdio: ['ignore', out, out], windowsHide: true });",
+  "child.once('error', () => process.exit(1));",
+  'if (child.pid) { process.stdout.write(String(child.pid)); child.unref(); process.exit(0); }',
+].join('\n');
+
+function spawnReparented(name, command, cmdArgs, env, { launch = spawnSync, fallback = spawnDetached } = {}) {
+  // Windows has no parent-PID tree kill of a detached, job-breakaway child; the
+  // existing detached launcher already covers it.
+  if (WIN) return fallback(name, command, cmdArgs, env);
+  const launched = launch(process.execPath, ['-e', REPARENTING_LAUNCHER, JSON.stringify([path.join(LOGS, name + '.log'), command, ...cmdArgs])], {
+    env: { ...process.env, ...env },
+    stdio: ['ignore', 'pipe', 'ignore'],
+    encoding: 'utf8',
+    timeout: 10000,
+    windowsHide: true,
+  });
+  const pid = Number(String(launched?.stdout || '').trim());
+  // A launcher that could not report its child must not leave the gateway with no
+  // supervisor at all: fall back to the direct detached spawn, which only loses the
+  // hook-timeout protection.
+  if (!launched || launched.status !== 0 || !Number.isInteger(pid) || pid <= 0) return fallback(name, command, cmdArgs, env);
+  writePidRecord(name, pid);
+  return pid;
+}
+
+// Claude Code runs the SessionStart `ensure` hook with a 30s timeout (hooks/hooks.json)
+// and kills it when that expires. Quiet ensure stops waiting on its own, early enough
+// to report its outcome and release the ensure lock itself, however much of the
+// budget the lock wait and health probes already spent.
+const HOOK_BUDGET_MS = 25000;
+const MIN_QUIET_STARTUP_WAIT_MS = 1000;
+function quietStartupWaitMsWithinHookBudget({ elapsedMs = process.uptime() * 1000 } = {}) {
+  return Math.max(MIN_QUIET_STARTUP_WAIT_MS, Math.min(QUIET_STARTUP_WAIT_MS, Math.floor(HOOK_BUDGET_MS - elapsedMs)));
+}
+
+// SQ-235 (2026-09-29 22:32Z): a bound-but-slow supervisor was SIGTERMed, took 3 minutes
+// to drain, and `ensure` gave up after its 3s stop wait and never started a successor,
+// so :20216 went dark the moment the drain finished. A successor cannot bind until the
+// incumbent releases the listener, which the supervisor does only after its worker has
+// drained. When the incumbent outlives the stop wait, the restart is owned by this
+// controller instead: reparented off the hook (see spawnReparented), it waits for the
+// release and starts exactly one successor under the same ensure lock SessionStart hooks
+// take, so a concurrent ensure can never launch a competing supervisor.
+const RECOVERY_CONTROLLER = 'recovery-controller';
+const RECOVERY_CONTROLLER_TIMEOUT_MS = 10 * 60 * 1000;
+
+async function recoveryControllerActive({
+  readControllerPid = () => readPid(RECOVERY_CONTROLLER),
+  isOwned = (pid) => processIsOwnedByThisInstallAsync(pid),
+} = {}) {
+  const pid = readControllerPid();
+  if (!pid || pid === process.pid) return false;
+  return (await isOwned(pid)) === true;
+}
+
+function scheduleDetachedShimRecovery(incumbentPid, { launch = spawnReparented } = {}) {
+  return launch(RECOVERY_CONTROLLER, process.execPath, [resolveNewestInstalledCliPath(), 'recover-shim', String(incumbentPid || '')], {});
+}
+
+async function recoverShimAfterIncumbent({
+  incumbentPid = Number(args[0]) || null,
+  isPortBound = portListening,
+  start = startAll,
+  claimLock = tryClaimEnsureLock,
+  releaseLock = releaseEnsureLock,
+  now = Date.now,
+  pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  timeoutMs = RECOVERY_CONTROLLER_TIMEOUT_MS,
+  pollMs = 250,
+} = {}) {
+  const record = (outcome, extra = {}) => recordGatewayLifecycle('recovery-controller-finished', {
+    component: RECOVERY_CONTROLLER,
+    pid: process.pid,
+    child: incumbentPid ? { component: 'supervisor', pid: incumbentPid } : undefined,
+    outcome,
+    ...extra,
+  });
+  recordGatewayLifecycle('recovery-controller-started', {
+    component: RECOVERY_CONTROLLER,
+    pid: process.pid,
+    child: incumbentPid ? { component: 'supervisor', pid: incumbentPid } : undefined,
+  });
+  const deadline = now() + timeoutMs;
+  try {
+    while (await isPortBound(PUBLIC_SHIM_PORT)) {
+      if (now() >= deadline) {
+        // Leave a still-bound incumbent alone: the next ensure probes it afresh.
+        record('incumbent-did-not-release');
+        return { ok: false, reason: `incumbent shim supervisor did not release :${PUBLIC_SHIM_PORT}` };
+      }
+      await pause(pollMs);
+    }
+    while (!claimLock()) {
+      if (now() >= deadline) {
+        record('ensure-lock-unavailable');
+        return { ok: false, reason: 'ensure lock stayed held' };
+      }
+      await pause(pollMs);
+    }
+    let outcome = { ok: false, message: 'recovery controller did not complete' };
+    try {
+      const result = await start({ quiet: true, lifecycleOperation: 'recover-shim' });
+      outcome = { ok: result.ok, message: result.ok ? null : `model-gateway could not start: ${result.reason}` };
+      record(result.ok ? 'supervisor-ready' : 'supervisor-not-ready', { started: result.started || [] });
+      return result;
+    } finally {
+      releaseLock(outcome);
+    }
+  } finally {
+    if (readPid(RECOVERY_CONTROLLER) === process.pid) removePid(RECOVERY_CONTROLLER);
+  }
+}
+
+// Stops the incumbent supervisor for a recovery. A stop that returns before the
+// incumbent released :PUBLIC_SHIM_PORT is not a failure to recover but a drain still in
+// progress: the restart is handed to the detached controller rather than abandoned.
+async function stopIncumbentForRecovery({ quiet, operation, incumbentPid, stopSupervisor, isPortBound, scheduleRecovery, resolveStopOwner = resolvePortOwner }) {
+  // Only a stop that was actually sent can be finished by waiting for the release.
+  // stopRunningSupervisor also returns ok:false when it refuses to signal an owner it
+  // cannot confirm, and nothing will ever release the port in that case.
+  let refused = false;
+  const stopped = await stopSupervisor({
+    quiet,
+    operation,
+    resolveOwner: async (port) => {
+      const owner = await resolveStopOwner(port);
+      refused = Boolean(portOwnerRefusal(owner));
+      return owner;
+    },
+  });
+  const stillBound = !stopped.ok && !refused && (await isPortBound(PUBLIC_SHIM_PORT));
+  recordGatewayLifecycle(`${operation}-supervisor-stop-finished`, {
+    component: 'controller',
+    pid: process.pid,
+    child: incumbentPid ? { component: 'supervisor', pid: incumbentPid } : undefined,
+    outcome: stopped.ok ? 'exited' : (stillBound ? 'still-draining' : 'failed'),
+    ...(stopped.ok ? {} : { reason: stopped.reason }),
+  });
+  if (stopped.ok || !stillBound) return { stopped };
+  scheduleRecovery(incumbentPid);
+  return {
+    stopped,
+    handedOff: {
+      ok: false,
+      reason: `the shim supervisor on :${PUBLIC_SHIM_PORT} is still draining; a detached recovery controller starts its successor once it releases the port`,
+      started: [RECOVERY_CONTROLLER],
+      handedOff: true,
+      waitCutShort: quiet,
+    },
+  };
 }
 
 async function startAll({
