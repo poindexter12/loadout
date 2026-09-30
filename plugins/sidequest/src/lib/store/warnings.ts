@@ -1151,7 +1151,11 @@ function crossTicketStateWarnings(ticket?: any, slug?: any) {
   return warnings;
 }
 
-function staleWorktreeCwdWarning(cwd?: any, projectPath?: any, sharedTree?: any) {
+// ownWorktrees are the linked worktrees this dispatch bound for its own
+// executor. The executor renders its briefing with the launcher CLI from inside
+// that worktree, so there process.cwd() is its bound worktree. That is neither
+// leftover nor the board server's cwd (SQ-221).
+function staleWorktreeCwdWarning(cwd?: any, projectPath?: any, sharedTree?: any, ownWorktrees?: any) {
   const workingDirectory = String(cwd || '').trim();
   const projectRoot = String(projectPath || '').trim();
   if (!workingDirectory || !projectRoot) return null;
@@ -1168,6 +1172,10 @@ function staleWorktreeCwdWarning(cwd?: any, projectPath?: any, sharedTree?: any)
     return null;
   }
   if (canonicalPath(checkoutRoot) === canonicalPath(projectRoot)) return null;
+  const boundWorktrees = (Array.isArray(ownWorktrees) ? ownWorktrees : [ownWorktrees])
+    .map((worktree) => String(worktree || '').trim())
+    .filter(Boolean);
+  if (boundWorktrees.some((worktree) => canonicalPath(worktree) === canonicalPath(checkoutRoot))) return null;
   if (!projectWorktrees.some((worktree) => canonicalPath(worktree.worktree) === canonicalPath(checkoutRoot))) return null;
   if (sharedTree === true) {
     return `Shared-tree dispatch: the executor has no worktree of its own and will work in whatever cwd it inherits. Board server cwd ${workingDirectory} is a leftover linked worktree; it should run from project root ${projectRoot}.`;
@@ -1196,7 +1204,8 @@ function dispatchUncertaintyWarnings(ticket?: any, slug?: any) {
   if (dispatch) {
     const setupIncomplete = worktreeSetupIncompleteWarning(dispatch);
     if (setupIncomplete) warnings.push(setupIncomplete);
-    const staleWorktreeWarning = staleWorktreeCwdWarning(process.cwd(), projectPath, dispatch.sharedTree === true);
+    const ownWorktrees = dispatch.sharedTree === true ? [] : [dispatch.worktree, dispatch.continuation?.sourceWorktree];
+    const staleWorktreeWarning = staleWorktreeCwdWarning(process.cwd(), projectPath, dispatch.sharedTree === true, ownWorktrees);
     if (staleWorktreeWarning) warnings.push(staleWorktreeWarning);
   }
   return warnings.map((warning) => `Dispatch warning: ${warning}`);

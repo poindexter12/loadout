@@ -1061,6 +1061,55 @@ test('stale worktree cwd warnings identify dispatch-specific consequences', () =
   }
 });
 
+test('SQ-221: an executor briefing rendered inside its own bound worktree is not flagged as a leftover board server cwd', () => {
+  // The executor renders its briefing with the launcher CLI from inside the
+  // worktree this dispatch bound for it, so process.cwd() there is that
+  // worktree. It is neither leftover nor the board server's cwd.
+  const store = require('../lib/store.js');
+  const worktrees = require('../lib/worktrees.js');
+  const projectRoot = tmpDir();
+  assert.equal(git(projectRoot, ['init', '-b', 'main', '--quiet']).status, 0);
+  assert.equal(git(projectRoot, ['config', 'user.email', 'sidequest@example.invalid']).status, 0);
+  assert.equal(git(projectRoot, ['config', 'user.name', 'Sidequest Tests']).status, 0);
+  fs.writeFileSync(path.join(projectRoot, 'README.md'), 'own worktree fixture\n');
+  assert.equal(git(projectRoot, ['add', '.']).status, 0);
+  assert.equal(git(projectRoot, ['commit', '--quiet', '-m', 'fixture']).status, 0);
+  const slug = store.ensureProject(projectRoot, 'own worktree cwd warning').slug;
+  const ownWorktree = worktrees.agentWorktreePath(projectRoot, 'own-dispatch');
+  const leftoverWorktree = worktrees.agentWorktreePath(projectRoot, 'leftover-dispatch');
+  for (const worktree of [ownWorktree, leftoverWorktree]) {
+    fs.mkdirSync(path.dirname(worktree), { recursive: true });
+    assert.equal(git(projectRoot, ['worktree', 'add', '--detach', worktree]).status, 0);
+  }
+  const ownSubdirectory = path.join(ownWorktree, 'plugins', 'nested');
+  fs.mkdirSync(ownSubdirectory, { recursive: true });
+  const isolated = { sharedTree: false, worktree: ownWorktree };
+  const continuation = { sharedTree: false, worktree: leftoverWorktree, continuation: { mode: 'retained_worktree_resume', sourceWorktree: ownWorktree } };
+  const originalCwd = process.cwd;
+  try {
+    for (const cwd of [ownWorktree, ownSubdirectory]) {
+      process.cwd = () => cwd;
+      assert.deepStrictEqual(store.dispatchUncertaintyWarnings({ dispatch: isolated }, slug), [], `own worktree cwd ${cwd} must not be flagged`);
+      assert.deepStrictEqual(store.dispatchUncertaintyWarnings({ dispatch: continuation }, slug), [], `continuation source worktree cwd ${cwd} must not be flagged`);
+      const briefing = agentsync.renderTicketBriefing({
+        ref: 'SQ-221', title: 'Own worktree briefing', model: 'opus', effort: 'high', category: {}, dispatch: isolated,
+      }, 'own-worktree-token', slug, projectRoot);
+      assert.doesNotMatch(briefing, /leftover linked worktree/);
+      assert.doesNotMatch(briefing, /Restart the session/);
+    }
+
+    process.cwd = () => leftoverWorktree;
+    const foreign = store.dispatchUncertaintyWarnings({ dispatch: isolated }, slug).join('\n');
+    assert.match(foreign, /Isolated-worktree dispatch/);
+    assert.match(foreign, /leftover linked worktree/);
+  } finally {
+    process.cwd = originalCwd;
+    for (const worktree of [ownWorktree, leftoverWorktree]) {
+      assert.equal(git(projectRoot, ['worktree', 'remove', '--force', worktree]).status, 0);
+    }
+  }
+});
+
 test('worktree provisioning config stays out of executor briefings', () => {
   const store = require('../lib/store.js');
   const slug = store.ensureProject(tmpDir(), 'worktree provisioning briefing').slug;
