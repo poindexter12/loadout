@@ -1447,8 +1447,16 @@ test('doctor warns when the configured Codex window resolves to the unknown-mode
 });
 
 test('doctor policy table includes gateway and native model rows', () => {
-  const { modelWindowPolicyRows } = require(COMMANDS);
-  const rows = modelWindowPolicyRows();
+  // Native rows resolve from the active config tree's pin cache and overrides.
+  // Load the module in a fixture child so a developer's gateway state cannot
+  // change this assertion.
+  const script = `process.stdout.write(JSON.stringify(require(${JSON.stringify(COMMANDS)}).modelWindowPolicyRows()))`;
+  const result = spawnGatewayProcessSync(process.execPath, ['-e', script], {
+    env: { MODEL_GATEWAY_CLAUDE_HOME: '' },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const rows = JSON.parse(result.stdout);
 
   assert.equal(rows.some((row) => row.backendId === 'grok-4.5' && row.pickerId === 'claude-grok-4.5[1m]'), true);
   assert.equal(rows.some((row) => row.backendId === 'claude-opus-5' && row.sentry === 'none'), true);
