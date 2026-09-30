@@ -385,7 +385,7 @@ export function replacedBeneath(trace: readonly TraceEntry[]): boolean {
 
 async function readLiveRefs($: HookContext): Promise<{ closed: Set<string>; pin: string } | null> {
   try {
-    const home = sidequestHome(await $.env.get('SIDEQUEST_HOME'), await $.env.get('HOME'));
+    const home = sidequestHome(await $.env.get('SIDEQUEST_HOME'), await $.env.get('HOME'), await $.env.get('CLAUDE_CONFIG_DIR'));
     const session = await $.session.id();
     if (!home || !session) return null;
     const parsed = parseLiveRefs(await $.fs.read(liveRefsPath(home, session)));

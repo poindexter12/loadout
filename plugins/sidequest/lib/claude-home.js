@@ -28,7 +28,8 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var claude_home_exports = {};
 __export(claude_home_exports, {
-  resolveClaudeHome: () => resolveClaudeHome
+  resolveClaudeHome: () => resolveClaudeHome,
+  resolveSidequestHome: () => resolveSidequestHome
 });
 module.exports = __toCommonJS(claude_home_exports);
 var import_node_os = __toESM(require("node:os"));
@@ -36,7 +37,14 @@ var import_node_path = __toESM(require("node:path"));
 function resolveClaudeHome(explicit) {
   return explicit || process.env.SIDEQUEST_CLAUDE_HOME || process.env.CLAUDE_CONFIG_DIR || import_node_path.default.join(import_node_os.default.homedir(), ".claude");
 }
+function resolveSidequestHome(env = process.env) {
+  const explicit = String(env.SIDEQUEST_HOME || "").trim();
+  if (explicit) return import_node_path.default.resolve(explicit);
+  const configDir = String(env.CLAUDE_CONFIG_DIR || "").trim();
+  return import_node_path.default.join(configDir ? import_node_path.default.resolve(configDir) : import_node_path.default.join(import_node_os.default.homedir(), ".claude"), "sidequest");
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
-  resolveClaudeHome
+  resolveClaudeHome,
+  resolveSidequestHome
 });

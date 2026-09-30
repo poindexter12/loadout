@@ -9,9 +9,11 @@ var LIVE_REFS_VERSION = 1;
 function trimSlashes(value) {
   return value.replace(/[\\/]+$/, "");
 }
-function sidequestHome(sidequestHomeEnv, homeEnv) {
+function sidequestHome(sidequestHomeEnv, homeEnv, configDirEnv) {
   const explicit = String(sidequestHomeEnv || "").trim();
   if (explicit) return trimSlashes(explicit);
+  const configDir = trimSlashes(String(configDirEnv || "").trim());
+  if (configDir) return `${configDir}/sidequest`;
   const home = trimSlashes(String(homeEnv || "").trim());
   return home ? `${home}/.claude/sidequest` : "";
 }
@@ -230,7 +232,7 @@ function replacedBeneath(trace) {
 }
 async function readLiveRefs($) {
   try {
-    const home = sidequestHome(await $.env.get("SIDEQUEST_HOME"), await $.env.get("HOME"));
+    const home = sidequestHome(await $.env.get("SIDEQUEST_HOME"), await $.env.get("HOME"), await $.env.get("CLAUDE_CONFIG_DIR"));
     const session = await $.session.id();
     if (!home || !session) return null;
     const parsed = parseLiveRefs(await $.fs.read(liveRefsPath(home, session)));

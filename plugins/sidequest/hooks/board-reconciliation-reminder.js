@@ -37,8 +37,17 @@ __export(board_reconciliation_reminder_exports, {
 module.exports = __toCommonJS(board_reconciliation_reminder_exports);
 var import_node_crypto2 = __toESM(require("node:crypto"));
 var import_node_fs2 = __toESM(require("node:fs"));
+var import_node_path3 = __toESM(require("node:path"));
+
+// src/lib/claude-home.ts
 var import_node_os = __toESM(require("node:os"));
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_path = __toESM(require("node:path"));
+function resolveSidequestHome(env = process.env) {
+  const explicit = String(env.SIDEQUEST_HOME || "").trim();
+  if (explicit) return import_node_path.default.resolve(explicit);
+  const configDir = String(env.CLAUDE_CONFIG_DIR || "").trim();
+  return import_node_path.default.join(configDir ? import_node_path.default.resolve(configDir) : import_node_path.default.join(import_node_os.default.homedir(), ".claude"), "sidequest");
+}
 
 // src/hooks/shared/input.ts
 var import_node_fs = __toESM(require("node:fs"));
@@ -154,12 +163,12 @@ function writeContext(hookEventName, additionalContext, initialUserMessage = "")
 }
 
 // src/hooks/shared/paths.ts
-var import_node_path = __toESM(require("node:path"));
+var import_node_path2 = __toESM(require("node:path"));
 function pluginRoot() {
-  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path.default.join(__dirname, "..");
+  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path2.default.join(__dirname, "..");
 }
 function runtimeModule(name) {
-  return import_node_path.default.join(pluginRoot(), "lib", `${name}.js`);
+  return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
 // src/hooks/board-reconciliation-reminder.ts
@@ -190,15 +199,15 @@ function countLabel(count, singular, plural = singular + "s") {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 function reminderStateFile(sessionId) {
-  const home = process.env.SIDEQUEST_HOME || import_node_path2.default.join(import_node_os.default.homedir(), ".claude", "sidequest");
+  const home = resolveSidequestHome();
   const key = import_node_crypto2.default.createHash("sha256").update(sessionId).digest("hex");
-  return import_node_path2.default.join(home, "hook-state", `stop-reminder-${key}.json`);
+  return import_node_path3.default.join(home, "hook-state", `stop-reminder-${key}.json`);
 }
 function stateLockOwnerFile(lockDirectory) {
   try {
     const owners = import_node_fs2.default.readdirSync(lockDirectory).filter((name) => name.startsWith("owner-"));
     const [ownerName] = owners;
-    return owners.length === 1 && ownerName ? import_node_path2.default.join(lockDirectory, ownerName) : null;
+    return owners.length === 1 && ownerName ? import_node_path3.default.join(lockDirectory, ownerName) : null;
   } catch (_) {
     return null;
   }
@@ -240,12 +249,12 @@ function acquireStateLock(file) {
   const generation = `${process.pid}-${import_node_crypto2.default.randomUUID()}`;
   const ownerName = `owner-${generation}`;
   const candidateDirectory = `${lockDirectory}.${generation}`;
-  const publishedOwnerFile = import_node_path2.default.join(lockDirectory, ownerName);
+  const publishedOwnerFile = import_node_path3.default.join(lockDirectory, ownerName);
   const deadline = Date.now() + STATE_LOCK_WAIT_MS;
-  import_node_fs2.default.mkdirSync(import_node_path2.default.dirname(file), { recursive: true });
+  import_node_fs2.default.mkdirSync(import_node_path3.default.dirname(file), { recursive: true });
   try {
     import_node_fs2.default.mkdirSync(candidateDirectory);
-    import_node_fs2.default.writeFileSync(import_node_path2.default.join(candidateDirectory, ownerName), `${process.pid}
+    import_node_fs2.default.writeFileSync(import_node_path3.default.join(candidateDirectory, ownerName), `${process.pid}
 `);
     while (true) {
       try {
@@ -276,7 +285,7 @@ function acquireStateLock(file) {
 function releaseStateLock(ownerFile) {
   try {
     import_node_fs2.default.rmSync(ownerFile, { force: true });
-    import_node_fs2.default.rmdirSync(import_node_path2.default.dirname(ownerFile));
+    import_node_fs2.default.rmdirSync(import_node_path3.default.dirname(ownerFile));
   } catch (_) {
   }
 }
@@ -400,7 +409,7 @@ function main() {
   const message = boardReconciliationReminder(data);
   if (message) writeContext("Stop", message);
 }
-if (import_node_path2.default.basename(process.argv[1] || "") === "board-reconciliation-reminder.js") main();
+if (import_node_path3.default.basename(process.argv[1] || "") === "board-reconciliation-reminder.js") main();
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   boardReconciliationReminder,

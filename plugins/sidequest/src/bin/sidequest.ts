@@ -433,7 +433,8 @@ Project selection:
     (renumbers refs above the destination's, remaps links, moves assets, then
     deletes the source). --dry-run prints the ref mapping without touching disk.
 
-Tickets and their images are stored centrally (default ~/.claude/sidequest), so
+Tickets and their images are stored centrally ($SIDEQUEST_HOME, else
+$CLAUDE_CONFIG_DIR/sidequest, else ~/.claude/sidequest), so
 one dashboard shows every project's board at once.`
   );
 }

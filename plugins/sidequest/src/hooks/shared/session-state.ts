@@ -1,11 +1,11 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { resolveSidequestHome } from '../../lib/claude-home.js';
 
 export type SessionState = Record<string, unknown>;
 
 export function sessionStateFile(prefix: string, sessionId: string): string {
-  const home = process.env.SIDEQUEST_HOME || path.join(os.homedir(), '.claude', 'sidequest');
+  const home = resolveSidequestHome();
   return path.join(home, 'tmp', 'state', `${prefix}-${encodeURIComponent(sessionId)}.json`);
 }
 

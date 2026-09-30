@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { resolveSidequestHome } from '../../lib/claude-home.js';
 import { stringField, type HookInput } from './input.js';
 import { pluginRoot } from './paths.js';
 
@@ -33,7 +33,7 @@ export function deadlineMs(): number {
 }
 
 function stateDirectory(): string {
-  const home = String(process.env.SIDEQUEST_HOME || '').trim() || path.join(os.homedir(), '.claude', 'sidequest');
+  const home = resolveSidequestHome();
   return path.join(home, 'sweep-reports');
 }
 

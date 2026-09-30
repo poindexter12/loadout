@@ -81,16 +81,26 @@ function isSubagent(input) {
 
 // src/hooks/shared/compaction.ts
 var import_node_fs2 = __toESM(require("node:fs"));
+var import_node_os2 = __toESM(require("node:os"));
+var import_node_path3 = __toESM(require("node:path"));
+
+// src/lib/claude-home.ts
 var import_node_os = __toESM(require("node:os"));
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_path = __toESM(require("node:path"));
+function resolveSidequestHome(env = process.env) {
+  const explicit = String(env.SIDEQUEST_HOME || "").trim();
+  if (explicit) return import_node_path.default.resolve(explicit);
+  const configDir = String(env.CLAUDE_CONFIG_DIR || "").trim();
+  return import_node_path.default.join(configDir ? import_node_path.default.resolve(configDir) : import_node_path.default.join(import_node_os.default.homedir(), ".claude"), "sidequest");
+}
 
 // src/hooks/shared/paths.ts
-var import_node_path = __toESM(require("node:path"));
+var import_node_path2 = __toESM(require("node:path"));
 function pluginRoot() {
-  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path.default.join(__dirname, "..");
+  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path2.default.join(__dirname, "..");
 }
 function runtimeModule(name) {
-  return import_node_path.default.join(pluginRoot(), "lib", `${name}.js`);
+  return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
 // src/hooks/shared/compaction.ts
@@ -107,11 +117,11 @@ function isPrimarySession(input) {
   return !isSubagent(input);
 }
 function stateDirectory() {
-  const home = String(process.env.SIDEQUEST_HOME || "").trim() || import_node_path2.default.join(import_node_os.default.homedir(), ".claude", "sidequest");
-  return import_node_path2.default.join(home, "compaction-suggestions");
+  const home = resolveSidequestHome();
+  return import_node_path3.default.join(home, "compaction-suggestions");
 }
 function stateFile(sessionId) {
-  return import_node_path2.default.join(stateDirectory(), `${encodeURIComponent(sessionId)}.json`);
+  return import_node_path3.default.join(stateDirectory(), `${encodeURIComponent(sessionId)}.json`);
 }
 function transcriptBytes(transcriptPath) {
   try {

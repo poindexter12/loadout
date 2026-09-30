@@ -46,10 +46,16 @@ function trimSlashes(value: string): string {
   return value.replace(/[\\/]+$/, '');
 }
 
-/** The central board store: SIDEQUEST_HOME when set, else <home>/.claude/sidequest. */
-export function sidequestHome(sidequestHomeEnv: string | undefined, homeEnv: string | undefined): string {
+/**
+ * The central board store: SIDEQUEST_HOME when set, else <CLAUDE_CONFIG_DIR>/sidequest,
+ * else <home>/.claude/sidequest. Node-free twin of resolveSidequestHome() in
+ * src/lib/claude-home.ts (function hooks cannot import node:*); keep the order in sync.
+ */
+export function sidequestHome(sidequestHomeEnv: string | undefined, homeEnv: string | undefined, configDirEnv?: string | undefined): string {
   const explicit = String(sidequestHomeEnv || '').trim();
   if (explicit) return trimSlashes(explicit);
+  const configDir = trimSlashes(String(configDirEnv || '').trim());
+  if (configDir) return `${configDir}/sidequest`;
   const home = trimSlashes(String(homeEnv || '').trim());
   return home ? `${home}/.claude/sidequest` : '';
 }

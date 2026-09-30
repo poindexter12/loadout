@@ -7,6 +7,7 @@ const fs = require('node:fs/promises');
 const nativeFs = require('node:fs');
 const { execFileSync, spawn, spawnSync } = require('node:child_process');
 const commitScope = require('./commit-scope.js');
+const { resolveSidequestHome } = require('./claude-home.js');
 const worktreeLease = require('./kernel/worktree.js') as {
   canonicalPath: (value: string) => string;
   checkoutInstanceIdentity: (gitDirectory: string) => string | null;
@@ -224,8 +225,7 @@ function canonicalPath(value: unknown): string {
 }
 
 function sidequestHome(): string {
-  const configured = String(process.env.SIDEQUEST_HOME || '').trim();
-  return configured ? path.resolve(configured) : path.join(os.homedir(), '.claude', 'sidequest');
+  return resolveSidequestHome();
 }
 
 function worktreeProjectSlug(repository: string): string {

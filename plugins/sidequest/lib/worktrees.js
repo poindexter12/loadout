@@ -6,6 +6,7 @@ const fs = require("node:fs/promises");
 const nativeFs = require("node:fs");
 const { execFileSync, spawn, spawnSync } = require("node:child_process");
 const commitScope = require("./commit-scope.js");
+const { resolveSidequestHome } = require("./claude-home.js");
 const worktreeLease = require("./kernel/worktree.js");
 const DEFAULT_MIN_AGE_MS = 3 * 60 * 60 * 1e3;
 const DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_MS = 7 * 24 * 60 * 60 * 1e3;
@@ -192,8 +193,7 @@ function canonicalPath(value) {
   return worktreeLease.canonicalPath(String(value));
 }
 function sidequestHome() {
-  const configured = String(process.env.SIDEQUEST_HOME || "").trim();
-  return configured ? path.resolve(configured) : path.join(os.homedir(), ".claude", "sidequest");
+  return resolveSidequestHome();
 }
 function worktreeProjectSlug(repository) {
   const resolved = path.resolve(repository);

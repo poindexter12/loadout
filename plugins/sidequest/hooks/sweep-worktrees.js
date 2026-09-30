@@ -69,23 +69,31 @@ function runtimeModule(name) {
 var import_node_child_process2 = require("node:child_process");
 var import_node_fs3 = __toESM(require("node:fs"));
 var import_promises = require("node:fs/promises");
-var import_node_os2 = __toESM(require("node:os"));
-var import_node_path3 = __toESM(require("node:path"));
+var import_node_path4 = __toESM(require("node:path"));
+
+// src/lib/claude-home.ts
+var import_node_os = __toESM(require("node:os"));
+var import_node_path2 = __toESM(require("node:path"));
+function resolveSidequestHome(env = process.env) {
+  const explicit = String(env.SIDEQUEST_HOME || "").trim();
+  if (explicit) return import_node_path2.default.resolve(explicit);
+  const configDir = String(env.CLAUDE_CONFIG_DIR || "").trim();
+  return import_node_path2.default.join(configDir ? import_node_path2.default.resolve(configDir) : import_node_path2.default.join(import_node_os.default.homedir(), ".claude"), "sidequest");
+}
 
 // src/hooks/shared/sweep-handoff.ts
 var import_node_child_process = require("node:child_process");
 var import_node_crypto = __toESM(require("node:crypto"));
 var import_node_fs2 = __toESM(require("node:fs"));
-var import_node_os = __toESM(require("node:os"));
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_path3 = __toESM(require("node:path"));
 var EMPTY_SWEEP_PROGRESS = { planned: 0, removed: 0, keptByReason: {} };
 function stateDirectory() {
-  const home = String(process.env.SIDEQUEST_HOME || "").trim() || import_node_path2.default.join(import_node_os.default.homedir(), ".claude", "sidequest");
-  return import_node_path2.default.join(home, "sweep-reports");
+  const home = resolveSidequestHome();
+  return import_node_path3.default.join(home, "sweep-reports");
 }
 function reportFile(cwd) {
-  const key = import_node_crypto.default.createHash("sha1").update(import_node_path2.default.resolve(cwd || ".")).digest("hex").slice(0, 16);
-  return import_node_path2.default.join(stateDirectory(), `${key}.json`);
+  const key = import_node_crypto.default.createHash("sha1").update(import_node_path3.default.resolve(cwd || ".")).digest("hex").slice(0, 16);
+  return import_node_path3.default.join(stateDirectory(), `${key}.json`);
 }
 function progressFile(cwd) {
   return reportFile(cwd).replace(/\.json$/, ".progress.json");
@@ -164,8 +172,8 @@ function worktreeRemovalFailureNotice(failure, options = {}) {
   return `${notice}. Processes still using it: ${details.join("; ")}. End those PIDs and re-run the sweep.`;
 }
 function stateFile() {
-  const home = String(process.env.SIDEQUEST_HOME || "").trim() || import_node_path3.default.join(import_node_os2.default.homedir(), ".claude", "sidequest");
-  return import_node_path3.default.join(home, "worktree-sweep-sessions.json");
+  const home = resolveSidequestHome();
+  return import_node_path4.default.join(home, "worktree-sweep-sessions.json");
 }
 function readState() {
   try {
@@ -176,7 +184,7 @@ function readState() {
 }
 function writeState(state) {
   try {
-    import_node_fs3.default.mkdirSync(import_node_path3.default.dirname(stateFile()), { recursive: true });
+    import_node_fs3.default.mkdirSync(import_node_path4.default.dirname(stateFile()), { recursive: true });
     import_node_fs3.default.writeFileSync(stateFile(), JSON.stringify(state), "utf8");
   } catch (_) {
   }
@@ -188,15 +196,15 @@ function projectCommand(project) {
   return `node "${pluginRoot()}/bin/sidequest.js" board-config --project "${project.path}" --integration-branch <branch>`;
 }
 function sessionWorktreePath(start) {
-  const resolved = import_node_path3.default.resolve(start);
+  const resolved = import_node_path4.default.resolve(start);
   let candidate = resolved;
   for (; ; ) {
     try {
-      if (import_node_fs3.default.existsSync(import_node_path3.default.join(candidate, ".git"))) return candidate;
+      if (import_node_fs3.default.existsSync(import_node_path4.default.join(candidate, ".git"))) return candidate;
     } catch (_) {
       return resolved;
     }
-    const parent = import_node_path3.default.dirname(candidate);
+    const parent = import_node_path4.default.dirname(candidate);
     if (parent === candidate) return resolved;
     candidate = parent;
   }
@@ -261,7 +269,7 @@ async function sweepWorktrees(data, includeKnownProjects) {
   for (const project of projects) {
     const isCurrentProject = project.slug === current.slug;
     try {
-      await (0, import_promises.stat)(import_node_path3.default.join(project.path, ".git"));
+      await (0, import_promises.stat)(import_node_path4.default.join(project.path, ".git"));
     } catch (_) {
       continue;
     }
