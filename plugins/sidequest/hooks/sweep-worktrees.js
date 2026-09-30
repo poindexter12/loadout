@@ -55,6 +55,12 @@ function stringField(input, ...names) {
   }
   return "";
 }
+function isSubagent(input) {
+  return ["agent_id", "agentId", "agent_type", "agentType"].some((name) => {
+    const identity = String(input[name] || "").trim().toLowerCase();
+    return identity && identity !== "main" && identity !== "main-thread";
+  });
+}
 
 // src/hooks/shared/paths.ts
 var import_node_path = __toESM(require("node:path"));
@@ -343,7 +349,13 @@ function migrateLegacyExecAgentNotices() {
     return [];
   }
 }
+function sessionStartIsHostRestart(data) {
+  if (isSubagent(data)) return false;
+  const source = stringField(data, "source").trim().toLowerCase();
+  return source === "startup" || source === "resume";
+}
 function lostLaunchNotices(data) {
+  if (!sessionStartIsHostRestart(data)) return [];
   try {
     const sessionId2 = stringField(data, "session_id", "sessionId") || process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || "";
     const store = require(runtimeModule("store"));
@@ -369,7 +381,12 @@ async function sessionStartMaintenance(data) {
 }
 async function main() {
   const cwd = argument("cwd") || process.cwd();
-  const notices = await sessionStartMaintenance({ cwd, session_id: argument("session") });
+  const notices = await sessionStartMaintenance({
+    cwd,
+    session_id: argument("session"),
+    source: argument("source"),
+    ...argument("subagent") === "1" ? { agent_id: "subagent" } : {}
+  });
   writeReport(cwd, notices);
 }
 main().catch((error) => {

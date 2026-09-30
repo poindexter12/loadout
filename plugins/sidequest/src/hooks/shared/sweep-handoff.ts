@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { stringField, type HookInput } from './input.js';
+import { isSubagent, stringField, type HookInput } from './input.js';
 import { pluginRoot } from './paths.js';
 
 // The sweep removes worktrees, backs up dirty ones and prunes branches: dozens of
@@ -140,6 +140,10 @@ export async function runSweep(data: HookInput): Promise<string[]> {
       path.join(pluginRoot(), 'hooks', 'sweep-worktrees.js'),
       '--cwd', cwd,
       '--session', stringField(data, 'session_id', 'sessionId'),
+      // SQ-220: the child decides from these whether this start is a host restart, the only
+      // start that may retire this session's unbound launches.
+      '--source', stringField(data, 'source'),
+      '--subagent', isSubagent(data) ? '1' : '0',
     ], { detached: true, stdio: 'ignore', windowsHide: true });
   } catch (_) {
     clearSweepProgress(cwd);

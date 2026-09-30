@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // SessionStart waits only for this worker's handoff deadline, so store maintenance
 // cannot make Claude discard the briefing with the hook's entire stdout.
-import { stringField, type HookInput } from './shared/input.js';
+import { isSubagent, stringField, type HookInput } from './shared/input.js';
 import { runtimeModule } from './shared/paths.js';
 import { sweepWorktrees } from './shared/worktree-sweep.js';
 import { writeReport } from './shared/sweep-handoff.js';
@@ -53,7 +53,18 @@ function migrateLegacyExecAgentNotices(): string[] {
   }
 }
 
+// SQ-220: a launched-but-unbound attempt is lost only when the host process that launched it
+// restarted. Compaction, /clear, and any subagent's own SessionStart share the orchestrator's
+// session id while that process, and every background executor it launched, is still alive, so
+// those starts must never fail a live launch. A start that names no source is not proof either.
+function sessionStartIsHostRestart(data: HookInput): boolean {
+  if (isSubagent(data)) return false;
+  const source = stringField(data, 'source').trim().toLowerCase();
+  return source === 'startup' || source === 'resume';
+}
+
 function lostLaunchNotices(data: HookInput): string[] {
+  if (!sessionStartIsHostRestart(data)) return [];
   try {
     const sessionId = stringField(data, 'session_id', 'sessionId') || process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || '';
     const store = require(runtimeModule('store')) as Store;
@@ -81,7 +92,12 @@ async function sessionStartMaintenance(data: HookInput): Promise<string[]> {
 
 async function main(): Promise<void> {
   const cwd = argument('cwd') || process.cwd();
-  const notices = await sessionStartMaintenance({ cwd, session_id: argument('session') });
+  const notices = await sessionStartMaintenance({
+    cwd,
+    session_id: argument('session'),
+    source: argument('source'),
+    ...(argument('subagent') === '1' ? { agent_id: 'subagent' } : {}),
+  });
   writeReport(cwd, notices);
 }
 
