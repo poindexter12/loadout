@@ -35,6 +35,7 @@ tag, then pushes the plugin tags separately.
   --dry-run                Plan only: no file writes, no git mutations
   --push                   Acquire the publish lock and run the atomic push
   --skip-tests             Do not run the changed plugins' suites
+  --force-local-tests      Run the changed plugins' suites even when Test passed on the pinned commit
   --no-merge               The tree is already prepared; skip the fast-forward merge
   --no-branch-check        Allow cutting from a branch other than --publish-branch
   --allow-dirty            Tolerate unstaged or untracked files outside the paths the release writes
@@ -787,6 +788,7 @@ export async function cut(options = {}) {
     dryRun = false,
     push = false,
     skipTests = false,
+    forceLocalTests = false,
     noMerge = false,
     branchCheck = true,
     allowDirty = false,
@@ -999,7 +1001,12 @@ export async function cut(options = {}) {
     try {
       const failures = [];
       const runSuite = options.runSuite ?? defaultSuiteRunner(repoRoot, { log, tag: plan.tag });
-      if (!skipTests) {
+      const localSuitesSkipped = !skipTests && !forceLocalTests && mode === 'normal'
+        && ci?.status === 'passed' && ci.commit === pinned;
+      if (localSuitesSkipped) {
+        log(`Test CI on the pinned commit ${pinned} passed; skipping local plugin suites. Pass --force-local-tests to run them.`);
+      }
+      if (!skipTests && !localSuitesSkipped) {
         for (const suite of plan.suites) {
           const result = runSuite(suite);
           if (result.code !== 0) {
@@ -1055,7 +1062,7 @@ export async function cut(options = {}) {
 
       return {
         status: 'cut', plan, commit, message, pushed, refspecs, marketplacePush, pluginPush,
-        pushCommands, touched, consumed, ci, suiteWarnings, githubRelease, audit,
+        pushCommands, touched, consumed, ci, suiteWarnings, suitesSkipped: localSuitesSkipped, githubRelease, audit,
       };
     } catch (error) {
       const pushSeen = pushStarted || (git.history ?? []).slice(historyStart).some((entry) => entry.mutatesRemote);
@@ -1095,6 +1102,7 @@ export function parseCutArgs(argv) {
       'dry-run': { type: 'boolean' },
       push: { type: 'boolean' },
       'skip-tests': { type: 'boolean' },
+      'force-local-tests': { type: 'boolean' },
       'no-merge': { type: 'boolean' },
       'no-branch-check': { type: 'boolean' },
       'allow-dirty': { type: 'boolean' },
@@ -1123,6 +1131,7 @@ export function parseCutArgs(argv) {
       dryRun: values['dry-run'] === true,
       push: values.push === true,
       skipTests: values['skip-tests'] === true,
+      forceLocalTests: values['force-local-tests'] === true,
       noMerge: values['no-merge'] === true,
       branchCheck: values['no-branch-check'] !== true,
       allowDirty: values['allow-dirty'] === true,
@@ -1152,6 +1161,7 @@ export async function main(argv) {
       refspecs: result.refspecs ?? [],
       ci: result.ci ?? null,
       suiteWarnings: result.suiteWarnings ?? [],
+      suitesSkipped: result.suitesSkipped ?? false,
       githubRelease: result.githubRelease ?? null,
       touched: result.touched ?? [],
       consumed: result.consumed ?? [],
