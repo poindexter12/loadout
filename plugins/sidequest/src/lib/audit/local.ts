@@ -76,8 +76,10 @@ function deliveryCommit(ticket: Ticket) {
 }
 
 /**
- * Finds active tickets whose ref appears in a newer commit on the integration branch.
- * The executor returns stdout, or null when a git operation cannot be inspected.
+ * Finds active tickets with a post-creation, subject-tagged integration commit and
+ * durable delivery evidence in either a release fragment or the changelog. Commit-body
+ * mentions are context, not landed-fix evidence. The executor returns stdout, or null
+ * when a git operation cannot be inspected.
  */
 function findLandedFixes(tickets: Ticket[], git: GitExecutor): LandedFix[] | null {
   const candidates = tickets.filter((ticket) => !ticket.archived && (ticket.status === 'todo' || ticket.status === 'doing') && ticket.id && ticket.ref);
@@ -96,17 +98,19 @@ function findLandedFixes(tickets: Ticket[], git: GitExecutor): LandedFix[] | nul
     const createdAt = new Date(String(ticket.createdAt || '')).valueOf();
     if (!Number.isFinite(createdAt)) return [];
     const matchesRef = refPattern(String(ticket.ref));
+    const fragment = fragmentPaths.has(`.release/unreleased/${ticket.ref}.md`);
+    const changelogVersion = changelogVersionFor(changelog, String(ticket.ref));
     const matchedCommits = commits
-      .filter((commit) => new Date(commit.date).valueOf() > createdAt && matchesRef.test(`${commit.subject}\n${commit.body || ''}`))
+      .filter((commit) => new Date(commit.date).valueOf() > createdAt && matchesRef.test(commit.subject))
       .map(({ sha, subject, date }) => ({ sha, subject, date }));
-    if (!matchedCommits.length) return [];
+    if (!matchedCommits.length || (!fragment && !changelogVersion)) return [];
     return [{
       ticketId: String(ticket.id),
       ref: String(ticket.ref),
       status: String(ticket.status),
       commits: matchedCommits,
-      fragment: fragmentPaths.has(`.release/unreleased/${ticket.ref}.md`),
-      changelogVersion: changelogVersionFor(changelog, String(ticket.ref)),
+      fragment,
+      changelogVersion,
     }];
   });
 }

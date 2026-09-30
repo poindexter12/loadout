@@ -105,16 +105,17 @@ var require_local = __commonJS({
         const createdAt = new Date(String(ticket.createdAt || "")).valueOf();
         if (!Number.isFinite(createdAt)) return [];
         const matchesRef = refPattern(String(ticket.ref));
-        const matchedCommits = commits.filter((commit) => new Date(commit.date).valueOf() > createdAt && matchesRef.test(`${commit.subject}
-${commit.body || ""}`)).map(({ sha, subject, date }) => ({ sha, subject, date }));
-        if (!matchedCommits.length) return [];
+        const fragment = fragmentPaths.has(`.release/unreleased/${ticket.ref}.md`);
+        const changelogVersion = changelogVersionFor(changelog, String(ticket.ref));
+        const matchedCommits = commits.filter((commit) => new Date(commit.date).valueOf() > createdAt && matchesRef.test(commit.subject)).map(({ sha, subject, date }) => ({ sha, subject, date }));
+        if (!matchedCommits.length || !fragment && !changelogVersion) return [];
         return [{
           ticketId: String(ticket.id),
           ref: String(ticket.ref),
           status: String(ticket.status),
           commits: matchedCommits,
-          fragment: fragmentPaths.has(`.release/unreleased/${ticket.ref}.md`),
-          changelogVersion: changelogVersionFor(changelog, String(ticket.ref))
+          fragment,
+          changelogVersion
         }];
       });
     }
@@ -498,7 +499,7 @@ var require_report = __commonJS({
     }
     function auditSummary2(report) {
       const counts = [
-        [report.staleBoardTickets.length, "board tickets look already fixed"],
+        [report.staleBoardTickets.length, "board tickets have subject-tagged main commits plus delivery evidence"],
         [report.untrackedIssues.length, "untracked issues"],
         [report.linkedDrift.length, "linked issues drifting"]
       ].filter(([count]) => Number(count) > 0);

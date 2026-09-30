@@ -57,16 +57,17 @@ function findLandedFixes(tickets, git) {
     const createdAt = new Date(String(ticket.createdAt || "")).valueOf();
     if (!Number.isFinite(createdAt)) return [];
     const matchesRef = refPattern(String(ticket.ref));
-    const matchedCommits = commits.filter((commit) => new Date(commit.date).valueOf() > createdAt && matchesRef.test(`${commit.subject}
-${commit.body || ""}`)).map(({ sha, subject, date }) => ({ sha, subject, date }));
-    if (!matchedCommits.length) return [];
+    const fragment = fragmentPaths.has(`.release/unreleased/${ticket.ref}.md`);
+    const changelogVersion = changelogVersionFor(changelog, String(ticket.ref));
+    const matchedCommits = commits.filter((commit) => new Date(commit.date).valueOf() > createdAt && matchesRef.test(commit.subject)).map(({ sha, subject, date }) => ({ sha, subject, date }));
+    if (!matchedCommits.length || !fragment && !changelogVersion) return [];
     return [{
       ticketId: String(ticket.id),
       ref: String(ticket.ref),
       status: String(ticket.status),
       commits: matchedCommits,
-      fragment: fragmentPaths.has(`.release/unreleased/${ticket.ref}.md`),
-      changelogVersion: changelogVersionFor(changelog, String(ticket.ref))
+      fragment,
+      changelogVersion
     }];
   });
 }

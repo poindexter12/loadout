@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { auditReport, formatAudit, ghExecutor, gitExecutor } = require('../src/lib/audit/report');
+const { auditReport, auditSummary, formatAudit, ghExecutor, gitExecutor } = require('../src/lib/audit/report');
 
 const ticket = { id: 'tk_one', ref: 'SQ-72', title: 'Audit command reports board drift', status: 'todo', createdAt: '2020-01-01T00:00:00.000Z' };
 const linkedTicket = { id: 'tk_two', ref: 'SQ-73', title: 'Active linked change', status: 'doing', createdAt: '2020-01-01T00:00:00.000Z' };
@@ -47,6 +47,17 @@ test('audit report renders every section from injected board, git, and GitHub ev
   assert.match(output, /UNTRACKED ISSUES \(1\)/);
   assert.match(output, /LINKED DRIFT \(1\)/);
   assert.match(output, /WARNINGS \(0\)/);
+});
+
+test('audit summary describes subject-tagged commits and delivery evidence', () => {
+  const summary = auditSummary({
+    staleBoardTickets: [{ ref: 'SQ-72' }],
+    untrackedIssues: [],
+    linkedDrift: [],
+  });
+
+  assert.match(summary, /subject-tagged main commits plus delivery evidence/);
+  assert.doesNotMatch(summary, /look already fixed/);
 });
 
 test('audit apply calls GitHub actions only for linked drift', () => {
