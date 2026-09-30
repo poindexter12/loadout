@@ -13,6 +13,14 @@ interface CompactionState {
   ticketBaselineAt: string;
   transcriptBytes: number;
   suggestedAt?: string;
+  // SQ-195: set at PostCompact. The engine re-appends jev's kept history to the transcript JSONL
+  // (530KB-1.0MB observed) sometime between PostCompact and the first Stop, so the transcript
+  // byte count recorded at PostCompact time undercounts what the transcript will actually be once
+  // the session resumes. While this flag is set, the transcript baseline is not yet trustworthy:
+  // the first Stop after a compaction consumes it, records the post-reappend size as the real
+  // baseline, and skips the suggestion for that turn. Real growth measured after that baseline is
+  // established still counts normally.
+  baselinePending?: boolean;
 }
 
 interface Store {
@@ -83,7 +91,12 @@ export function initializeCompactionState(sessionId: string, transcriptPath: unk
 export function resetCompactionState(sessionId: string, transcriptPath: unknown): void {
   if (!sessionId) return;
   const now = new Date().toISOString();
-  writeState(sessionId, { resetAt: now, ticketBaselineAt: now, transcriptBytes: transcriptBytes(transcriptPath) });
+  writeState(sessionId, {
+    resetAt: now,
+    ticketBaselineAt: now,
+    transcriptBytes: transcriptBytes(transcriptPath),
+    baselinePending: true,
+  });
 }
 
 // SQ-197: a "replacement" compaction (PostCompact's compact_summary === '') means the host kept
@@ -201,6 +214,18 @@ export async function compactionSuggestion(input: Record<string, unknown>): Prom
 
   const currentBytes = transcriptBytes(input.transcript_path || input.transcriptPath);
   const state = readState(sessionId, currentBytes);
+
+  // SQ-195: the transcript baseline recorded at PostCompact predates the engine's re-append of
+  // jev's kept history, so it undercounts the transcript's real post-compaction size. The first
+  // Stop after a compaction just re-baselines against the current (post-reappend) size instead of
+  // treating that reappend as growth; it never suggests on this turn.
+  if (state.baselinePending) {
+    state.baselinePending = false;
+    state.transcriptBytes = currentBytes;
+    writeState(sessionId, state);
+    return null;
+  }
+
   const project = projectFor(String(input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd()));
   if (!project) return null;
 

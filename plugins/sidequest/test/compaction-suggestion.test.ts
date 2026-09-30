@@ -88,13 +88,40 @@ test('compaction suggestion tracks transcript bytes and honors the kill switch',
   fs.writeFileSync(transcript, '[]');
   const sessionId = 'compaction-growth';
   hook(postCompactHook, { session_id: sessionId, transcript_path: transcript });
-  fs.writeFileSync(transcript, 'x'.repeat(3 * 1024 * 1024 + 2));
 
+  // The engine re-appends jev's kept history between PostCompact and the first Stop. The first
+  // Stop after a compaction must absorb that into the new baseline rather than suggest on it.
+  fs.writeFileSync(transcript, 'x'.repeat(1024 * 1024));
+  assert.equal(stop(sessionId, transcript), null, 'the first Stop after compaction only records the new baseline');
+
+  fs.writeFileSync(transcript, 'x'.repeat(1024 * 1024 + 3 * 1024 * 1024 + 2));
   const suggestion = stop(sessionId, transcript);
-  assert.match(suggestion.systemMessage, /Transcript growth: 3.0 MB/);
-  fs.writeFileSync(transcript, 'x'.repeat(9 * 1024 * 1024 + 4));
+  assert.match(suggestion.systemMessage, /Transcript growth: 3.0 MB/, 'growth is measured from the post-reappend baseline, not the PostCompact-time size');
+  fs.writeFileSync(transcript, 'x'.repeat(1024 * 1024 + 9 * 1024 * 1024 + 4));
   const rearmed = stop(sessionId, transcript);
   assert.match(rearmed.systemMessage, /Transcript growth: 6.0 MB/, 'the retry threshold measures fresh growth after the first suggestion');
   assert.equal(stop(sessionId, transcript), null, 'the second transcript suggestion does not nag on later turns');
   assert.equal(stop(sessionId, transcript, { SIDEQUEST_COMPACTION_SUGGESTIONS: 'off' }), null);
+});
+
+test('compaction baseline absorbs the kept-history re-append instead of counting it as growth', () => {
+  const transcript = path.join(HOME, 'reappend.jsonl');
+  fs.writeFileSync(transcript, '[]');
+  const sessionId = 'compaction-reappend';
+  hook(postCompactHook, { session_id: sessionId, transcript_path: transcript });
+
+  // Simulate the engine re-appending a large chunk of kept history before the session's first
+  // Stop fires. Under the SQ-195 bug this alone would look like 1.5MB of growth and (combined
+  // with enough closed tickets) could trip the suggestion immediately after compaction.
+  fs.writeFileSync(transcript, 'x'.repeat(1536 * 1024));
+  closeTicket('reappend one');
+  closeTicket('reappend two');
+  closeTicket('reappend three');
+  assert.equal(stop(sessionId, transcript), null, 'the kept-history re-append produces no suggestion on the first post-compaction Stop');
+
+  // Real growth after that first Stop still trips the suggestion normally.
+  fs.writeFileSync(transcript, 'x'.repeat(1536 * 1024 + 3 * 1024 * 1024 + 2));
+  const suggestion = stop(sessionId, transcript);
+  assert.match(suggestion.systemMessage, /compaction is safe/);
+  assert.match(suggestion.systemMessage, /Transcript growth: 3.0 MB/, 'real growth after the established baseline still triggers a suggestion');
 });
