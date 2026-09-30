@@ -1515,6 +1515,61 @@ test('a CI override records its reason for a local cut', async (t) => {
   assert.ok(logs.includes(`Test CI on the pinned commit ${pinned} was overridden: SQ-1349 repairs the failed Test workflow`));
 });
 
+test('a passing Test workflow skips local suites unless --force-local-tests requires them', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const pinned = context.commit('integrate');
+  const logs = [];
+
+  const skipped = await cut({
+    repoRoot: context.root,
+    log: (message) => logs.push(message),
+    runSuite: context.runSuite,
+    assertParentCiPassed: (repoRoot, commit) => ({ commit, conclusion: 'success' }),
+  });
+
+  assert.equal(skipped.status, 'cut');
+  assert.equal(skipped.suitesSkipped, true, 'the result reports automatic suite skipping');
+  assert.deepEqual(context.suites, [], 'the passing exact-commit CI verdict replaces local suites');
+  assert.ok(logs.includes(`Test CI on the pinned commit ${pinned} passed; skipping local plugin suites. Pass --force-local-tests to run them.`));
+
+  const forcedContext = setup(t);
+  forcedContext.writeFragment('SQ-2', { plugins: ['sidequest'], bump: 'patch' });
+  const forcedPinned = forcedContext.commit('integrate');
+  const forced = await cut({
+    repoRoot: forcedContext.root,
+    forceLocalTests: true,
+    log: () => {},
+    runSuite: forcedContext.runSuite,
+    assertParentCiPassed: (repoRoot, commit) => ({ commit, conclusion: 'success' }),
+  });
+
+  assert.equal(forced.status, 'cut');
+  assert.equal(forced.suitesSkipped, false, '--force-local-tests prevents automatic suite skipping');
+  assert.equal(forced.ci.commit, forcedPinned);
+  assert.deepEqual(forcedContext.suites, ['sidequest'], '--force-local-tests runs the release suite despite passing CI');
+
+  const hotfixContext = setup(t);
+  hotfixContext.onBranch('dev');
+  hotfixContext.write('plugins/sidequest/urgent.js', '// urgent\n');
+  const fixSha = hotfixContext.commit('the urgent fix');
+  hotfixContext.writeFragment('SQ-3', { plugins: ['sidequest'], bump: 'patch', commit: fixSha });
+  const hotfixPin = hotfixContext.commit('note urgent ticket');
+  hotfixContext.onBranch('main');
+  const hotfix = await cut({
+    repoRoot: hotfixContext.root,
+    mode: 'hotfix',
+    tickets: ['SQ-3'],
+    sha: hotfixPin,
+    log: () => {},
+    runSuite: hotfixContext.runSuite,
+    assertParentCiPassed: (repoRoot, commit) => ({ commit, conclusion: 'success' }),
+  });
+
+  assert.equal(hotfix.suitesSkipped, false, 'a hotfix still runs local suites because it releases cherry-picks');
+  assert.deepEqual(hotfixContext.suites, ['sidequest']);
+});
+
 test('--trust-ci records a failing local suite as a warning when CI passed on the pinned commit', async (t) => {
   const context = setup(t);
   context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
@@ -1524,6 +1579,7 @@ test('--trust-ci records a failing local suite as a warning when CI passed on th
   const result = await cut({
     repoRoot: context.root,
     trustCi: true,
+    forceLocalTests: true,
     log: (message) => logs.push(message),
     runSuite: failingSuite,
     assertParentCiPassed: (repoRoot, commit) => ({ commit, conclusion: 'success' }),
@@ -1568,13 +1624,15 @@ test('--marketplace-level parses as a normal-window override', () => {
   assert.equal(parseCutArgs(['--repo', '/tmp/x']).options.marketplaceLevel, null);
 });
 
-test('--trust-ci and --keep-on-failure parse to cut options that default off', () => {
+test('--trust-ci, --force-local-tests, and --keep-on-failure parse to cut options that default off', () => {
   const { parseCutArgs } = cutModule;
-  const on = parseCutArgs(['--trust-ci', '--keep-on-failure', '--repo', '/tmp/x']).options;
+  const on = parseCutArgs(['--trust-ci', '--force-local-tests', '--keep-on-failure', '--repo', '/tmp/x']).options;
   assert.equal(on.trustCi, true);
+  assert.equal(on.forceLocalTests, true);
   assert.equal(on.keepOnFailure, true);
   const off = parseCutArgs(['--repo', '/tmp/x']).options;
   assert.equal(off.trustCi, false);
+  assert.equal(off.forceLocalTests, false);
   assert.equal(off.keepOnFailure, false);
 });
 
