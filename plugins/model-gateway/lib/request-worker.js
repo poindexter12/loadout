@@ -63,8 +63,9 @@ function isAuthedAsync({ timeout = 15000, spawnProcess = spawn } = {}) {
     try {
       child = spawnProcess(PROXY_BIN, ['codex', 'auth', 'status'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     } catch { return resolve(false); }
+    // Not unref'd: a hung check must still settle at its timeout even when
+    // nothing else holds the event loop open.
     const timer = setTimeout(() => { try { child.kill(); } catch {} finish(false); }, timeout);
-    timer.unref?.();
     child.stdout?.on('data', (chunk) => { output += chunk; });
     child.stderr?.on('data', (chunk) => { output += chunk; });
     child.once('error', () => finish(false));
