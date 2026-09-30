@@ -678,8 +678,14 @@ export function assertParentCiPassed(repoRoot, commit, runner = spawnSync, suite
   return { commit, conclusion: run.conclusion };
 }
 
-function isGitHubRemote(remoteUrl) {
-  return /(?:^|[@/:])github\.com(?::|\/|$)/i.test(remoteUrl);
+export function isGitHubRemote(repoRoot, remote, remoteUrl, runner = spawnSync) {
+  const stored = runner('git', ['config', '--get', `remote.${remote}.url`], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  const githubUrl = /(?:^|[@/:])github\.com(?::|\/|$)/i;
+  return (stored.status === 0 && githubUrl.test(stored.stdout)) || githubUrl.test(remoteUrl);
 }
 
 export async function assertGitHubReleasePublished(
@@ -884,7 +890,7 @@ export async function cut(options = {}) {
   if (allowDirty) assertReleasePathsUnchanged(git, plan, manifest);
   const recreatableTags = assertNoStaleTags(git, plan, { remote, force });
 
-  const githubRemote = !dryRun && isGitHubRemote(git.remoteUrl(remote));
+  const githubRemote = !dryRun && isGitHubRemote(repoRoot, remote, git.remoteUrl(remote));
   let ci = null;
   if (!dryRun && (options.assertParentCiPassed || githubRemote)) {
     // CI is asserted on the commit this window releases. The remote branch head is a different
