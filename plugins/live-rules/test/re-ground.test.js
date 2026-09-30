@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const test = require('node:test');
 
 const rules = require('../hooks/lib/rules');
@@ -490,4 +490,38 @@ test('failed manifest replacement leaves rule files unchanged and discoverable',
   } finally {
     fs.renameSync = originalRename;
   }
+});
+
+test('atomic check reports hash drift plus missing and extra rule files without writing', () => {
+  const dir = project();
+  atomic(dir, [{ data: { description: 'One' }, body: 'Before.' }]);
+  const manifestPath = path.join(dir, '.claude', 'live-rules', 'manifest.json');
+  const before = fs.readFileSync(manifestPath, 'utf8');
+  const rulesDirectory = path.join(dir, '.claude', 'live-rules', 'rules');
+  fs.writeFileSync(path.join(rulesDirectory, '001.md'), '---\ndescription: One\n---\nChanged.\n');
+  fs.writeFileSync(path.join(rulesDirectory, 'extra.md'), '---\ndescription: Extra\n---\nExtra.\n');
+  const manifest = JSON.parse(before);
+  manifest.rules.push({ path: 'rules/missing.md', hash: 'missing' });
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest) + '\n');
+  const checkManifest = fs.readFileSync(manifestPath, 'utf8');
+
+  assert.deepStrictEqual(rules.checkAtomicRuleSet(dir), [
+    'rules/001.md: manifest hash does not match the calculated sha256.',
+    'rules/missing.md: listed in the manifest but its rule file is missing.',
+    'rules/extra.md: rule file is missing from the manifest.',
+  ]);
+  assert.strictEqual(fs.readFileSync(manifestPath, 'utf8'), checkManifest, 'check must not rewrite the manifest');
+});
+
+test('sync command --check prints each detected mismatch and exits non-zero', () => {
+  const dir = project();
+  atomic(dir, [{ data: { description: 'One' }, body: 'Before.' }]);
+  const manifestPath = path.join(dir, '.claude', 'live-rules', 'manifest.json');
+  fs.writeFileSync(path.join(dir, '.claude', 'live-rules', 'rules', '001.md'), '---\ndescription: One\n---\nChanged.\n');
+  const before = fs.readFileSync(manifestPath, 'utf8');
+  const result = spawnSync(process.execPath, [path.join(root, 'scripts', 'sync-atomic-rules.js'), '--check', '--project', dir], { encoding: 'utf8' });
+
+  assert.strictEqual(result.status, 1);
+  assert.match(result.stderr, /live-rules check failed: rules\/001\.md: manifest hash does not match the calculated sha256\./);
+  assert.strictEqual(fs.readFileSync(manifestPath, 'utf8'), before, '--check must not rewrite the manifest');
 });
