@@ -124,7 +124,7 @@ function unreadyCatalog(updatedAt = new Date().toISOString()) {
 
 // A refresh is a side effect on the catalog FILE, and the real gateway also reports what it did on stdout, so a
 // fake that only prints the catalog would pass while the shipped code silently gave up on that report (SQ-2208).
-function seedGatewayHome(t: { after(fn: () => void): void }, stored: unknown, refreshWrites: Record<string, unknown>) {
+function seedGatewayHome(t: { after(fn: () => void): void }, stored: unknown, refreshWrites: Record<string, unknown>, refreshDelayMs = 0) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-discovery-refresh-'));
   const previousHome = process.env.HOME;
   const previousUserProfile = process.env.USERPROFILE;
@@ -155,6 +155,7 @@ function seedGatewayHome(t: { after(fn: () => void): void }, stored: unknown, re
     const command = path.join(installPath, 'bin', 'model-gateway.js');
     fs.mkdirSync(path.dirname(command), { recursive: true });
     fs.writeFileSync(command, [
+      `if (${refreshDelayMs} > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${refreshDelayMs});`,
       `require('fs').writeFileSync(${JSON.stringify(catalogPath)}, ${JSON.stringify(JSON.stringify(catalog))});`,
       "process.stdout.write('catalog: preserved claude-grok-build from a subset write\\n');",
     ].join('\n'));
@@ -170,6 +171,14 @@ function seedGatewayHome(t: { after(fn: () => void): void }, stored: unknown, re
 
 test('discovery refreshes an unready Codex catalog through the newest installed gateway', (t) => {
   seedGatewayHome(t, unreadyCatalog(), { '0.48.6': unreadyCatalog(), '0.48.7': readyCatalog() });
+
+  assert.deepEqual(discovery.providerReadiness('codex'), {
+    provider: 'codex', ready: true, state: 'ready', message: 'Codex is ready.',
+  });
+});
+
+test('discovery waits for a healthy gateway refresh that exceeds the old five-second timeout', (t) => {
+  seedGatewayHome(t, unreadyCatalog(), { '0.48.7': readyCatalog() }, 5_100);
 
   assert.deepEqual(discovery.providerReadiness('codex'), {
     provider: 'codex', ready: true, state: 'ready', message: 'Codex is ready.',

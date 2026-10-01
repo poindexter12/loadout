@@ -105,11 +105,12 @@ function newestGatewayCatalogCommand() {
   }
   return newest?.command ?? null;
 }
+const GATEWAY_REFRESH_TIMEOUT_MS = 10 * 1e3;
 function gatewayRefreshSucceeded(command) {
   try {
     return (0, import_node_child_process.spawnSync)(process.execPath, [command, "catalog", "--refresh", "--json"], {
       encoding: "utf8",
-      timeout: 5e3,
+      timeout: GATEWAY_REFRESH_TIMEOUT_MS,
       windowsHide: true
     }).status === 0;
   } catch {

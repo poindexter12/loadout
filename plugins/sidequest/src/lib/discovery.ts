@@ -121,10 +121,14 @@ function newestGatewayCatalogCommand(): string | null {
   return newest?.command ?? null;
 }
 
+// model-gateway budgets 3s for its shim health probe and 3s for /v1/models;
+// reserve the remaining time for Node startup and load-related scheduling headroom.
+const GATEWAY_REFRESH_TIMEOUT_MS = 10 * 1000;
+
 function gatewayRefreshSucceeded(command: string): boolean {
   try {
     return spawnSync(process.execPath, [command, 'catalog', '--refresh', '--json'], {
-      encoding: 'utf8', timeout: 5000, windowsHide: true,
+      encoding: 'utf8', timeout: GATEWAY_REFRESH_TIMEOUT_MS, windowsHide: true,
     }).status === 0;
   } catch {
     return false;
