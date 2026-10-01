@@ -1056,7 +1056,26 @@ ${verify.outputTail}` : null
     const deliveredPatchIds = new Set(deliveredCommits.map((commit) => patchIdForCommit(repo, commit)));
     const candidateCommits = Array.isArray(submission.commits) && submission.commits.length ? submission.commits : [candidate];
     const missing = candidateCommits.filter((commit) => !deliveredPatchIds.has(patchIdForCommit(repo, String(commit))));
-    return missing.length ? { ok: false, missing } : { ok: true, evidence: "equivalent_patches" };
+    if (!missing.length) return { ok: true, evidence: "equivalent_patches" };
+    if (squashedCandidateContentPreserved(repo, String(candidateCommits[0]), candidate, deliveryCommit)) {
+      return { ok: true, evidence: "squashed_candidate_content" };
+    }
+    return { ok: false, missing };
+  }
+  function objectAtPath(repo, revision, file) {
+    try {
+      return integrationGit(repo, ["rev-parse", "--verify", "--quiet", `${revision}:${file}`]).toLowerCase() || null;
+    } catch (_) {
+      return null;
+    }
+  }
+  function squashedCandidateContentPreserved(repo, firstCommit, candidate, deliveryCommit) {
+    const base = resolveCommitOrNull(repo, `${firstCommit}^`);
+    if (!base) return false;
+    if (!isAncestorCommit(repo, base, deliveryCommit)) return false;
+    const paths = integrationGit(repo, ["diff", "--name-only", base, candidate]).split(/\r?\n/).filter(Boolean);
+    if (!paths.length) return false;
+    return paths.every((file) => objectAtPath(repo, candidate, file) === objectAtPath(repo, deliveryCommit, file));
   }
   function resolveCommitOrNull(repo, revision) {
     try {

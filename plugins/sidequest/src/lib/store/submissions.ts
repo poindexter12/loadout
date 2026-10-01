@@ -1265,9 +1265,36 @@ function deliveryContainsSubmittedContent(repo: string, submission: any, deliver
   const deliveredPatchIds = new Set(deliveredCommits.map((commit: string) => patchIdForCommit(repo, commit)));
   const candidateCommits = Array.isArray(submission.commits) && submission.commits.length ? submission.commits : [candidate];
   const missing = candidateCommits.filter((commit: any) => !deliveredPatchIds.has(patchIdForCommit(repo, String(commit))));
-  return missing.length
-    ? { ok: false, missing }
-    : { ok: true, evidence: 'equivalent_patches' };
+  if (!missing.length) return { ok: true, evidence: 'equivalent_patches' };
+  // A squash merge of a multi-commit candidate is one commit whose patch-id is
+  // the combined diff, so no individual candidate commit's patch-id can match
+  // even when the delivered content is identical (SQ-236). Fall back to the
+  // invariant this check exists for: every path the candidate range changed
+  // holds, in the delivery commit, exactly the content it has at the
+  // candidate tip.
+  if (squashedCandidateContentPreserved(repo, String(candidateCommits[0]), candidate, deliveryCommit)) {
+    return { ok: true, evidence: 'squashed_candidate_content' };
+  }
+  return { ok: false, missing };
+}
+
+function objectAtPath(repo: string, revision: string, file: string) {
+  try {
+    return integrationGit(repo, ['rev-parse', '--verify', '--quiet', `${revision}:${file}`]).toLowerCase() || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function squashedCandidateContentPreserved(repo: string, firstCommit: string, candidate: string, deliveryCommit: string) {
+  const base = resolveCommitOrNull(repo, `${firstCommit}^`);
+  if (!base) return false;
+  // The delivery must sit on the candidate's own base line; content that
+  // merely happens to match on an unrelated history is not this candidate.
+  if (!isAncestorCommit(repo, base, deliveryCommit)) return false;
+  const paths = integrationGit(repo, ['diff', '--name-only', base, candidate]).split(/\r?\n/).filter(Boolean);
+  if (!paths.length) return false;
+  return paths.every((file: string) => objectAtPath(repo, candidate, file) === objectAtPath(repo, deliveryCommit, file));
 }
 
 function resolveCommitOrNull(repo: string, revision: string) {

@@ -3516,6 +3516,93 @@ test('SQ-2169: integrate records an already delivered reviewed candidate or a re
   }
 });
 
+test('SQ-236: a squash merge of a multi-commit candidate is accepted by content, and only by content', () => {
+  cleanBranch();
+  const ticket = addTicket('record squashed multi-commit delivery', { files: ['README.md', 'squash-a.txt', 'squash-b.txt'] });
+  const base = git(['rev-parse', 'HEAD']);
+  // Two candidate commits on origin/main; the second deletes README.md, so the
+  // deletion is part of what a delivery must preserve.
+  fs.writeFileSync(path.join(PROJECT_DIR, 'squash-a.txt'), 'squash first\n');
+  git(['add', 'squash-a.txt']);
+  git(['commit', '-q', '-m', 'squash candidate first']);
+  const first = git(['rev-parse', 'HEAD']);
+  fs.writeFileSync(path.join(PROJECT_DIR, 'squash-b.txt'), 'squash second\n');
+  git(['rm', '-q', 'README.md']);
+  git(['add', 'squash-b.txt']);
+  git(['commit', '-q', '-m', 'squash candidate second']);
+  const candidate = git(['rev-parse', 'HEAD']);
+  pin(ticket, candidate);
+  assert.strictEqual(store.claimTicket(slug, ticket.ref, 'squash-delivery-source', {
+    direct: true,
+    reason: 'The submission fixture requires a local direct claim.',
+  }).ok, true);
+  assert.strictEqual(store.submitTicket(slug, ticket.ref, 'squash-delivery-source', {
+    commit: candidate,
+    verify: 'node -e "process.exit(0)"',
+  }).ok, true);
+  const submitted = store.getTicket(slug, ticket.ref);
+  Object.assign(submitted.submission, {
+    base,
+    upstream: 'origin/main',
+    upstreamCommit: base,
+    // Two candidate commits: the squash route only matters because there is
+    // more than one. Paths in rangePaths order (first appearance per commit).
+    commits: [first, candidate],
+    changedPaths: ['squash-a.txt', 'README.md', 'squash-b.txt'],
+  });
+  submitted.dispatch = {
+    outcome: 'submitted',
+    terminalAt: new Date(Date.now() - 60_000).toISOString(),
+    attempts: [{ outcome: 'submitted', commit: candidate, agentId: 'squash-delivery-source', terminalAt: new Date(Date.now() - 60_000).toISOString() }],
+  };
+  persist(submitted);
+
+  // One squash commit on origin/main with a chosen tree for the candidate paths.
+  const squash = (a: string, keepReadme: boolean) => {
+    git(['checkout', '-q', '-f', '-B', `squash-delivery-${++branchSeq}`, 'origin/main']);
+    fs.writeFileSync(path.join(PROJECT_DIR, 'squash-a.txt'), a);
+    fs.writeFileSync(path.join(PROJECT_DIR, 'squash-b.txt'), 'squash second\n');
+    git(['add', 'squash-a.txt', 'squash-b.txt']);
+    if (!keepReadme) git(['rm', '-q', 'README.md']);
+    git(['commit', '-q', '-m', 'squash delivery']);
+    return git(['rev-parse', 'HEAD']);
+  };
+
+  const originalConfig = store.boardConfig(slug);
+  try {
+    const review = dispatchedIsolatedReview('squash delivery review', ticket.ref, candidate, 'squash-delivery-review');
+    completeIsolatedReview(review, true);
+    const record = (delivery: string) => {
+      store.setBoardConfig(slug, { integrationMode: 'local', integrationBranch: git(['branch', '--show-current']) });
+      return store.recordDeliveredSubmission(slug, ticket.ref, {
+        target: store.integrationTarget(slug),
+        deliveryCommit: delivery,
+        reason: 'Squash-merged on the forge.',
+      });
+    };
+
+    // Content differs on one submitted path: still refused.
+    const drifted = record(squash('something else\n', false));
+    assert.strictEqual(drifted.ok, false);
+    assert.strictEqual(drifted.reason, 'delivery_content_missing');
+
+    // The candidate's deletion was dropped: still refused.
+    const undeleted = record(squash('squash first\n', true));
+    assert.strictEqual(undeleted.ok, false);
+    assert.strictEqual(undeleted.reason, 'delivery_content_missing');
+
+    // A faithful squash of both candidate commits: accepted by content.
+    const faithful = squash('squash first\n', false);
+    assert.strictEqual(git(['rev-parse', `${faithful}^{tree}`]), git(['rev-parse', `${candidate}^{tree}`]));
+    const recorded = record(faithful);
+    assert.strictEqual(recorded.ok, true, recorded.message);
+    assert.strictEqual(recorded.integration.contentEvidence, 'squashed_candidate_content');
+    assert.strictEqual(recorded.integration.deliveryCommit, faithful);
+  } finally {
+    store.setBoardConfig(slug, { integrationMode: originalConfig.integrationMode, integrationBranch: originalConfig.integrationBranch });
+  }
+});
+
 test('SQ-2369: reachable manual delivery survives a later folder rename while non-reachable manual delivery requires working-tree content', () => {
   const originalConfig = store.boardConfig(slug);
   try {
