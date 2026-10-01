@@ -211,10 +211,13 @@ function recordedGatewayPid(name, { report = console.error } = {}) {
 function recordedGatewayPids(options) {
   return [...new Set(['guardian', 'shim', 'proxy'].map((name) => recordedGatewayPid(name, options)).filter(Boolean))];
 }
+// `signal` escalates a stop this process already asked for politely (SIGKILL after a
+// SIGTERM that ran over its budget). Windows has no softer form than the taskkill /F
+// the default branch already sends, so it ignores the signal.
 function killPid(pid, options = {}) {
   if (!pid || !processIsOwnedByThisInstall(pid, options)) return false;
   if (WIN) spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-  else { try { process.kill(pid, 'SIGTERM'); } catch {} }
+  else { try { process.kill(pid, options.signal || 'SIGTERM'); } catch {} }
   return true;
 }
 function stopProcess(name, options) {
@@ -714,12 +717,77 @@ async function stopAll({ report = console.log, resolveOwner = resolvePortOwner }
   reapGatewayOrphans(null);
   return { ok: true };
 }
-async function stopRunningSupervisor({ quiet = false, operation = 'restart', report = console.log, resolveOwner = resolvePortOwner } = {}) {
+// A SIGTERMed supervisor does not exit until its worker has drained, so "it has not
+// exited yet" and "it will not exit" are different states. The flat 3s wait this
+// replaced conflated them: on 2026-09-30 at load average 29, `update-loadout` reported
+// `could not restart shim supervisor` for a SIGTERM that had worked, and a second,
+// identical run found :20216 already free (SQ-252). Same failure shape as the 1s
+// /healthz probe in SQ-244.
+//
+// Two budgets, because the callers differ in what happens to an unconfirmed stop:
+//   - A quiet (SessionStart hook) stop keeps the short wait. Claude Code kills that
+//     hook at 30s, HOOK_RECOVERY_RESERVE_MS in commands.js budgets 3s for this wait,
+//     and an unconfirmed stop there is handed to a detached recovery controller that
+//     starts the successor as soon as the port frees (SQ-235). Waiting longer would
+//     spend the hook's whole budget learning what the controller handles anyway.
+//   - An interactive stop (`setup`, `update-loadout`, `restart`) waits for the drain
+//     it is actually waiting on, so its budget tracks CODEX_GATEWAY_DRAIN_TIMEOUT_MS
+//     the way startupWaitMsFor does, and never less than 12s.
+const HANDED_OFF_SUPERVISOR_STOP_WAIT_MS = 3000;
+const MIN_SUPERVISOR_STOP_WAIT_MS = 12000;
+// SIGKILL leaves nothing to tear down: the kernel reaps the process and closes its
+// listener. This budget covers that reap, not another drain.
+const SUPERVISOR_STOP_ESCALATION_WAIT_MS = 3000;
+// The listener closes as the process exits, so once the exit is confirmed the port
+// check needs a moment, not a second full budget.
+const SUPERVISOR_PORT_RELEASE_GRACE_MS = 500;
+function drainTimeoutMs() {
+  return Number(process.env.CODEX_GATEWAY_DRAIN_TIMEOUT_MS) || 30000;
+}
+function supervisorStopWaitMs(quiet) {
+  return quiet ? HANDED_OFF_SUPERVISOR_STOP_WAIT_MS : Math.max(MIN_SUPERVISOR_STOP_WAIT_MS, drainTimeoutMs());
+}
+// The supervisor was already asked to stop and is being replaced deliberately, so a
+// graceful stop that outlives its budget is escalated rather than abandoned.
+function hardKillSupervisor(pid, options = {}) {
+  if (!pid) return false;
+  return killPid(pid, { ...options, signal: 'SIGKILL' });
+}
+// null once the supervisor is gone and its port is free; otherwise which half of the
+// stop is still outstanding, so a refusal can say which instead of guessing.
+async function supervisorStopPending(targetPid, budgetMs, { awaitProcessExit, awaitShimExit }) {
+  const deadline = Date.now() + budgetMs;
+  if (!(await awaitProcessExit(targetPid, budgetMs))) return 'running';
+  if (!(await awaitShimExit(Math.max(SUPERVISOR_PORT_RELEASE_GRACE_MS, deadline - Date.now())))) return 'bound';
+  return null;
+}
+function supervisorStopPendingReason(pending, { pid, waitedMs, escalated, port = PUBLIC_SHIM_PORT }) {
+  const who = pid ? ` (PID ${pid})` : '';
+  const sent = WIN ? 'TASKKILL /F' : (escalated ? 'SIGTERM and then SIGKILL' : 'SIGTERM');
+  const state = pending === 'running' ? 'has not exited yet' : `exited, but :${port} is still bound`;
+  return `the shim supervisor on :${port}${who} ${state} ${Math.round(waitedMs / 1000)}s after ${sent}; that stop is still in flight rather than failed, and nothing was started in its place. Nothing needs stopping by hand: run ensure again, which starts a successor as soon as the port is free`;
+}
+async function stopRunningSupervisor({
+  quiet = false,
+  operation = 'restart',
+  report = console.log,
+  resolveOwner = resolvePortOwner,
+  stopWaitMs = supervisorStopWaitMs(quiet),
+  // Escalation belongs to a stop whose caller has no fallback. A quiet stop's
+  // unconfirmed outcome is owned by the detached recovery controller, and SIGKILL
+  // would abort the deliberate drain that controller is waiting out.
+  escalate = !quiet,
+  awaitProcessExit = waitForProcessExit,
+  awaitShimExit = waitForShimExit,
+  hardKill = hardKillSupervisor,
+} = {}) {
   const owner = await resolveOwner(PUBLIC_SHIM_PORT);
   const reason = portOwnerRefusal(owner);
   if (reason) return { ok: false, reason };
   const pid = owner.pid;
   const targetPid = pid || readPid('guardian');
+  // Read before stopProcess('guardian'), which retires the record it identifies by.
+  const targetIdentity = pid ? {} : { name: 'guardian', record: readPidRecord('guardian') };
   if (targetPid) {
     recordGatewayLifecycle(`${operation}-supervisor-stop-requested`, {
       component: 'controller',
@@ -730,14 +798,36 @@ async function stopRunningSupervisor({ quiet = false, operation = 'restart', rep
   }
   if (pid) killPid(pid);
   else stopProcess('guardian');
-  if (!((await waitForProcessExit(targetPid, 3000)) && (await waitForShimExit(3000)))) {
-    return { ok: false, reason: `could not stop the shim supervisor on :${PUBLIC_SHIM_PORT}${pid ? ` (PID ${pid})` : ''}; run node "${CLI_PATH}" stop, then ensure` };
+  const startedAt = Date.now();
+  const waits = { awaitProcessExit, awaitShimExit };
+  let pending = await supervisorStopPending(targetPid, stopWaitMs, waits);
+  let escalated = false;
+  if (pending && escalate && targetPid) {
+    escalated = hardKill(targetPid, targetIdentity) === true;
+    recordGatewayLifecycle(`${operation}-supervisor-stop-escalated`, {
+      component: 'controller',
+      pid: process.pid,
+      child: { component: 'supervisor', pid: targetPid },
+      signal: WIN ? 'TASKKILL' : 'SIGKILL',
+      pending,
+      waitedMs: Date.now() - startedAt,
+      sent: escalated,
+    });
+    pending = await supervisorStopPending(targetPid, SUPERVISOR_STOP_ESCALATION_WAIT_MS, waits);
+  }
+  if (pending) {
+    return {
+      ok: false,
+      pending,
+      escalated,
+      reason: supervisorStopPendingReason(pending, { pid, waitedMs: Date.now() - startedAt, escalated }),
+    };
   }
   reapGatewayOrphans(null);
-  if (!quiet) report(`model-gateway: stopped stale shim supervisor${pid ? ` (PID ${pid})` : ''}.`);
+  if (!quiet) report(`model-gateway: stopped stale shim supervisor${pid ? ` (PID ${pid})` : ''}${escalated ? '; its graceful stop ran over, so it was force-stopped' : ''}.`);
   const siblingInstallRoot = owner.state === 'same-install' && normalizedPath(owner.installRoot) !== normalizedPath(gatewayInstallRoot())
     ? owner.installRoot : null;
-  return { ok: true, pid, siblingInstallRoot };
+  return { ok: true, pid, siblingInstallRoot, escalated };
 }
 function postJson(url, body, timeout = 2000) {
   return new Promise((resolve, reject) => {
@@ -768,7 +858,7 @@ async function waitForShimExit(timeout) {
   }
   return !(await portListening(SHIM_PORT, 100));
 }
-async function stopShimWithDrain({ quiet = false, timeout = Number(process.env.CODEX_GATEWAY_DRAIN_TIMEOUT_MS) || 30000, report = console.log, resolveOwner = resolvePortOwner } = {}) {
+async function stopShimWithDrain({ quiet = false, timeout = drainTimeoutMs(), report = console.log, resolveOwner = resolvePortOwner } = {}) {
   const owner = await resolveOwner(SHIM_PORT);
   const reason = portOwnerRefusal(owner, SHIM_PORT);
   if (reason) return { ok: false, reason };
@@ -794,7 +884,7 @@ async function stopShimWithDrain({ quiet = false, timeout = Number(process.env.C
   stopProcess('shim');
   return { ok: true, drained: false, forced: true, reason: 'drain timeout' };
 }
-async function restartWorkerWithDrain({ quiet = false, timeout = Number(process.env.CODEX_GATEWAY_DRAIN_TIMEOUT_MS) || 30000, report = console.log, resolveOwner = resolvePortOwner } = {}) {
+async function restartWorkerWithDrain({ quiet = false, timeout = drainTimeoutMs(), report = console.log, resolveOwner = resolvePortOwner } = {}) {
   const owner = await resolveOwner(PUBLIC_SHIM_PORT);
   const reason = portOwnerRefusal(owner, PUBLIC_SHIM_PORT);
   if (reason) return { ok: false, reason };
@@ -1165,5 +1255,6 @@ module.exports = {
   commandIncludesFile, commandResultAsync, confirmProbeDown, createProbeChildRegistry, createProxyRecovery, createWakeDetector, describeFetchFailure, dropPooledSockets, fetchUrl, foreignOwnerRemedy, foreignPortOwner, foreignPortOwnerReason, foreignShimOwner, foreignShimOwnerMessage, gatewayInstallRoot, installBelongsToThisPlugin, isDescendantOfAsync, killPid, killPidAsync, pidFile, pidRecordFile, pluginCacheIdentity, portListening, postJson,
   processInfoAsync, processIsOwnedByThisInstall, processIsOwnedByThisInstallAsync, processOwningPort: processOwningPortSync, processOwningPortAsync, processOwningPortInProcAsync, processTableAsync, resolvePortOwner, portOwnerRefusal, PROBE_FAILURE_THRESHOLD, PROBE_TIMEOUT_MS,
   probeFailureReason, probeSucceeded, proxyModelsAnswering, proxyModelsProbe, readPid, readPidRecord, recordedGatewayPids, reapGatewayOrphans, removePid, restartWorkerWithDrain, shimHealthy, spawnDetached,
-  spawnSupervisedProxy, stopAll, stopProcess, stopRunningSupervisor, stopShimWithDrain, waitForPortRelease, waitForShimExit, writePidRecord, writePidRecordAsync,
+  spawnSupervisedProxy, stopAll, stopProcess, stopRunningSupervisor, stopShimWithDrain, supervisorStopWaitMs, waitForPortRelease, waitForShimExit, writePidRecord, writePidRecordAsync,
+  HANDED_OFF_SUPERVISOR_STOP_WAIT_MS, MIN_SUPERVISOR_STOP_WAIT_MS, SUPERVISOR_STOP_ESCALATION_WAIT_MS,
 };
