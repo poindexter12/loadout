@@ -1,7 +1,9 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const http = require('node:http');
+const path = require('node:path');
 const test = require('node:test');
 const { startGateway } = require('./support.js');
 const {
@@ -19,9 +21,9 @@ function listen(server) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 }
 
-function post(port, pathname, bodyObject) {
+function postRaw(port, pathname, body) {
   return new Promise((resolve, reject) => {
-    const encoded = Buffer.from(JSON.stringify(bodyObject));
+    const encoded = Buffer.isBuffer(body) ? body : Buffer.from(body);
     const req = http.request({
       host: '127.0.0.1',
       port,
@@ -36,6 +38,10 @@ function post(port, pathname, bodyObject) {
     req.on('error', reject);
     req.end(encoded);
   });
+}
+
+function post(port, pathname, bodyObject) {
+  return postRaw(port, pathname, JSON.stringify(bodyObject));
 }
 
 // --- SQ-21: unit coverage for the connect-error classifier ---
@@ -230,4 +236,91 @@ test('SQ-29 e2e: aborting a streaming client destroys the upstream socket prompt
     upstreamClosed.then((result) => { clearTimeout(timeout); resolve(result); }, reject);
   });
   assert.equal(closed.socketDestroyed, true, 'client abort must destroy the upstream socket');
+});
+
+test('SQ-30 e2e: the parsed routing table preserves each route and only malformed JSON passes through', async (t) => {
+  const received = { codex: [], grok: [], antigravity: [], anthropic: [] };
+  const upstream = (provider, response) => http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      received[provider].push(Buffer.concat(chunks).toString());
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify(response));
+    });
+  });
+  const codex = upstream('codex', { type: 'message', model: 'gpt-5.6-terra', content: [] });
+  const grok = upstream('grok', { id: 'resp_test', model: 'grok-4.5', output: [], usage: {} });
+  const antigravity = upstream('antigravity', { type: 'message', model: 'gemini-2.5-pro', content: [] });
+  const anthropic = upstream('anthropic', { type: 'message', model: 'claude-sonnet-4-5', content: [] });
+  const [codexPort, grokPort, antigravityPort, anthropicPort] = await Promise.all([
+    listen(codex), listen(grok), listen(antigravity), listen(anthropic),
+  ]);
+  t.after(() => [codex, grok, antigravity, anthropic].forEach((server) => server.close()));
+
+  const { gatewayTestEnvironment } = require('./support.js');
+  const environment = gatewayTestEnvironment(t);
+  fs.mkdirSync(environment.CODEX_GATEWAY_GROK_HOME, { recursive: true });
+  fs.writeFileSync(path.join(environment.CODEX_GATEWAY_GROK_HOME, 'auth.json'), JSON.stringify({
+    'https://auth.x.ai::openid': { key: 'test-grok-key', expires_at: Date.now() + 3600000 },
+  }));
+  const { port: shimPort } = await startGateway(t, 'serve-shim', environment, {
+    isolatedOverrides: {
+      CODEX_GATEWAY_PROXY_PORT: String(codexPort),
+      CODEX_GATEWAY_GROK_ENDPOINT: `http://127.0.0.1:${grokPort}/v1/responses`,
+      CODEX_GATEWAY_ANTIGRAVITY_ENDPOINT: `http://127.0.0.1:${antigravityPort}`,
+      CODEX_GATEWAY_ANTHROPIC_UPSTREAM: `http://127.0.0.1:${anthropicPort}`,
+      CODEX_GATEWAY_REQUEST_LOG: '0',
+      CODEX_GATEWAY_SENTRY: '0',
+    },
+  });
+
+  const routes = [
+    { name: 'codex', body: { model: 'claude-gpt-5.6-terra', messages: [], max_tokens: 1 } },
+    { name: 'grok', body: { model: 'claude-grok-4.5', messages: [], max_tokens: 1 } },
+    { name: 'antigravity', body: { model: 'claude-gemini-2.5-pro', messages: [], max_tokens: 1 } },
+    { name: 'anthropic', body: { model: 'claude-sonnet-4-5', messages: [], max_tokens: 1 } },
+    { name: 'unparseable body', body: '{not valid JSON' },
+  ];
+  for (const route of routes) {
+    const response = typeof route.body === 'string'
+      ? await postRaw(shimPort, '/v1/messages', route.body)
+      : await post(shimPort, '/v1/messages', route.body);
+    assert.equal(response.status, 200, `${route.name} must reach its selected upstream`);
+  }
+
+  assert.equal(received.codex.filter((body) => body.includes('gpt-5.6-terra')).length, 1);
+  assert.equal(received.grok.length, 1);
+  assert.equal(received.antigravity.filter((body) => body.includes('"model":"gemini-2.5-pro"')).length, 1);
+  assert.equal(received.anthropic.length, 2, 'native Anthropic and malformed bodies are the only Anthropic requests');
+  assert.equal(received.anthropic[1], '{not valid JSON', 'unparseable bodies stay byte-identical');
+});
+
+test('SQ-30 e2e: a post-parse routing exception returns 500 and does not fall through to Anthropic', async (t) => {
+  let anthropicRequests = 0;
+  const anthropic = http.createServer((req, res) => {
+    anthropicRequests += 1;
+    res.end(JSON.stringify({ type: 'message', content: [] }));
+  });
+  const anthropicPort = await listen(anthropic);
+  t.after(() => anthropic.close());
+
+  const { gatewayTestEnvironment } = require('./support.js');
+  const environment = gatewayTestEnvironment(t);
+  const { port: shimPort } = await startGateway(t, 'serve-shim', environment, {
+    isolatedOverrides: {
+      CODEX_GATEWAY_ANTHROPIC_UPSTREAM: `http://127.0.0.1:${anthropicPort}`,
+      CODEX_GATEWAY_SENTRY: '0',
+      CODEX_GATEWAY_REQUEST_LOG: '0',
+    },
+  });
+  // sanitizeToolSchemas recurses after JSON.parse. This deliberately deep JSON
+  // schema reliably overflows that post-parse walk without making JSON.parse fail.
+  const nestedSchema = '{"node":'.repeat(12000) + 'null' + '}'.repeat(12000);
+  const body = `{"model":"claude-gpt-5.6-terra","messages":[],"tools":[{"input_schema":${nestedSchema}}]}`;
+  const response = await postRaw(shimPort, '/v1/messages', body);
+
+  assert.equal(response.status, 500);
+  assert.match(JSON.parse(response.body).error.message, /no Anthropic fallback was used/);
+  assert.equal(anthropicRequests, 0, 'post-parse failures must not leak to the Anthropic upstream');
 });
