@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { resolveSidequestHome } from '../lib/claude-home.js';
 import { readStdin, stringField, type HookInput } from './shared/input.js';
 import { writeContext } from './shared/output.js';
 import { runtimeModule } from './shared/paths.js';
@@ -85,7 +85,7 @@ function countLabel(count: number, singular: string, plural = singular + 's'): s
 }
 
 function reminderStateFile(sessionId: string): string {
-  const home = process.env.SIDEQUEST_HOME || path.join(os.homedir(), '.claude', 'sidequest');
+  const home = resolveSidequestHome();
   const key = crypto.createHash('sha256').update(sessionId).digest('hex');
   return path.join(home, 'hook-state', `stop-reminder-${key}.json`);
 }

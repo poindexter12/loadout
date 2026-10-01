@@ -1,9 +1,8 @@
 "use strict";
+const { resolveSidequestHome } = require("../claude-home.js");
 function createPaths({ fs, os, path, crypto }) {
   function homeRoot() {
-    const env = process.env.SIDEQUEST_HOME;
-    if (env && String(env).trim()) return path.resolve(String(env).trim());
-    return path.join(os.homedir(), ".claude", "sidequest");
+    return resolveSidequestHome();
   }
   function projectsRoot() {
     return path.join(homeRoot(), "projects");

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { resolveSidequestHome } from '../../lib/claude-home.js';
 import { isSubagent } from './input.js';
 import { runtimeModule } from './paths.js';
 
@@ -43,7 +44,7 @@ export function isPrimarySession(input: Record<string, unknown>): boolean {
 }
 
 function stateDirectory(): string {
-  const home = String(process.env.SIDEQUEST_HOME || '').trim() || path.join(os.homedir(), '.claude', 'sidequest');
+  const home = resolveSidequestHome();
   return path.join(home, 'compaction-suggestions');
 }
 

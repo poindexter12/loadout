@@ -117,11 +117,21 @@ function isSubagent(input) {
 
 // src/hooks/shared/compaction.ts
 var import_node_fs3 = __toESM(require("node:fs"));
+var import_node_os2 = __toESM(require("node:os"));
+var import_node_path4 = __toESM(require("node:path"));
+
+// src/lib/claude-home.ts
 var import_node_os = __toESM(require("node:os"));
-var import_node_path3 = __toESM(require("node:path"));
+var import_node_path2 = __toESM(require("node:path"));
+function resolveSidequestHome(env = process.env) {
+  const explicit = String(env.SIDEQUEST_HOME || "").trim();
+  if (explicit) return import_node_path2.default.resolve(explicit);
+  const configDir = String(env.CLAUDE_CONFIG_DIR || "").trim();
+  return import_node_path2.default.join(configDir ? import_node_path2.default.resolve(configDir) : import_node_path2.default.join(import_node_os.default.homedir(), ".claude"), "sidequest");
+}
 
 // src/hooks/shared/paths.ts
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_path3 = __toESM(require("node:path"));
 
 // src/hooks/shared/compaction.ts
 var TRANSCRIPT_BYTES_THRESHOLD = 3 * 1024 * 1024;
@@ -129,11 +139,11 @@ function isPrimarySession(input) {
   return !isSubagent(input);
 }
 function stateDirectory() {
-  const home = String(process.env.SIDEQUEST_HOME || "").trim() || import_node_path3.default.join(import_node_os.default.homedir(), ".claude", "sidequest");
-  return import_node_path3.default.join(home, "compaction-suggestions");
+  const home = resolveSidequestHome();
+  return import_node_path4.default.join(home, "compaction-suggestions");
 }
 function stateFile(sessionId) {
-  return import_node_path3.default.join(stateDirectory(), `${encodeURIComponent(sessionId)}.json`);
+  return import_node_path4.default.join(stateDirectory(), `${encodeURIComponent(sessionId)}.json`);
 }
 function transcriptBytes(transcriptPath) {
   try {
@@ -165,10 +175,10 @@ function replacementMarkerHome() {
   const sidequestHome = String(process.env.SIDEQUEST_HOME || "").trim();
   if (sidequestHome) return sidequestHome;
   const configDir = String(process.env.CLAUDE_CONFIG_DIR || "").trim();
-  return import_node_path3.default.join(configDir || import_node_path3.default.join(import_node_os.default.homedir(), ".claude"), "sidequest");
+  return import_node_path4.default.join(configDir || import_node_path4.default.join(import_node_os2.default.homedir(), ".claude"), "sidequest");
 }
 function replacementMarkerFile(sessionId) {
-  return import_node_path3.default.join(replacementMarkerHome(), "replacement-compactions", `${encodeURIComponent(sessionId)}.json`);
+  return import_node_path4.default.join(replacementMarkerHome(), "replacement-compactions", `${encodeURIComponent(sessionId)}.json`);
 }
 function recordReplacementCompaction(sessionId, replacement) {
   if (!sessionId) return;
@@ -179,7 +189,7 @@ function recordReplacementCompaction(sessionId, replacement) {
   }
   if (!replacement) return;
   try {
-    import_node_fs3.default.mkdirSync(import_node_path3.default.dirname(file), { recursive: true });
+    import_node_fs3.default.mkdirSync(import_node_path4.default.dirname(file), { recursive: true });
     import_node_fs3.default.writeFileSync(file, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString() }));
   } catch (_) {
   }

@@ -510,7 +510,7 @@ var require_report = __commonJS({
 });
 
 // src/hooks/audit-report.ts
-var import_node_path3 = __toESM(require("node:path"));
+var import_node_path4 = __toESM(require("node:path"));
 
 // src/hooks/shared/paths.ts
 var import_node_path = __toESM(require("node:path"));
@@ -525,8 +525,17 @@ function runtimeModule(name) {
 var import_node_child_process = require("node:child_process");
 var import_node_crypto = __toESM(require("node:crypto"));
 var import_node_fs2 = __toESM(require("node:fs"));
+var import_node_path3 = __toESM(require("node:path"));
+
+// src/lib/claude-home.ts
 var import_node_os = __toESM(require("node:os"));
 var import_node_path2 = __toESM(require("node:path"));
+function resolveSidequestHome(env = process.env) {
+  const explicit = String(env.SIDEQUEST_HOME || "").trim();
+  if (explicit) return import_node_path2.default.resolve(explicit);
+  const configDir = String(env.CLAUDE_CONFIG_DIR || "").trim();
+  return import_node_path2.default.join(configDir ? import_node_path2.default.resolve(configDir) : import_node_path2.default.join(import_node_os.default.homedir(), ".claude"), "sidequest");
+}
 
 // src/hooks/shared/input.ts
 var import_node_fs = __toESM(require("node:fs"));
@@ -554,12 +563,12 @@ var BUNDLED_AGENT_NAMES = /* @__PURE__ */ new Set([
 
 // src/hooks/shared/audit-handoff.ts
 function stateDirectory() {
-  const home = String(process.env.SIDEQUEST_HOME || "").trim() || import_node_path2.default.join(import_node_os.default.homedir(), ".claude", "sidequest");
-  return import_node_path2.default.join(home, "audit-reports");
+  const home = resolveSidequestHome();
+  return import_node_path3.default.join(home, "audit-reports");
 }
 function auditReportFile(cwd) {
-  const key = import_node_crypto.default.createHash("sha1").update(import_node_path2.default.resolve(cwd || ".")).digest("hex").slice(0, 16);
-  return import_node_path2.default.join(stateDirectory(), `${key}.json`);
+  const key = import_node_crypto.default.createHash("sha1").update(import_node_path3.default.resolve(cwd || ".")).digest("hex").slice(0, 16);
+  return import_node_path3.default.join(stateDirectory(), `${key}.json`);
 }
 function writeAuditHandoffReport(cwd, report) {
   try {
@@ -576,7 +585,7 @@ function argument(name) {
   return index >= 0 ? String(process.argv[index + 1] || "") : "";
 }
 function main() {
-  const cwd = import_node_path3.default.resolve(argument("--cwd") || process.cwd());
+  const cwd = import_node_path4.default.resolve(argument("--cwd") || process.cwd());
   try {
     const store = require(runtimeModule("store"));
     const found = store.findProject(store.nearestRepoRoot(cwd));

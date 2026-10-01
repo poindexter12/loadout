@@ -42,6 +42,7 @@ const { createTickets } = require("./store/tickets.js");
 const { createSubmissions } = require("./store/submissions.js");
 const { createDispatch } = require("./store/dispatch.js");
 const { createPaths } = require("./store/paths.js");
+const { resolveSidequestHome } = require("./claude-home.js");
 const { createCache } = require("./store/cache.js");
 const { createConfig } = require("./store/config.js");
 const { createSweeps } = require("./store/sweeps.js");
@@ -655,7 +656,7 @@ const {
   fs,
   getCategory: (...args) => getCategory(...args),
   getStory: (...args) => getStory(...args),
-  homeRoot: () => process.env.SIDEQUEST_HOME || path.join(os.homedir(), ".claude", "sidequest"),
+  homeRoot: () => resolveSidequestHome(),
   integrationTarget,
   hasOriginRemote,
   pendingSubmission: pendingSubmissionForTickets,

@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { stat } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
+import { resolveSidequestHome } from '../../lib/claude-home.js';
 import { stringField, type HookInput } from './input.js';
 import { pluginRoot, runtimeModule } from './paths.js';
 import { writeSweepProgress, type SweepProgress } from './sweep-handoff.js';
@@ -110,7 +110,7 @@ export function worktreeRemovalFailureNotice(
 }
 
 function stateFile(): string {
-  const home = String(process.env.SIDEQUEST_HOME || '').trim() || path.join(os.homedir(), '.claude', 'sidequest');
+  const home = resolveSidequestHome();
   return path.join(home, 'worktree-sweep-sessions.json');
 }
 

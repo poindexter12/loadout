@@ -55,8 +55,17 @@ installBudget(failOpen);
 // src/hooks/board-reconciliation-reminder.ts
 var import_node_crypto2 = __toESM(require("node:crypto"));
 var import_node_fs3 = __toESM(require("node:fs"));
+var import_node_path4 = __toESM(require("node:path"));
+
+// src/lib/claude-home.ts
 var import_node_os = __toESM(require("node:os"));
-var import_node_path3 = __toESM(require("node:path"));
+var import_node_path2 = __toESM(require("node:path"));
+function resolveSidequestHome(env = process.env) {
+  const explicit = String(env.SIDEQUEST_HOME || "").trim();
+  if (explicit) return import_node_path2.default.resolve(explicit);
+  const configDir = String(env.CLAUDE_CONFIG_DIR || "").trim();
+  return import_node_path2.default.join(configDir ? import_node_path2.default.resolve(configDir) : import_node_path2.default.join(import_node_os.default.homedir(), ".claude"), "sidequest");
+}
 
 // src/hooks/shared/input.ts
 var import_node_fs2 = __toESM(require("node:fs"));
@@ -189,12 +198,12 @@ function writeSystemMessage(hookEventName, systemMessage) {
 }
 
 // src/hooks/shared/paths.ts
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_path3 = __toESM(require("node:path"));
 function pluginRoot() {
-  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path2.default.join(__dirname, "..");
+  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path3.default.join(__dirname, "..");
 }
 function runtimeModule(name) {
-  return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
+  return import_node_path3.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
 // src/hooks/board-reconciliation-reminder.ts
@@ -225,15 +234,15 @@ function countLabel(count, singular, plural = singular + "s") {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 function reminderStateFile(sessionId) {
-  const home = process.env.SIDEQUEST_HOME || import_node_path3.default.join(import_node_os.default.homedir(), ".claude", "sidequest");
+  const home = resolveSidequestHome();
   const key = import_node_crypto2.default.createHash("sha256").update(sessionId).digest("hex");
-  return import_node_path3.default.join(home, "hook-state", `stop-reminder-${key}.json`);
+  return import_node_path4.default.join(home, "hook-state", `stop-reminder-${key}.json`);
 }
 function stateLockOwnerFile(lockDirectory) {
   try {
     const owners = import_node_fs3.default.readdirSync(lockDirectory).filter((name) => name.startsWith("owner-"));
     const [ownerName] = owners;
-    return owners.length === 1 && ownerName ? import_node_path3.default.join(lockDirectory, ownerName) : null;
+    return owners.length === 1 && ownerName ? import_node_path4.default.join(lockDirectory, ownerName) : null;
   } catch (_) {
     return null;
   }
@@ -275,12 +284,12 @@ function acquireStateLock(file) {
   const generation = `${process.pid}-${import_node_crypto2.default.randomUUID()}`;
   const ownerName = `owner-${generation}`;
   const candidateDirectory = `${lockDirectory}.${generation}`;
-  const publishedOwnerFile = import_node_path3.default.join(lockDirectory, ownerName);
+  const publishedOwnerFile = import_node_path4.default.join(lockDirectory, ownerName);
   const deadline = Date.now() + STATE_LOCK_WAIT_MS;
-  import_node_fs3.default.mkdirSync(import_node_path3.default.dirname(file), { recursive: true });
+  import_node_fs3.default.mkdirSync(import_node_path4.default.dirname(file), { recursive: true });
   try {
     import_node_fs3.default.mkdirSync(candidateDirectory);
-    import_node_fs3.default.writeFileSync(import_node_path3.default.join(candidateDirectory, ownerName), `${process.pid}
+    import_node_fs3.default.writeFileSync(import_node_path4.default.join(candidateDirectory, ownerName), `${process.pid}
 `);
     while (true) {
       try {
@@ -311,7 +320,7 @@ function acquireStateLock(file) {
 function releaseStateLock(ownerFile) {
   try {
     import_node_fs3.default.rmSync(ownerFile, { force: true });
-    import_node_fs3.default.rmdirSync(import_node_path3.default.dirname(ownerFile));
+    import_node_fs3.default.rmdirSync(import_node_path4.default.dirname(ownerFile));
   } catch (_) {
   }
 }
@@ -432,12 +441,12 @@ function main() {
   const message = boardReconciliationReminder(data);
   if (message) writeContext("Stop", message);
 }
-if (import_node_path3.default.basename(process.argv[1] || "") === "board-reconciliation-reminder.js") main();
+if (import_node_path4.default.basename(process.argv[1] || "") === "board-reconciliation-reminder.js") main();
 
 // src/hooks/shared/compaction.ts
 var import_node_fs4 = __toESM(require("node:fs"));
 var import_node_os2 = __toESM(require("node:os"));
-var import_node_path4 = __toESM(require("node:path"));
+var import_node_path5 = __toESM(require("node:path"));
 var CLOSED_TICKETS_THRESHOLD = 3;
 var TRANSCRIPT_BYTES_THRESHOLD = 3 * 1024 * 1024;
 var RETRY_MULTIPLIER = 2;
@@ -451,11 +460,11 @@ function isPrimarySession(input) {
   return !isSubagent(input);
 }
 function stateDirectory() {
-  const home = String(process.env.SIDEQUEST_HOME || "").trim() || import_node_path4.default.join(import_node_os2.default.homedir(), ".claude", "sidequest");
-  return import_node_path4.default.join(home, "compaction-suggestions");
+  const home = resolveSidequestHome();
+  return import_node_path5.default.join(home, "compaction-suggestions");
 }
 function stateFile(sessionId) {
-  return import_node_path4.default.join(stateDirectory(), `${encodeURIComponent(sessionId)}.json`);
+  return import_node_path5.default.join(stateDirectory(), `${encodeURIComponent(sessionId)}.json`);
 }
 function transcriptBytes(transcriptPath) {
   try {
@@ -586,7 +595,7 @@ async function compactionSuggestion(input) {
 // src/hooks/shared/compaction-policy.ts
 var import_node_fs5 = __toESM(require("node:fs"));
 var import_node_os3 = __toESM(require("node:os"));
-var import_node_path5 = __toESM(require("node:path"));
+var import_node_path6 = __toESM(require("node:path"));
 
 // src/hooks/shared/live-refs.ts
 var COMPACTION_RECOVERY_MARKER = "sidequest compaction recovery v1";
@@ -599,9 +608,11 @@ var LIVE_REFS_VERSION = 1;
 function trimSlashes(value) {
   return value.replace(/[\\/]+$/, "");
 }
-function sidequestHome(sidequestHomeEnv, homeEnv) {
+function sidequestHome(sidequestHomeEnv, homeEnv, configDirEnv) {
   const explicit = String(sidequestHomeEnv || "").trim();
   if (explicit) return trimSlashes(explicit);
+  const configDir = trimSlashes(String(configDirEnv || "").trim());
+  if (configDir) return `${configDir}/sidequest`;
   const home = trimSlashes(String(homeEnv || "").trim());
   return home ? `${home}/.claude/sidequest` : "";
 }
@@ -715,13 +726,13 @@ async function compactionRecoverySnapshot(cwd) {
 async function recordLiveRefs(input) {
   if (compactionGuardMode(process.env.CLAUDE_PLUGIN_OPTION_COMPACTIONGUARD) === "off") return "";
   const sessionId = String(input.session_id || input.sessionId || process.env.CLAUDE_CODE_SESSION_ID || "").trim();
-  const home = sidequestHome(process.env.SIDEQUEST_HOME, import_node_os3.default.homedir());
+  const home = sidequestHome(process.env.SIDEQUEST_HOME, import_node_os3.default.homedir(), process.env.CLAUDE_CONFIG_DIR);
   if (!sessionId || !home) return "";
   try {
     const snapshot = await compactionRecoverySnapshot(String(input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd()));
     if (!snapshot) return "";
     const file = liveRefsPath(home, sessionId);
-    import_node_fs5.default.mkdirSync(import_node_path5.default.dirname(file), { recursive: true });
+    import_node_fs5.default.mkdirSync(import_node_path6.default.dirname(file), { recursive: true });
     const temporary = `${file}.${process.pid}.tmp`;
     import_node_fs5.default.writeFileSync(temporary, serializeLiveRefs(sessionId, snapshot.pin, snapshot.closed));
     import_node_fs5.default.renameSync(temporary, file);

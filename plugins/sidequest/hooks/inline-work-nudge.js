@@ -181,11 +181,22 @@ function runtimeModule(name) {
 
 // src/hooks/shared/session-state.ts
 var import_node_fs3 = __toESM(require("node:fs"));
+var import_node_path4 = __toESM(require("node:path"));
+
+// src/lib/claude-home.ts
 var import_node_os = __toESM(require("node:os"));
 var import_node_path3 = __toESM(require("node:path"));
+function resolveSidequestHome(env = process.env) {
+  const explicit = String(env.SIDEQUEST_HOME || "").trim();
+  if (explicit) return import_node_path3.default.resolve(explicit);
+  const configDir = String(env.CLAUDE_CONFIG_DIR || "").trim();
+  return import_node_path3.default.join(configDir ? import_node_path3.default.resolve(configDir) : import_node_path3.default.join(import_node_os.default.homedir(), ".claude"), "sidequest");
+}
+
+// src/hooks/shared/session-state.ts
 function sessionStateFile(prefix, sessionId) {
-  const home = process.env.SIDEQUEST_HOME || import_node_path3.default.join(import_node_os.default.homedir(), ".claude", "sidequest");
-  return import_node_path3.default.join(home, "tmp", "state", `${prefix}-${encodeURIComponent(sessionId)}.json`);
+  const home = resolveSidequestHome();
+  return import_node_path4.default.join(home, "tmp", "state", `${prefix}-${encodeURIComponent(sessionId)}.json`);
 }
 function readSessionState(file) {
   try {
@@ -196,7 +207,7 @@ function readSessionState(file) {
   }
 }
 function writeSessionState(file, state) {
-  import_node_fs3.default.mkdirSync(import_node_path3.default.dirname(file), { recursive: true });
+  import_node_fs3.default.mkdirSync(import_node_path4.default.dirname(file), { recursive: true });
   import_node_fs3.default.writeFileSync(file, JSON.stringify(state));
 }
 

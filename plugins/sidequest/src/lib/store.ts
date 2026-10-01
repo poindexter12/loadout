@@ -8,7 +8,8 @@
  *   - a repo never gets ticket JSON committed into it by accident, and
  *   - a single dashboard can show every project's board at once.
  *
- * Layout (root defaults to ~/.claude/sidequest, override with SIDEQUEST_HOME):
+ * Layout (root is SIDEQUEST_HOME, else $CLAUDE_CONFIG_DIR/sidequest, else ~/.claude/sidequest;
+ * see resolveSidequestHome in claude-home.ts):
  *
  *   <root>/
  *     server.json                         # { port, pid, startedAt, url } of the live dashboard
@@ -69,6 +70,7 @@ const { createTickets } = require('./store/tickets.js');
 const { createSubmissions } = require('./store/submissions.js');
 const { createDispatch } = require('./store/dispatch.js');
 const { createPaths } = require('./store/paths.js');
+const { resolveSidequestHome } = require('./claude-home.js');
 const { createCache } = require('./store/cache.js');
 const { createConfig } = require('./store/config.js');
 const { createSweeps } = require('./store/sweeps.js');
@@ -551,7 +553,7 @@ const {
   fs,
   getCategory: (...args: any[]) => getCategory(...args),
   getStory: (...args: any[]) => getStory(...args),
-  homeRoot: () => process.env.SIDEQUEST_HOME || path.join(os.homedir(), '.claude', 'sidequest'),
+  homeRoot: () => resolveSidequestHome(),
   integrationTarget,
   hasOriginRemote,
   pendingSubmission: pendingSubmissionForTickets,

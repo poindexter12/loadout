@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { resolveSidequestHome } from '../../lib/claude-home.js';
 import { runtimeModule } from './paths.js';
 import {
   COMPACTION_RECOVERY_MARKER,
@@ -48,7 +49,7 @@ function policy(): 'off' | 'pin' | 'veto' {
 }
 
 function stateFile(sessionId: string): string {
-  const home = String(process.env.SIDEQUEST_HOME || '').trim() || path.join(os.homedir(), '.claude', 'sidequest');
+  const home = resolveSidequestHome();
   return path.join(home, 'compaction-policy', `${encodeURIComponent(sessionId)}.json`);
 }
 
@@ -259,7 +260,7 @@ export async function recordLiveRefs(input: Record<string, unknown>): Promise<st
   // userConfig reaches a classic hook as CLAUDE_PLUGIN_OPTION_<KEY>, the key upper-cased.
   if (compactionGuardMode(process.env.CLAUDE_PLUGIN_OPTION_COMPACTIONGUARD) === 'off') return '';
   const sessionId = String(input.session_id || input.sessionId || process.env.CLAUDE_CODE_SESSION_ID || '').trim();
-  const home = sidequestHome(process.env.SIDEQUEST_HOME, os.homedir());
+  const home = sidequestHome(process.env.SIDEQUEST_HOME, os.homedir(), process.env.CLAUDE_CONFIG_DIR);
   if (!sessionId || !home) return '';
   try {
     const snapshot = await compactionRecoverySnapshot(String(input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd()));
