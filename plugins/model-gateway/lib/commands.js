@@ -1989,8 +1989,19 @@ async function catalogCommand() {
   const refresh = flag('--refresh');
   let catalog = readCatalog();
   const stale = !catalog || (Date.now() - Date.parse(catalog.updatedAt || 0) > CATALOG_STALE_MS);
-  if ((refresh || stale) && (await shimHealthy())) {
-    catalog = (await writeCatalog().catch(() => null)) || catalog;
+  if (refresh || stale) {
+    const healthy = await shimHealthy();
+    if (healthy) {
+      try {
+        const written = await writeCatalog();
+        if (written) catalog = written;
+        else if (refresh) die('catalog refresh failed: the shim advertised no gateway models; existing catalog was not refreshed');
+      } catch (error) {
+        if (refresh) throw new Error(`catalog refresh failed: ${error.message}`);
+      }
+    } else if (refresh) {
+      die('catalog refresh failed: shim health probe did not return 200 within 3000ms; existing catalog was not refreshed');
+    }
   }
   if (!catalog) die('no catalog available yet (run setup or start first)');
   if (jsonOut) process.stdout.write(JSON.stringify(catalog) + '\n');

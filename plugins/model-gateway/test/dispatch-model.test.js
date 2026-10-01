@@ -569,6 +569,85 @@ test('writeCatalogFile replaces a catalog when the fetched set contains a new mo
   }
 });
 
+test('SQ-244: catalog --refresh waits for a busy shim health check and rewrites the catalog', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'catalog-slow-health-'));
+  const state = path.join(home, '.claude', 'model-gateway');
+  fs.mkdirSync(state, { recursive: true });
+  const existingCatalog = gw.buildCatalog(['claude-gpt-5.6-terra']);
+  fs.writeFileSync(path.join(state, 'catalog.json'), JSON.stringify(existingCatalog));
+
+  const shim = http.createServer((request, response) => {
+    const delay = request.url === '/healthz' ? 1200 : 0;
+    setTimeout(() => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(request.url === '/healthz' ? '{"ok":true}' : '{"data":[{"id":"claude-gpt-5.6-terra"}]}');
+    }, delay);
+  });
+  const port = await listen(shim);
+  t.after(() => {
+    shim.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  const result = await new Promise((resolve) => {
+    const child = spawnGatewayProcess(t, process.execPath, [CLI, 'catalog', '--refresh', '--json'], {
+      env: {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        CODEX_GATEWAY_PORT: String(port),
+        CODEX_GATEWAY_WORKER_PORT: String(port),
+      },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.notEqual(JSON.parse(result.stdout).updatedAt, existingCatalog.updatedAt, 'the slow health check must still lead to a catalog rewrite');
+});
+
+test('SQ-244: catalog --refresh fails when the shim cannot write a catalog', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'catalog-empty-refresh-'));
+  const state = path.join(home, '.claude', 'model-gateway');
+  fs.mkdirSync(state, { recursive: true });
+  fs.writeFileSync(path.join(state, 'catalog.json'), JSON.stringify(gw.buildCatalog(['claude-gpt-5.6-terra'])));
+
+  const shim = http.createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(request.url === '/healthz' ? '{"ok":true}' : '{"data":[]}');
+  });
+  const port = await listen(shim);
+  t.after(() => {
+    shim.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  const result = await new Promise((resolve) => {
+    const child = spawnGatewayProcess(t, process.execPath, [CLI, 'catalog', '--refresh', '--json'], {
+      env: {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        CODEX_GATEWAY_PORT: String(port),
+        CODEX_GATEWAY_WORKER_PORT: String(port),
+      },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+  });
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /catalog refresh failed: the shim advertised no gateway models; existing catalog was not refreshed/);
+});
+
 test('SQ-2208: catalog --refresh --json keeps stdout parseable while it logs a preserved subset', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'catalog-json-stdout-'));
   const state = path.join(home, '.claude', 'model-gateway');

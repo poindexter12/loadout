@@ -83,9 +83,14 @@ function portListening(port, timeout = 700) {
   });
 }
 
+// Catalog refresh and startup recovery both need to tolerate a busy shim. This matches
+// the /v1/models request budget used by catalog writes, rather than rejecting a shim
+// that has answered health checks a little slower than the old one-second probe.
+const SHIM_HEALTH_TIMEOUT_MS = 3000;
+
 async function shimHealthy() {
   try {
-    const response = await fetchUrl(`http://127.0.0.1:${SHIM_PORT}/healthz`, { timeout: 1000 });
+    const response = await fetchUrl(`http://127.0.0.1:${SHIM_PORT}/healthz`, { timeout: SHIM_HEALTH_TIMEOUT_MS });
     return response.status === 200;
   } catch { return false; }
 }
