@@ -170,26 +170,216 @@ function writeDeny(hookEventName, permissionDecisionReason) {
 }
 
 // src/hooks/guard-home-delete.ts
+var UNKNOWN = "\0";
 function deleteArguments(command) {
-  const commands = /(?:^|[;&|{}()\n])\s*(?:[\w.-]+\s+)*(?:remove-item|rm|rmdir|rd|ri|del|erase)\b([^;&|{}\n]*)/gi;
+  const commands = /(?:^|[;&|{}()\n])\s*(?:[\w.-]+\s+)*(?:remove-item|rm|rmdir|rd|ri|del|erase)\b((?:\$\{[^{}\n]*\}|[^;&|{}\n])*)/gi;
   return [...command.matchAll(commands)].map((match) => match[1] || "");
 }
-function hasProtectedRecursiveDelete(command) {
-  const recursive = /(?:--recursive\b|-[a-z]*r[a-z]*\b|-recurse\b|\/s\b)/i;
-  return deleteArguments(command).some((argumentsAfterDelete) => recursive.test(argumentsAfterDelete) && isProtectedPath(argumentsAfterDelete));
+function tokenize(text) {
+  const tokens = [];
+  let current = "";
+  let started = false;
+  let quote = "";
+  const flush = () => {
+    if (started) tokens.push(current);
+    current = "";
+    started = false;
+  };
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index] ?? "";
+    if (quote) {
+      if (char === quote) quote = "";
+      else current += char;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      started = true;
+      continue;
+    }
+    if (char === "$" && text[index + 1] === "(") {
+      let depth = 0;
+      let end = index + 1;
+      for (; end < text.length; end += 1) {
+        if (text[end] === "(") depth += 1;
+        else if (text[end] === ")" && --depth === 0) break;
+      }
+      current += text.slice(index, end + 1);
+      started = true;
+      index = end;
+      continue;
+    }
+    if (char === "`") {
+      const end = text.indexOf("`", index + 1);
+      const stop = end === -1 ? text.length : end;
+      current += text.slice(index, stop + 1);
+      started = true;
+      index = stop;
+      continue;
+    }
+    if (/\s/.test(char) || char === "(" || char === ")" || char === "<" || char === ">") {
+      flush();
+      continue;
+    }
+    if (char === "#" && !started) break;
+    current += char;
+    started = true;
+  }
+  flush();
+  return tokens;
 }
-function normalizePath(value) {
-  return value.toLowerCase().replace(/[\\/]+$/, "");
+function parseDeleteArguments(argumentsAfterDelete) {
+  const parsed = { recursive: false, targets: [] };
+  let optionsEnded = false;
+  for (const token of tokenize(argumentsAfterDelete)) {
+    if (!token || token === "\\") continue;
+    if (!optionsEnded && token === "--") {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded && token.startsWith("--")) {
+      const name = token.toLowerCase().split("=")[0] ?? "";
+      if (name.length >= 3 && "--recursive".startsWith(name)) parsed.recursive = true;
+      continue;
+    }
+    if (!optionsEnded && token.startsWith("-") && token.length > 1) {
+      const separator = token.indexOf(":");
+      const name = separator === -1 ? token.slice(1) : token.slice(1, separator);
+      if (/^[a-z]+$/i.test(name) && /r/i.test(name)) parsed.recursive = true;
+      const value = separator === -1 ? "" : token.slice(separator + 1);
+      if (value && /^(?:path|literalpath|lp|pspath)$/i.test(name)) parsed.targets.push(value);
+      continue;
+    }
+    if (/^(?:\/[a-z?])+$/i.test(token)) {
+      if (/\/s/i.test(token)) parsed.recursive = true;
+      continue;
+    }
+    parsed.targets.push(token);
+  }
+  return parsed;
 }
-function isProtectedPath(command) {
-  if (/\$home\b|\$env:userprofile\b|%userprofile%|(?<!\w)~(?=[\\/\s"']|$)/i.test(command)) return true;
+function expandHome(target, home) {
+  return target.replace(/^~(?=[\\/]|$)/, () => home).replace(/\$\{(?:env:)?(?:home|userprofile)\}|\$env:(?:userprofile|home)(?![\w:])|\$home(?![\w:])|%userprofile%|%homedrive%%homepath%/gi, () => home);
+}
+function markUnknown(target) {
+  let result = "";
+  for (let index = 0; index < target.length; index += 1) {
+    const char = target[index] ?? "";
+    const next = target[index + 1] || "";
+    if (index === 0 && char === "~") {
+      const end = target.slice(1).search(/[\\/]/);
+      result += UNKNOWN;
+      index = end === -1 ? target.length : end;
+      continue;
+    }
+    if (char === "$" && next === "(") {
+      let depth = 0;
+      let end = index + 1;
+      for (; end < target.length; end += 1) {
+        if (target[end] === "(") depth += 1;
+        else if (target[end] === ")" && --depth === 0) break;
+      }
+      result += UNKNOWN;
+      index = end;
+      continue;
+    }
+    if (char === "$" && next === "{") {
+      const end = target.indexOf("}", index);
+      result += UNKNOWN;
+      index = end === -1 ? target.length : end;
+      continue;
+    }
+    if (char === "$" && /[a-z_]/i.test(next)) {
+      const match = /^\$(?:env:)?\w+/i.exec(target.slice(index));
+      result += UNKNOWN;
+      index += (match ? match[0].length : 1) - 1;
+      continue;
+    }
+    if (char === "$" && /[0-9@*#?!$-]/.test(next)) {
+      result += UNKNOWN;
+      index += 1;
+      continue;
+    }
+    if (char === "`") {
+      const end = target.indexOf("`", index + 1);
+      result += UNKNOWN;
+      index = end === -1 ? target.length : end;
+      continue;
+    }
+    if (char === "%") {
+      const match = /^%[a-z_][\w()]*%/i.exec(target.slice(index));
+      if (match) {
+        result += UNKNOWN;
+        index += match[0].length - 1;
+        continue;
+      }
+    }
+    result += char;
+  }
+  return result;
+}
+function slashes(value) {
+  return value.replace(/\\/g, "/");
+}
+function trimTrailingSlashes(value) {
+  const trimmed = value.replace(/\/+$/, "");
+  return trimmed || "/";
+}
+function protectedPaths(home) {
+  const paths = [import_node_path2.default.join(home, ".claude")];
+  for (let current = home; ; current = import_node_path2.default.dirname(current)) {
+    paths.push(current);
+    if (import_node_path2.default.dirname(current) === current) break;
+  }
+  return paths.map((value) => trimTrailingSlashes(slashes(value)).toLowerCase());
+}
+function patternFor(target) {
+  let source = "";
+  for (let index = 0; index < target.length; index += 1) {
+    const char = target[index] ?? "";
+    if (char === UNKNOWN) source += ".*";
+    else if (char === "*") source += "[^/]*";
+    else if (char === "?") source += "[^/]";
+    else if (char === "[") {
+      const end = target.indexOf("]", index + 1);
+      if (end === -1) source += "\\[";
+      else {
+        source += "[^/]";
+        index = end;
+      }
+    } else source += char.replace(/[.+^${}()|\\\]]/g, "\\$&");
+  }
+  return new RegExp(`^${source}$`, "i");
+}
+function isProtectedTarget(rawTarget) {
   const home = import_node_path2.default.resolve(import_node_os.default.homedir());
-  const protectedRoots = [home, import_node_path2.default.join(home, ".claude"), import_node_path2.default.dirname(home), import_node_path2.default.parse(home).root].map(normalizePath);
-  return command.replace(/["']/g, "").split(/\s+/).filter((target) => target !== "\\" && import_node_path2.default.isAbsolute(target)).some((target) => {
-    const resolved = import_node_path2.default.resolve(target);
+  const marked = markUnknown(expandHome(rawTarget, home));
+  if (!marked) return false;
+  let candidate;
+  if (marked.includes(UNKNOWN)) {
+    const normalized = slashes(marked);
+    if (normalized.split("/").some((part) => part === "." || part === "..")) return true;
+    if (!normalized.startsWith(UNKNOWN) && !import_node_path2.default.isAbsolute(normalized.split(UNKNOWN)[0] || ".")) return false;
+    candidate = trimTrailingSlashes(normalized);
+  } else {
+    const normalized = import_node_path2.default.sep === "/" ? slashes(marked) : marked;
+    if (!import_node_path2.default.isAbsolute(normalized)) return false;
+    const resolved = import_node_path2.default.resolve(normalized);
     if (import_node_path2.default.parse(resolved).root === resolved) return true;
-    const normalized = normalizePath(resolved);
-    return protectedRoots.some((root) => root === normalized || root.startsWith(`${normalized}${import_node_path2.default.sep}`));
+    candidate = trimTrailingSlashes(slashes(resolved));
+    const globAt = candidate.search(/[*?[]/);
+    if (globAt !== -1) {
+      const globDirectory = candidate.slice(0, candidate.lastIndexOf("/", globAt) + 1);
+      if (import_node_path2.default.parse(import_node_path2.default.resolve(globDirectory)).root === import_node_path2.default.resolve(globDirectory)) return true;
+    }
+  }
+  const pattern = patternFor(candidate);
+  return protectedPaths(home).some((protectedPath) => pattern.test(protectedPath));
+}
+function hasProtectedRecursiveDelete(command) {
+  return deleteArguments(command).some((argumentsAfterDelete) => {
+    const parsed = parseDeleteArguments(argumentsAfterDelete);
+    return parsed.recursive && parsed.targets.some(isProtectedTarget);
   });
 }
 function main() {
