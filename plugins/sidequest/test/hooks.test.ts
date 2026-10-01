@@ -5283,6 +5283,41 @@ test('session start reconciles a reload-lost launch once and leaves it ready to 
   assert.ok(!second.includes('launched but never claimed'));
 });
 
+test('SQ-220: a same-process session start never fails a live launched-but-unbound dispatch', () => {
+  // Compaction (the orchestrator's or any in-process subagent's) and a subagent's own
+  // SessionStart share the orchestrator session id, but the host process and every
+  // background executor it launched are still alive. Only a restart may reconcile.
+  const ticket = addEffortTicket('live launch across compaction', 'high');
+  const sessionId = `live-launch-${++sqSeq}`;
+  const prepared = store.prepareDispatch(slug, ticket.ref, { allowUnscoped: true, sessionId });
+  assert.equal(store.recordDispatchLaunch(slug, ticket.ref, {
+    sessionId,
+    token: prepared.token,
+    executor: prepared.ticket.dispatchExecutor,
+    agentName: 'live-native-task',
+  }).ok, true);
+  const env = { SIDEQUEST_SWEEP_DEADLINE_MS: '60000' };
+  const sameProcessStarts = [
+    { session_id: sessionId, source: 'compact' },
+    { session_id: sessionId, source: 'clear' },
+    { session_id: sessionId, source: 'startup', agent_id: 'native-sibling', agent_type: prepared.ticket.dispatchExecutor },
+    { session_id: sessionId, source: 'compact', agent_id: 'native-sibling', agent_type: prepared.ticket.dispatchExecutor },
+  ];
+  for (const payload of sameProcessStarts) {
+    const context = runHook(SESSION, payload, env);
+    assert.ok(!context.includes('launched but never claimed'), `${JSON.stringify(payload)} reported a live launch as lost`);
+    const live = store.getTicket(slug, ticket.ref);
+    assert.equal(live.dispatch.outcome, 'launched', `${JSON.stringify(payload)} terminalized a live launch`);
+    assert.equal(live.dispatch.terminalAt ?? null, null);
+    assert.ok(live.dispatchNonce, `${JSON.stringify(payload)} revoked the live dispatch token`);
+  }
+  assert.equal(store.claimTicket(slug, ticket.ref, 'live-launch-worker', {
+    sessionId,
+    token: prepared.token,
+    executor: prepared.ticket.dispatchExecutor,
+  }).ok, true);
+});
+
 test('subagent stop terminalizes an unclaimed launch so the next dispatch can recover safely', () => {
   const ticket = addEffortTicket('stop before claim', 'high');
   const sessionId = `stop-${++sqSeq}`;

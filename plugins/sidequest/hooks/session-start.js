@@ -339,7 +339,13 @@ async function runSweep(data) {
       "--cwd",
       cwd,
       "--session",
-      stringField(data, "session_id", "sessionId")
+      stringField(data, "session_id", "sessionId"),
+      // SQ-220: the child decides from these whether this start is a host restart, the only
+      // start that may retire this session's unbound launches.
+      "--source",
+      stringField(data, "source"),
+      "--subagent",
+      isSubagent(data) ? "1" : "0"
     ], { detached: true, stdio: "ignore", windowsHide: true });
   } catch (_) {
     clearSweepProgress(cwd);
