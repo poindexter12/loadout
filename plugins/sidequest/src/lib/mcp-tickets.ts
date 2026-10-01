@@ -58,6 +58,7 @@ const {
   withoutCategories,
   snapshotContextRetrieval,
 } = require('./mcp-shared');
+const { verifyCaptureWrapperCommand } = require('./kernel/verification.js');
 
 function sameBasenameSiblingDetails(project: string, ticket: any, projectPath: string, tool: string) {
   const details = store.scopeConsumerWarningDetails(ticket, projectPath);
@@ -96,9 +97,20 @@ function amendmentCount(ticket: any) {
   return Array.isArray(ticket?.verificationAmendments) ? ticket.verificationAmendments.length : 0;
 }
 
+// SQ-223: an executor that already read its briefing holds the old command pre-encoded in
+// its wrapper invocation, and nothing on its side re-reads the board until it runs. Its
+// capture of the superseded command is refused with the current invocation, and the ack
+// hands the orchestrator that same invocation so it can tell the executor first.
+function liveAmendmentExecutorNotice(ticket: any, amendment: any, projectPath?: string) {
+  const command = String(amendment?.newCommand || '').trim();
+  const wrapper = command && projectPath ? verifyCaptureWrapperCommand(command, ticket.ref, projectPath) : '';
+  const holder = ticket.claim?.by ? `The claim holder ${ticket.claim.by}` : 'An executor that already fetched its briefing';
+  return ` ${holder} may still hold the old wrapper invocation; its capture of the old command is refused with the current invocation, and a fresh briefing names the amendment.${wrapper ? ` Tell the executor to run: ${wrapper}` : ''}`;
+}
+
 // Every verify amendment says which verify the NEXT verification runs: the live
 // dispatch's, the pending submission's integration, or the next dispatch's.
-function verificationAmendmentAck(before: any, ticket: any) {
+function verificationAmendmentAck(before: any, ticket: any, projectPath?: string) {
   const recorded = amendmentCount(ticket) !== amendmentCount(before) || JSON.stringify(ticket.verificationAmendments?.at(-1) || null) !== JSON.stringify(before?.verificationAmendments?.at(-1) || null);
   const amendment = recorded ? ticket.verificationAmendments.at(-1) : null;
   const liveDispatch = ticket.dispatch && !ticket.dispatch.terminalAt;
@@ -115,7 +127,7 @@ function verificationAmendmentAck(before: any, ticket: any) {
       status: 'applied_to_live_dispatch',
       oldCommand: amendment.oldCommand || null,
       newCommand: amendment.newCommand || null,
-      message: `Verification was amended for ${ticket.ref}. The live dispatch now requires ${amendment.newCommand || '<none>'}; it previously required ${amendment.oldCommand || '<none>'}.`,
+      message: `Verification was amended for ${ticket.ref}. The live dispatch now requires ${amendment.newCommand || '<none>'}; it previously required ${amendment.oldCommand || '<none>'}.${liveAmendmentExecutorNotice(ticket, amendment, projectPath)}`,
     };
   }
   if (liveDispatch || (ticket.submission && !ticket.submission.integratedAt && (ticket.submission.commit || ticket.submission.sourceRevision))) {
@@ -357,7 +369,7 @@ const tools: ToolDefinition[] = [
       warnings.push(...store.ticketPlanningWarnings(t, meta.path));
       const presentedWarnings = store.presentWarnings(t, warnings, sessionOf(args));
       const verificationAmendment = verificationWasAmended
-        ? verificationAmendmentAck(existing, t)
+        ? verificationAmendmentAck(existing, t, meta.path)
         : null;
       return mutationAck(slug, { ok: true, ticket: t }, Object.assign(
         presentedWarnings.length ? { warnings: presentedWarnings } : {},

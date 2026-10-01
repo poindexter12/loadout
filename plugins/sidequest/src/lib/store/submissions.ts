@@ -1,6 +1,6 @@
 'use strict';
 
-const { classifyVerificationKind, commandVerificationResult, verificationAccepted, verificationFailureDiagnostic, verificationOutcome, verificationRequirement, validateVerificationWaiver, verificationWaiverDiagnostic } = require('../kernel/verification.js');
+const { classifyVerificationKind, commandVerificationResult, verificationAccepted, verificationFailureDiagnostic, verificationOutcome, verificationRequirement, validateVerificationWaiver, verificationWaiverDiagnostic, verifyCaptureWrapperCommand } = require('../kernel/verification.js');
 const { runProcessVerification } = require('../ports/process.js');
 const { verificationTimeoutGuidance } = require('../refusal-guidance.js');
 const { decideSubmissionAdmission } = require('../kernel/submission');
@@ -708,13 +708,53 @@ function amendedVerifierCaptureMessage(ticket: any, pinnedCommand: string, captu
   return `Verification capture for ${ticket.ref} used the live ticket verifier, but the verify was amended after dispatch. This dispatch still requires its pinned command.\n${captureCommandDetails(pinnedCommand, capturedCommand)}\nCheckpoint current work, release the claim, and re-dispatch; the recovery dispatch resumes the retained worktree and pins the amended verify. If the work is already verified by other evidence, release the claim and use orchestrator groomClose with deliveryCommit.`;
 }
 
+// SQ-223: a live dispatch whose verify was amended after the executor read its briefing.
+// The board re-pinned the dispatch, but the executor's briefing still carries the old
+// command pre-encoded in its wrapper invocation. The latest amendment that superseded the
+// captured command is the evidence that this is a stale briefing, not a retyped command.
+function supersededDispatchVerifier(ticket: any, capturedCommand: string) {
+  const state = ticket?.dispatch;
+  if (!capturedCommand || !state || typeof state !== 'object' || state.terminalAt) return null;
+  const trail = Array.isArray(state.verificationAmendments) ? state.verificationAmendments : [];
+  for (let index = trail.length - 1; index >= 0; index -= 1) {
+    if (String(trail[index]?.oldCommand || '').trim() === capturedCommand) return trail[index];
+  }
+  return null;
+}
+
+// The invocation carries the pin base64-encoded, so a long pin would blow the refusal's
+// display bound; past it the executor is sent to the briefing, which prints it in full.
+function currentWrapperInvocation(ticket: any, pinnedCommand: string, projectPath?: unknown) {
+  const project = String(projectPath || '').trim();
+  const wrapper = pinnedCommand && project ? verifyCaptureWrapperCommand(pinnedCommand, ticket.ref, project) : '';
+  return wrapper.length <= CAPTURE_COMMAND_DISPLAY_MAX ? wrapper : '';
+}
+
+function currentWrapperGuidance(ticket: any, pinnedCommand: string, projectPath?: unknown) {
+  const wrapper = currentWrapperInvocation(ticket, pinnedCommand, projectPath);
+  return wrapper ? `\nRun the pinned command through: ${wrapper}` : '';
+}
+
+function supersededVerifierCaptureMessage(ticket: any, pinnedCommand: string, capturedCommand: string, amendment: any, projectPath?: unknown) {
+  const by = String(amendment?.by || '').trim();
+  const at = String(amendment?.at || '').trim();
+  const wrapper = currentWrapperInvocation(ticket, pinnedCommand, projectPath);
+  return [
+    `Verification capture for ${ticket.ref} ran a verify that was amended after this dispatch was prepared${at ? ` (${at}` : ''}${by ? `${at ? ', ' : ' ('}by ${by}` : ''}${at || by ? ')' : ''}. The briefing or wrapper invocation you ran from predates the amendment; the board already pins the amended command for this same dispatch, so nothing needs to be released or re-dispatched.`,
+    captureCommandDetails(pinnedCommand, capturedCommand),
+    wrapper
+      ? `Rerun with the current wrapper invocation: ${wrapper}`
+      : 'Rerun the verify-capture wrapper with the pinned command above, or fetch the briefing again for the current wrapper invocation.',
+  ].join('\n');
+}
+
 // SQ-203 (#20): the one comparison of a captured command against the ticket's pin. The
 // verify-capture wrapper preflights through recordVerificationCapture({preflight:true}), so
 // the wrapper and the recorder resolve the same pin (pinnedVerificationRequirement, including
 // a re-pin and the legacy fallback) and apply the same trim-then-verbatim equality. Before
 // this the wrapper kept its own dispatch-only pin lookup, so a command it let run could still
 // be refused after it passed, with only the bare reason reaching the caller.
-function captureCommandRefusal(ticket: any, capturedCommand: unknown) {
+function captureCommandRefusal(ticket: any, capturedCommand: unknown, projectPath?: unknown) {
   const pinnedAtDispatch = ticket.dispatch?.verificationRequirement
     || ticket.dispatch?.lifecycleAttempt?.verificationRequirement
     || ticket.lifecycleAttempt?.verificationRequirement;
@@ -722,9 +762,12 @@ function captureCommandRefusal(ticket: any, capturedCommand: unknown) {
   const expectedCommand = String(pinnedVerificationRequirement(ticket).command || '').trim();
   if (expectedCommand && command === expectedCommand) return null;
   const liveCommand = String(ticket.executorVerify || '').trim();
-  const message = pinnedAtDispatch && expectedCommand && liveCommand && command === liveCommand
-    ? amendedVerifierCaptureMessage(ticket, expectedCommand, command)
-    : captureCommandMismatchMessage(ticket, expectedCommand, command);
+  const superseded = supersededDispatchVerifier(ticket, command);
+  const message = superseded && expectedCommand
+    ? supersededVerifierCaptureMessage(ticket, expectedCommand, command, superseded, projectPath)
+    : pinnedAtDispatch && expectedCommand && liveCommand && command === liveCommand
+      ? amendedVerifierCaptureMessage(ticket, expectedCommand, command)
+      : `${captureCommandMismatchMessage(ticket, expectedCommand, command)}${currentWrapperGuidance(ticket, expectedCommand, projectPath)}`;
   return { ok: false, reason: 'verification_capture_command_mismatch', ticket, message, pinnedCommand: expectedCommand };
 }
 
@@ -733,7 +776,7 @@ function recordVerificationCapture(slug: any, idOrRef: any, capture: any) {
   if (!found) return { ok: false, reason: 'not_found' };
   // Read-only: answers whether this command would be recorded, and writes nothing.
   if (capture?.preflight === true) {
-    return captureCommandRefusal(found, capture?.command) || { ok: true, preflight: true, ticket: found, command: String(capture?.command || '').trim() };
+    return captureCommandRefusal(found, capture?.command, readMeta(slug)?.path) || { ok: true, preflight: true, ticket: found, command: String(capture?.command || '').trim() };
   }
   return withTicketLock(slug, found.id, () => {
     const ticket = getTicket(slug, found.id);
@@ -742,7 +785,7 @@ function recordVerificationCapture(slug: any, idOrRef: any, capture: any) {
     const status = String(capture?.status || '').trim();
     const candidateSource = String(capture?.candidate?.source || '').trim();
     const candidateValue = String(capture?.candidate?.value || '').trim().toLowerCase();
-    const refusal = captureCommandRefusal(ticket, command);
+    const refusal = captureCommandRefusal(ticket, command, readMeta(slug)?.path);
     if (refusal) return refusal;
     if (!['passed', 'failed_suite', 'toolchain_missing', 'could_not_run', 'timeout', 'manual', 'attestation', 'skipped', 'failed_check'].includes(status)) {
       return { ok: false, reason: 'invalid_verification_capture_status', ticket, message: `Verification capture for ${ticket.ref} has an invalid status.` };

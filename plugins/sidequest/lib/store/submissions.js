@@ -1,5 +1,5 @@
 "use strict";
-const { classifyVerificationKind, commandVerificationResult, verificationAccepted, verificationFailureDiagnostic, verificationOutcome, verificationRequirement, validateVerificationWaiver, verificationWaiverDiagnostic } = require("../kernel/verification.js");
+const { classifyVerificationKind, commandVerificationResult, verificationAccepted, verificationFailureDiagnostic, verificationOutcome, verificationRequirement, validateVerificationWaiver, verificationWaiverDiagnostic, verifyCaptureWrapperCommand } = require("../kernel/verification.js");
 const { runProcessVerification } = require("../ports/process.js");
 const { verificationTimeoutGuidance } = require("../refusal-guidance.js");
 const { decideSubmissionAdmission } = require("../kernel/submission");
@@ -564,20 +564,50 @@ ${captureCommandDetails(pinnedCommand, capturedCommand)}`;
 ${captureCommandDetails(pinnedCommand, capturedCommand)}
 Checkpoint current work, release the claim, and re-dispatch; the recovery dispatch resumes the retained worktree and pins the amended verify. If the work is already verified by other evidence, release the claim and use orchestrator groomClose with deliveryCommit.`;
   }
-  function captureCommandRefusal(ticket, capturedCommand) {
+  function supersededDispatchVerifier(ticket, capturedCommand) {
+    const state = ticket?.dispatch;
+    if (!capturedCommand || !state || typeof state !== "object" || state.terminalAt) return null;
+    const trail = Array.isArray(state.verificationAmendments) ? state.verificationAmendments : [];
+    for (let index = trail.length - 1; index >= 0; index -= 1) {
+      if (String(trail[index]?.oldCommand || "").trim() === capturedCommand) return trail[index];
+    }
+    return null;
+  }
+  function currentWrapperInvocation(ticket, pinnedCommand, projectPath) {
+    const project = String(projectPath || "").trim();
+    const wrapper = pinnedCommand && project ? verifyCaptureWrapperCommand(pinnedCommand, ticket.ref, project) : "";
+    return wrapper.length <= CAPTURE_COMMAND_DISPLAY_MAX ? wrapper : "";
+  }
+  function currentWrapperGuidance(ticket, pinnedCommand, projectPath) {
+    const wrapper = currentWrapperInvocation(ticket, pinnedCommand, projectPath);
+    return wrapper ? `
+Run the pinned command through: ${wrapper}` : "";
+  }
+  function supersededVerifierCaptureMessage(ticket, pinnedCommand, capturedCommand, amendment, projectPath) {
+    const by = String(amendment?.by || "").trim();
+    const at = String(amendment?.at || "").trim();
+    const wrapper = currentWrapperInvocation(ticket, pinnedCommand, projectPath);
+    return [
+      `Verification capture for ${ticket.ref} ran a verify that was amended after this dispatch was prepared${at ? ` (${at}` : ""}${by ? `${at ? ", " : " ("}by ${by}` : ""}${at || by ? ")" : ""}. The briefing or wrapper invocation you ran from predates the amendment; the board already pins the amended command for this same dispatch, so nothing needs to be released or re-dispatched.`,
+      captureCommandDetails(pinnedCommand, capturedCommand),
+      wrapper ? `Rerun with the current wrapper invocation: ${wrapper}` : "Rerun the verify-capture wrapper with the pinned command above, or fetch the briefing again for the current wrapper invocation."
+    ].join("\n");
+  }
+  function captureCommandRefusal(ticket, capturedCommand, projectPath) {
     const pinnedAtDispatch = ticket.dispatch?.verificationRequirement || ticket.dispatch?.lifecycleAttempt?.verificationRequirement || ticket.lifecycleAttempt?.verificationRequirement;
     const command = String(capturedCommand || "").trim();
     const expectedCommand = String(pinnedVerificationRequirement(ticket).command || "").trim();
     if (expectedCommand && command === expectedCommand) return null;
     const liveCommand = String(ticket.executorVerify || "").trim();
-    const message = pinnedAtDispatch && expectedCommand && liveCommand && command === liveCommand ? amendedVerifierCaptureMessage(ticket, expectedCommand, command) : captureCommandMismatchMessage(ticket, expectedCommand, command);
+    const superseded = supersededDispatchVerifier(ticket, command);
+    const message = superseded && expectedCommand ? supersededVerifierCaptureMessage(ticket, expectedCommand, command, superseded, projectPath) : pinnedAtDispatch && expectedCommand && liveCommand && command === liveCommand ? amendedVerifierCaptureMessage(ticket, expectedCommand, command) : `${captureCommandMismatchMessage(ticket, expectedCommand, command)}${currentWrapperGuidance(ticket, expectedCommand, projectPath)}`;
     return { ok: false, reason: "verification_capture_command_mismatch", ticket, message, pinnedCommand: expectedCommand };
   }
   function recordVerificationCapture(slug, idOrRef, capture) {
     const found = getTicket(slug, idOrRef);
     if (!found) return { ok: false, reason: "not_found" };
     if (capture?.preflight === true) {
-      return captureCommandRefusal(found, capture?.command) || { ok: true, preflight: true, ticket: found, command: String(capture?.command || "").trim() };
+      return captureCommandRefusal(found, capture?.command, readMeta(slug)?.path) || { ok: true, preflight: true, ticket: found, command: String(capture?.command || "").trim() };
     }
     return withTicketLock(slug, found.id, () => {
       const ticket = getTicket(slug, found.id);
@@ -586,7 +616,7 @@ Checkpoint current work, release the claim, and re-dispatch; the recovery dispat
       const status = String(capture?.status || "").trim();
       const candidateSource = String(capture?.candidate?.source || "").trim();
       const candidateValue = String(capture?.candidate?.value || "").trim().toLowerCase();
-      const refusal = captureCommandRefusal(ticket, command);
+      const refusal = captureCommandRefusal(ticket, command, readMeta(slug)?.path);
       if (refusal) return refusal;
       if (!["passed", "failed_suite", "toolchain_missing", "could_not_run", "timeout", "manual", "attestation", "skipped", "failed_check"].includes(status)) {
         return { ok: false, reason: "invalid_verification_capture_status", ticket, message: `Verification capture for ${ticket.ref} has an invalid status.` };

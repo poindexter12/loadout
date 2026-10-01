@@ -57,6 +57,7 @@ function createDispatch(dependencies) {
       newCommand: String(nextRequirement.command || "").trim() || null
     });
     ticket.verificationAmendments = [...Array.isArray(ticket.verificationAmendments) ? ticket.verificationAmendments : [], record].slice(-20);
+    state.verificationAmendments = [...Array.isArray(state.verificationAmendments) ? state.verificationAmendments : [], record].slice(-10);
     return record;
   }
   const DISPATCH_TOKEN_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";

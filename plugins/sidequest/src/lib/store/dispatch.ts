@@ -70,6 +70,12 @@ function createDispatch(dependencies: any) {
       newCommand: String(nextRequirement.command || '').trim() || null,
     });
     ticket.verificationAmendments = [...(Array.isArray(ticket.verificationAmendments) ? ticket.verificationAmendments : []), record].slice(-20);
+    // SQ-223: the executor may already hold a briefing rendered before this amendment,
+    // with the old command pre-encoded in its wrapper invocation. The dispatch keeps its
+    // own amendment trail, so the next briefing names the change and a capture of a
+    // superseded command is refused with the current invocation rather than a bare
+    // "must use its declared command". A fresh dispatch starts with no trail.
+    state.verificationAmendments = [...(Array.isArray(state.verificationAmendments) ? state.verificationAmendments : []), record].slice(-10);
     return record;
   }
 
