@@ -8,6 +8,24 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v4.4.0 (2026-09-30)
+
+### model-gateway 0.52.2 → 0.52.3
+
+#### Fixes
+
+- Report failed catalog refreshes (SQ-244)
+  Catalog refresh now waits for a busy gateway health check and reports failure instead of serving a stale catalog as a successful refresh.
+
+### sidequest 5.4.1 → 5.4.2
+
+#### Fixes
+
+- Corroborate landed-fix audit evidence (SQ-242)
+  Sidequest audit now requires a subject-tagged main commit and release delivery evidence before it reports an open ticket as already fixed.
+- Extend Sidequest gateway catalog refresh timeout (SQ-248)
+  Sidequest now allows healthy model-gateway catalog refreshes enough time to complete under load.
+
 ## v4.3.0 (2026-09-30)
 
 ### live-rules 2.11.1 → 2.12.0
