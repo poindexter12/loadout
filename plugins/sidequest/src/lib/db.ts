@@ -5,6 +5,9 @@ import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from 
 
 import { DEFAULT_CATEGORIES, ROUTING_PROFILE_SEED_REVISION, starterRoutingProfilesFor } from './category-defaults.js';
 import { discoverExternalModels, providerReadiness } from './discovery.js';
+// Opt-in write-lock measurement (SQ-262). Both begin* calls return null unless SIDEQUEST_LOCK_TRACE is
+// set, so with tracing off the two seams below cost one call that reads a cached boolean.
+import { beginLockHold, beginLockWait } from './lock-trace.js';
 
 const originalEmitWarning = process.emitWarning;
 process.emitWarning = ((warning: string | Error, ...args: unknown[]) => {
@@ -251,23 +254,38 @@ function sqliteBusyError(operation: string, startedAt: number, cause: unknown, p
   );
 }
 
+// The one chokepoint every board statement passes through, which is why the wait measurement lives here
+// and not at the 17 call sites. `wait` is null unless tracing is on; the `finally` release unwinds the
+// nesting counter and flushes the buffer once the outermost frame is done.
 function retryWhenSqliteBusy<T>(operation: string, work: () => T): T {
   const policy = sqliteBusyPolicy();
   const startedAt = Date.now();
-  for (let attempt = 0; attempt < policy.attempts; attempt += 1) {
-    try {
-      return work();
-    } catch (error) {
-      if (!isSqliteBusy(error)) throw error;
-      if (attempt === policy.attempts - 1) {
-        const exhausted = sqliteBusyError(operation, startedAt, error, policy);
-        policy.onExhausted?.(exhausted);
-        throw exhausted;
+  const wait = beginLockWait(operation, policy.label);
+  try {
+    for (let attempt = 0; attempt < policy.attempts; attempt += 1) {
+      try {
+        const result = work();
+        wait?.finish('clear', attempt + 1);
+        return result;
+      } catch (error) {
+        if (!isSqliteBusy(error)) {
+          wait?.finish('failed', attempt + 1);
+          throw error;
+        }
+        if (attempt === policy.attempts - 1) {
+          const exhausted = sqliteBusyError(operation, startedAt, error, policy);
+          // Recorded before onExhausted, which a hook uses to fail open with process.exit().
+          wait?.finish('exhausted', attempt + 1);
+          policy.onExhausted?.(exhausted);
+          throw exhausted;
+        }
+        Atomics.wait(busySleep, 0, 0, SQLITE_BUSY_RETRY_DELAYS_MS[attempt] ?? SQLITE_BUSY_RETRY_DELAYS_MS.at(-1));
       }
-      Atomics.wait(busySleep, 0, 0, SQLITE_BUSY_RETRY_DELAYS_MS[attempt] ?? SQLITE_BUSY_RETRY_DELAYS_MS.at(-1));
     }
+    throw new Error(`SQLite busy retry exhausted without an error while ${operation}.`);
+  } finally {
+    wait?.release();
   }
-  throw new Error(`SQLite busy retry exhausted without an error while ${operation}.`);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1078,14 +1096,21 @@ export function hasRow<N extends TableName>(database: DatabaseSync, table: N, ke
 export function txn<T>(database: DatabaseSync, fn: () => T): T {
   const row = retryWhenSqliteBusy('checking schema version before a transaction', () => prepareCached(database, "SELECT value FROM meta WHERE key = 'schema_version'").get());
   if (row) assertWritable(database);
+  // Resolved out here, not inside the callback: nothing but the transaction itself should run while
+  // BEGIN IMMEDIATE is held, least of all the bookkeeping that measures how long it is held.
+  const policyLabel = sqliteBusyPolicy().label;
   return retryWhenSqliteBusy('writing transaction', () => {
     database.exec('BEGIN IMMEDIATE');
+    // The write lock is held from here until COMMIT or ROLLBACK returns, and nothing else in the board
+    // holds it, so this is the only hold measurement there is to take (SQ-262).
+    const hold = beginLockHold('writing transaction', policyLabel);
     try {
       const result = fn();
       if (isRecord(result) && typeof result.then === 'function') {
         throw new TypeError('SQLite transaction callbacks must be synchronous.');
       }
       database.exec('COMMIT');
+      hold?.finish('commit');
       return result;
     } catch (error) {
       try {
@@ -1093,6 +1118,7 @@ export function txn<T>(database: DatabaseSync, fn: () => T): T {
       } catch {
         // Preserve the operation error if a rollback is no longer possible.
       }
+      hold?.finish('rollback');
       throw error;
     }
   });

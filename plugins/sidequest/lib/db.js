@@ -56,6 +56,7 @@ var import_node_fs = __toESM(require("node:fs"));
 var import_node_path = __toESM(require("node:path"));
 var import_category_defaults = require("./category-defaults.js");
 var import_discovery = require("./discovery.js");
+var import_lock_trace = require("./lock-trace.js");
 const originalEmitWarning = process.emitWarning;
 process.emitWarning = ((warning, ...args) => {
   if (warning === "SQLite is an experimental feature and might change at any time" && args[0] === "ExperimentalWarning") {
@@ -143,20 +144,31 @@ function sqliteBusyError(operation, startedAt, cause, policy) {
 function retryWhenSqliteBusy(operation, work) {
   const policy = sqliteBusyPolicy();
   const startedAt = Date.now();
-  for (let attempt = 0; attempt < policy.attempts; attempt += 1) {
-    try {
-      return work();
-    } catch (error) {
-      if (!isSqliteBusy(error)) throw error;
-      if (attempt === policy.attempts - 1) {
-        const exhausted = sqliteBusyError(operation, startedAt, error, policy);
-        policy.onExhausted?.(exhausted);
-        throw exhausted;
+  const wait = (0, import_lock_trace.beginLockWait)(operation, policy.label);
+  try {
+    for (let attempt = 0; attempt < policy.attempts; attempt += 1) {
+      try {
+        const result = work();
+        wait?.finish("clear", attempt + 1);
+        return result;
+      } catch (error) {
+        if (!isSqliteBusy(error)) {
+          wait?.finish("failed", attempt + 1);
+          throw error;
+        }
+        if (attempt === policy.attempts - 1) {
+          const exhausted = sqliteBusyError(operation, startedAt, error, policy);
+          wait?.finish("exhausted", attempt + 1);
+          policy.onExhausted?.(exhausted);
+          throw exhausted;
+        }
+        Atomics.wait(busySleep, 0, 0, SQLITE_BUSY_RETRY_DELAYS_MS[attempt] ?? SQLITE_BUSY_RETRY_DELAYS_MS.at(-1));
       }
-      Atomics.wait(busySleep, 0, 0, SQLITE_BUSY_RETRY_DELAYS_MS[attempt] ?? SQLITE_BUSY_RETRY_DELAYS_MS.at(-1));
     }
+    throw new Error(`SQLite busy retry exhausted without an error while ${operation}.`);
+  } finally {
+    wait?.release();
   }
-  throw new Error(`SQLite busy retry exhausted without an error while ${operation}.`);
 }
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -819,20 +831,24 @@ function hasRow(database, table, key) {
 function txn(database, fn) {
   const row = retryWhenSqliteBusy("checking schema version before a transaction", () => prepareCached(database, "SELECT value FROM meta WHERE key = 'schema_version'").get());
   if (row) assertWritable(database);
+  const policyLabel = sqliteBusyPolicy().label;
   return retryWhenSqliteBusy("writing transaction", () => {
     database.exec("BEGIN IMMEDIATE");
+    const hold = (0, import_lock_trace.beginLockHold)("writing transaction", policyLabel);
     try {
       const result = fn();
       if (isRecord(result) && typeof result.then === "function") {
         throw new TypeError("SQLite transaction callbacks must be synchronous.");
       }
       database.exec("COMMIT");
+      hold?.finish("commit");
       return result;
     } catch (error) {
       try {
         database.exec("ROLLBACK");
       } catch {
       }
+      hold?.finish("rollback");
       throw error;
     }
   });
