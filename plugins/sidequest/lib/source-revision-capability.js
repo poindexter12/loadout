@@ -18,13 +18,15 @@ var __copyProps = (to, from, except, desc) => {
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var source_revision_capability_exports = {};
 __export(source_revision_capability_exports, {
+  FILESYSTEM_SNAPSHOT_SOURCE: () => FILESYSTEM_SNAPSHOT_SOURCE,
   filesystemSnapshotCapability: () => filesystemSnapshotCapability,
   filesystemSnapshotRevision: () => filesystemSnapshotRevision,
   isSourceRevisionAdapterFacts: () => isSourceRevisionAdapterFacts,
   registerSourceRevisionCapability: () => registerSourceRevisionCapability,
   sourceRevision: () => sourceRevision,
   sourceRevisionAdapterFacts: () => sourceRevisionAdapterFacts,
-  sourceRevisionBaseline: () => sourceRevisionBaseline
+  sourceRevisionBaseline: () => sourceRevisionBaseline,
+  withPrecomputedFilesystemSnapshot: () => withPrecomputedFilesystemSnapshot
 });
 module.exports = __toCommonJS(source_revision_capability_exports);
 var import_node_crypto = require("node:crypto");
@@ -64,9 +66,8 @@ function updateFilesystemSnapshot(hash, projectPath, entryPath) {
   }
   hash.update(`other\0${relativePath}\0${entry.mode}\0${entry.size}\0`);
 }
-function filesystemSnapshotRevision(projectPath, observedAt = (/* @__PURE__ */ new Date()).toISOString()) {
-  const root = (0, import_node_path.resolve)(String(projectPath || "").trim());
-  if (!root || !Number.isFinite(Date.parse(observedAt))) return null;
+const precomputedSnapshotDigests = /* @__PURE__ */ new Map();
+function filesystemSnapshotDigest(root) {
   let rootExists = false;
   try {
     if (!(0, import_node_fs.lstatSync)(root).isDirectory()) return null;
@@ -82,11 +83,30 @@ function filesystemSnapshotRevision(projectPath, observedAt = (/* @__PURE__ */ n
   } catch {
     return null;
   }
+  return hash.digest("hex");
+}
+function filesystemSnapshotRevision(projectPath, observedAt = (/* @__PURE__ */ new Date()).toISOString()) {
+  const root = (0, import_node_path.resolve)(String(projectPath || "").trim());
+  if (!root || !Number.isFinite(Date.parse(observedAt))) return null;
+  const digest = precomputedSnapshotDigests.has(root) ? precomputedSnapshotDigests.get(root) ?? null : filesystemSnapshotDigest(root);
+  if (digest == null) return null;
   return Object.freeze({
     source: FILESYSTEM_SNAPSHOT_SOURCE,
-    value: hash.digest("hex"),
+    value: digest,
     observedAt: new Date(observedAt).toISOString()
   });
+}
+function withPrecomputedFilesystemSnapshot(projectPath, operation) {
+  const root = (0, import_node_path.resolve)(String(projectPath || "").trim());
+  const hadPrevious = precomputedSnapshotDigests.has(root);
+  const previous = precomputedSnapshotDigests.get(root) ?? null;
+  precomputedSnapshotDigests.set(root, filesystemSnapshotDigest(root));
+  try {
+    return operation();
+  } finally {
+    if (hadPrevious) precomputedSnapshotDigests.set(root, previous);
+    else precomputedSnapshotDigests.delete(root);
+  }
 }
 function filesystemSnapshotCapability(projectPath, hasPersistedBaseline) {
   return (candidate, baseline) => {
@@ -158,11 +178,13 @@ function isSourceRevisionAdapterFacts(value) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  FILESYSTEM_SNAPSHOT_SOURCE,
   filesystemSnapshotCapability,
   filesystemSnapshotRevision,
   isSourceRevisionAdapterFacts,
   registerSourceRevisionCapability,
   sourceRevision,
   sourceRevisionAdapterFacts,
-  sourceRevisionBaseline
+  sourceRevisionBaseline,
+  withPrecomputedFilesystemSnapshot
 });
