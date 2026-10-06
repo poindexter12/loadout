@@ -30,6 +30,7 @@ var lock_trace_exports = {};
 __export(lock_trace_exports, {
   LOCK_TRACE_ENV: () => LOCK_TRACE_ENV,
   LOCK_TRACE_FILENAME: () => LOCK_TRACE_FILENAME,
+  UNATTRIBUTED_CALLER: () => UNATTRIBUTED_CALLER,
   beginLockHold: () => beginLockHold,
   beginLockWait: () => beginLockWait,
   defaultLockTracePath: () => defaultLockTracePath,
@@ -47,11 +48,15 @@ var import_node_fs = __toESM(require("node:fs"));
 var import_node_os = __toESM(require("node:os"));
 var import_node_path = __toESM(require("node:path"));
 var import_node_perf_hooks = require("node:perf_hooks");
+var import_node_url = require("node:url");
 var import_claude_home = require("./claude-home.js");
 const LOCK_TRACE_ENV = "SIDEQUEST_LOCK_TRACE";
 const LOCK_TRACE_FILENAME = "lock-trace.jsonl";
 const OFF_VALUES = /* @__PURE__ */ new Set(["", "0", "false", "off", "no"]);
 const ON_VALUES = /* @__PURE__ */ new Set(["1", "true", "on", "yes"]);
+const CALLER_CAPTURE_FRAME_LIMIT = 32;
+const CALLER_CHAIN_LIMIT = 5;
+const UNATTRIBUTED_CALLER = "(unattributed)";
 const PENDING_RECORD_LIMIT = 1024;
 let config;
 let broken = false;
@@ -59,7 +64,7 @@ let projectSlug;
 let sinkFd = null;
 let sinkFile = null;
 let exitFlushInstalled = false;
-let waitDepth = 0;
+const openFrames = [];
 const pending = [];
 function resolveConfig(env) {
   const raw = String(env[LOCK_TRACE_ENV] ?? "").trim();
@@ -93,6 +98,74 @@ function traceProject() {
     projectSlug = null;
   }
   return projectSlug;
+}
+const seamDirectory = __dirname;
+const seamModules = /* @__PURE__ */ new Set(["db", "lock-trace"]);
+const storeFacadePrefix = import_node_path.default.join(seamDirectory, "store.");
+const storeDirectoryPrefix = import_node_path.default.join(seamDirectory, "store") + import_node_path.default.sep;
+function captureCallSites() {
+  const previousPrepare = Error.prepareStackTrace;
+  const previousLimit = Error.stackTraceLimit;
+  try {
+    Error.stackTraceLimit = CALLER_CAPTURE_FRAME_LIMIT;
+    Error.prepareStackTrace = (_error, callSites) => callSites;
+    const holder = {};
+    Error.captureStackTrace(holder, captureCallSites);
+    const captured = holder.stack;
+    return Array.isArray(captured) ? captured : [];
+  } catch (_) {
+    return [];
+  } finally {
+    Error.prepareStackTrace = previousPrepare;
+    Error.stackTraceLimit = previousLimit;
+  }
+}
+function frameFile(raw) {
+  if (!raw) return null;
+  if (!raw.startsWith("file://")) return raw;
+  try {
+    return (0, import_node_url.fileURLToPath)(raw);
+  } catch (_) {
+    return null;
+  }
+}
+function isPlumbingFrame(file) {
+  if (file.startsWith("node:") || file.includes(`${import_node_path.default.sep}node_modules${import_node_path.default.sep}`)) return true;
+  if (import_node_path.default.dirname(file) !== seamDirectory) return false;
+  return seamModules.has(import_node_path.default.basename(file).replace(/\.[cm]?[jt]s$/, ""));
+}
+function frameLocation(file, line) {
+  const relative = import_node_path.default.relative(seamDirectory, file);
+  const shown = !relative || relative.startsWith("..") ? import_node_path.default.basename(file) : relative;
+  return `${shown}:${line}`;
+}
+function resolveAttribution() {
+  const frames = [];
+  for (const site of captureCallSites()) {
+    const file = frameFile(site.getFileName());
+    if (!file || isPlumbingFrame(file)) continue;
+    frames.push({
+      name: site.getFunctionName() || site.getMethodName() || null,
+      file,
+      line: site.getLineNumber() ?? 0,
+      store: file.startsWith(storeDirectoryPrefix) || file.startsWith(storeFacadePrefix)
+    });
+  }
+  let outermostNamedStore = null;
+  let outermostNamed = null;
+  for (const frame of frames) {
+    if (!frame.name) continue;
+    outermostNamed = frame;
+    if (frame.store) outermostNamedStore = frame;
+  }
+  const chosen = outermostNamedStore ?? outermostNamed;
+  const innermost = frames[0];
+  const chain = frames.slice(0, CALLER_CHAIN_LIMIT);
+  if (chosen && !chain.includes(chosen)) chain.splice(CALLER_CHAIN_LIMIT - 1, 1, chosen);
+  return {
+    caller: chosen?.name ?? (innermost ? frameLocation(innermost.file, innermost.line) : UNATTRIBUTED_CALLER),
+    callerStack: chain.map((frame) => `${frame.name ?? "<anonymous>"} (${frameLocation(frame.file, frame.line)})`)
+  };
 }
 function closeSink() {
   if (sinkFd === null) return;
@@ -161,10 +234,12 @@ function round(milliseconds) {
 function beginLockWait(operation, policy) {
   if (!lockTraceConfig()) return null;
   activate();
-  const depth = waitDepth;
-  waitDepth += 1;
+  const depth = openFrames.length;
+  const attribution = openFrames[depth - 1] ?? resolveAttribution();
+  openFrames.push(attribution);
   const startedAt = import_node_perf_hooks.performance.now();
   let finished = false;
+  let released = false;
   const finish = (outcome, attempts) => {
     if (finished) return;
     finished = true;
@@ -175,6 +250,8 @@ function beginLockWait(operation, policy) {
       policy,
       project: traceProject(),
       operation,
+      caller: attribution.caller,
+      callerStack: [...attribution.callerStack],
       depth,
       waitMs: round(import_node_perf_hooks.performance.now() - startedAt),
       attempts,
@@ -188,16 +265,19 @@ function beginLockWait(operation, policy) {
   return {
     finish,
     release() {
+      if (released) return;
+      released = true;
       finish("abandoned", 0);
-      waitDepth = Math.max(0, waitDepth - 1);
-      if (waitDepth === 0) flushLockTrace();
+      openFrames.pop();
+      if (openFrames.length === 0) flushLockTrace();
     }
   };
 }
 function beginLockHold(operation, policy) {
   if (!lockTraceConfig()) return null;
   activate();
-  const depth = Math.max(0, waitDepth - 1);
+  const depth = Math.max(0, openFrames.length - 1);
+  const attribution = openFrames[openFrames.length - 1] ?? resolveAttribution();
   const startedAt = import_node_perf_hooks.performance.now();
   let finished = false;
   return {
@@ -211,6 +291,8 @@ function beginLockHold(operation, policy) {
         policy,
         project: traceProject(),
         operation,
+        caller: attribution.caller,
+        callerStack: [...attribution.callerStack],
         depth,
         holdMs: round(import_node_perf_hooks.performance.now() - startedAt),
         outcome
@@ -224,7 +306,7 @@ function resetLockTrace() {
   config = void 0;
   broken = false;
   projectSlug = void 0;
-  waitDepth = 0;
+  openFrames.length = 0;
 }
 function isLockTraceRecord(value) {
   if (value === null || typeof value !== "object") return false;
@@ -293,6 +375,9 @@ function summarizeLockTrace(records) {
     p95WaitMs: overall.p95WaitMs,
     maxWaitMs: overall.maxWaitMs,
     maxHoldMs: overall.maxHoldMs,
+    // `|| UNATTRIBUTED_CALLER` rather than a plain read: a log collected before SQ-269 has no caller
+    // field at all, and the report has to summarise it instead of grouping everything under `undefined`.
+    byCaller: groupBy(records, (record) => record.caller || UNATTRIBUTED_CALLER),
     byOperation: groupBy(records, (record) => record.operation),
     byPolicy: groupBy(records, (record) => record.policy),
     pids: [...new Set(records.map((record) => record.pid))].sort((left, right) => left - right),
@@ -302,9 +387,10 @@ function summarizeLockTrace(records) {
   };
 }
 function statsTable(title, rows) {
-  const header = ["waits", "blocked", "exhausted", "p50ms", "p95ms", "maxms", "holds", "maxholdms", title];
+  const header = ["waits", "nested", "blocked", "exhausted", "p50ms", "p95ms", "maxms", "holds", "maxholdms", title];
   const body = rows.map((row) => [
     String(row.waits),
+    String(row.nested),
     String(row.blocked),
     String(row.exhausted),
     String(row.p50WaitMs),
@@ -331,7 +417,7 @@ function formatLockTraceReport(summary, options) {
     `holds: ${summary.holds} | max hold ms ${summary.maxHoldMs}`
   ];
   if (options.skipped) lines.push(`unparsed lines: ${options.skipped}`);
-  lines.push("", statsTable("operation", summary.byOperation), "", statsTable("policy", summary.byPolicy));
+  lines.push("", statsTable("caller", summary.byCaller), "", statsTable("operation", summary.byOperation), "", statsTable("policy", summary.byPolicy));
   return `${lines.join("\n")}
 `;
 }
@@ -341,7 +427,8 @@ function main() {
   if (argv.includes("--help") || argv.includes("-h")) {
     process.stdout.write(`Usage: node lock-trace.js [<trace.jsonl>] [--json]
 
-Summarises a Sidequest board lock trace. Collect one by running the board with
+Summarises a Sidequest board lock trace, broken down by the board function that held
+the lock, then by statement, then by lock policy. Collect one by running the board with
 ${LOCK_TRACE_ENV}=1 (writes <board root>/${LOCK_TRACE_FILENAME}) or ${LOCK_TRACE_ENV}=/path/to/trace.jsonl.
 `);
     return;
@@ -367,6 +454,7 @@ if (require.main === module) main();
 0 && (module.exports = {
   LOCK_TRACE_ENV,
   LOCK_TRACE_FILENAME,
+  UNATTRIBUTED_CALLER,
   beginLockHold,
   beginLockWait,
   defaultLockTracePath,

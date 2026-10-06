@@ -10,12 +10,20 @@
 //   hold  - how long this process held BEGIN IMMEDIATE inside txn(), from the moment that statement
 //           returned to the moment COMMIT or ROLLBACK returned.
 //
+// Both carry a `caller` (SQ-269). db.ts only knows a statement's own label — `writing transaction` for
+// every one of the control-plane paths SQ-263 named — so a trace built on that label alone can say how
+// long the board waited but not who held the lock, which is the one thing SQ-264 has to decide on. The
+// caller is therefore resolved HERE, at the same single seam, from a bounded stack walk taken only when
+// tracing is on: see resolveAttribution. Instrumenting the 17 call sites and their transitive callers
+// was explicitly ruled out, and would have had to be redone every time a new board writer appeared.
+//
 // Three deliberate properties:
 //
 //  1. Off unless SIDEQUEST_LOCK_TRACE says otherwise. db.ts sits on the hot path of every hook in every
 //     session across every registered project, so when the variable is unset every seam costs one
 //     function call that reads a cached module variable and returns null. Nothing is resolved, nothing
-//     is opened, nothing is written, and this module requires nothing beyond node:* at load.
+//     is opened, nothing is written, no stack is captured, and this module requires nothing beyond
+//     node:* at load.
 //  2. Records go to a JSONL file, never into sidequest.db. Writing a measurement through the very lock
 //     being measured would both perturb and deadlock-prone the thing under test.
 //  3. Records are buffered and flushed only once the outermost retry frame releases (or on process
@@ -28,14 +36,15 @@
 // Atomics.wait in db.ts blocks the thread synchronously across exactly that kind of window. The `at`
 // field is wall clock on purpose, for a human reading the log, and is never used for a duration.
 //
-// Reading the log back: `node plugins/sidequest/lib/lock-trace.js [<file>] [--json]` prints per-operation
-// and per-policy-label counts, p50/p95/max wait, max hold, and how many calls actually blocked.
+// Reading the log back: `node plugins/sidequest/lib/lock-trace.js [<file>] [--json]` prints per-caller,
+// per-operation and per-policy-label counts, p50/p95/max wait, max hold, and how many calls blocked.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { fileURLToPath } from 'node:url';
 
 import { resolveSidequestHome } from './claude-home.js';
 
@@ -49,6 +58,17 @@ export const LOCK_TRACE_FILENAME = 'lock-trace.jsonl';
 
 const OFF_VALUES = new Set(['', '0', 'false', 'off', 'no']);
 const ON_VALUES = new Set(['1', 'true', 'on', 'yes']);
+/**
+ * How many stack frames the caller walk asks V8 for. The seam is only a handful of frames below the
+ * board function that owns the write, but a hold taken through a sweep or a lock helper sits deeper, so
+ * this is generous rather than tight: the walk is bounded, happens once per outermost retry frame, and
+ * never happens at all with tracing off.
+ */
+const CALLER_CAPTURE_FRAME_LIMIT = 32;
+/** How many frames a record keeps, innermost first. Enough to show the path, small enough for JSONL. */
+const CALLER_CHAIN_LIMIT = 5;
+/** Recorded when the stack walk found nothing usable, so an unattributed wait is visible, not silent. */
+export const UNATTRIBUTED_CALLER = '(unattributed)';
 // A bound on how many records may sit unflushed. One transaction runs a bounded number of statements and
 // the buffer drains whenever the outermost retry frame releases, so this only matters if a caller somehow
 // never unwinds: correctness of the log beats keeping the hold measurement pristine in that case.
@@ -75,6 +95,14 @@ export interface LockWaitRecord {
   project: string | null;
   /** The human-readable label retryWhenSqliteBusy was given, e.g. `writing tickets`. */
   operation: string;
+  /**
+   * The board function this wait is attributed to, e.g. `prepareDispatch` — the outermost frame of the
+   * store layer on the stack, not the statement that happened to be executing. A nested wait reports
+   * the same caller as the frame enclosing it, so attribution never shifts to an inner statement.
+   */
+  caller: string;
+  /** Up to CALLER_CHAIN_LIMIT frames, innermost first, as `name (file:line)`: how `caller` was reached. */
+  callerStack: string[];
   /** Enclosing retry frames already open when this one started; 0 is outermost. See `nested` below. */
   depth: number;
   waitMs: number;
@@ -92,6 +120,9 @@ export interface LockHoldRecord {
   project: string | null;
   /** The label of the retry frame that owns this BEGIN IMMEDIATE. */
   operation: string;
+  /** The caller of that owning frame, so a hold is attributed exactly as its own wait record is. */
+  caller: string;
+  callerStack: string[];
   /** Depth of that owning frame, so a hold lines up with its own wait record rather than its children. */
   depth: number;
   holdMs: number;
@@ -104,6 +135,12 @@ interface LockTraceConfig {
   readonly file: string;
 }
 
+/** Who a retry frame is attributed to, resolved once for the outermost frame and inherited inwards. */
+interface LockTraceAttribution {
+  readonly caller: string;
+  readonly callerStack: readonly string[];
+}
+
 // `undefined` means "not resolved yet"; `null` means "resolved, and tracing is off".
 let config: LockTraceConfig | null | undefined;
 let broken = false;
@@ -111,7 +148,11 @@ let projectSlug: string | null | undefined;
 let sinkFd: number | null = null;
 let sinkFile: string | null = null;
 let exitFlushInstalled = false;
-let waitDepth = 0;
+// One entry per currently-open retryWhenSqliteBusy frame, outermost first. It is the nesting depth and
+// the attribution carrier in one: `openFrames.length` is what `depth` was counted from before SQ-269,
+// and the top entry is the caller an inner statement or a hold inherits instead of walking its own
+// stack. Frames are strictly LIFO because retryWhenSqliteBusy releases in a `finally`.
+const openFrames: LockTraceAttribution[] = [];
 const pending: string[] = [];
 
 function resolveConfig(env: NodeJS.ProcessEnv): LockTraceConfig | null {
@@ -163,6 +204,128 @@ function traceProject(): string | null {
     projectSlug = null;
   }
   return projectSlug;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Caller attribution (SQ-269)
+ * ------------------------------------------------------------------ */
+
+// The seam is db.ts plus this module. Frames in either are plumbing, never an answer to "who held the
+// lock", so the walk skips them by directory and basename rather than by a hardcoded path: under tsx a
+// frame reads `src/lib/db.ts` and in the built plugin `lib/db.js`, and both have to be recognised.
+// Neither file is ever bundled (scripts/build.mjs builds lib/ and bin/ with bundle:false, and no hook
+// bundle contains retryWhenSqliteBusy), so a frame's filename really does identify its module.
+const seamDirectory = __dirname;
+const seamModules = new Set(['db', 'lock-trace']);
+// The board's data-access API: store.ts and everything under store/. Every caller SQ-263 ranked lives
+// there — prepareDispatch in store/dispatch.ts, releaseTicket in store.ts, mergeProject in
+// store/projects.ts, and so on — while the layers above it (mcp-*.ts, bin/*.ts, the hooks) are
+// transport. So "the outermost store-layer frame" is exactly the board operation that took the lock,
+// and it is a boundary rule rather than a list of function names that would rot.
+const storeFacadePrefix = path.join(seamDirectory, 'store.');
+const storeDirectoryPrefix = path.join(seamDirectory, 'store') + path.sep;
+
+interface CapturedCallSite {
+  getFileName(): string | null | undefined;
+  getFunctionName(): string | null | undefined;
+  getMethodName(): string | null | undefined;
+  getLineNumber(): number | null | undefined;
+}
+
+interface CallerFrame {
+  readonly name: string | null;
+  readonly file: string;
+  readonly line: number;
+  readonly store: boolean;
+}
+
+/**
+ * The V8 structured-stack API, used instead of parsing a formatted stack string: no string is built, and
+ * a frame's file and function come back as themselves rather than as something to regex. Both globals it
+ * borrows are restored in the `finally`, and the borrow is synchronous, so no other formatter can
+ * observe it. A host without the API leaves attribution unresolved instead of failing a board write.
+ */
+function captureCallSites(): readonly CapturedCallSite[] {
+  const previousPrepare = Error.prepareStackTrace;
+  const previousLimit = Error.stackTraceLimit;
+  try {
+    Error.stackTraceLimit = CALLER_CAPTURE_FRAME_LIMIT;
+    Error.prepareStackTrace = (_error, callSites) => callSites;
+    const holder: { stack?: unknown } = {};
+    // Everything from captureCallSites inwards is elided, so the walk starts at this module's own caller.
+    Error.captureStackTrace(holder, captureCallSites);
+    const captured: unknown = holder.stack;
+    return Array.isArray(captured) ? (captured as CapturedCallSite[]) : [];
+  } catch (_) {
+    return [];
+  } finally {
+    Error.prepareStackTrace = previousPrepare;
+    Error.stackTraceLimit = previousLimit;
+  }
+}
+
+function frameFile(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  if (!raw.startsWith('file://')) return raw;
+  try {
+    return fileURLToPath(raw);
+  } catch (_) {
+    return null;
+  }
+}
+
+function isPlumbingFrame(file: string): boolean {
+  if (file.startsWith('node:') || file.includes(`${path.sep}node_modules${path.sep}`)) return true;
+  if (path.dirname(file) !== seamDirectory) return false;
+  return seamModules.has(path.basename(file).replace(/\.[cm]?[jt]s$/, ''));
+}
+
+// Relative to src/lib or lib, so a chain entry reads `store/dispatch.js` and not an absolute path that
+// differs per checkout. A frame from outside that tree (a test file, a bin script) keeps its basename.
+function frameLocation(file: string, line: number): string {
+  const relative = path.relative(seamDirectory, file);
+  const shown = !relative || relative.startsWith('..') ? path.basename(file) : relative;
+  return `${shown}:${line}`;
+}
+
+/**
+ * Walk the stack once and decide who this retry frame belongs to.
+ *
+ * `caller` is the OUTERMOST store-layer frame with a name, which is the board operation that owns the
+ * write rather than whichever statement inside it reached db.ts. Falling back outwards: the outermost
+ * named frame of any module (a caller that bypasses the store layer still gets a name), then the
+ * innermost frame's location, then UNATTRIBUTED_CALLER. `callerStack` carries the innermost few frames
+ * regardless, so a reader can always see whether the boundary rule picked the frame they expected.
+ */
+function resolveAttribution(): LockTraceAttribution {
+  const frames: CallerFrame[] = [];
+  for (const site of captureCallSites()) {
+    const file = frameFile(site.getFileName());
+    if (!file || isPlumbingFrame(file)) continue;
+    frames.push({
+      name: site.getFunctionName() || site.getMethodName() || null,
+      file,
+      line: site.getLineNumber() ?? 0,
+      store: file.startsWith(storeDirectoryPrefix) || file.startsWith(storeFacadePrefix),
+    });
+  }
+  let outermostNamedStore: CallerFrame | null = null;
+  let outermostNamed: CallerFrame | null = null;
+  for (const frame of frames) {
+    if (!frame.name) continue;
+    outermostNamed = frame;
+    if (frame.store) outermostNamedStore = frame;
+  }
+  const chosen = outermostNamedStore ?? outermostNamed;
+  const innermost = frames[0];
+  // The chain is the innermost frames, but the chosen frame is usually outside that window, and a record
+  // whose chain never shows the frame it named cannot be checked by eye. So reserve the last slot for it.
+  const chain = frames.slice(0, CALLER_CHAIN_LIMIT);
+  if (chosen && !chain.includes(chosen)) chain.splice(CALLER_CHAIN_LIMIT - 1, 1, chosen);
+  return {
+    caller: chosen?.name ?? (innermost ? frameLocation(innermost.file, innermost.line) : UNATTRIBUTED_CALLER),
+    callerStack: chain.map((frame) => `${frame.name ?? '<anonymous>'} (${frameLocation(frame.file, frame.line)})`),
+  };
 }
 
 function closeSink(): void {
@@ -267,10 +430,17 @@ export interface LockHoldProbe {
 export function beginLockWait(operation: string, policy: string): LockWaitProbe | null {
   if (!lockTraceConfig()) return null;
   activate();
-  const depth = waitDepth;
-  waitDepth += 1;
+  const depth = openFrames.length;
+  // Only the outermost frame walks the stack. An inner statement inherits its enclosing frame's caller,
+  // which is what keeps attribution on the outermost meaningful frame (SQ-269) instead of drifting to
+  // whichever `putRow` happened to run inside the transaction — and means one walk per transaction, not
+  // one per statement. The walk is deliberately taken BEFORE the clock below, like traceProject(), so
+  // its cost lands outside the wait it is about to measure.
+  const attribution = openFrames[depth - 1] ?? resolveAttribution();
+  openFrames.push(attribution);
   const startedAt = performance.now();
   let finished = false;
+  let released = false;
   const finish = (outcome: LockWaitOutcome, attempts: number): void => {
     if (finished) return;
     finished = true;
@@ -281,6 +451,8 @@ export function beginLockWait(operation: string, policy: string): LockWaitProbe 
       policy,
       project: traceProject(),
       operation,
+      caller: attribution.caller,
+      callerStack: [...attribution.callerStack],
       depth,
       waitMs: round(performance.now() - startedAt),
       attempts,
@@ -295,9 +467,13 @@ export function beginLockWait(operation: string, policy: string): LockWaitProbe 
   return {
     finish,
     release(): void {
+      // Guarded, because the frame stack is now what `depth` and inherited attribution are read from:
+      // a double release would pop someone else's frame, not just undercount a counter.
+      if (released) return;
+      released = true;
       finish('abandoned', 0);
-      waitDepth = Math.max(0, waitDepth - 1);
-      if (waitDepth === 0) flushLockTrace();
+      openFrames.pop();
+      if (openFrames.length === 0) flushLockTrace();
     },
   };
 }
@@ -309,8 +485,12 @@ export function beginLockWait(operation: string, policy: string): LockWaitProbe 
 export function beginLockHold(operation: string, policy: string): LockHoldProbe | null {
   if (!lockTraceConfig()) return null;
   activate();
-  // The hold lives inside its owning retry frame, which has already counted itself.
-  const depth = Math.max(0, waitDepth - 1);
+  // The hold lives inside its owning retry frame, which has already counted itself and already resolved
+  // who it belongs to. Reusing that attribution keeps a hold and its wait reporting the same caller, and
+  // avoids a second stack walk from inside the BEGIN IMMEDIATE this probe exists to measure. The
+  // fallback walk only matters if tracing was switched on between the enclosing retry frame and here.
+  const depth = Math.max(0, openFrames.length - 1);
+  const attribution = openFrames[openFrames.length - 1] ?? resolveAttribution();
   const startedAt = performance.now();
   let finished = false;
   return {
@@ -324,6 +504,8 @@ export function beginLockHold(operation: string, policy: string): LockHoldProbe 
         policy,
         project: traceProject(),
         operation,
+        caller: attribution.caller,
+        callerStack: [...attribution.callerStack],
         depth,
         holdMs: round(performance.now() - startedAt),
         outcome,
@@ -343,7 +525,7 @@ export function resetLockTrace(): void {
   config = undefined;
   broken = false;
   projectSlug = undefined;
-  waitDepth = 0;
+  openFrames.length = 0;
 }
 
 /* ------------------------------------------------------------------ *
@@ -376,6 +558,12 @@ export interface LockTraceSummary {
   p95WaitMs: number;
   maxWaitMs: number;
   maxHoldMs: number;
+  /**
+   * The breakdown US-4 reads first: which board function's waits and holds these were (SQ-269). Note
+   * that a caller's `waits` counts the statements nested inside its transaction as well as the
+   * transaction itself, which is why `nested` is reported beside it and wait times are never summed.
+   */
+  byCaller: LockTraceGroupStats[];
   byOperation: LockTraceGroupStats[];
   byPolicy: LockTraceGroupStats[];
   pids: number[];
@@ -461,6 +649,9 @@ export function summarizeLockTrace(records: readonly LockTraceRecord[]): LockTra
     p95WaitMs: overall.p95WaitMs,
     maxWaitMs: overall.maxWaitMs,
     maxHoldMs: overall.maxHoldMs,
+    // `|| UNATTRIBUTED_CALLER` rather than a plain read: a log collected before SQ-269 has no caller
+    // field at all, and the report has to summarise it instead of grouping everything under `undefined`.
+    byCaller: groupBy(records, (record) => record.caller || UNATTRIBUTED_CALLER),
     byOperation: groupBy(records, (record) => record.operation),
     byPolicy: groupBy(records, (record) => record.policy),
     pids: [...new Set(records.map((record) => record.pid))].sort((left, right) => left - right),
@@ -471,9 +662,12 @@ export function summarizeLockTrace(records: readonly LockTraceRecord[]): LockTra
 }
 
 function statsTable(title: string, rows: readonly LockTraceGroupStats[]): string {
-  const header = ['waits', 'blocked', 'exhausted', 'p50ms', 'p95ms', 'maxms', 'holds', 'maxholdms', title];
+  // `nested` is printed because the caller table attributes a transaction's inner statements to the same
+  // caller as the transaction: without it, one dispatch looks like forty waits.
+  const header = ['waits', 'nested', 'blocked', 'exhausted', 'p50ms', 'p95ms', 'maxms', 'holds', 'maxholdms', title];
   const body = rows.map((row) => [
     String(row.waits),
+    String(row.nested),
     String(row.blocked),
     String(row.exhausted),
     String(row.p50WaitMs),
@@ -504,7 +698,9 @@ export function formatLockTraceReport(summary: LockTraceSummary, options: { file
     `holds: ${summary.holds} | max hold ms ${summary.maxHoldMs}`,
   ];
   if (options.skipped) lines.push(`unparsed lines: ${options.skipped}`);
-  lines.push('', statsTable('operation', summary.byOperation), '', statsTable('policy', summary.byPolicy));
+  // Caller first: "how long did the board wait" is answered by the lines above, "who held the lock" only
+  // by this table, and the second question is the one a split-or-not decision turns on.
+  lines.push('', statsTable('caller', summary.byCaller), '', statsTable('operation', summary.byOperation), '', statsTable('policy', summary.byPolicy));
   return `${lines.join('\n')}\n`;
 }
 
@@ -512,7 +708,7 @@ function main(): void {
   const argv = process.argv.slice(2);
   const json = argv.includes('--json');
   if (argv.includes('--help') || argv.includes('-h')) {
-    process.stdout.write(`Usage: node lock-trace.js [<trace.jsonl>] [--json]\n\nSummarises a Sidequest board lock trace. Collect one by running the board with\n${LOCK_TRACE_ENV}=1 (writes <board root>/${LOCK_TRACE_FILENAME}) or ${LOCK_TRACE_ENV}=/path/to/trace.jsonl.\n`);
+    process.stdout.write(`Usage: node lock-trace.js [<trace.jsonl>] [--json]\n\nSummarises a Sidequest board lock trace, broken down by the board function that held\nthe lock, then by statement, then by lock policy. Collect one by running the board with\n${LOCK_TRACE_ENV}=1 (writes <board root>/${LOCK_TRACE_FILENAME}) or ${LOCK_TRACE_ENV}=/path/to/trace.jsonl.\n`);
     return;
   }
   const file = argv.find((argument) => !argument.startsWith('-')) || lockTracePath() || defaultLockTracePath();

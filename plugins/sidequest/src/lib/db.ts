@@ -257,6 +257,11 @@ function sqliteBusyError(operation: string, startedAt: number, cause: unknown, p
 // The one chokepoint every board statement passes through, which is why the wait measurement lives here
 // and not at the 17 call sites. `wait` is null unless tracing is on; the `finally` release unwinds the
 // nesting counter and flushes the buffer once the outermost frame is done.
+//
+// `operation` is the statement's label, not its caller: every control-plane path SQ-263 named arrives
+// here as `writing transaction`. beginLockWait therefore resolves the calling board function itself,
+// from a bounded stack walk taken only while tracing is on (SQ-269) — nothing is passed down from here,
+// and no call site needs to know tracing exists.
 function retryWhenSqliteBusy<T>(operation: string, work: () => T): T {
   const policy = sqliteBusyPolicy();
   const startedAt = Date.now();
