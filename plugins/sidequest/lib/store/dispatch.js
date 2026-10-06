@@ -2,6 +2,7 @@
 const { canonicalPreparedDispatchExecutor } = require("../prepared-dispatch.js");
 const { classifyVerificationKind, verificationRequirement } = require("../kernel/verification.js");
 const { resolveSuite } = require("../suite-resolver.js");
+const { FILESYSTEM_SNAPSHOT_SOURCE, withPrecomputedFilesystemSnapshot } = require("../source-revision-capability.js");
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationOutcome } = require("../kernel/review-binding");
 function unscopedWriteCannotAutoApprove(ticket, options) {
   const { dispatchReadOnly, normalizeFiles, autoApproveScope } = options;
@@ -109,6 +110,26 @@ function createDispatch(dependencies) {
     fs.writeFileSync(file, `${ticket.dispatchNonce}
 `, { encoding: "utf8", mode: 384 });
     return file;
+  }
+  function stageDispatchToken(file, nonce) {
+    if (!file) throw new Error("dispatch token file is unavailable");
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 448 });
+    const staged = `${file}.${crypto.randomUUID()}.staging`;
+    fs.writeFileSync(staged, `${nonce}
+`, { encoding: "utf8", mode: 384 });
+    return {
+      publish: () => {
+        fs.renameSync(staged, file);
+        return file;
+      },
+      discard: () => {
+        try {
+          fs.unlinkSync(staged);
+        } catch (error) {
+          if (error?.code !== "ENOENT") throw error;
+        }
+      }
+    };
   }
   function removeDispatchTokenFile(ticket) {
     const file = dispatchTokenFile(ticket);
@@ -1106,6 +1127,94 @@ function createDispatch(dependencies) {
     }
     return { state, checkpointCommit: null };
   }
+  const DISPATCH_PLAN_MAX_ATTEMPTS = 3;
+  const STALE_DISPATCH_PLAN = /* @__PURE__ */ Symbol("sidequest.staleDispatchPlan");
+  function dispatchPlanKeys(slug, ticket) {
+    const ticketIds = [String(ticket?.id)];
+    const reviewTargetId = ticket?.reviewTarget?.ticketId;
+    if (reviewTargetId) ticketIds.push(String(reviewTargetId));
+    return {
+      slug: String(slug || ""),
+      ticketIds,
+      storyIds: ticket?.storyId ? [String(ticket.storyId)] : []
+    };
+  }
+  function dispatchPlanBoardStamp(keys) {
+    const handle = database();
+    const hash = crypto.createHash("sha256");
+    for (const id of keys.ticketIds) {
+      const row = db.selectRow(handle, "SELECT data FROM tickets WHERE project = ? AND id = ?", [keys.slug, id]);
+      hash.update(`ticket\0${id}\0${row ? String(row.data) : ""}\0`);
+    }
+    for (const id of keys.storyIds) {
+      const row = db.selectRow(handle, "SELECT data FROM stories WHERE project = ? AND id = ?", [keys.slug, id]);
+      hash.update(`story\0${id}\0${row ? String(row.data) : ""}\0`);
+    }
+    const project = db.selectRow(handle, "SELECT data FROM projects WHERE slug = ?", [keys.slug]);
+    hash.update(`project\0${project ? String(project.data) : ""}\0`);
+    return hash.digest("hex");
+  }
+  function dispatchRepositoryStamp(projectPath) {
+    const root = String(projectPath || "").trim();
+    if (!root) return "no-project-path";
+    const parts = [];
+    const stampStat = (label, target) => {
+      try {
+        const stat = fs.lstatSync(target, { bigint: true });
+        parts.push(`${label}=${stat.mtimeNs}:${stat.size}:${stat.ino}`);
+      } catch (error) {
+        parts.push(`${label}=${error?.code || "unreadable"}`);
+      }
+    };
+    const readSmall = (label, target) => {
+      let value;
+      try {
+        value = fs.readFileSync(target, "utf8").trim();
+      } catch (error) {
+        value = `<${error?.code || "unreadable"}>`;
+      }
+      parts.push(`${label}=${value}`);
+      return value;
+    };
+    try {
+      const stat = fs.lstatSync(root, { bigint: true });
+      parts.push(`root=${stat.ino}:${stat.dev}:${stat.mode}`);
+    } catch (error) {
+      parts.push(`root=${error?.code || "unreadable"}`);
+    }
+    const dotGit = path.join(root, ".git");
+    let gitDir = dotGit;
+    try {
+      if (fs.lstatSync(dotGit).isFile()) {
+        const pointer = /^gitdir:\s*(.+)$/m.exec(fs.readFileSync(dotGit, "utf8"))?.[1]?.trim();
+        if (pointer) gitDir = path.resolve(root, pointer);
+      }
+    } catch (error) {
+      parts.push(`gitdir=${error?.code || "absent"}`);
+    }
+    const head = readSmall("head", path.join(gitDir, "HEAD"));
+    const symbolic = /^ref:\s*(.+)$/.exec(head)?.[1]?.trim();
+    if (symbolic && !symbolic.split("/").includes("..")) {
+      readSmall("ref", path.join(gitDir, symbolic));
+    }
+    stampStat("packedrefs", path.join(gitDir, "packed-refs"));
+    stampStat("fetchhead", path.join(gitDir, "FETCH_HEAD"));
+    return parts.join("\0");
+  }
+  function stampDifference(before, after) {
+    const stampLabel = (part) => part.slice(0, part.indexOf("="));
+    const beforeParts = new Map(before.split("\0").map((part) => [stampLabel(part), part]));
+    const changed = [];
+    for (const part of after.split("\0")) {
+      if (beforeParts.get(stampLabel(part)) !== part) changed.push(stampLabel(part));
+    }
+    return changed.length ? changed.join(", ") : "nothing identifiable";
+  }
+  function withPrecomputedProjectSnapshot(slug, projectPath, operation) {
+    const root = String(projectPath || "").trim();
+    if (!root || readMeta(slug)?.sourceRevisionAdapter !== FILESYSTEM_SNAPSHOT_SOURCE) return operation();
+    return withPrecomputedFilesystemSnapshot(root, operation);
+  }
   function prepareDispatch(slug, idOrRef, opts) {
     opts = opts || {};
     if (!projectRoutingEnabled(slug)) throw new Error(routingDisabledMessage(idOrRef));
@@ -1136,7 +1245,8 @@ function createDispatch(dependencies) {
     }
     assertDispatchTransport(opts.transport, { allowUnverifiedTransport: !!opts.allowUnverifiedTransport });
     const pythonIoEncoding = projectPath ? ensurePythonIoEncoding(projectPath) : { written: false };
-    return withTicketLock(slug, found.id, () => {
+    let stagedToken = null;
+    const planDispatch = () => {
       const t = getTicket(slug, found.id);
       if (!t) throw new Error(`prepare dispatch: no ticket "${idOrRef}".`);
       const current = dispatchState(t);
@@ -1191,13 +1301,17 @@ function createDispatch(dependencies) {
           const route = current.route || { model: t.model, effort: t.effort };
           current.launchName = dispatchLaunchName(t.ref, t.title, resolveExec(route.model, route.effort), route.effort, current.launchSeq);
         }
-        putTicket(slug, t);
         return {
-          ok: true,
-          ticket: t,
-          token: t.dispatchNonce,
-          reused: true,
-          recovery: current.recovery
+          commit: () => {
+            putTicket(slug, t);
+            return {
+              ok: true,
+              ticket: t,
+              token: t.dispatchNonce,
+              reused: true,
+              recovery: current.recovery
+            };
+          }
         };
       }
       if (current && current.recovery && !current.terminalAt && !currentRoute) {
@@ -1268,13 +1382,6 @@ function createDispatch(dependencies) {
       const runtimeRefusal = sharedTree ? sharedTreeRuntimeRefusal(t, projectPath, opts.runtimeCwd) : null;
       if (runtimeRefusal) throw new Error(runtimeRefusal);
       t.dispatchNonce = mintDispatchToken();
-      if (priorTokenFile) {
-        try {
-          fs.unlinkSync(priorTokenFile);
-        } catch (error) {
-          if (error?.code !== "ENOENT") throw error;
-        }
-      }
       const category = getCategory(ticketCategory(t), { project: slug });
       const artifactRoot = sharedTree && effectiveFiles.length === 1 && sharedTreeArtifactRequested(t) ? categoryArtifactRoot(category, effectiveFiles[0]) : null;
       const artifactMode = Boolean(artifactRoot);
@@ -1329,92 +1436,137 @@ function createDispatch(dependencies) {
       const evidenceDirectory = ticketEvidenceDirectory(slug, t.ref, projectPath);
       fs.mkdirSync(evidenceDirectory, { recursive: true, mode: 448 });
       const baseCommit = reviewTargetState?.candidate.source === "git" ? reviewTargetState.candidate.value : integrationTargetState ? integrationTargetCommit(readMeta(slug)?.path || "", integrationTargetState) : commitScope.headCommit(readMeta(slug)?.path || "");
-      const dispatchBaseline = dispatchBaselineForProject(slug, t, now, baseCommit, nonRepoOutput);
-      t.dispatch = {
-        lifecycleAttempt: prepareAttempt(
-          dispatchBaseline,
-          Object.freeze({ actor: dispatchPreparationAttribution(opts), operation: "prepare", sessionId: opts.sessionId ? String(opts.sessionId) : null }),
-          preparedPluginInstall && preparedPluginIdentity ? Object.freeze({ pluginInstall: preparedPluginInstall, identity: preparedPluginIdentity }) : void 0,
-          verificationRequirement2
-        ),
-        verificationRequirement: verificationRequirement2,
-        evidenceDirectory,
-        sessionId: opts.sessionId ? String(opts.sessionId) : null,
-        preparedBy: dispatchPreparationAttribution(opts),
-        ...preparedPluginInstall && preparedPluginIdentity ? { preparedCompatibility: { pluginInstall: preparedPluginInstall, identity: preparedPluginIdentity } } : {},
-        sharedTree,
-        ...worktreeWarning ? { worktreeWarning } : {},
-        ...pythonIoEncoding.written ? { pythonIoEncoding } : {},
-        ...opts.dispatchSkew ? { dispatchSkew: opts.dispatchSkew } : {},
-        declaredFiles,
-        ...!sharedTree && releasedContinuation?.continuation ? {
-          continuation: releasedContinuation.continuation,
-          worktree: releasedContinuation.continuation.sourceWorktree,
-          worktreeGitDirectory: releasedContinuation.continuation.lease.boundGitDirectory,
-          worktreeCommonGitDirectory: releasedContinuation.continuation.lease.boundCommonGitDirectory,
-          worktreeCheckoutInstance: releasedContinuation.continuation.lease.boundCheckoutInstance,
-          worktreeObservedRevision: releasedContinuation.continuation.lease.boundRevision,
-          worktreeBindingSource: "continuation"
-        } : {},
-        ...releasedContinuation?.fallback ? { continuationFallback: releasedContinuation.fallback } : {},
-        ...sharedTree && releasedContinuation?.continuation ? { continuationFallback: continuationFallback("continuation_checkpoint_requires_isolated_worktree", releasedContinuation.continuation.sourceWorktree) } : {},
-        // Record the integration target commit so an isolated executor can bring
-        // its harness-created worktree forward before changing it.
-        baseCommit,
-        ...reviewTargetState ? { reviewTarget: t.reviewTarget } : {},
-        ...integrationTargetState ? { integrationTarget: integrationTargetState } : {},
-        ...localAheadWarning ? { localAheadWarning } : {},
-        readonly,
-        ...noDeclaredFileScope ? {
-          unscopedOverride: {
-            at: now,
-            source: opts.source || opts.transport || "store"
+      const plannedTokenFile = newDispatchTokenFile();
+      const planStagedToken = stageDispatchToken(plannedTokenFile, t.dispatchNonce);
+      stagedToken = planStagedToken;
+      return {
+        commit: () => {
+          const dispatchBaseline = dispatchBaselineForProject(slug, t, now, baseCommit, nonRepoOutput);
+          t.dispatch = {
+            lifecycleAttempt: prepareAttempt(
+              dispatchBaseline,
+              Object.freeze({ actor: dispatchPreparationAttribution(opts), operation: "prepare", sessionId: opts.sessionId ? String(opts.sessionId) : null }),
+              preparedPluginInstall && preparedPluginIdentity ? Object.freeze({ pluginInstall: preparedPluginInstall, identity: preparedPluginIdentity }) : void 0,
+              verificationRequirement2
+            ),
+            verificationRequirement: verificationRequirement2,
+            evidenceDirectory,
+            sessionId: opts.sessionId ? String(opts.sessionId) : null,
+            preparedBy: dispatchPreparationAttribution(opts),
+            ...preparedPluginInstall && preparedPluginIdentity ? { preparedCompatibility: { pluginInstall: preparedPluginInstall, identity: preparedPluginIdentity } } : {},
+            sharedTree,
+            ...worktreeWarning ? { worktreeWarning } : {},
+            ...pythonIoEncoding.written ? { pythonIoEncoding } : {},
+            ...opts.dispatchSkew ? { dispatchSkew: opts.dispatchSkew } : {},
+            declaredFiles,
+            ...!sharedTree && releasedContinuation?.continuation ? {
+              continuation: releasedContinuation.continuation,
+              worktree: releasedContinuation.continuation.sourceWorktree,
+              worktreeGitDirectory: releasedContinuation.continuation.lease.boundGitDirectory,
+              worktreeCommonGitDirectory: releasedContinuation.continuation.lease.boundCommonGitDirectory,
+              worktreeCheckoutInstance: releasedContinuation.continuation.lease.boundCheckoutInstance,
+              worktreeObservedRevision: releasedContinuation.continuation.lease.boundRevision,
+              worktreeBindingSource: "continuation"
+            } : {},
+            ...releasedContinuation?.fallback ? { continuationFallback: releasedContinuation.fallback } : {},
+            ...sharedTree && releasedContinuation?.continuation ? { continuationFallback: continuationFallback("continuation_checkpoint_requires_isolated_worktree", releasedContinuation.continuation.sourceWorktree) } : {},
+            // Record the integration target commit so an isolated executor can bring
+            // its harness-created worktree forward before changing it.
+            baseCommit,
+            ...reviewTargetState ? { reviewTarget: t.reviewTarget } : {},
+            ...integrationTargetState ? { integrationTarget: integrationTargetState } : {},
+            ...localAheadWarning ? { localAheadWarning } : {},
+            readonly,
+            ...noDeclaredFileScope ? {
+              unscopedOverride: {
+                at: now,
+                source: opts.source || opts.transport || "store"
+              }
+            } : {},
+            ...nonRepoOutput ? { nonRepoOutput: true } : {},
+            artifactMode,
+            artifactRoot,
+            artifactScope,
+            ...artifactMode ? { artifactDirtyBaseline } : {},
+            ...dirtyBaselineCapture?.warning ? { dirtyBaselineWarning: dirtyBaselineCapture.warning } : {},
+            ...workingTreeDelivery ? { workingTreeDelivery: true, workingTreeDirtyBaseline } : {},
+            ...sharedTree ? { dirtyBaseline: artifactDirtyBaseline || dirtyBaselineCapture?.baseline || null } : {},
+            tokenPrefix: dispatchTokenPrefix(t.dispatchNonce),
+            tokenFile: plannedTokenFile,
+            executor: t.dispatchExecutor,
+            description: spawnDescription(t, preparedExec),
+            launchSeq,
+            launchName: dispatchLaunchName(t.ref, t.title, preparedExec, t.effort, launchSeq),
+            route: dispatchRouteState(t.model, t.effort, preparedExec),
+            ...repeatFailure ? {
+              repeatFailureOverride: {
+                at: now,
+                source: opts.source || opts.transport || "store",
+                priorAttempts: recentNoCommitAttempts(current).length
+              }
+            } : {},
+            ...unboundAttemptsSkipped ? { unboundAttemptsSkipped: true } : {},
+            ...fallbackReason ? { fallbackReason } : {},
+            storyContract: contract,
+            storyLogRevision,
+            ...contractDrift ? { storyContractDrift: Object.assign({}, contractDrift, { rebasedAt: now }) } : {},
+            preparedAt: now,
+            launchedAt: null,
+            boundAt: null,
+            claimedAt: null,
+            terminalAt: null,
+            outcome: "prepared",
+            ...attempts.length ? { attempts } : {},
+            ...supersededTokens.length ? { supersededTokens: supersededTokens.slice(-8) } : {},
+            ...recovery ? { recovery } : {}
+          };
+          t.lifecycleAttempt = t.dispatch.lifecycleAttempt;
+          if (priorTokenFile) {
+            try {
+              fs.unlinkSync(priorTokenFile);
+            } catch (error) {
+              if (error?.code !== "ENOENT") throw error;
+            }
           }
-        } : {},
-        ...nonRepoOutput ? { nonRepoOutput: true } : {},
-        artifactMode,
-        artifactRoot,
-        artifactScope,
-        ...artifactMode ? { artifactDirtyBaseline } : {},
-        ...dirtyBaselineCapture?.warning ? { dirtyBaselineWarning: dirtyBaselineCapture.warning } : {},
-        ...workingTreeDelivery ? { workingTreeDelivery: true, workingTreeDirtyBaseline } : {},
-        ...sharedTree ? { dirtyBaseline: artifactDirtyBaseline || dirtyBaselineCapture?.baseline || null } : {},
-        tokenPrefix: dispatchTokenPrefix(t.dispatchNonce),
-        tokenFile: newDispatchTokenFile(),
-        executor: t.dispatchExecutor,
-        description: spawnDescription(t, preparedExec),
-        launchSeq,
-        launchName: dispatchLaunchName(t.ref, t.title, preparedExec, t.effort, launchSeq),
-        route: dispatchRouteState(t.model, t.effort, preparedExec),
-        ...repeatFailure ? {
-          repeatFailureOverride: {
-            at: now,
-            source: opts.source || opts.transport || "store",
-            priorAttempts: recentNoCommitAttempts(current).length
-          }
-        } : {},
-        ...unboundAttemptsSkipped ? { unboundAttemptsSkipped: true } : {},
-        ...fallbackReason ? { fallbackReason } : {},
-        storyContract: contract,
-        storyLogRevision,
-        ...contractDrift ? { storyContractDrift: Object.assign({}, contractDrift, { rebasedAt: now }) } : {},
-        preparedAt: now,
-        launchedAt: null,
-        boundAt: null,
-        claimedAt: null,
-        terminalAt: null,
-        outcome: "prepared",
-        ...attempts.length ? { attempts } : {},
-        ...supersededTokens.length ? { supersededTokens: supersededTokens.slice(-8) } : {},
-        ...recovery ? { recovery } : {}
+          planStagedToken.publish();
+          stampDispatchEvent(t, "dispatch", now);
+          putTicket(slug, t);
+          const warnings = [localAheadWarning?.message, dirtyBaselineCapture?.warning].filter(Boolean);
+          return { ok: true, ticket: t, token: t.dispatchNonce, recovery, ...warnings.length ? { warnings } : {} };
+        }
       };
-      t.lifecycleAttempt = t.dispatch.lifecycleAttempt;
-      writeDispatchTokenFile(t);
-      stampDispatchEvent(t, "dispatch", now);
-      putTicket(slug, t);
-      const warnings = [localAheadWarning?.message, dirtyBaselineCapture?.warning].filter(Boolean);
-      return { ok: true, ticket: t, token: t.dispatchNonce, recovery, ...warnings.length ? { warnings } : {} };
-    });
+    };
+    for (let attempt = 1; ; attempt += 1) {
+      const planKeys = dispatchPlanKeys(slug, getTicket(slug, found.id) || found);
+      const boardStamp = dispatchPlanBoardStamp(planKeys);
+      const repositoryStamp = dispatchRepositoryStamp(projectPath);
+      let staleReason = null;
+      stagedToken = null;
+      const committed = withPrecomputedProjectSnapshot(slug, projectPath, () => {
+        const planned = planDispatch();
+        try {
+          return withTicketLock(slug, found.id, () => {
+            const boardNow = dispatchPlanBoardStamp(planKeys);
+            if (boardNow !== boardStamp) {
+              staleReason = "the board rows it read were rewritten";
+              return STALE_DISPATCH_PLAN;
+            }
+            const repositoryNow = dispatchRepositoryStamp(projectPath);
+            if (repositoryNow !== repositoryStamp) {
+              staleReason = `the repository moved (${stampDifference(repositoryStamp, repositoryNow)})`;
+              return STALE_DISPATCH_PLAN;
+            }
+            return planned.commit();
+          });
+        } finally {
+          stagedToken?.discard();
+        }
+      });
+      if (committed !== STALE_DISPATCH_PLAN) return committed;
+      if (attempt >= DISPATCH_PLAN_MAX_ATTEMPTS) {
+        throw new Error(`prepare dispatch: ${found.ref} was planned ${DISPATCH_PLAN_MAX_ATTEMPTS} times and each plan went stale before it could be stored, the last because ${staleReason}. Nothing was written. Let the concurrent work settle, then dispatch again.`);
+      }
+    }
   }
   function readDispatchBriefing(slug, idOrRef, token, tokenFile) {
     const ticket = getTicket(slug, idOrRef);

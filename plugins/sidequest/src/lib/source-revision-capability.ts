@@ -32,7 +32,7 @@ type SourceRevisionRegistration = Readonly<{
   capability: SourceRevisionCapability;
 }>;
 
-const FILESYSTEM_SNAPSHOT_SOURCE = 'filesystem-snapshot';
+export const FILESYSTEM_SNAPSHOT_SOURCE = 'filesystem-snapshot';
 const registrationsByProject = new Map<string, SourceRevisionRegistration>();
 const resolvedAdapterFacts = new WeakSet<object>();
 
@@ -71,9 +71,17 @@ function updateFilesystemSnapshot(hash: ReturnType<typeof createHash>, projectPa
   hash.update(`other\0${relativePath}\0${entry.mode}\0${entry.size}\0`);
 }
 
-export function filesystemSnapshotRevision(projectPath: string, observedAt = new Date().toISOString()): SourceRevision | null {
-  const root = resolve(String(projectPath || '').trim());
-  if (!root || !Number.isFinite(Date.parse(observedAt))) return null;
+// SQ-268: a dispatch must not hold the board's machine-global write lock across a recursive read
+// of every file in the project, but the snapshot it stores has to be written inside that lock to
+// stay atomic with the dispatch row it describes. So the digest is measured once in a window the
+// caller opens outside the lock, and the one call inside the lock is served from that measurement
+// instead of walking the tree again. Keyed by resolved root, holding only the digest: `observedAt`
+// stays per-call, and the window is cleared on the way out so no measurement can outlive the
+// operation that took it and be mistaken for a fresh observation.
+const precomputedSnapshotDigests = new Map<string, string | null>();
+
+// null means the tree cannot be snapshotted at all, which is a refusal rather than an empty digest.
+function filesystemSnapshotDigest(root: string): string | null {
   let rootExists = false;
   try {
     if (!lstatSync(root).isDirectory()) return null;
@@ -89,11 +97,41 @@ export function filesystemSnapshotRevision(projectPath: string, observedAt = new
   } catch {
     return null;
   }
+  return hash.digest('hex');
+}
+
+export function filesystemSnapshotRevision(projectPath: string, observedAt = new Date().toISOString()): SourceRevision | null {
+  const root = resolve(String(projectPath || '').trim());
+  if (!root || !Number.isFinite(Date.parse(observedAt))) return null;
+  const digest = precomputedSnapshotDigests.has(root)
+    ? precomputedSnapshotDigests.get(root) ?? null
+    : filesystemSnapshotDigest(root);
+  if (digest == null) return null;
   return Object.freeze({
     source: FILESYSTEM_SNAPSHOT_SOURCE,
-    value: hash.digest('hex'),
+    value: digest,
     observedAt: new Date(observedAt).toISOString(),
   });
+}
+
+/**
+ * Runs `operation` with this project's whole-tree digest already measured, so a
+ * `filesystemSnapshotRevision` call made inside it costs a map lookup rather than a recursive read
+ * of every file. Measuring costs exactly what the walk costs, so only open a window around work
+ * that would otherwise walk the tree while holding something another caller wants. A nested window
+ * restores the one enclosing it, and no window survives the call that opened it.
+ */
+export function withPrecomputedFilesystemSnapshot<T>(projectPath: string, operation: () => T): T {
+  const root = resolve(String(projectPath || '').trim());
+  const hadPrevious = precomputedSnapshotDigests.has(root);
+  const previous = precomputedSnapshotDigests.get(root) ?? null;
+  precomputedSnapshotDigests.set(root, filesystemSnapshotDigest(root));
+  try {
+    return operation();
+  } finally {
+    if (hadPrevious) precomputedSnapshotDigests.set(root, previous);
+    else precomputedSnapshotDigests.delete(root);
+  }
 }
 
 export function filesystemSnapshotCapability(

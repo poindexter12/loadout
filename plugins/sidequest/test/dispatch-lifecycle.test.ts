@@ -39,6 +39,7 @@ const store = require('../lib/store.js');
 const worktrees = require('../lib/worktrees.js');
 const worktreeLease = require('../lib/kernel/worktree.js');
 const agentsync = require('../lib/agentsync.js');
+const lockTrace = require('../lib/lock-trace.js');
 const { claimRefusalMessage } = require('../lib/refusal-guidance.js');
 const { checkSidequestInstall } = require('../lib/dispatch-preflight.js');
 const { collectGitSubmissionFacts } = require('../lib/mcp-lifecycle.js');
@@ -2698,6 +2699,76 @@ test('dispatch briefing includes each pinned decision once and reports later del
   assert.doesNotMatch(briefing, /#3 DISCOVERY \(orchestrator, orchestrator\): post-prepare delta/);
   assert.match(warnings, /decision log gained 1 entry \(#3\) since .* was prepared/);
   assert.doesNotMatch(warnings, /was claimed/);
+});
+
+/**
+ * SQ-268. `prepareDispatch` used to hold the board's machine-global SQLite write lock across its Git
+ * subprocesses -- `git status`, batched `git ls-files`, `rev-parse` -- and, on a filesystem-snapshot
+ * project, a recursive read of every file in the project. Every dispatch on every project paid that,
+ * which made this the hottest lock-holding path on the board. The plan now runs outside the lock and
+ * the lock is taken only to re-validate cheaply and store.
+ *
+ * The assertion is a ratio against a MEASURED process spawn rather than a millisecond threshold, on
+ * purpose. This machine's suites go red at load 26-34 and pass at ~10, so a stopwatch test would be
+ * measuring the load and would have to be "fixed" by loosening it until it proved nothing. One `git
+ * rev-parse` costs whatever a spawn costs here and now, and the hold inflates with load exactly as
+ * that spawn does. So "no write-lock hold lasts as long as a single Git subprocess" is a structural
+ * claim -- a lock spanning six or more spawns cannot satisfy it at any load -- while staying immune
+ * to the load itself. Before this change the hold covered nearly the whole prepare and the first
+ * assertion fails by an order of magnitude; it is not a threshold anyone can tune past.
+ *
+ * Every hold recorded in the traced window counts, not only the one attributed to `prepareDispatch`,
+ * which makes the claim stronger than attribution and independent of how a frame happens to be named.
+ */
+test('preparing a dispatch does not hold the board write lock across its Git and filesystem work', (t: any) => {
+  const traceFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sq-dispatch-lock-trace-')), 'trace.jsonl');
+  const ticket = createFixture('write lock is not held across the dispatch plan');
+
+  // What one process spawn costs on this machine, under whatever load it is under right now.
+  const spawnCosts: number[] = [];
+  for (let probe = 0; probe < 3; probe += 1) {
+    const startedProbe = process.hrtime.bigint();
+    execFileSync('git', ['rev-parse', 'HEAD'], { cwd: PROJECT, encoding: 'utf8', windowsHide: true });
+    spawnCosts.push(Number(process.hrtime.bigint() - startedProbe) / 1e6);
+  }
+  const oneGitSpawnMs = spawnCosts.slice().sort((left, right) => left - right)[1] ?? 0;
+  assert.ok(oneGitSpawnMs > 0, 'the Git spawn probe produced no measurement, so there is nothing to compare a hold against');
+
+  let prepareMs = 0;
+  let records: any[] = [];
+  process.env[lockTrace.LOCK_TRACE_ENV] = traceFile;
+  lockTrace.resetLockTrace();
+  try {
+    const started = process.hrtime.bigint();
+    const prepared = store.prepareDispatch(slug, ticket.ref);
+    prepareMs = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.equal(prepared.ok, true, 'the two-phase prepare still returns a prepared dispatch');
+    assert.equal(typeof prepared.ticket.dispatch.baseCommit, 'string', 'the plan still records the commit its run starts from');
+    lockTrace.flushLockTrace();
+    // Tracing only creates the file once it has something to append, so an absent file has to read as
+    // "nothing was recorded" and fail the next assertion rather than crash here.
+    records = fs.existsSync(traceFile) ? lockTrace.readLockTraceRecords(traceFile).records : [];
+  } finally {
+    delete process.env[lockTrace.LOCK_TRACE_ENV];
+    lockTrace.resetLockTrace();
+  }
+
+  const holds = records.filter((record: any) => record.kind === 'hold');
+  assert.ok(holds.length > 0, 'tracing recorded no write-lock hold at all, so this test proved nothing about how long one is held');
+  const worstHoldMs = Math.max(...holds.map((record: any) => record.holdMs));
+  // Reported on a pass too: when this machine is loaded enough to fail the suite, the three numbers
+  // say whether the lock regressed or the machine is just busy, without a rerun to find out.
+  t.diagnostic(`worst write-lock hold ${worstHoldMs.toFixed(1)}ms across ${holds.length} hold(s); preparing took ${prepareMs.toFixed(1)}ms; one Git spawn costs ${oneGitSpawnMs.toFixed(1)}ms`);
+
+  assert.ok(
+    worstHoldMs < oneGitSpawnMs,
+    `preparing a dispatch held the board write lock for ${worstHoldMs}ms, longer than the ${oneGitSpawnMs}ms one Git subprocess costs here, so the lock still spans Git work`,
+  );
+  assert.ok(
+    worstHoldMs * 4 < prepareMs,
+    `preparing a dispatch took ${prepareMs}ms and held the board write lock for ${worstHoldMs}ms of it, so the lock still covers the bulk of the work`,
+  );
+  assert.equal(store.releaseTicket(slug, ticket.ref, 'lock-hold-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
 });
 
 export {};

@@ -3,6 +3,7 @@
 const { canonicalPreparedDispatchExecutor } = require('../prepared-dispatch.js');
 const { classifyVerificationKind, verificationRequirement } = require('../kernel/verification.js');
 const { resolveSuite } = require('../suite-resolver.js');
+const { FILESYSTEM_SNAPSHOT_SOURCE, withPrecomputedFilesystemSnapshot } = require('../source-revision-capability.js');
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationOutcome } = require('../kernel/review-binding');
 
 function unscopedWriteCannotAutoApprove(ticket?: any, options?: any) {
@@ -137,6 +138,41 @@ function writeDispatchTokenFile(ticket?: any) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   fs.writeFileSync(file, `${ticket.dispatchNonce}\n`, { encoding: 'utf8', mode: 0o600 });
   return file;
+}
+
+/**
+ * SQ-268: writing the token file was, with the evidence directory, most of what the board's
+ * machine-global write lock was still held across once the Git work moved out -- 45ms of a 103ms
+ * hold, measured under load. Splitting the write from its publication moves the cost out while
+ * keeping the property that matters: the token must not be readable at its real path before the
+ * dispatch row that authorizes it is committed, or an executor could present a token the board has
+ * no record of. So the content is written to a staging name outside the lock and `rename`d into
+ * place inside it -- one atomic metadata operation in the same directory, which is what the lock
+ * now pays for instead of a create-write-flush-close.
+ *
+ * `discard` is idempotent on purpose: once `publish` has renamed the staging file away, discarding
+ * finds nothing, so every caller can discard unconditionally on the way out without first working
+ * out whether it got as far as publishing.
+ */
+function stageDispatchToken(file: string, nonce: string) {
+  if (!file) throw new Error('dispatch token file is unavailable');
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  // Beside the destination, so the rename stays inside one directory and one filesystem.
+  const staged = `${file}.${crypto.randomUUID()}.staging`;
+  fs.writeFileSync(staged, `${nonce}\n`, { encoding: 'utf8', mode: 0o600 });
+  return {
+    publish: () => {
+      fs.renameSync(staged, file);
+      return file;
+    },
+    discard: () => {
+      try {
+        fs.unlinkSync(staged);
+      } catch (error: any) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
+    },
+  };
 }
 
 function removeDispatchTokenFile(ticket?: any) {
@@ -1290,6 +1326,148 @@ function unclaimedWorktreeRecoveryFacts(projectPath?: any, ticket?: any, state?:
   return { state, checkpointCommit: null };
 }
 
+// SQ-268: `prepareDispatch` used to hold the board's machine-global SQLite write lock across its
+// Git subprocesses and, for a filesystem-snapshot project, a recursive read of every file in the
+// project, which made every dispatch on every project the hottest lock-holding path on the board
+// (SQ-263). The plan now runs outside the lock and the lock is taken only to re-validate cheaply
+// and store. Re-validation is a compare-and-set, never a repeat of the work: the plan is accepted
+// only when both stamps below are identical to the ones sampled before it began. Anything else
+// discards the plan and plans again, because a precompute that is simply trusted would trade a
+// contention bug for a correctness bug.
+const DISPATCH_PLAN_MAX_ATTEMPTS = 3;
+// Distinguishable from every value a commit can return, and private, so no caller can forge it.
+const STALE_DISPATCH_PLAN = Symbol('sidequest.staleDispatchPlan');
+
+// The board rows a dispatch plan reads. Every one of them is addressable before the plan starts,
+// so the stamp covers the whole window rather than only the part after the keys became known.
+function dispatchPlanKeys(slug?: any, ticket?: any) {
+  const ticketIds = [String(ticket?.id)];
+  const reviewTargetId = ticket?.reviewTarget?.ticketId;
+  if (reviewTargetId) ticketIds.push(String(reviewTargetId));
+  return {
+    slug: String(slug || ''),
+    ticketIds,
+    storyIds: ticket?.storyId ? [String(ticket.storyId)] : [],
+  };
+}
+
+// Compare-and-set half one, and the half that restores what the write transaction used to give
+// this function: board reads serialized with the write that depends on them. The stored payloads
+// are compared as the bytes they are, so the comparison needs no canonical key ordering to be
+// exact, and it stays cheap enough to belong in the lock -- three or four point reads on primary
+// keys. The resident cache revalidates itself against PRAGMA data_version on every access, so
+// these reads and the plan's cached reads cannot disagree about what is committed.
+function dispatchPlanBoardStamp(keys: any) {
+  const handle = database();
+  const hash = crypto.createHash('sha256');
+  for (const id of keys.ticketIds) {
+    const row: any = db.selectRow(handle, 'SELECT data FROM tickets WHERE project = ? AND id = ?', [keys.slug, id]);
+    hash.update(`ticket\u0000${id}\u0000${row ? String(row.data) : ''}\u0000`);
+  }
+  for (const id of keys.storyIds) {
+    const row: any = db.selectRow(handle, 'SELECT data FROM stories WHERE project = ? AND id = ?', [keys.slug, id]);
+    hash.update(`story\u0000${id}\u0000${row ? String(row.data) : ''}\u0000`);
+  }
+  const project: any = db.selectRow(handle, 'SELECT data FROM projects WHERE slug = ?', [keys.slug]);
+  hash.update(`project\u0000${project ? String(project.data) : ''}\u0000`);
+  return hash.digest('hex');
+}
+
+// Compare-and-set half two: the repository facts a dispatch RECORDS, stamped without spawning
+// anything. HEAD and the ref it names cover commits, checkouts and branch moves; packed-refs and
+// FETCH_HEAD cover ref packing and fetches; the root's identity covers a checkout that moved or
+// was replaced. Between them they cover every Git value the stored row cites -- base commit,
+// integration target, and whether the branch sits ahead of its upstream.
+//
+// Two things are deliberately absent, and both have to be, for opposite reasons.
+//
+// The `.git` directory mtime and the index are absent because the plan's own reads move them:
+// `git status` takes `index.lock` to refresh the stat cache, and that bumps the directory mtime on
+// every single dispatch (measured, not assumed). Stamping either makes every plan look stale,
+// retry, and then refuse -- a self-inflicted outage rather than a safety check. A stamp that the
+// work it guards invalidates is worse than no stamp at all.
+//
+// Working-tree file CONTENT is absent because reading it is the expensive thing being moved out of
+// the lock, so a content recheck would restore the cost this change exists to remove. It is also
+// not a guarantee being given up: the dirty baseline `git status` reports is a point-in-time sample
+// that the write transaction never froze, because a database lock cannot freeze a filesystem. An
+// edit landing a microsecond after `git status` returned was already outside the baseline, inside
+// the transaction, before this change. So this stamp narrows a pre-existing window; it does not
+// reopen a closed one.
+function dispatchRepositoryStamp(projectPath?: any) {
+  const root = String(projectPath || '').trim();
+  if (!root) return 'no-project-path';
+  const parts: string[] = [];
+  const stampStat = (label: string, target: string) => {
+    try {
+      const stat: any = fs.lstatSync(target, { bigint: true });
+      parts.push(`${label}=${stat.mtimeNs}:${stat.size}:${stat.ino}`);
+    } catch (error: any) {
+      parts.push(`${label}=${error?.code || 'unreadable'}`);
+    }
+  };
+  const readSmall = (label: string, target: string) => {
+    let value: string;
+    try {
+      value = fs.readFileSync(target, 'utf8').trim();
+    } catch (error: any) {
+      value = `<${error?.code || 'unreadable'}>`;
+    }
+    parts.push(`${label}=${value}`);
+    return value;
+  };
+  // Identity, not mtime: a build writing into the checkout must not read as the repository moving.
+  try {
+    const stat: any = fs.lstatSync(root, { bigint: true });
+    parts.push(`root=${stat.ino}:${stat.dev}:${stat.mode}`);
+  } catch (error: any) {
+    parts.push(`root=${error?.code || 'unreadable'}`);
+  }
+  // `.git` is a directory in the main checkout and a gitdir pointer file in a linked worktree.
+  const dotGit = path.join(root, '.git');
+  let gitDir = dotGit;
+  try {
+    if (fs.lstatSync(dotGit).isFile()) {
+      const pointer = /^gitdir:\s*(.+)$/m.exec(fs.readFileSync(dotGit, 'utf8'))?.[1]?.trim();
+      if (pointer) gitDir = path.resolve(root, pointer);
+    }
+  } catch (error: any) {
+    parts.push(`gitdir=${error?.code || 'absent'}`);
+  }
+  const head = readSmall('head', path.join(gitDir, 'HEAD'));
+  const symbolic = /^ref:\s*(.+)$/.exec(head)?.[1]?.trim();
+  // A ref name comes off disk, so refuse to follow one that climbs out of the Git directory.
+  if (symbolic && !symbolic.split('/').includes('..')) {
+    readSmall('ref', path.join(gitDir, symbolic));
+  }
+  // Stat rather than read: these two run to thousands of lines in a large repository, and only a
+  // fetch or a repack writes them, so size and mtime carry the whole signal.
+  stampStat('packedrefs', path.join(gitDir, 'packed-refs'));
+  stampStat('fetchhead', path.join(gitDir, 'FETCH_HEAD'));
+  return parts.join('\u0000');
+}
+
+// Names the stamped facts that moved, so a refusal reports what changed and not merely that
+// something did. Labels only: the values are mtimes and object ids nobody reads in a message.
+function stampDifference(before: string, after: string) {
+  const stampLabel = (part: string) => part.slice(0, part.indexOf('='));
+  const beforeParts = new Map(before.split('\u0000').map((part) => [stampLabel(part), part]));
+  const changed: string[] = [];
+  for (const part of after.split('\u0000')) {
+    if (beforeParts.get(stampLabel(part)) !== part) changed.push(stampLabel(part));
+  }
+  return changed.length ? changed.join(', ') : 'nothing identifiable';
+}
+
+// Only a filesystem-snapshot project pays for a whole-tree digest, and only it needs the window:
+// a Git project's dispatch baseline is a commit id that costs one `rev-parse`. Measuring costs
+// exactly what the walk costs, so opening a window for anything else would be pure overhead.
+function withPrecomputedProjectSnapshot<T>(slug: any, projectPath: any, operation: () => T): T {
+  const root = String(projectPath || '').trim();
+  if (!root || readMeta(slug)?.sourceRevisionAdapter !== FILESYSTEM_SNAPSHOT_SOURCE) return operation();
+  return withPrecomputedFilesystemSnapshot(root, operation);
+}
+
 function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
   opts = opts || {};
   if (!projectRoutingEnabled(slug)) throw new Error(routingDisabledMessage(idOrRef));
@@ -1329,7 +1507,15 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
   // this transport concept.
   assertDispatchTransport(opts.transport, { allowUnverifiedTransport: !!opts.allowUnverifiedTransport });
   const pythonIoEncoding = projectPath ? ensurePythonIoEncoding(projectPath) : { written: false };
-  return withTicketLock(slug, found.id, () => {
+  // Everything from here to the returned `commit` is the plan. It reads the board, spawns Git and,
+  // for a filesystem-snapshot project, measures the project tree, all without holding the write
+  // lock, and it mutates nothing outside its own clone of the ticket so a discarded plan leaves no
+  // trace. Replanning is why the prior token file is removed in `commit` and not here: a plan that
+  // is thrown away must not have deleted the token the live attempt is still using.
+  // Set by the plan and cleaned up by the loop, because a plan the locked section rejects must not
+  // leave its staged token on disk.
+  let stagedToken: { publish: () => string; discard: () => void } | null = null;
+  const planDispatch = () => {
     const t = getTicket(slug, found.id);
     if (!t) throw new Error(`prepare dispatch: no ticket "${idOrRef}".`);
     const current = dispatchState(t);
@@ -1395,13 +1581,17 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
         const route = current.route || { model: t.model, effort: t.effort };
         current.launchName = dispatchLaunchName(t.ref, t.title, resolveExec(route.model, route.effort), route.effort, current.launchSeq);
       }
-      putTicket(slug, t);
       return {
-        ok: true,
-        ticket: t,
-        token: t.dispatchNonce,
-        reused: true,
-        recovery: current.recovery,
+        commit: () => {
+          putTicket(slug, t);
+          return {
+            ok: true,
+            ticket: t,
+            token: t.dispatchNonce,
+            reused: true,
+            recovery: current.recovery,
+          };
+        },
       };
     }
     if (current && current.recovery && !current.terminalAt && !currentRoute) {
@@ -1490,9 +1680,6 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
     const runtimeRefusal = sharedTree ? sharedTreeRuntimeRefusal(t, projectPath, opts.runtimeCwd) : null;
     if (runtimeRefusal) throw new Error(runtimeRefusal);
     t.dispatchNonce = mintDispatchToken();
-    if (priorTokenFile) {
-      try { fs.unlinkSync(priorTokenFile); } catch (error: any) { if (error?.code !== 'ENOENT') throw error; }
-    }
     const category = getCategory(ticketCategory(t), { project: slug });
     const artifactRoot = sharedTree && effectiveFiles.length === 1 && sharedTreeArtifactRequested(t)
       ? categoryArtifactRoot(category, effectiveFiles[0])
@@ -1566,102 +1753,160 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
     delete t.storyContractDrift;
     const verificationRequirement = preparedVerificationRequirement(t, String(readMeta(slug)?.path || ''));
     const evidenceDirectory = ticketEvidenceDirectory(slug, t.ref, projectPath);
+    // Out of the lock because an empty directory is neither a token nor a dispatch row: one left
+    // behind by a plan that was replanned or refused is inert, and the next attempt reuses it.
     fs.mkdirSync(evidenceDirectory, { recursive: true, mode: 0o700 });
     const baseCommit = reviewTargetState?.candidate.source === 'git'
       ? reviewTargetState.candidate.value
       : integrationTargetState
         ? integrationTargetCommit(readMeta(slug)?.path || '', integrationTargetState)
         : commitScope.headCommit(readMeta(slug)?.path || '');
-    const dispatchBaseline = dispatchBaselineForProject(slug, t, now, baseCommit, nonRepoOutput);
-    t.dispatch = {
-      lifecycleAttempt: prepareAttempt(
-        dispatchBaseline,
-        Object.freeze({ actor: dispatchPreparationAttribution(opts), operation: 'prepare', sessionId: opts.sessionId ? String(opts.sessionId) : null }),
-        preparedPluginInstall && preparedPluginIdentity
-          ? Object.freeze({ pluginInstall: preparedPluginInstall, identity: preparedPluginIdentity })
-          : undefined,
-        verificationRequirement,
-      ),
-      verificationRequirement,
-      evidenceDirectory,
-      sessionId: opts.sessionId ? String(opts.sessionId) : null,
-      preparedBy: dispatchPreparationAttribution(opts),
-      ...(preparedPluginInstall && preparedPluginIdentity ? { preparedCompatibility: { pluginInstall: preparedPluginInstall, identity: preparedPluginIdentity } } : {}),
-      sharedTree,
-      ...(worktreeWarning ? { worktreeWarning } : {}),
-      ...(pythonIoEncoding.written ? { pythonIoEncoding } : {}),
-      ...(opts.dispatchSkew ? { dispatchSkew: opts.dispatchSkew } : {}),
-      declaredFiles,
-      ...(!sharedTree && releasedContinuation?.continuation ? {
-        continuation: releasedContinuation.continuation,
-        worktree: releasedContinuation.continuation.sourceWorktree,
-        worktreeGitDirectory: releasedContinuation.continuation.lease.boundGitDirectory,
-        worktreeCommonGitDirectory: releasedContinuation.continuation.lease.boundCommonGitDirectory,
-        worktreeCheckoutInstance: releasedContinuation.continuation.lease.boundCheckoutInstance,
-        worktreeObservedRevision: releasedContinuation.continuation.lease.boundRevision,
-        worktreeBindingSource: 'continuation',
-      } : {}),
-      ...(releasedContinuation?.fallback ? { continuationFallback: releasedContinuation.fallback } : {}),
-      ...(sharedTree && releasedContinuation?.continuation
-        ? { continuationFallback: continuationFallback('continuation_checkpoint_requires_isolated_worktree', releasedContinuation.continuation.sourceWorktree) }
-        : {}),
-      // Record the integration target commit so an isolated executor can bring
-      // its harness-created worktree forward before changing it.
-      baseCommit,
-      ...(reviewTargetState ? { reviewTarget: t.reviewTarget } : {}),
-      ...(integrationTargetState ? { integrationTarget: integrationTargetState } : {}),
-      ...(localAheadWarning ? { localAheadWarning } : {}),
-      readonly,
-      ...(noDeclaredFileScope ? {
-        unscopedOverride: {
-          at: now,
-          source: opts.source || opts.transport || 'store',
-        },
-      } : {}),
-      ...(nonRepoOutput ? { nonRepoOutput: true } : {}),
-      artifactMode,
-      artifactRoot,
-      artifactScope,
-      ...(artifactMode ? { artifactDirtyBaseline } : {}),
-      ...(dirtyBaselineCapture?.warning ? { dirtyBaselineWarning: dirtyBaselineCapture.warning } : {}),
-      ...(workingTreeDelivery ? { workingTreeDelivery: true, workingTreeDirtyBaseline } : {}),
-      ...(sharedTree ? { dirtyBaseline: artifactDirtyBaseline || dirtyBaselineCapture?.baseline || null } : {}),
-      tokenPrefix: dispatchTokenPrefix(t.dispatchNonce),
-      tokenFile: newDispatchTokenFile(),
-      executor: t.dispatchExecutor,
-      description: spawnDescription(t, preparedExec),
-      launchSeq,
-      launchName: dispatchLaunchName(t.ref, t.title, preparedExec, t.effort, launchSeq),
-      route: dispatchRouteState(t.model, t.effort, preparedExec),
-      ...(repeatFailure ? {
-        repeatFailureOverride: {
-          at: now,
-          source: opts.source || opts.transport || 'store',
-          priorAttempts: recentNoCommitAttempts(current).length,
-        },
-      } : {}),
-      ...(unboundAttemptsSkipped ? { unboundAttemptsSkipped: true } : {}),
-      ...(fallbackReason ? { fallbackReason } : {}),
-      storyContract: contract,
-      storyLogRevision,
-      ...(contractDrift ? { storyContractDrift: Object.assign({}, contractDrift, { rebasedAt: now }) } : {}),
-      preparedAt: now,
-      launchedAt: null,
-      boundAt: null,
-      claimedAt: null,
-      terminalAt: null,
-      outcome: 'prepared',
-      ...(attempts.length ? { attempts } : {}),
-      ...(supersededTokens.length ? { supersededTokens: supersededTokens.slice(-8) } : {}),
-      ...(recovery ? { recovery } : {}),
+    // The lock covers exactly what follows. `dispatchBaselineForProject` is inside it because for a
+    // filesystem-snapshot project it PERSISTS the snapshot it measures, and that row has to commit
+    // with the dispatch row that cites it; the measurement itself already happened in the window
+    // this plan runs under, so the call is a map lookup here rather than a walk of the tree.
+    //
+    // Staged last, so no refusal above this point can leave a staging file behind.
+    const plannedTokenFile = newDispatchTokenFile();
+    // The commit closes over its OWN plan's handle, so a replanned attempt can never publish the
+    // token a discarded attempt staged. The shared variable is for cleanup alone.
+    const planStagedToken = stageDispatchToken(plannedTokenFile, t.dispatchNonce);
+    stagedToken = planStagedToken;
+    return {
+      commit: () => {
+        const dispatchBaseline = dispatchBaselineForProject(slug, t, now, baseCommit, nonRepoOutput);
+        t.dispatch = {
+          lifecycleAttempt: prepareAttempt(
+            dispatchBaseline,
+            Object.freeze({ actor: dispatchPreparationAttribution(opts), operation: 'prepare', sessionId: opts.sessionId ? String(opts.sessionId) : null }),
+            preparedPluginInstall && preparedPluginIdentity
+              ? Object.freeze({ pluginInstall: preparedPluginInstall, identity: preparedPluginIdentity })
+              : undefined,
+            verificationRequirement,
+          ),
+          verificationRequirement,
+          evidenceDirectory,
+          sessionId: opts.sessionId ? String(opts.sessionId) : null,
+          preparedBy: dispatchPreparationAttribution(opts),
+          ...(preparedPluginInstall && preparedPluginIdentity ? { preparedCompatibility: { pluginInstall: preparedPluginInstall, identity: preparedPluginIdentity } } : {}),
+          sharedTree,
+          ...(worktreeWarning ? { worktreeWarning } : {}),
+          ...(pythonIoEncoding.written ? { pythonIoEncoding } : {}),
+          ...(opts.dispatchSkew ? { dispatchSkew: opts.dispatchSkew } : {}),
+          declaredFiles,
+          ...(!sharedTree && releasedContinuation?.continuation ? {
+            continuation: releasedContinuation.continuation,
+            worktree: releasedContinuation.continuation.sourceWorktree,
+            worktreeGitDirectory: releasedContinuation.continuation.lease.boundGitDirectory,
+            worktreeCommonGitDirectory: releasedContinuation.continuation.lease.boundCommonGitDirectory,
+            worktreeCheckoutInstance: releasedContinuation.continuation.lease.boundCheckoutInstance,
+            worktreeObservedRevision: releasedContinuation.continuation.lease.boundRevision,
+            worktreeBindingSource: 'continuation',
+          } : {}),
+          ...(releasedContinuation?.fallback ? { continuationFallback: releasedContinuation.fallback } : {}),
+          ...(sharedTree && releasedContinuation?.continuation
+            ? { continuationFallback: continuationFallback('continuation_checkpoint_requires_isolated_worktree', releasedContinuation.continuation.sourceWorktree) }
+            : {}),
+          // Record the integration target commit so an isolated executor can bring
+          // its harness-created worktree forward before changing it.
+          baseCommit,
+          ...(reviewTargetState ? { reviewTarget: t.reviewTarget } : {}),
+          ...(integrationTargetState ? { integrationTarget: integrationTargetState } : {}),
+          ...(localAheadWarning ? { localAheadWarning } : {}),
+          readonly,
+          ...(noDeclaredFileScope ? {
+            unscopedOverride: {
+              at: now,
+              source: opts.source || opts.transport || 'store',
+            },
+          } : {}),
+          ...(nonRepoOutput ? { nonRepoOutput: true } : {}),
+          artifactMode,
+          artifactRoot,
+          artifactScope,
+          ...(artifactMode ? { artifactDirtyBaseline } : {}),
+          ...(dirtyBaselineCapture?.warning ? { dirtyBaselineWarning: dirtyBaselineCapture.warning } : {}),
+          ...(workingTreeDelivery ? { workingTreeDelivery: true, workingTreeDirtyBaseline } : {}),
+          ...(sharedTree ? { dirtyBaseline: artifactDirtyBaseline || dirtyBaselineCapture?.baseline || null } : {}),
+          tokenPrefix: dispatchTokenPrefix(t.dispatchNonce),
+          tokenFile: plannedTokenFile,
+          executor: t.dispatchExecutor,
+          description: spawnDescription(t, preparedExec),
+          launchSeq,
+          launchName: dispatchLaunchName(t.ref, t.title, preparedExec, t.effort, launchSeq),
+          route: dispatchRouteState(t.model, t.effort, preparedExec),
+          ...(repeatFailure ? {
+            repeatFailureOverride: {
+              at: now,
+              source: opts.source || opts.transport || 'store',
+              priorAttempts: recentNoCommitAttempts(current).length,
+            },
+          } : {}),
+          ...(unboundAttemptsSkipped ? { unboundAttemptsSkipped: true } : {}),
+          ...(fallbackReason ? { fallbackReason } : {}),
+          storyContract: contract,
+          storyLogRevision,
+          ...(contractDrift ? { storyContractDrift: Object.assign({}, contractDrift, { rebasedAt: now }) } : {}),
+          preparedAt: now,
+          launchedAt: null,
+          boundAt: null,
+          claimedAt: null,
+          terminalAt: null,
+          outcome: 'prepared',
+          ...(attempts.length ? { attempts } : {}),
+          ...(supersededTokens.length ? { supersededTokens: supersededTokens.slice(-8) } : {}),
+          ...(recovery ? { recovery } : {}),
+        };
+        t.lifecycleAttempt = t.dispatch.lifecycleAttempt;
+        // Token, evidence directory and ticket row still commit together, so there is no window where a
+        // token outlives the dispatch row that authorizes it or a stored row names a token nobody wrote.
+        if (priorTokenFile) {
+          try { fs.unlinkSync(priorTokenFile); } catch (error: any) { if (error?.code !== 'ENOENT') throw error; }
+        }
+        planStagedToken.publish();
+        stampDispatchEvent(t, 'dispatch', now);
+        putTicket(slug, t);
+        const warnings = [localAheadWarning?.message, dirtyBaselineCapture?.warning].filter(Boolean);
+        return { ok: true, ticket: t, token: t.dispatchNonce, recovery, ...(warnings.length ? { warnings } : {}) };
+      },
     };
-    t.lifecycleAttempt = t.dispatch.lifecycleAttempt;
-    writeDispatchTokenFile(t);
-    stampDispatchEvent(t, 'dispatch', now);
-    putTicket(slug, t);
-    const warnings = [localAheadWarning?.message, dirtyBaselineCapture?.warning].filter(Boolean);
-    return { ok: true, ticket: t, token: t.dispatchNonce, recovery, ...(warnings.length ? { warnings } : {}) };
-  });
+  };
+  for (let attempt = 1; ; attempt += 1) {
+    // Sampled before the plan reads anything, so a change anywhere between the plan's first read
+    // and the store is caught, not only one that lands after the expensive work finished. Both the
+    // keys and the stamps are taken again per attempt, so a replan addresses current rows.
+    const planKeys = dispatchPlanKeys(slug, getTicket(slug, found.id) || found);
+    const boardStamp = dispatchPlanBoardStamp(planKeys);
+    const repositoryStamp = dispatchRepositoryStamp(projectPath);
+    let staleReason: string | null = null;
+    stagedToken = null;
+    const committed = withPrecomputedProjectSnapshot(slug, projectPath, () => {
+      const planned = planDispatch();
+      // Unconditional, and safe after a publish because the rename already moved the file away.
+      // It also covers the lock itself refusing, where the commit never runs at all.
+      try {
+        return withTicketLock(slug, found.id, () => {
+          const boardNow = dispatchPlanBoardStamp(planKeys);
+          if (boardNow !== boardStamp) {
+            staleReason = 'the board rows it read were rewritten';
+            return STALE_DISPATCH_PLAN;
+          }
+          const repositoryNow = dispatchRepositoryStamp(projectPath);
+          if (repositoryNow !== repositoryStamp) {
+            staleReason = `the repository moved (${stampDifference(repositoryStamp, repositoryNow)})`;
+            return STALE_DISPATCH_PLAN;
+          }
+          return planned.commit();
+        });
+      } finally {
+        stagedToken?.discard();
+      }
+    });
+    if (committed !== STALE_DISPATCH_PLAN) return committed;
+    if (attempt >= DISPATCH_PLAN_MAX_ATTEMPTS) {
+      throw new Error(`prepare dispatch: ${found.ref} was planned ${DISPATCH_PLAN_MAX_ATTEMPTS} times and each plan went stale before it could be stored, the last because ${staleReason}. Nothing was written. Let the concurrent work settle, then dispatch again.`);
+    }
+  }
 }
 
 function readDispatchBriefing(slug?: any, idOrRef?: any, token?: any, tokenFile?: any) {
