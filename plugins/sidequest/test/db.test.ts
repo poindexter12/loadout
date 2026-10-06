@@ -469,6 +469,7 @@ test('requiring db.js emits no SQLite ExperimentalWarning', () => {
 const lockTraceApi = require('../lib/lock-trace.js') as {
   LOCK_TRACE_ENV: string;
   LOCK_TRACE_FILENAME: string;
+  UNATTRIBUTED_CALLER: string;
   lockTraceEnabled(): boolean;
   lockTracePath(): string | null;
   defaultLockTracePath(env?: NodeJS.ProcessEnv): string;
@@ -784,4 +785,190 @@ test('the lock-trace report summarises waits, holds, and blocking per operation 
   const missing = spawnSync(process.execPath, [cliPath, path.join(path.dirname(traceFile), 'absent.jsonl')], { encoding: 'utf8', timeout: 30_000 });
   assert.strictEqual(missing.status, 2, 'a missing trace is a usage problem, not a crash');
   assert.match(missing.stderr, /SIDEQUEST_LOCK_TRACE/, 'the failure should say how to collect a trace');
+});
+
+// --- Caller attribution (SQ-269) ------------------------------------------------------------------
+//
+// SQ-262 recorded only the generic operation label retryWhenSqliteBusy already carried, so every board
+// write collapsed into 'writing transaction': the trace could say how long the board waited but not who
+// held the lock. SQ-264 has to choose between shrinking the critical section and splitting the file, and
+// that choice needs the second answer. These tests pin the three properties it rests on — a record
+// names the board function that owns the write rather than the seam, a statement nested inside a
+// transaction inherits that name instead of claiming the wait for itself, and the stack walk which
+// resolves the name does not happen at all while tracing is off.
+
+/** Stands in for a board operation: the outermost named frame that reaches the db seam. */
+function tracedBoardWrite(database: SidequestDatabase): void {
+  txn(database, () => {
+    putRow(database, 'globals', { key: 'attributed-a', data: { n: 1 } });
+    putRow(database, 'globals', { key: 'attributed-b', data: { n: 2 } });
+  });
+}
+
+/** A second, differently-named operation, so attribution is shown to vary with the caller. */
+function tracedBoardRead(database: SidequestDatabase): unknown {
+  return getRow(database, 'globals', 'attributed-a');
+}
+
+const callersOf = (records: readonly LockTraceRecord[], operation: string): string[] =>
+  records.filter((record) => record.operation === operation).map((record) => record.caller);
+
+test('a traced wait names the caller that owns it, and nested statements inherit it (SQ-269)', () => {
+  const { db } = makeDb();
+  const traceFile = newTraceFile();
+  const previous = process.env[lockTraceApi.LOCK_TRACE_ENV];
+  let records: LockTraceRecord[];
+  // Deliberately NOT run through withLockTrace: that helper would put its own named frame outside
+  // tracedBoardWrite, and this test is about which frame gets picked. Here the only named frame on the
+  // stack above the seam is tracedBoardWrite itself, so the assertion is exact rather than approximate.
+  process.env[lockTraceApi.LOCK_TRACE_ENV] = traceFile;
+  lockTraceApi.resetLockTrace();
+  try {
+    tracedBoardWrite(db);
+    tracedBoardRead(db);
+    lockTraceApi.flushLockTrace();
+    records = recordedIn(traceFile);
+  } finally {
+    if (previous === undefined) delete process.env[lockTraceApi.LOCK_TRACE_ENV];
+    else process.env[lockTraceApi.LOCK_TRACE_ENV] = previous;
+    lockTraceApi.resetLockTrace();
+    db.close();
+  }
+
+  assert.deepStrictEqual(callersOf(records, 'writing transaction'), ['tracedBoardWrite', 'tracedBoardWrite'],
+    'the transaction wait and its hold must both name the function that owns the write');
+
+  // The point of the ticket: the two statements inside the transaction must report the function that
+  // holds the lock, not themselves and not the generic label. A naive per-call capture fails here.
+  const nested = waitsFor(records, 'writing globals');
+  assert.strictEqual(nested.length, 2);
+  for (const write of nested) {
+    assert.ok(write.depth >= 1, `expected a nested statement, got depth ${write.depth}`);
+    assert.strictEqual(write.caller, 'tracedBoardWrite',
+      'a statement inside the transaction must inherit the outermost frame, or attribution follows whichever inner statement was executing');
+  }
+
+  // Attribution varies with the caller, so it is reading the stack rather than reporting a constant.
+  assert.deepStrictEqual(callersOf(records, 'reading globals'), ['tracedBoardRead']);
+
+  // No record may fall back to the seam or to the operation label, which is what SQ-262 effectively had.
+  for (const record of records) {
+    assert.doesNotMatch(record.caller, /^(retryWhenSqliteBusy|withTransaction|txn|putRow|getRow)$/,
+      `${record.operation} was attributed to the seam itself: ${record.caller}`);
+    assert.notStrictEqual(record.caller, record.operation);
+    assert.notStrictEqual(record.caller, lockTraceApi.UNATTRIBUTED_CALLER);
+    // The chain is what lets a reader check the choice by eye, and it must skip the instrumentation.
+    assert.ok(record.callerStack.length > 0, 'every attributed record carries the frames it was resolved from');
+    assert.ok(record.callerStack.some((frame) => frame.includes('tracedBoardWrite') || frame.includes('tracedBoardRead')),
+      `the chosen frame must appear in the chain: ${record.callerStack.join(' <- ')}`);
+    for (const frame of record.callerStack) {
+      assert.doesNotMatch(frame, /\b(db|lock-trace)\.[cm]?[jt]s:/, `the chain should skip the seam, got ${frame}`);
+    }
+  }
+
+  // Requirement 5: without a per-caller breakdown the attribution is in the JSONL but unusable.
+  const summary = lockTraceApi.summarizeLockTrace(records);
+  const write = summary.byCaller.find((row) => row.key === 'tracedBoardWrite');
+  assert.ok(write, `no per-caller row: ${summary.byCaller.map((row) => row.key).join(', ')}`);
+  // Not an exact count: a transaction also drags in the schema-version checks around it, and pinning
+  // their number here would make this test fail on an unrelated change to how openDb validates schema.
+  assert.ok(write.waits >= 3, `the transaction and its two nested statements should all be attributed, got ${write.waits}`);
+  assert.ok(write.nested >= 2, 'nested waits stay separated per caller, so wait time is never summed');
+  assert.ok(write.waits > write.nested, 'a caller with only nested waits would mean the outermost frame lost its own record');
+  assert.strictEqual(write.holds, 1);
+  assert.ok(write.maxHoldMs >= 0 && write.p50WaitMs <= write.p95WaitMs && write.p95WaitMs <= write.maxWaitMs,
+    `per-caller percentiles should be ordered, got ${write.p50WaitMs}/${write.p95WaitMs}/${write.maxWaitMs}`);
+  assert.ok(summary.byCaller.some((row) => row.key === 'tracedBoardRead'));
+
+  const report = lockTraceApi.formatLockTraceReport(summary, { file: traceFile });
+  for (const expected of ['caller', 'tracedBoardWrite', 'tracedBoardRead', 'nested']) {
+    assert.ok(report.includes(expected), `the per-caller breakdown is how SQ-264 reads this, but the report omits ${expected}:\n${report}`);
+  }
+});
+
+test('attribution resolves a real board function through the store layer (SQ-269)', () => {
+  // The in-process test above pins the mechanism; this one pins the rule that matters in production.
+  // Attribution picks the outermost frame inside the store layer, so a wait taken deep under
+  // releaseTicket reports releaseTicket — one of the callers SQ-264 was handed to rank. Run in a child
+  // process because it drives the real store against a real board file, and must not touch the
+  // sandboxed home the rest of this file shares.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-attr-store-'));
+  const traceFile = path.join(home, 'trace.jsonl');
+  const script = `
+    const store = require(${JSON.stringify(path.join(pluginRoot, 'lib', 'store.js'))});
+    const project = store.ensureProject(${JSON.stringify(path.join(home, 'board'))}, 'Attribution');
+    const ticket = store.createTicket(project.slug, { title: 'attribution probe' });
+    store.updateTicket(project.slug, ticket.ref, { status: 'doing' });
+    store.releaseTicket(project.slug, ticket.ref, 'nobody', { note: 'probe' });
+    require(${JSON.stringify(path.join(pluginRoot, 'lib', 'lock-trace.js'))}).flushLockTrace();
+  `;
+  const child = spawnSync(process.execPath, ['-e', script], {
+    encoding: 'utf8',
+    timeout: 120_000,
+    env: { ...process.env, SIDEQUEST_HOME: home, [lockTraceApi.LOCK_TRACE_ENV]: traceFile },
+  });
+  assert.strictEqual(child.status, 0, child.stderr);
+
+  const records = lockTraceApi.readLockTraceRecords(traceFile).records;
+  const released = records.filter((record) => record.caller === 'releaseTicket');
+  assert.ok(released.some((record) => record.kind === 'wait'), `no wait attributed to releaseTicket: ${[...new Set(records.map((record) => record.caller))].join(', ')}`);
+  assert.ok(released.some((record) => record.kind === 'hold'), 'releaseTicket takes the write lock, so one of its records must be a hold');
+  assert.ok(records.some((record) => record.caller === 'createTicket'), 'a second real caller must be distinguishable from the first');
+
+  // Every record must name a board function. A record attributed to db.js would mean the walk stopped
+  // inside the instrumentation, which is the failure SQ-269 exists to prevent.
+  for (const record of records) {
+    assert.doesNotMatch(record.caller, /\.[cm]?[jt]s:\d+$/, `${record.operation} fell back to a file location: ${record.caller}`);
+    assert.notStrictEqual(record.caller, lockTraceApi.UNATTRIBUTED_CALLER);
+  }
+});
+
+test('resolving a caller costs nothing while tracing is off (SQ-269)', () => {
+  const { db } = makeDb();
+  const traceFile = newTraceFile();
+  const previousEnv = process.env[lockTraceApi.LOCK_TRACE_ENV];
+  const realCapture = Error.captureStackTrace;
+  const previousPrepare = Error.prepareStackTrace;
+  const previousLimit = Error.stackTraceLimit;
+  // Count only the attribution walk's own captures, identified by the frame it elides from. Unrelated
+  // captures (node internals building an error) would otherwise make the count meaningless.
+  let walks = 0;
+  Error.captureStackTrace = function countedCaptureStackTrace(target: object, constructorOpt?: Function): void {
+    if (constructorOpt && constructorOpt.name === 'captureCallSites') walks += 1;
+    realCapture.call(Error, target, constructorOpt);
+  };
+  try {
+    delete process.env[lockTraceApi.LOCK_TRACE_ENV];
+    lockTraceApi.resetLockTrace();
+    tracedBoardWrite(db);
+    tracedBoardRead(db);
+    assert.strictEqual(walks, 0, 'db.ts is on the hot path of every hook in every session: tracing off must mean no stack walk at all');
+
+    // Switched on, the same work does walk — so the zero above is the gate working, not a broken spy.
+    process.env[lockTraceApi.LOCK_TRACE_ENV] = traceFile;
+    lockTraceApi.resetLockTrace();
+    tracedBoardWrite(db);
+    lockTraceApi.flushLockTrace();
+    assert.ok(walks > 0, 'with tracing on, attribution must actually resolve a caller');
+
+    // One walk per OUTERMOST retry frame, never one per statement. This is the assertion that proves
+    // inheritance rather than merely observing it: the nested statements share their parent's stack, so
+    // a per-call capture would still report the right name while paying for every statement.
+    const waits = recordedIn(traceFile).filter((record): record is LockWaitRecord => record.kind === 'wait');
+    const outermost = waits.filter((wait) => wait.depth === 0);
+    assert.ok(waits.length > outermost.length, 'this work must contain nested waits, or the test proves nothing');
+    assert.strictEqual(walks, outermost.length,
+      `expected one walk per outermost frame (${outermost.length} of ${waits.length} waits), got ${walks}`);
+  } finally {
+    Error.captureStackTrace = realCapture;
+    if (previousEnv === undefined) delete process.env[lockTraceApi.LOCK_TRACE_ENV];
+    else process.env[lockTraceApi.LOCK_TRACE_ENV] = previousEnv;
+    lockTraceApi.resetLockTrace();
+    db.close();
+  }
+
+  // The walk borrows two Error globals and must hand them back, or it would change how every other
+  // stack in the process is formatted.
+  assert.strictEqual(Error.prepareStackTrace, previousPrepare, 'the walk must restore Error.prepareStackTrace');
+  assert.strictEqual(Error.stackTraceLimit, previousLimit, 'the walk must restore Error.stackTraceLimit');
 });
