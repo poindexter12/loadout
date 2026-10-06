@@ -9,6 +9,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 
 import type { ChangeCount, SidequestDatabase, TableName } from '../src/lib/db.js';
+import type { LockHoldRecord, LockTraceRecord, LockTraceSummary, LockWaitRecord } from '../src/lib/lock-trace.js';
 
 interface TicketData {
   id: string;
@@ -455,4 +456,332 @@ test('requiring db.js emits no SQLite ExperimentalWarning', () => {
   assert.strictEqual(result.status, 0, result.stderr);
   assert.doesNotMatch(result.stdout, /ExperimentalWarning/);
   assert.doesNotMatch(result.stderr, /ExperimentalWarning/);
+});
+
+// --- Write-lock contention tracing (SQ-262) ------------------------------------------------------
+//
+// The board DB is one file shared by every project and SQLite's write lock is file-granular, so US-4
+// has to decide whether to split it per project. These tests pin the measurement that decision rests
+// on: that it is off by default, that it separates waiting from holding, that nesting is visible rather
+// than double-counted, and above all that a spent hook lock budget is recorded durably before the
+// exhaustion hook (which may process.exit()) gets control.
+
+const lockTraceApi = require('../lib/lock-trace.js') as {
+  LOCK_TRACE_ENV: string;
+  LOCK_TRACE_FILENAME: string;
+  lockTraceEnabled(): boolean;
+  lockTracePath(): string | null;
+  defaultLockTracePath(env?: NodeJS.ProcessEnv): string;
+  flushLockTrace(): void;
+  resetLockTrace(): void;
+  readLockTraceRecords(file: string): { records: LockTraceRecord[]; skipped: number };
+  summarizeLockTrace(records: readonly LockTraceRecord[]): LockTraceSummary;
+  formatLockTraceReport(summary: LockTraceSummary, options: { file: string; skipped?: number }): string;
+};
+
+function newTraceFile(): string {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sq-lock-trace-')), 'trace.jsonl');
+}
+
+/**
+ * Everything recorded so far, treating an absent file as "nothing was recorded". Tracing only creates
+ * the file when it has something to append, so a test that asserts on records has to be able to fail on
+ * the missing record rather than crash on the missing file. readLockTraceRecords itself keeps throwing,
+ * which is what lets the report CLI tell a user there is no trace to read.
+ */
+function recordedIn(traceFile: string): LockTraceRecord[] {
+  return fs.existsSync(traceFile) ? lockTraceApi.readLockTraceRecords(traceFile).records : [];
+}
+
+/** Run `work` with tracing pointed at `traceFile`, then hand back everything it recorded. */
+function withLockTrace(traceFile: string, work: () => void): LockTraceRecord[] {
+  process.env[lockTraceApi.LOCK_TRACE_ENV] = traceFile;
+  lockTraceApi.resetLockTrace();
+  try {
+    work();
+    lockTraceApi.flushLockTrace();
+    return recordedIn(traceFile);
+  } finally {
+    delete process.env[lockTraceApi.LOCK_TRACE_ENV];
+    lockTraceApi.resetLockTrace();
+  }
+}
+
+const waitsFor = (records: readonly LockTraceRecord[], operation: string): LockWaitRecord[] =>
+  records.filter((record): record is LockWaitRecord => record.kind === 'wait' && record.operation === operation);
+const holdsIn = (records: readonly LockTraceRecord[]): LockHoldRecord[] =>
+  records.filter((record): record is LockHoldRecord => record.kind === 'hold');
+
+test('lock tracing is off unless its env var says otherwise, and writes nothing when off (SQ-262)', () => {
+  const { db, homeRoot } = makeDb();
+  const previous = process.env[lockTraceApi.LOCK_TRACE_ENV];
+  // _sidequest-test-home.ts pins SIDEQUEST_HOME to a sandbox so no test can reach the real board.
+  // This test overrides it to check where tracing resolves its default path, so put it back exactly.
+  const previousHome = process.env.SIDEQUEST_HOME;
+  delete process.env[lockTraceApi.LOCK_TRACE_ENV];
+  lockTraceApi.resetLockTrace();
+  try {
+    assert.strictEqual(lockTraceApi.lockTraceEnabled(), false, 'the gate must default to off: db.ts is on the hot path of every hook in every session');
+    assert.strictEqual(lockTraceApi.lockTracePath(), null);
+
+    // A full read/write cycle under the default configuration must leave no trace artefact anywhere
+    // tracing would choose to write: not beside the board database, and not at the default path.
+    txn(db, () => putRow(db, 'globals', { key: 'untraced', data: { n: 1 } }));
+    getRow(db, 'globals', 'untraced');
+    lockTraceApi.flushLockTrace();
+
+    assert.strictEqual(fs.existsSync(path.join(homeRoot, lockTraceApi.LOCK_TRACE_FILENAME)), false, 'tracing wrote beside the board database while disabled');
+    assert.strictEqual(fs.existsSync(lockTraceApi.defaultLockTracePath({ ...process.env, SIDEQUEST_HOME: homeRoot })), false);
+
+    // A falsey word is still off, so SIDEQUEST_LOCK_TRACE=0 turns an enabled shell back off.
+    process.env[lockTraceApi.LOCK_TRACE_ENV] = '0';
+    lockTraceApi.resetLockTrace();
+    assert.strictEqual(lockTraceApi.lockTraceEnabled(), false);
+
+    // Switched on without a path, records go to a sibling of sidequest.db, never into it: a measurement
+    // written through the lock being measured would both perturb and deadlock the thing under test.
+    process.env.SIDEQUEST_HOME = homeRoot;
+    process.env[lockTraceApi.LOCK_TRACE_ENV] = '1';
+    lockTraceApi.resetLockTrace();
+    assert.strictEqual(lockTraceApi.lockTracePath(), path.join(homeRoot, lockTraceApi.LOCK_TRACE_FILENAME));
+    assert.notStrictEqual(lockTraceApi.lockTracePath(), path.join(homeRoot, 'sidequest.db'));
+  } finally {
+    if (previousHome === undefined) delete process.env.SIDEQUEST_HOME;
+    else process.env.SIDEQUEST_HOME = previousHome;
+    if (previous === undefined) delete process.env[lockTraceApi.LOCK_TRACE_ENV];
+    else process.env[lockTraceApi.LOCK_TRACE_ENV] = previous;
+    lockTraceApi.resetLockTrace();
+    db.close();
+  }
+});
+
+test('a traced transaction records its wait, its hold, and its nested statements separately (SQ-262)', () => {
+  const { db } = makeDb();
+  const traceFile = newTraceFile();
+  let records: LockTraceRecord[];
+  try {
+    records = withLockTrace(traceFile, () => {
+      txn(db, () => {
+        putRow(db, 'globals', { key: 'traced-a', data: { n: 1 } });
+        putRow(db, 'globals', { key: 'traced-b', data: { n: 2 } });
+      });
+      getRow(db, 'globals', 'traced-a');
+    });
+  } finally {
+    db.close();
+  }
+
+  const transactions = waitsFor(records, 'writing transaction');
+  assert.strictEqual(transactions.length, 1, 'the transaction should produce exactly one wait record');
+  const transaction = transactions[0]!;
+  assert.strictEqual(transaction.depth, 0, 'the transaction is the outermost retry frame');
+  assert.strictEqual(transaction.attempts, 1);
+  assert.strictEqual(transaction.blocked, false, 'an uncontended write must be distinguishable from one that waited');
+  assert.strictEqual(transaction.outcome, 'clear');
+  assert.ok(Number.isFinite(transaction.waitMs) && transaction.waitMs >= 0, `waitMs should be a monotonic elapsed measurement, got ${transaction.waitMs}`);
+
+  // Attribution: the pid and the policy label are what tell a starved hook apart from a server write.
+  for (const record of records) {
+    assert.strictEqual(record.pid, process.pid);
+    assert.strictEqual(record.policy, 'server', 'this process runs under the default server lock policy');
+    assert.match(String(record.project), /\S/, 'every record carries the project slug in scope');
+  }
+
+  // Nesting is explicit, so a reader never adds a child's wait into its parent's.
+  const nested = waitsFor(records, 'writing globals');
+  assert.strictEqual(nested.length, 2, 'both writes inside the transaction should be recorded');
+  for (const write of nested) assert.ok(write.depth >= 1, `a statement inside the transaction must be marked nested, got depth ${write.depth}`);
+  assert.ok(waitsFor(records, 'reading globals').some((read) => read.depth === 0), 'the read outside the transaction is its own outermost frame');
+
+  // One hold per BEGIN IMMEDIATE, measured from after that statement to after COMMIT, so it can never
+  // exceed the wait that encloses it.
+  const holds = holdsIn(records).filter((hold) => hold.operation === 'writing transaction');
+  assert.strictEqual(holds.length, 1);
+  const hold = holds[0]!;
+  assert.strictEqual(hold.outcome, 'commit');
+  assert.strictEqual(hold.depth, 0, 'the hold is attributed to the frame that owns BEGIN IMMEDIATE, not to its children');
+  assert.ok(hold.holdMs >= 0 && hold.holdMs <= transaction.waitMs + 1, `hold ${hold.holdMs}ms should sit inside its wait ${transaction.waitMs}ms`);
+  assert.strictEqual(holdsIn(records).some((record) => record.operation === 'reading globals'), false, 'a read takes no write lock, so it has no hold');
+});
+
+test('a rolled-back transaction still records how long it held the write lock (SQ-262)', () => {
+  const { db } = makeDb();
+  const traceFile = newTraceFile();
+  let records: LockTraceRecord[];
+  try {
+    records = withLockTrace(traceFile, () => {
+      assert.throws(() => txn(db, () => {
+        putRow(db, 'globals', { key: 'rolled-back', data: { n: 1 } });
+        throw new Error('abandon this transaction');
+      }), /abandon this transaction/);
+    });
+  } finally {
+    db.close();
+  }
+
+  const holds = holdsIn(records);
+  assert.strictEqual(holds.length, 1);
+  assert.strictEqual(holds[0]!.outcome, 'rollback', 'the lock is held until ROLLBACK returns, so a failed transaction is still contention');
+  assert.ok(holds[0]!.holdMs >= 0);
+  // The failure was not a lock error, so the retry frame settled as failed rather than exhausted.
+  const transaction = waitsFor(records, 'writing transaction')[0];
+  assert.strictEqual(transaction?.outcome, 'failed');
+  assert.strictEqual(transaction?.blocked, false, 'an ordinary error is not lock contention');
+});
+
+test('a wait that retried past a busy error is distinguishable from one that never blocked (SQ-262)', () => {
+  const { db } = makeDb();
+  const traceFile = newTraceFile();
+  let records: LockTraceRecord[];
+  try {
+    records = withLockTrace(traceFile, () => {
+      txn(db, () => putRow(db, 'globals', { key: 'clear', data: { n: 1 } }));
+      let attempts = 0;
+      const outcome = txn(db, () => {
+        attempts += 1;
+        if (attempts === 1) throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+        putRow(db, 'globals', { key: 'retried', data: { n: 2 } });
+        return 'committed';
+      });
+      assert.strictEqual(outcome, 'committed');
+      assert.strictEqual(attempts, 2);
+    });
+  } finally {
+    db.close();
+  }
+
+  const transactions = waitsFor(records, 'writing transaction');
+  assert.strictEqual(transactions.length, 2);
+  const [clear, retried] = transactions as [LockWaitRecord, LockWaitRecord];
+
+  assert.strictEqual(clear.blocked, false);
+  assert.strictEqual(clear.attempts, 1);
+  assert.strictEqual(retried.blocked, true, 'a wait that saw SQLITE_BUSY must be flagged, which is the whole blocked tally US-4 reads');
+  assert.strictEqual(retried.attempts, 2);
+  assert.strictEqual(retried.outcome, 'clear', 'it recovered on the retry, so the wait succeeded despite blocking');
+
+  // The retry sleeps through busySleep's Atomics.wait, which blocks the thread synchronously. A wall
+  // clock could report that as anything; a monotonic clock reports at least the delay that elapsed.
+  assert.ok(retried.waitMs >= 45, `the 50ms busy backoff should show up in the measured wait, got ${retried.waitMs}ms`);
+  assert.ok(retried.waitMs > clear.waitMs, `a wait that blocked (${retried.waitMs}ms) must read longer than one that did not (${clear.waitMs}ms)`);
+
+  // Two BEGIN IMMEDIATEs were taken for the one retried frame: the rolled-back attempt and the commit.
+  const holds = holdsIn(records).filter((hold) => hold.operation === 'writing transaction');
+  assert.deepStrictEqual(holds.map((hold) => hold.outcome), ['commit', 'rollback', 'commit']);
+});
+
+test('a spent hook lock budget is traced, and reaches the file before the exhaustion hook runs (SQ-262)', async () => {
+  const { db, homeRoot } = makeDb();
+  // The connection pragma is what actually bounds one attempt; the policy bounds how many attempts.
+  db.exec('PRAGMA busy_timeout=50');
+  const childProcess = await holdWriteLock(homeRoot, 30_000);
+  const traceFile = newTraceFile();
+  const seenInsideHook: LockWaitRecord[] = [];
+  const exhaustedErrors: Error[] = [];
+
+  process.env[lockTraceApi.LOCK_TRACE_ENV] = traceFile;
+  lockTraceApi.resetLockTrace();
+  Reflect.set(globalThis, SQLITE_BUSY_POLICY_KEY, {
+    label: 'hook',
+    timeoutMs: 100,
+    attempts: 1,
+    onExhausted: (error: Error) => {
+      exhaustedErrors.push(error);
+      // A hook fails open from here by exiting the process, so anything not already on disk is lost.
+      for (const record of recordedIn(traceFile)) {
+        if (record.kind === 'wait' && record.outcome === 'exhausted') seenInsideHook.push(record);
+      }
+    },
+  });
+
+  try {
+    assert.throws(() => txn(db, () => putRow(db, 'globals', { key: 'starved', data: {} })), /stayed locked/);
+    assert.strictEqual(exhaustedErrors.length, 1, 'the budget should have been spent');
+
+    assert.strictEqual(seenInsideHook.length, 1, 'the exhausted wait must be durable before onExhausted gets control, because that hook may never return');
+    const exhausted = seenInsideHook[0]!;
+    assert.strictEqual(exhausted.operation, 'writing transaction');
+    assert.strictEqual(exhausted.policy, 'hook', 'the policy label is what separates a starved hook from a server write');
+    assert.strictEqual(exhausted.blocked, true);
+    assert.strictEqual(exhausted.attempts, 1);
+    assert.strictEqual(exhausted.depth, 0);
+    assert.strictEqual(exhausted.pid, process.pid);
+    assert.ok(exhausted.waitMs >= 40, `the wait should cover the 50ms busy timeout, got ${exhausted.waitMs}ms`);
+
+    // BEGIN IMMEDIATE never succeeded, so there is nothing to report as held.
+    assert.deepStrictEqual(holdsIn(recordedIn(traceFile)), []);
+  } finally {
+    Reflect.deleteProperty(globalThis, SQLITE_BUSY_POLICY_KEY);
+    delete process.env[lockTraceApi.LOCK_TRACE_ENV];
+    lockTraceApi.resetLockTrace();
+    childProcess.kill();
+    await waitForProcessExit(childProcess);
+    db.close();
+  }
+});
+
+test('the lock-trace report summarises waits, holds, and blocking per operation and policy (SQ-262)', () => {
+  const { db } = makeDb();
+  const traceFile = newTraceFile();
+  try {
+    withLockTrace(traceFile, () => {
+      txn(db, () => putRow(db, 'globals', { key: 'reported', data: { n: 1 } }));
+      let attempts = 0;
+      txn(db, () => {
+        attempts += 1;
+        if (attempts === 1) throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+        return 'ok';
+      });
+      getRow(db, 'globals', 'reported');
+    });
+  } finally {
+    db.close();
+  }
+
+  // A foreign line must be counted, not thrown: every board process on the machine appends here.
+  fs.appendFileSync(traceFile, 'not json at all\n');
+  const parsed = lockTraceApi.readLockTraceRecords(traceFile);
+  assert.strictEqual(parsed.skipped, 1);
+
+  const summary = lockTraceApi.summarizeLockTrace(parsed.records);
+  assert.strictEqual(summary.blocked, 1, 'exactly one wait saw SQLITE_BUSY');
+  assert.strictEqual(summary.exhausted, 0);
+  assert.ok(summary.nested > 0, 'the summary separates nested waits so wait time is never summed');
+  assert.ok(summary.holds >= 3, `three BEGIN IMMEDIATEs were taken, got ${summary.holds}`);
+  assert.ok(summary.maxHoldMs > 0);
+  assert.ok(summary.p50WaitMs <= summary.p95WaitMs && summary.p95WaitMs <= summary.maxWaitMs, `percentiles should be ordered, got ${summary.p50WaitMs}/${summary.p95WaitMs}/${summary.maxWaitMs}`);
+  assert.deepStrictEqual(summary.pids, [process.pid]);
+
+  const transaction = summary.byOperation.find((row) => row.key === 'writing transaction');
+  assert.ok(transaction, `no per-operation row for the transactions: ${summary.byOperation.map((row) => row.key).join(', ')}`);
+  assert.strictEqual(transaction.waits, 2);
+  assert.strictEqual(transaction.blocked, 1);
+  assert.strictEqual(transaction.rollbacks, 1);
+  assert.ok(transaction.maxWaitMs >= 45, 'the per-operation max must carry the real blocked wait');
+
+  assert.deepStrictEqual(summary.byPolicy.map((row) => row.key), ['server'], 'this run only used the server policy');
+  assert.strictEqual(summary.byPolicy[0]!.blocked, 1);
+
+  const report = lockTraceApi.formatLockTraceReport(summary, { file: traceFile, skipped: parsed.skipped });
+  for (const expected of ['writing transaction', 'blocked:', 'budget exhausted:', 'max hold ms', 'unparsed lines: 1', 'policy']) {
+    assert.ok(report.includes(expected), `the report is the only thing making the raw log usable, but it omits ${expected}:\n${report}`);
+  }
+
+  // The report has to be runnable, not just callable: this is how US-4 actually reads a collected log.
+  const cliPath = path.join(pluginRoot, 'lib', 'lock-trace.js');
+  const cli = spawnSync(process.execPath, [cliPath, traceFile], { encoding: 'utf8', timeout: 30_000 });
+  assert.strictEqual(cli.status, 0, cli.stderr);
+  assert.ok(cli.stdout.includes('writing transaction'), cli.stdout);
+  assert.ok(cli.stdout.includes('blocked: 1 wait hit SQLITE_BUSY at least once'), cli.stdout);
+
+  const json = spawnSync(process.execPath, [cliPath, traceFile, '--json'], { encoding: 'utf8', timeout: 30_000 });
+  assert.strictEqual(json.status, 0, json.stderr);
+  const decoded = JSON.parse(json.stdout) as LockTraceSummary & { file: string; skipped: number };
+  assert.strictEqual(decoded.blocked, 1);
+  assert.strictEqual(decoded.skipped, 1);
+  assert.ok(decoded.byOperation.some((row) => row.key === 'writing transaction'));
+
+  const missing = spawnSync(process.execPath, [cliPath, path.join(path.dirname(traceFile), 'absent.jsonl')], { encoding: 'utf8', timeout: 30_000 });
+  assert.strictEqual(missing.status, 2, 'a missing trace is a usage problem, not a crash');
+  assert.match(missing.stderr, /SIDEQUEST_LOCK_TRACE/, 'the failure should say how to collect a trace');
 });
