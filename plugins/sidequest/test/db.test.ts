@@ -483,6 +483,16 @@ function newTraceFile(): string {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sq-lock-trace-')), 'trace.jsonl');
 }
 
+/**
+ * Everything recorded so far, treating an absent file as "nothing was recorded". Tracing only creates
+ * the file when it has something to append, so a test that asserts on records has to be able to fail on
+ * the missing record rather than crash on the missing file. readLockTraceRecords itself keeps throwing,
+ * which is what lets the report CLI tell a user there is no trace to read.
+ */
+function recordedIn(traceFile: string): LockTraceRecord[] {
+  return fs.existsSync(traceFile) ? lockTraceApi.readLockTraceRecords(traceFile).records : [];
+}
+
 /** Run `work` with tracing pointed at `traceFile`, then hand back everything it recorded. */
 function withLockTrace(traceFile: string, work: () => void): LockTraceRecord[] {
   process.env[lockTraceApi.LOCK_TRACE_ENV] = traceFile;
@@ -490,7 +500,7 @@ function withLockTrace(traceFile: string, work: () => void): LockTraceRecord[] {
   try {
     work();
     lockTraceApi.flushLockTrace();
-    return lockTraceApi.readLockTraceRecords(traceFile).records;
+    return recordedIn(traceFile);
   } finally {
     delete process.env[lockTraceApi.LOCK_TRACE_ENV];
     lockTraceApi.resetLockTrace();
@@ -678,7 +688,7 @@ test('a spent hook lock budget is traced, and reaches the file before the exhaus
     onExhausted: (error: Error) => {
       exhaustedErrors.push(error);
       // A hook fails open from here by exiting the process, so anything not already on disk is lost.
-      for (const record of lockTraceApi.readLockTraceRecords(traceFile).records) {
+      for (const record of recordedIn(traceFile)) {
         if (record.kind === 'wait' && record.outcome === 'exhausted') seenInsideHook.push(record);
       }
     },
@@ -699,7 +709,7 @@ test('a spent hook lock budget is traced, and reaches the file before the exhaus
     assert.ok(exhausted.waitMs >= 40, `the wait should cover the 50ms busy timeout, got ${exhausted.waitMs}ms`);
 
     // BEGIN IMMEDIATE never succeeded, so there is nothing to report as held.
-    assert.deepStrictEqual(holdsIn(lockTraceApi.readLockTraceRecords(traceFile).records), []);
+    assert.deepStrictEqual(holdsIn(recordedIn(traceFile)), []);
   } finally {
     Reflect.deleteProperty(globalThis, SQLITE_BUSY_POLICY_KEY);
     delete process.env[lockTraceApi.LOCK_TRACE_ENV];
