@@ -57,8 +57,9 @@ recon. The executor starts where you left off, never cold. This removes orientat
 
 Before the first dispatch, give review-gated work adversarial acceptance criteria: name the exact
 bypass classes the reviewer must probe, not a generic "review it" request. Review checks the pinned
-contract and its done-oracle. Unrelated findings become separately prioritized tickets and block the
-active ship only when the contract or a proven regression requires it.
+contract and its done-oracle. Unrelated findings are reported to the user with their evidence; they
+become separately prioritized tickets only when the user wants them tracked, and block the active
+ship only when the contract or a proven regression requires it.
 
 After two independently rejected candidates in one defect chain, stop local patching. Re-plan, narrow
 the contract, or replace the authority or architecture before another candidate; involve the user when

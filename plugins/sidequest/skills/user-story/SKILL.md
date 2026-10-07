@@ -251,8 +251,11 @@ deferred), read the story log for what the wave learned, then promote each findi
 executor into that ticket's description, dependency contract, comment, or the story execution contract
 before dispatching it. The story log is orchestrator planning history, never executor orientation. Adjust
 the next wave's tickets after that promotion. That is legitimate precisely because those tickets already
-exist and the user could see them; it is the opposite of inventing the plan one ticket at a time. New
-discoveries become normal tickets, linked into the wave they belong to.
+exist and the user could see them; it is the opposite of inventing the plan one ticket at a time.
+
+A discovery the current feature needs becomes a normal ticket, linked into the wave it belongs to.
+One the feature does not need is reported to the user, not filed — filing converts your attention
+into their backlog, and they did not ask for that trade.
 
 A wave that straggles on one ticket while you sit idle is a sizing error, not a reason to poke it.
 Note it, and cut thinner slices next time.
@@ -277,8 +280,9 @@ How much review sits on top of that floor scales with the work:
 Give reviewers an adversarial mandate: try to break it, name the failing input or the broken consumer,
 and default to "not proven" when uncertain. A verdict of "looks good" with no evidence is not a review
 pass, and treating it as one is worse than not having run it. Review verifies the pinned contract and
-its oracle, never silently expands the active feature. Route unrelated concerns into separately
-prioritized tickets; they block this ship only when the contract or a proven regression requires it.
+its oracle, never silently expands the active feature. Unrelated concerns are reported to the user with their
+evidence; file them as separately prioritized tickets only when the user wants them tracked, and
+they block this ship only when the contract or a proven regression requires it.
 Findings that do block ship become fix tickets, and their verdicts land as comments starting
 `reviewed-by:`.
 
@@ -325,6 +329,9 @@ Same beats, different owner for each, and every one of them sized:
 - **Reading the whole subsystem before filing anything.** Recon has a stopping condition: the contract
   is writable.
 - **A backlog that grows one ticket at a time.** Nobody can steer a plan they cannot see.
+- **Converting every finding into a ticket.** Investigating well produces more true observations
+  than the feature needs. Filing each one feels like diligence and lands as a backlog the user never
+  chose, burying the work they did ask for. A true finding is evidence, not a commitment.
 - **Polling.** Pulses, worktree peeks, or a shell loop waiting on an executor. Reports arrive on their
   own.
 - **Re-reviewing the wave's diffs yourself.** That is what the verify command and the review panel are
