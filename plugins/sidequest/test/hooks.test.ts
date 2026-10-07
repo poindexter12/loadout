@@ -3235,11 +3235,13 @@ test('session-start: loads user-story for routed work beyond small tasks', () =>
     });
     const inlineCarveOut = 'Quick edits at a named or known location, one-line fixes, operational requests, and direct questions stay inline and do not load user-story';
     const userStoryDefault = 'For work beyond a small task, load the user-story skill before ticketing or dispatching';
-    const dispatchDefault = 'A usable Sidequest project route is standing authorization to file tickets and dispatch returned executors without offering it or asking for a further user request';
+    const dispatchDefault = 'A usable Sidequest project route authorizes the ROUTE, not the MANDATE';
     assert.match(context, new RegExp(inlineCarveOut, 'i'));
     assert.match(context, new RegExp(userStoryDefault, 'i'));
     assert.match(context, new RegExp(dispatchDefault, 'i'));
-    assert.match(context, /multi-file change, at an unknown location that needs discovery, or an investigation/i);
+    assert.match(context, /multi-file, at an unknown location that needs discovery, or an investigation/i);
+    assert.match(context, /name who asked and what breaks if nobody does it/i);
+    assert.match(context, /if you only noticed it, report it and file nothing/i);
     assert.ok(context.indexOf(inlineCarveOut) < context.indexOf(userStoryDefault));
     assert.ok(context.indexOf(userStoryDefault) < context.indexOf(dispatchDefault));
     assert.doesNotMatch(context, /can ask to use it/i);
