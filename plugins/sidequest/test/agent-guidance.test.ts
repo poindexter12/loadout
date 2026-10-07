@@ -120,7 +120,8 @@ test('published guidance pins surgical planning before substantial dispatch', ()
   assert.match(userStory, /Design-reopen evidence/);
   assert.match(userStory, /"do your thing", "use your judgment", or "whatever you think"/);
   assert.match(userStory, /use two\s+or three bounded proposals only when the approach is genuinely contested/);
-  assert.match(ticketAuthoring, /Unrelated findings become separately prioritized tickets/);
+  assert.match(ticketAuthoring, /Unrelated findings are reported to the user with their\s+evidence/);
+  assert.match(ticketAuthoring, /become separately prioritized tickets only when the user wants them tracked/);
   assert.match(ticketAuthoring, /After two independently rejected candidates in one defect chain/);
 });
 

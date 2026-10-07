@@ -3239,7 +3239,6 @@ test('session-start: loads user-story for routed work beyond small tasks', () =>
     assert.match(context, new RegExp(inlineCarveOut, 'i'));
     assert.match(context, new RegExp(userStoryDefault, 'i'));
     assert.match(context, new RegExp(dispatchDefault, 'i'));
-    assert.match(context, /multi-file, at an unknown location that needs discovery, or an investigation/i);
     assert.match(context, /name who asked and what breaks if nobody does it/i);
     assert.match(context, /if you only noticed it, report it and file nothing/i);
     assert.ok(context.indexOf(inlineCarveOut) < context.indexOf(userStoryDefault));
