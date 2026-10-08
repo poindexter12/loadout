@@ -8,6 +8,15 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v4.6.0 (2026-10-07)
+
+### sidequest 5.5.0 → 5.5.1
+
+#### Fixes
+
+- Prevent stopping sibling executor dispatches (SQ-283)
+  Executors now explicitly avoid TaskStop calls on other tickets' executor and dispatch ids.
+
 ## v4.5.0 (2026-10-07)
 
 ### model-gateway 0.52.3 → 0.52.4
