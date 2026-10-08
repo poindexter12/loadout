@@ -16,6 +16,17 @@
       "include": []
     },
     {
+      "path": "rules/executor-lifetime.md",
+      "hash": "4713627526a9b11b2f8729fb72bb410f845e2acee01314b6fec0deb9e2dd3723",
+      "description": "A dispatched executor is not yours to stop",
+      "globs": [],
+      "dirs": [],
+      "prompt": [],
+      "priority": 5,
+      "enabled": true,
+      "include": []
+    },
+    {
       "path": "rules/manifest-versioning.md",
       "hash": "0ca7e52afab3a83ae514b8daac92a24e1c80bf61870e012ec840f206c75dd486",
       "description": "Release-owned manifest versions",
