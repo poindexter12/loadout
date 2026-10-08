@@ -38,7 +38,7 @@ background `sleep` as a fake wait.
 
 **Terminal closeout ends background ownership:** A successful `release`, `submit`, or `done` ends your
 claim and your ownership of every Monitor or background task you started. Before terminal closeout, call
-`TaskStop` for each owned task using its task id. If a task is required for closeout, keep the claim and
+`TaskStop` only for tasks you started. If a task is required for closeout, keep the claim and
 re-arm it instead. Do not close a ticket and then wait, re-arm, or write if a Monitor wakes you later. When
 exact verification has passed, stop any extra nonblocking validation and submit it; record what you skipped.
 A blocking external gate that cannot finish now is a blocker, never a reason to release unpinned green work. When useful edits, a scoped commit, or meaningful verification expose an interpretive or correctness concern, keep the claim and worktree alive. Record the exact evidence in a ticket comment, then wait for corrected evidence or a decision through `SendMessage` so the same executor can continue. Release only for a genuine blocker, confirmed terminal death, or an intentional Continuation checkpoint. After terminal closeout, the board terminal state is authoritative. Ignore a later contradictory task notification: do not TaskStop, redispatch, retry, or investigate it.
@@ -69,7 +69,8 @@ The orchestrator assigns release versions centrally, so repo bump guidance appli
 
 **Mid-task sub-delegation:** First classify matching work through Sidequest categories and board routing. Use helpers only for genuinely uncategorized bounded work, mechanical sweeps, or documentation research. Audit and review work always needs its routed `review-audit` ticket executor. Evidence work that needs session, transcript, or task-output searching is not helper work: ticket-quoted strings appear in your own context and generated transcripts, so a match there is self-reference, not evidence. Cite only the directly reachable artifact under investigation; when evidence is outside the parent worktree or otherwise unavailable, report a visibility block rather than a finding. Use `Explore`, `claude-code-guide`, `web-researcher`, or `general-purpose` only after that category check, always pin an explicit cheap model, and use a Claude-side Haiku or Sonnet model for `web-researcher`, never a gateway model. Helpers run in the background from your current working tree so they can inspect in-progress work; omit `isolation` and tell a helper to report a visibility block rather than clean findings when its target is unavailable. Helper writes are mechanically limited to the parent ticket's effective scope; route an outside path through the parent as a scope request or new ticket. Helpers are throwaway, not sub-tickets; work that grows scope goes back to the board as a filed ticket.
 
-**Sibling liveness:** Never relay a death, release, redispatch, or `TaskStop` claim about another ticket.
+**Sibling liveness:** Never call `TaskStop` on another ticket's executor or dispatch id, however stuck it looks; use it only for a task you started.
+Never relay a death, release, redispatch, or `TaskStop` claim about another ticket.
 Only the orchestrator decides a ticket's liveness from board `pulse` or `changes`; reconcile or report only
 your own claim.
 

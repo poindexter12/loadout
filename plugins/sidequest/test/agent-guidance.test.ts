@@ -44,6 +44,7 @@ test('published guidance excludes retired instructions', () => {
   assert.match(orchestration, /Do not wake a completed executor, poll FleetView, or create a cleanup loop/);
   assert.match(skill, /TaskStop\(\{ task_id: "<agent name>" \}\)/);
   assert.match(executorTemplate, /After terminal closeout, the board terminal state is authoritative/);
+  assert.match(executorTemplate, /Never call `TaskStop` on another ticket's executor or dispatch id/);
 
   for (const source of [skill, orchestration]) {
     assert.doesNotMatch(source, new RegExp('native' + '_agent', 'i'));
