@@ -2,21 +2,20 @@
 /**
  * live-rules - SessionStart hook
  *
- * Injects the project's always-on rules once, at session start, as a fallback
- * delivery path alongside the UserPromptSubmit hook.
+ * Re-grounds the project's always-on rules after a summarising compaction, and
+ * records what native already loaded at every other kind of session start.
  *
- * Why this exists: Claude Code snapshots a session's hook registrations at
- * session start. If live-rules is installed or updated mid-session, the new
- * UserPromptSubmit wiring does not take effect until the session restarts, but
- * nothing tells you that: the hook just never fires, silently, for the rest of
- * the session. This hook cannot fix that same-session gap (it also only fires
- * at session start), but it does two useful things for every session going
- * forward:
- *   - guarantees always-on rules reach the model at least once, even if
- *     UserPromptSubmit's wiring is somehow stale or broken that session, and
- *   - gives a concrete, checkable signal: if this block does not reappear on
- *     your very next prompt, the per-prompt hook is not wired. See the README
- *     "Restart after enabling or updating" section.
+ * SQ-293, native first: native Claude Code reads .claude/rules/ itself when a
+ * context begins, so at startup | resume | clear the rules are in context
+ * before this hook runs and emitting them would be saying everything twice.
+ * The hook instead records their hashes in the session ledger, which is what
+ * lets the prompt and edit hooks notice later that a rule file CHANGED.
+ *
+ * A summarising compaction is the one SessionStart where that is not true: the
+ * transcript is replaced by a summary, nothing re-reads the rule files, and the
+ * rules native loaded at startup are gone. Re-grounding there is the README's
+ * promise that always-on rules survive compaction. (A *replacement* compaction
+ * keeps history verbatim, so it gets a short note instead - see SQ-197 below.)
  *
  * Design constraints (shared with the rest of live-rules):
  *   - No external dependencies (Node stdlib only).
@@ -68,10 +67,26 @@ function isReplacementCompaction(sessionId) {
   }
 }
 
+/**
+ * Is native Claude Code loading the rule files itself on this SessionStart?
+ *
+ * startup | resume | clear all begin a context that native populates from
+ * .claude/rules/ directly, so every global rule is already in it and live-rules
+ * must not say it again (SQ-293). A missing source is treated the same way:
+ * staying silent risks nothing, since native is the one carrier that is always
+ * present.
+ *
+ * compact is the exception. A summarising compaction replaces the transcript
+ * with a summary, and nothing re-reads the rule files at that boundary, so the
+ * rules native loaded at startup are simply gone. live-rules re-grounding them
+ * is the only thing that puts them back, which is the README's promise that
+ * always-on rules survive compaction.
+ */
+function nativeLoadsRules(source) {
+  return String(source || 'startup') !== 'compact';
+}
+
 function main() {
-  // Deliberately does not filter on data.source (startup | resume | clear |
-  // compact): always-on rules must re-inject after compaction too, or the
-  // README's promise that they survive compaction would silently break.
   const data = lib.readStdin();
   const projectDir = lib.getProjectDir(data);
 
@@ -97,6 +112,16 @@ function main() {
   const cwd = (data && typeof data.cwd === 'string' && data.cwd) || projectDir;
   const cwdRel = projectRelative(projectDir, cwd);
   const selected = lib.attachIncludes(lib.selectForPrompt(ruleSet.rules, { promptText: '', cwdRel }), projectDir);
+
+  // SQ-293, native first: at a real session start the rules are already in
+  // context because native read the same files. Record their hashes so a later
+  // edit can be detected as a change, and say nothing.
+  if (nativeLoadsRules(data.source)) {
+    ledger.record(projectDir, data.session_id, selected);
+    if (ruleSet.notice) lib.emit('SessionStart', ruleSet.notice);
+    process.exit(0);
+  }
+
   const changed = ledger.changed(projectDir, data.session_id, selected, true);
   if (!changed.length) {
     if (ruleSet.notice) lib.emit('SessionStart', ruleSet.notice);

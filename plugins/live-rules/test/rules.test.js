@@ -339,15 +339,22 @@ test('selectAlways: returns only always-on rules', () => {
  * ------------------------------------------------------------------ */
 
 test('rules report .claude/rules as their source', () => {
+  // Each hook is made to speak the way SQ-293 leaves it able to: the prompt
+  // hook on a keyword match, which native can never carry, and the edit hook on
+  // a rule that changed after native loaded it.
   const dir = project();
-  writeRule(dir);
-  const output = runHook(promptHook, dir, path.join(dir, 'state'), { session_id: 'prompt', prompt: 'hello' });
+  writeRule(dir, { description: 'Deploys', paths: [rules.NEVER_MATCH_PATH], prompt: ['deploy'] });
+  const output = runHook(promptHook, dir, path.join(dir, 'state'), { session_id: 'prompt', prompt: 'deploy' });
   assert.match(output, /Source: \.claude\/rules/);
 
   const editDir = project();
+  const editState = path.join(editDir, 'state');
+  const editData = { session_id: 'edit', tool_input: { file_path: 'src/a.js' } };
   writeRule(editDir, { description: 'Edit', paths: ['src/**/*.js'] });
-  const editOutput = runHook(editHook, editDir, path.join(editDir, 'state'), { session_id: 'edit', tool_input: { file_path: 'src/a.js' } });
-  assert.match(editOutput, /Source: \.claude\/rules/);
+  runHook(editHook, editDir, editState, editData);
+  fs.writeFileSync(path.join(editDir, '.claude', 'rules', 'rule.md'),
+    '---\ndescription: Edit\npaths: ["src/**/*.js"]\n---\nProject rule, revised.\n');
+  assert.match(runHook(editHook, editDir, editState, editData), /Source: \.claude\/rules/);
 });
 
 test('loadRules: only *.md is read, so a .md.off rename disables a rule', () => {

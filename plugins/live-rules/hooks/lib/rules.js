@@ -31,6 +31,7 @@
  *   paths: ["**\/*.tsx", "**\/*.jsx"]          # scope (native's key) -> PreToolUse
  *   prompt: ["deploy", "/migrat(e|ion)/i"]     # keyword -> UserPromptSubmit
  *   priority: 10                               # higher injects first (default 0)
+ *   reground: true                             # opt in to a periodic re-say
  *   ---
  *   - Prefer function components.
  *   - No inline styles; use CSS modules.
@@ -44,6 +45,19 @@
  *
  * Scope is inferred from which fields are present. A rule that declares neither
  * paths nor prompt is "always-on" and injected on every prompt.
+ *
+ * NATIVE FIRST (SQ-293). Native Claude Code reads the same files, so every rule
+ * it loads is already in context and live-rules must not say it a second time.
+ * live-rules therefore contributes timing only:
+ *   - a rule native loads (no `paths:`, or a `paths:` rule whose file is being
+ *     touched right now) is recorded in the session ledger and NOT emitted;
+ *     it is emitted later only when its content hash has changed since.
+ *   - a keyword (`prompt:`) rule is the one kind native cannot deliver on
+ *     demand, so it is emitted on a keyword match. Native would load a
+ *     `paths:`-less file globally, so a keyword-only rule carries the
+ *     NEVER_MATCH_PATH sentinel below as its `paths:` value.
+ *   - `reground: true` opts a rule into a periodic re-say; see session-ledger.js
+ *     for the cadence. Default off.
  */
 
 const crypto = require('crypto');
@@ -293,6 +307,37 @@ function isDirectoryStylePattern(pattern) {
 }
 
 /**
+ * The never-match `paths:` sentinel (SQ-293).
+ *
+ * A keyword (`prompt:`) rule has a problem native cannot express: native scopes
+ * a rule by `paths:` only, so a rule file with no `paths:` is loaded globally,
+ * at every session start, which is exactly what a keyword rule must not do. The
+ * fix is to give such a rule a `paths:` value that is real enough for native to
+ * honour as a scope but can never match anything:
+ *
+ *   - it is reserved. `.live-rules-never-match/` is a directory name this plugin
+ *     owns and never creates, so no file in a repo is ever inside it. Native can
+ *     only load a path rule when a tool touches a matching file, so the rule
+ *     stays out of native's hands.
+ *   - it is recognised. The two matchers below short-circuit on this exact
+ *     string, so live-rules will not match it either, even if a path that looks
+ *     like it somehow exists.
+ *
+ * The rejected alternative was a second store: keep keyword rules in a separate
+ * directory native does not read. It needs no sentinel, but it splits the rule
+ * set in two, so `add-rule`, the migration, the audit skill and the user all
+ * have to know which half a rule lives in, and a rule that gains or loses a
+ * keyword has to move file. One reserved string in frontmatter is the smaller
+ * surface, and it keeps every rule in one directory the user can read.
+ */
+const NEVER_MATCH_PATH = '.live-rules-never-match/**';
+
+/** Is this `paths:` entry the never-match sentinel? */
+function isNeverMatchPath(pattern) {
+  return String(pattern).replace(/\\/g, '/').trim() === NEVER_MATCH_PATH;
+}
+
+/**
  * Does a `paths:` entry apply to this repo-relative file?
  *
  * Three ways, in order: the glob matches the whole path; a slash-free pattern
@@ -301,6 +346,7 @@ function isDirectoryStylePattern(pattern) {
  * file beneath it.
  */
 function pathPatternMatchesFile(pattern, relPath) {
+  if (isNeverMatchPath(pattern)) return false;
   if (ruleGlobMatches(pattern, relPath)) return true;
   if (isDirectoryStylePattern(pattern)) {
     const base = normalizeDir(pattern);
@@ -312,6 +358,7 @@ function pathPatternMatchesFile(pattern, relPath) {
 
 /** Does a directory-style `paths:` entry contain the session's cwd? */
 function pathPatternMatchesDir(pattern, cwdRel) {
+  if (isNeverMatchPath(pattern)) return false;
   if (!isDirectoryStylePattern(pattern)) return false;
   return pathInDir(cwdRel, normalizeDir(pattern));
 }
@@ -431,6 +478,9 @@ function buildRule(id, data, body) {
     prompts,
     includes,
     priority,
+    // Opt in to a periodic re-say in a long session. Default off: a rule native
+    // has already loaded is in context, and saying it again costs tokens.
+    reground: data.reground === true || String(data.reground).trim() === 'true',
     body: String(body || '').trim(),
   };
 }
@@ -699,7 +749,7 @@ function loadRuleSet(projectDir) {
 
 function renderRuleFile(data, body) {
   const lines = [];
-  for (const key of ['description', 'paths', 'prompt', 'priority', 'include']) {
+  for (const key of ['description', 'paths', 'prompt', 'priority', 'reground', 'include']) {
     if (data[key] == null || data[key] === '') continue;
     if (Array.isArray(data[key]) && data[key].length === 0) continue;
     const value = Array.isArray(data[key]) ? JSON.stringify(data[key]) : String(data[key]);
@@ -716,6 +766,10 @@ function ruleFileFrontmatter(rule) {
     paths: rule.paths,
     prompt: rule.prompts,
     priority: rule.priority,
+    // '' rather than false so renderRuleFile omits the key entirely: the
+    // default is off, and writing `reground: false` into every rule file would
+    // be noise in a file a human reads.
+    reground: rule.reground ? true : '',
     include: rule.includes,
   };
 }
@@ -777,16 +831,38 @@ function truncLabel(s) {
   return s.length > 28 ? s.slice(0, 27) + '...' : s;
 }
 
+/*
+ * Every selection carries `carrier`: HOW native Claude Code gets this same rule
+ * into context, which is what lets the session ledger stay quiet instead of
+ * saying a rule twice (see session-ledger.js reconcile()).
+ *
+ *   'session'  no `paths:`, so native reads the file when the context begins.
+ *              If such a rule is NOT in the ledger after a session start was
+ *              recorded, it did not exist then, so native cannot have it and
+ *              live-rules must say it.
+ *   'touch'    a `paths:` rule. Native loads it the moment a tool touches a
+ *              matching file, so on first sight native is acquiring it right
+ *              now and live-rules must not pre-empt it: the contract's "never
+ *              inject on first match".
+ *   'none'     a keyword match. Native scopes by `paths:` only and these rules
+ *              carry NEVER_MATCH_PATH, so native never loads them at all and
+ *              live-rules is their only delivery path.
+ */
+const CARRIER_SESSION = 'session';
+const CARRIER_TOUCH = 'touch';
+const CARRIER_NONE = 'none';
+
 // UserPromptSubmit: always-on rules, prompt-keyword matches, and directory-style
 // path rules whose directory contains the session cwd.
 function selectForPrompt(rules, ctx) {
   const out = [];
   for (const rule of rules) {
     if (isAlways(rule)) {
-      out.push({ rule, label: 'always' });
+      out.push({ rule, label: 'always', carrier: CARRIER_SESSION });
       continue;
     }
     let label = null;
+    let carrier = CARRIER_NONE;
     for (const p of rule.prompts) {
       if (promptMatches(p, ctx.promptText)) {
         label = 'prompt:' + truncLabel(p);
@@ -797,11 +873,12 @@ function selectForPrompt(rules, ctx) {
       for (const p of rule.paths) {
         if (pathPatternMatchesDir(p, ctx.cwdRel)) {
           label = 'cwd:' + normalizeDir(p);
+          carrier = CARRIER_TOUCH;
           break;
         }
       }
     }
-    if (label) out.push({ rule, label });
+    if (label) out.push({ rule, label, carrier });
   }
   return sortSelected(out);
 }
@@ -819,7 +896,7 @@ function selectForEdit(rules, relPath) {
         break;
       }
     }
-    if (label) out.push({ rule, label });
+    if (label) out.push({ rule, label, carrier: CARRIER_TOUCH });
   }
   return sortSelected(out);
 }
@@ -831,7 +908,7 @@ function selectAlways(rules) {
   const out = [];
   for (const rule of rules) {
     if (!isAlways(rule)) continue;
-    out.push({ rule, label: 'always' });
+    out.push({ rule, label: 'always', carrier: CARRIER_SESSION });
   }
   return sortSelected(out);
 }
@@ -932,6 +1009,11 @@ module.exports = {
   RULES_DIR,
   LEGACY_ATOMIC_DIR,
   LEGACY_MONOLITH_FILE,
+  NEVER_MATCH_PATH,
+  isNeverMatchPath,
+  CARRIER_SESSION,
+  CARRIER_TOUCH,
+  CARRIER_NONE,
   readStdin,
   getProjectDir,
   globToRegExp,
