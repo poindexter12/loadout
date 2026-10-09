@@ -8,6 +8,79 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v4.7.0 (2026-10-09)
+
+### live-rules 2.12.0 → 3.0.0
+
+#### Breaking changes
+
+- live-rules reads native .claude/rules/ one-rule-per-file storage (SQ-292)
+  Rules now live in `.claude/rules/*.md`, the same directory Claude Code reads natively, and the
+  `.claude/live-rules/` store with its generated `manifest.json` is gone along with
+  `sync-atomic-rules.js`. Scope key is `paths:`; `globs:`/`dirs:` still work for one release with a
+  stderr deprecation. `enabled: false` no longer disables a rule, renaming it to `.md.off` does.
+  Content hashes are computed at hook time, so there is nothing left to keep in sync and no writer
+  lock. Run `node scripts/migrate-rules.js --project <dir>` to move an existing store; it rewrites
+  the scope key, splits a legacy `.claude/live-rules.md` monolith into per-rule files, and is
+  idempotent.
+- live-rules defers to native rule loading and only re-grounds on change (SQ-293)
+  Claude Code loads `.claude/rules/*.md` by itself, so live-rules no longer says those rules a second
+  time. A rule with no `paths:` and no `prompt:` is now recorded at SessionStart and emitted nothing
+  at all; a `paths:` rule stays silent on the first matching edit, because that touch is what makes
+  native load it. Either one is re-grounded only when its content hash changes after that, so editing
+  a rule still takes effect mid-session with no restart. A summarising compaction still re-grounds in
+  full, since nothing re-reads the rule files at that boundary.
+
+  Keyword rules are the exception: native has no notion of a prompt trigger, and a file with no
+  `paths:` would be loaded as a global rule, so a `prompt:` rule declares the reserved never-match
+  scope `paths: [".live-rules-never-match/**"]`. live-rules recognises that exact value, never
+  matches it against a real path, and keeps delivering the rule on a keyword match.
+
+  New `reground: true` frontmatter opts a rule into a periodic re-say for long sessions, once every 20
+  user prompts. It is off by default.
+
+#### Features
+
+- live-rules skills, README and docs describe the native .claude/rules store and three-way rule routing (SQ-295)
+  `add-rule` and `manage-rules` now describe the native store they actually write to. Rules are one
+  Markdown file in `.claude/rules/`, scoped with `paths:`; the retired `.claude/live-rules/` store, its
+  generated manifest and the sync command are gone from the skill text, so an agent is no longer told
+  to write to a path that does not exist or run a script that was deleted.
+
+  `add-rule` gained the routing question. A rule goes to `.claude/rules/<name>.md` when it is true of
+  the repo for anyone, `.claude/rules/<name>.local.md` when it is true of the repo for this user only,
+  and `~/.claude/rules/<name>.md` when it is true of the user everywhere. Response style, voice, tone,
+  punctuation and cross-project workflow habits are named as always belonging in that last one and
+  never in a repo. A keyword-only rule is written with the reserved never-match scope
+  `paths: [".live-rules-never-match/**"]`, quoted from the value the hooks export rather than retyped.
+
+  `manage-rules` reads `.claude/rules/` directly and has no manifest to recover. Disabling is a rename
+  to `<name>.md.off`, enabling renames it back, and promoting a personal rule is a rename from
+  `<name>.local.md`. Its audit flags the one keyword mistake that misfires silently: a `prompt:` rule
+  with no sentinel, which Claude Code loads globally instead.
+
+  A new `test/skill-prose.test.js` pins all of it, including the sentinel against `rules.NEVER_MATCH_PATH`
+  so the prose cannot drift from the shipped matcher.
+
+### quartermaster 0.8.6 → 0.9.0
+
+#### Features
+
+- quartermaster seeds project rules into .claude/rules and routes personal rules out of the repo (SQ-289)
+  Project-derived starter rules go to `.claude/rules/<name>.md`, the directory Claude Code reads natively; cross-project correction themes (response format, voice, tone, punctuation, workflow habits) go to `~/.claude/rules/<name>.md` and never into the repository. The template catalog drops the retired `.claude/live-rules/` store with its manifest, hashes and atomic-rename steps, and uses the native `paths:` scope key instead of `globs:`. Resupply asks the same three-way destination question (repo for anyone, repo for me as `<name>.local.md`, me everywhere) whether or not live-rules is installed, because who a rule is true for decides where it goes and no plugin changes that.
+
+#### Fixes
+
+- Use native self-improvement rule sentinel (SQ-301)
+  Quartermaster now recognizes the native `.claude/rules/self-improvement.md` sentinel when deciding whether to show its capability charter.
+
+### sidequest 5.5.1 → 5.6.0
+
+#### Features
+
+- Discover external models from any ANTHROPIC_BASE_URL (SQ-298)
+  External model discovery no longer requires Model Gateway to be installed. Sidequest now reads `GET /v1/models` from the effective `ANTHROPIC_BASE_URL`, the same list Claude Code reads for its own model picker, so a relay you run yourself contributes routable models on its own. The Model Gateway catalog is still read and still wins on naming for any model both sources publish, so existing routes keep their slugs and are never silently repointed. Readiness now states which source answered, separating a gateway reporting its own backend as down from an endpoint that never answered. First-party Claude models and the virtual dispatch id are never registered as external models.
+
 ## v4.6.0 (2026-10-07)
 
 ### sidequest 5.5.0 → 5.5.1

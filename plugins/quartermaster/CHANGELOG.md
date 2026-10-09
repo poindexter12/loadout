@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.0 (2026-10-09)
+
+Released in v4.7.0, up from 0.8.6.
+
+### Features
+
+- quartermaster seeds project rules into .claude/rules and routes personal rules out of the repo (SQ-289)
+  Project-derived starter rules go to `.claude/rules/<name>.md`, the directory Claude Code reads natively; cross-project correction themes (response format, voice, tone, punctuation, workflow habits) go to `~/.claude/rules/<name>.md` and never into the repository. The template catalog drops the retired `.claude/live-rules/` store with its manifest, hashes and atomic-rename steps, and uses the native `paths:` scope key instead of `globs:`. Resupply asks the same three-way destination question (repo for anyone, repo for me as `<name>.local.md`, me everywhere) whether or not live-rules is installed, because who a rule is true for decides where it goes and no plugin changes that.
+
+### Fixes
+
+- Use native self-improvement rule sentinel (SQ-301)
+  Quartermaster now recognizes the native `.claude/rules/self-improvement.md` sentinel when deciding whether to show its capability charter.
+
 ## 0.8.6 (2026-09-29)
 
 Released in v4.1.0, up from 0.8.5.
