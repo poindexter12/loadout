@@ -1,6 +1,7 @@
 ---
 description: Prose docs stay current with the code
-globs: ["plugins/*/**", "docs/src/content/docs/**"]
+paths: ["plugins/*/**","docs/src/content/docs/**"]
+priority: 0
 ---
 - A change to any skill, hook, CLI/MCP surface, setup flow, or config needs its affected prose page under `docs/src/content/docs/` updated in the same change, or a linked `docs-writing` ticket filed before the story closes.
 - Never hand-edit `docs/src/content/docs/reference/`; `docs/scripts/generate-reference.mjs` owns it. Fix the generator or the source manifest/skill instead.
