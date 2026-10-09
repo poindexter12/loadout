@@ -100,8 +100,9 @@ test('Quartermaster seed catalogs preserve Live Rules one-rule-per-file and re-g
   fs.rmSync(path.join(testFixture.project, '.claude'), { recursive: true, force: true });
   fs.mkdirSync(ruleDir, { recursive: true });
   fs.writeFileSync(rulePath, seed);
-  const start = runHook('live-rules', 'session-start-rules.js', testFixture, { source: 'startup' });
-  assertApprovalSplit(JSON.parse(start).hookSpecificOutput.additionalContext);
+  // Native loads a global rule at startup, so live-rules records its hash and says nothing (SQ-293).
+  // The approval split itself is asserted from the loaded rule set above.
+  assert.equal(runHook('live-rules', 'session-start-rules.js', testFixture, { source: 'startup' }), '');
   assert.equal(runHook('live-rules', 'inject-prompt-rules.js', testFixture, { prompt: 'continue' }), '');
   assert.equal(runHook('quartermaster', 'session-start-nudge.js', testFixture, { source: 'startup' }), '');
   // The hooks only ever read .claude/rules; nothing writes back to a rule file.
