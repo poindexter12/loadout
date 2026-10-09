@@ -5,18 +5,18 @@
  * On every user prompt, injects the project's "live" rules that apply right now:
  *   - always-on rules (no scope declared),
  *   - prompt-keyword rules whose pattern matches the submitted prompt,
- *   - directory rules whose directory contains the session's working dir.
+ *   - directory-style path rules whose directory contains the session cwd.
  *
  * It runs on UserPromptSubmit (not SessionStart) on purpose: a once-per-session
  * injection gets buried as the conversation grows. Re-injecting on every prompt
- * keeps the rules salient and current, and because the hook reads the rule files
- * fresh each time, editing a rule takes effect on the very next prompt with no
+ * keeps the rules salient and current, and because the hook reads .claude/rules
+ * fresh on every prompt, editing a rule takes effect on the very next prompt with no
  * restart. That is the "live" part.
  *
  * Design constraints (shared with the rest of live-rules):
  *   - No external dependencies (Node stdlib only).
  *   - Cross-platform (Windows / macOS / Linux).
- *   - Silent when there is no live-rules file for the project.
+ *   - Silent when the project has no .claude/rules/*.md files.
  *   - Never breaks a prompt: any error -> exit 0 with no output.
  */
 
@@ -57,7 +57,6 @@ function main() {
   const header =
     '=== LIVE RULES (live-rules) ===\n' +
     'Project rules re-grounded because they are new or changed for this session. Follow them for the work in this session. ' +
-    lib.formatRuleSetStatus(ruleSet) +
     'Source: ' + lib.displayPath(projectDir, ruleSet.source);
 
   lib.emit('UserPromptSubmit', lib.renderRules(changed, header));

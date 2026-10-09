@@ -7,31 +7,49 @@
  * file degrades to "skip that rule", never to a thrown error that could break a
  * prompt or an edit. The entry scripts wrap everything in try/catch and exit 0.
  *
- * All rules live in ONE Markdown file (by default .claude/live-rules.md at the
- * project root; override with the LIVE_RULES_PATH env var). The file holds any
- * number of rules, each a YAML frontmatter block followed by its body, with the
- * next "---" fence starting the next rule:
+ * STORAGE (SQ-292): rules are native Claude Code rule files. One rule per file
+ * in .claude/rules/*.md, read directly at hook time. There is no manifest, no
+ * sync step and no writer lock: the files on disk are the only source of truth
+ * and their content hashes are computed on every read.
+ *
+ *   .claude/rules/react.md         a project rule, native loads it too
+ *   .claude/rules/react.local.md   personal to this clone, gitignored
+ *   .claude/rules/react.md.off     disabled; neither native nor live-rules read it
+ *
+ * Only *.md is read, which is what makes disable-by-rename work: native
+ * discovers .md and nothing else, so renaming to .md.off hides a rule from both
+ * readers at once. A .local.md file is a rule like any other here.
+ *
+ * Scanning is NON-RECURSIVE: only the top level of .claude/rules/ is read.
+ * Native is recursive, so a rule in a subdirectory loads natively but is never
+ * re-grounded by live-rules. That is a timing difference, never a suppression.
+ *
+ * File format: optional YAML frontmatter, then the rule body.
  *
  *   ---
  *   description: React component conventions   # human title for the rule
- *   globs: ["**\/*.tsx", "**\/*.jsx"]          # path-scoped  -> PreToolUse
- *   dirs:  ["packages/api"]                     # dir-scoped   -> PreToolUse + cwd
- *   prompt: ["deploy", "/migrat(e|ion)/i"]      # keyword      -> UserPromptSubmit
- *   priority: 10                                # higher injects first (default 0)
- *   enabled: true                              # default true
+ *   paths: ["**\/*.tsx", "**\/*.jsx"]          # scope (native's key) -> PreToolUse
+ *   prompt: ["deploy", "/migrat(e|ion)/i"]     # keyword -> UserPromptSubmit
+ *   priority: 10                               # higher injects first (default 0)
  *   ---
  *   - Prefer function components.
  *   - No inline styles; use CSS modules.
  *
- * Scope is inferred from which fields are present. A rule that declares none of
- * globs/dirs/prompt is "always-on" and injected on every prompt.
+ * `paths:` is native's scope key and takes a YAML list or a comma-separated
+ * scalar. `globs:` and `dirs:` are accepted as deprecated aliases for it (one
+ * stderr notice per process) because native ignores them, so a rule still
+ * carrying them would load unscoped. There is no `enabled:` key: native ignores
+ * unknown keys, so a rule disabled in frontmatter would still load natively.
+ * Disabling is a rename to .md.off.
+ *
+ * Scope is inferred from which fields are present. A rule that declares neither
+ * paths nor prompt is "always-on" and injected on every prompt.
  */
 
 const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const migrationLock = require('./migration-lock');
 
 // Stay safely under Claude Code's 10,000-char cap on injected context; the
 // header plus the system-reminder wrapping eat into that budget too.
@@ -235,6 +253,9 @@ function normPath(p) {
  * gitignore-style match: a pattern with no "/" matches the basename at any
  * depth (so "*.sql" matches "db/x.sql"); a pattern containing "/" is anchored
  * to the repo-relative path.
+ *
+ * Dotfiles are NOT excluded: "*" matches a leading dot, so "*.md" matches
+ * ".hidden.md". See test/matcher-conformance.test.js for the pinned table.
  */
 function ruleGlobMatches(glob, relPath) {
   const p = normPath(relPath);
@@ -255,6 +276,44 @@ function pathInDir(relPath, dir) {
   const d = normalizeDir(dir);
   if (d === '' || d === '.') return true;
   return p === d || p.startsWith(d + '/');
+}
+
+/**
+ * A `paths:` entry is "directory-style" when it names a directory rather than a
+ * file pattern: it ends in "/", or it carries no glob metacharacter at all.
+ * Those are the entries that can select on the session's cwd, which is how the
+ * retired `dirs:` key behaved. A wildcard pattern ("src/**\/*.ts") stays a file
+ * pattern and never selects on cwd, so collapsing dirs into paths did not widen
+ * what the prompt hook emits.
+ */
+function isDirectoryStylePattern(pattern) {
+  const raw = String(pattern).replace(/\\/g, '/');
+  if (raw.endsWith('/')) return true;
+  return !/[*?{]/.test(raw);
+}
+
+/**
+ * Does a `paths:` entry apply to this repo-relative file?
+ *
+ * Three ways, in order: the glob matches the whole path; a slash-free pattern
+ * matches the basename at any depth; or a directory-style pattern contains the
+ * file. The last is what keeps a migrated `dirs: packages/api` scoping every
+ * file beneath it.
+ */
+function pathPatternMatchesFile(pattern, relPath) {
+  if (ruleGlobMatches(pattern, relPath)) return true;
+  if (isDirectoryStylePattern(pattern)) {
+    const base = normalizeDir(pattern);
+    if (base === '' || base === '.') return true;
+    if (compiledGlob(base + '/**').test(normPath(relPath))) return true;
+  }
+  return false;
+}
+
+/** Does a directory-style `paths:` entry contain the session's cwd? */
+function pathPatternMatchesDir(pattern, cwdRel) {
+  if (!isDirectoryStylePattern(pattern)) return false;
+  return pathInDir(cwdRel, normalizeDir(pattern));
 }
 
 /* ------------------------------------------------------------------ *
@@ -287,10 +346,71 @@ function toArray(v) {
   return (Array.isArray(v) ? v : [v]).map(String).map((s) => s.trim()).filter(Boolean);
 }
 
+/**
+ * Split a comma-separated scalar the way native splits `paths:`, without
+ * breaking brace expansion: commas inside "{ts,tsx}" are part of the pattern.
+ * A YAML list is already split, so its elements pass through untouched.
+ */
+function splitPatternScalar(value) {
+  const text = String(value);
+  const parts = [];
+  let cur = '';
+  let depth = 0;
+  for (const ch of text) {
+    if (ch === '{') {
+      depth++;
+      cur += ch;
+    } else if (ch === '}') {
+      if (depth > 0) depth--;
+      cur += ch;
+    } else if (ch === ',' && depth === 0) {
+      parts.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  parts.push(cur);
+  return parts;
+}
+
+// `paths:` only. Prompt selectors and includes keep toArray: a keyword or a
+// /regex{1,2}/ may legitimately contain a comma.
+function toPatternList(v) {
+  if (v == null || v === '') return [];
+  const raw = Array.isArray(v) ? v : splitPatternScalar(v);
+  return raw.map(String).map((s) => s.trim()).filter(Boolean);
+}
+
+const DEPRECATED_SCOPE_KEYS = ['globs', 'glob', 'dirs', 'dir'];
+let _deprecationNoticed = false;
+
+// One stderr line per process, not per rule file: a project that still carries
+// globs:/dirs: everywhere should get one notice, not fifty.
+function noteDeprecatedScopeKeys(keys) {
+  if (_deprecationNoticed || !keys.length) return;
+  _deprecationNoticed = true;
+  try {
+    process.stderr.write(
+      'live-rules: ' + keys.join('/') + ' in rule frontmatter is deprecated; rename it to paths: ' +
+      '(native Claude Code reads paths: and ignores the old keys). ' +
+      'Run: node "<plugin>/scripts/migrate-rules.js" --project <dir>\n'
+    );
+  } catch (_) {
+    /* a hook must never fail because stderr is closed */
+  }
+}
+
 function buildRule(id, data, body) {
   data = data || {};
-  const globs = toArray(data.globs).concat(toArray(data.glob));
-  const dirs = toArray(data.dirs).concat(toArray(data.dir)).map(normalizeDir).filter(Boolean);
+  const deprecated = DEPRECATED_SCOPE_KEYS.filter((key) => toArray(data[key]).length > 0);
+  noteDeprecatedScopeKeys(deprecated);
+
+  // paths: is native's key; globs:/dirs: fold into it so an un-migrated rule
+  // keeps its scope instead of silently becoming global.
+  let paths = toPatternList(data.paths);
+  for (const key of DEPRECATED_SCOPE_KEYS) paths = paths.concat(toPatternList(data[key]));
+
   const prompts = toArray(data.prompt)
     .concat(toArray(data.prompts))
     .concat(toArray(data.keywords));
@@ -307,23 +427,28 @@ function buildRule(id, data, body) {
   return {
     id,
     description: data.description != null ? String(data.description).trim() : '',
-    globs,
-    dirs,
+    paths,
     prompts,
     includes,
     priority,
-    enabled: data.enabled !== false,
     body: String(body || '').trim(),
   };
 }
 
 function isAlways(rule) {
-  return rule.globs.length === 0 && rule.dirs.length === 0 && rule.prompts.length === 0;
+  return rule.paths.length === 0 && rule.prompts.length === 0;
 }
 
-// Default single-file location, relative to the project root. Overridable with
-// the LIVE_RULES_PATH env var (absolute, project-relative, or "~"-relative).
-const DEFAULT_RULES_FILE = path.join('.claude', 'live-rules.md');
+/* ------------------------------------------------------------------ *
+ *  Store locations
+ * ------------------------------------------------------------------ */
+
+// The native rule directory. This is the only store live-rules reads.
+const RULES_DIR = path.join('.claude', 'rules');
+
+// Retired stores, read only by scripts/migrate-rules.js.
+const LEGACY_ATOMIC_DIR = path.join('.claude', 'live-rules');
+const LEGACY_MONOLITH_FILE = path.join('.claude', 'live-rules.md');
 
 function expandHome(p) {
   if (p === '~') return os.homedir();
@@ -331,23 +456,31 @@ function expandHome(p) {
   return p;
 }
 
-// Resolve the one Markdown file that holds every rule. The env override lets a
-// user keep rules anywhere convenient (a shared doc, a home-dir file, etc.).
-function getRulesFile(projectDir) {
+function getRulesDir(projectDir) {
+  return path.join(projectDir, RULES_DIR);
+}
+
+function getLegacyAtomicDir(projectDir) {
+  return path.join(projectDir, LEGACY_ATOMIC_DIR);
+}
+
+// The retired single-file store. LIVE_RULES_PATH used to relocate it, so
+// migration still honors the override when it looks for something to convert.
+function getLegacyRulesFile(projectDir) {
   const env = process.env.LIVE_RULES_PATH;
-  const raw = env && String(env).trim() ? expandHome(String(env).trim()) : DEFAULT_RULES_FILE;
+  const raw = env && String(env).trim() ? expandHome(String(env).trim()) : LEGACY_MONOLITH_FILE;
   return path.isAbsolute(raw) ? raw : path.join(projectDir, raw);
 }
 
-// Resolve an `include:` target to an absolute path. Like getRulesFile: a path is
-// project-relative by default, but absolute and "~"-relative paths are honored.
+// Resolve an `include:` target to an absolute path: project-relative by default,
+// but absolute and "~"-relative paths are honored.
 function resolveIncludePath(projectDir, p) {
   const raw = expandHome(String(p).trim());
   return path.isAbsolute(raw) ? raw : path.join(projectDir, raw);
 }
 
-// A short, readable form of the rules-file path for headers: repo-relative with
-// forward slashes when the file is inside the project, otherwise the full path.
+// A short, readable form of a path for headers: repo-relative with forward
+// slashes when the target is inside the project, otherwise the full path.
 function displayPath(projectDir, file) {
   try {
     const rel = path.relative(projectDir, file).replace(/\\/g, '/');
@@ -358,23 +491,30 @@ function displayPath(projectDir, file) {
   return String(file).replace(/\\/g, '/');
 }
 
+function hashContent(content) {
+  return crypto.createHash('sha256').update(String(content).replace(/\r/g, '')).digest('hex');
+}
+
+/* ------------------------------------------------------------------ *
+ *  File parsing
+ * ------------------------------------------------------------------ */
+
 function isFence(line) {
   return line.replace(/^﻿/, '').trim() === '---';
 }
 
 /**
- * Split the rules file into rule sections. Each rule is a frontmatter block
- * (between two "---" fences) followed by its body, which runs up to the next
- * opening fence. The "---" lines pair up as open/close, open/close, ...:
- * fences[0..1] fence the first rule's frontmatter and fences[1..2] bound its
- * body, and so on. Content before the first fence (a title or intro) is ignored,
- * and a dangling unmatched fence at the end is skipped. A body must therefore
- * not contain a bare "---" line (use *** or ___ for a horizontal rule).
+ * Split a multi-rule document into rule sections. Only the retired monolith
+ * held more than one rule per file, so this is now used by migration (and kept
+ * exported because its parsing rules are pinned by tests).
  *
- * Fallback for the simplest case: a file with no complete frontmatter block
- * (fewer than two "---" fences) is treated as ONE global rule whose body is the
- * whole file. So a plain "Write code as poetry." with no frontmatter just works
- * as an always-on rule, no fences required.
+ * Each rule is a frontmatter block (between two "---" fences) followed by its
+ * body, which runs up to the next opening fence. The "---" lines pair up as
+ * open/close, open/close, ... Content before the first fence is ignored, and a
+ * dangling unmatched fence at the end is skipped.
+ *
+ * Fallback: a document with fewer than two "---" fences is one global rule whose
+ * body is the whole text. So a plain "Write code as poetry." just works.
  */
 function splitSections(text) {
   const lines = String(text).replace(/^﻿/, '').split(/\r?\n/);
@@ -383,8 +523,8 @@ function splitSections(text) {
     if (isFence(lines[i])) fences.push(i);
   }
   if (fences.length < 2) {
-    // No fenced frontmatter: the entire file is a single global rule. Empty
-    // file -> no rule (keeps the hooks silent on a blank rules file).
+    // No fenced frontmatter: the entire text is a single global rule. Empty
+    // text -> no rule (keeps the hooks silent on a blank rule file).
     return String(text).trim() ? [{ data: {}, body: String(text) }] : [];
   }
   const sections = [];
@@ -405,24 +545,55 @@ function splitSections(text) {
   return sections;
 }
 
-const ATOMIC_RULES_DIR = path.join('.claude', 'live-rules');
-const ATOMIC_MANIFEST = 'manifest.json';
-
-function hashContent(content) {
-  return crypto.createHash('sha256').update(String(content).replace(/\r/g, '')).digest('hex');
+/**
+ * Parse ONE native rule file: leading frontmatter if the file opens with a
+ * "---" fence, and everything after the closing fence as the body. Unlike
+ * splitSections, a later bare "---" in the body is body text, which is what
+ * native does and means a horizontal rule no longer silently drops a rule.
+ */
+function parseRuleFile(content) {
+  const lines = String(content).replace(/^﻿/, '').split(/\r?\n/);
+  let first = 0;
+  while (first < lines.length && lines[first].trim() === '') first++;
+  if (first >= lines.length || !isFence(lines[first])) {
+    return { data: {}, body: String(content) };
+  }
+  for (let i = first + 1; i < lines.length; i++) {
+    if (!isFence(lines[i])) continue;
+    let data = {};
+    try {
+      data = parseYamlSubset(lines.slice(first + 1, i).join('\n'));
+    } catch (_) {
+      data = {};
+    }
+    return { data, body: lines.slice(i + 1).join('\n') };
+  }
+  // An unterminated frontmatter fence: treat the whole file as a body rather
+  // than dropping the rule.
+  return { data: {}, body: String(content) };
 }
 
-function getAtomicRulesDir(projectDir) {
-  return path.join(projectDir, ATOMIC_RULES_DIR);
-}
-
-function getManifestFile(projectDir) {
-  return path.join(getAtomicRulesDir(projectDir), ATOMIC_MANIFEST);
-}
-
-function isSafeRulePath(value) {
-  const normalized = String(value || '').replace(/\\/g, '/');
-  return normalized && !path.isAbsolute(normalized) && !normalized.split('/').includes('..') && normalized.endsWith('.md');
+/** Rule files in .claude/rules, top level only, *.md only, name-sorted. */
+function listRuleFiles(directory) {
+  let entries;
+  try {
+    entries = fs.readdirSync(directory, { withFileTypes: true });
+  } catch (_) {
+    return [];
+  }
+  const names = entries
+    .filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith('.md'))
+    .map((entry) => entry.name)
+    .sort();
+  const files = [];
+  for (const name of names) {
+    try {
+      files.push({ name, content: fs.readFileSync(path.join(directory, name), 'utf8') });
+    } catch (_) {
+      /* unreadable file -> skip that rule, never throw */
+    }
+  }
+  return files;
 }
 
 function enrichRule(rule, sourcePath, content) {
@@ -431,441 +602,162 @@ function enrichRule(rule, sourcePath, content) {
   return rule;
 }
 
-function loadLegacyRules(projectDir) {
-  const file = getRulesFile(projectDir);
-  let text;
-  try {
-    text = fs.readFileSync(file, 'utf8');
-  } catch (_) {
-    return [];
-  }
-  const base = path.basename(file);
-  const sections = splitSections(text);
+function loadRules(projectDir) {
+  const directory = getRulesDir(projectDir);
   const rules = [];
-  for (let i = 0; i < sections.length; i++) {
-    const id = sections.length > 1 ? base + '#' + (i + 1) : base;
+  for (const file of listRuleFiles(directory)) {
     try {
-      const content = sections.length === 1 ? text : renderRuleFile(sections[i].data, sections[i].body);
-      rules.push(enrichRule(buildRule(id, sections[i].data, sections[i].body), displayPath(projectDir, file) + (sections.length > 1 ? '#' + (i + 1) : ''), content));
+      const parsed = parseRuleFile(file.content);
+      if (!String(parsed.body || '').trim()) continue; // a bodyless rule says nothing
+      rules.push(
+        enrichRule(
+          buildRule(file.name, parsed.data, parsed.body),
+          RULES_DIR.replace(/\\/g, '/') + '/' + file.name,
+          file.content
+        )
+      );
     } catch (_) {
-      /* skip malformed section */
+      /* skip malformed rule file */
     }
   }
   return rules;
 }
 
-function loadAtomicRules(projectDir) {
-  let manifest;
+/** Every *.md under a directory, at any depth, repo-relative-ish and sorted. */
+function collectMarkdownFiles(directory, prefix) {
+  prefix = prefix || '';
+  let entries;
   try {
-    manifest = JSON.parse(fs.readFileSync(getManifestFile(projectDir), 'utf8'));
+    entries = fs.readdirSync(directory, { withFileTypes: true });
   } catch (_) {
-    return null;
+    return [];
   }
-  if (!manifest || manifest.version !== 1 || !Array.isArray(manifest.rules)) return { rules: [], stale: true, dropped: [] };
-  const rules = [];
-  const dropped = [];
-  const mismatches = [];
-  let stale = false;
-  for (const entry of manifest.rules) {
-    const droppedPath = entry && entry.path ? String(entry.path).replace(/\\/g, '/') : '<invalid manifest entry>';
-    if (!entry || !isSafeRulePath(entry.path)) {
-      stale = true;
-      dropped.push(droppedPath);
-      continue;
-    }
-    const target = path.join(getAtomicRulesDir(projectDir), entry.path);
-    let content;
-    try {
-      content = fs.readFileSync(target, 'utf8');
-    } catch (_) {
-      stale = true;
-      dropped.push(droppedPath);
-      continue;
-    }
-    if (entry.hash !== hashContent(content)) stale = true;
-    const sections = splitSections(content);
-    if (sections.length !== 1) {
-      stale = true;
-      dropped.push(droppedPath);
-      continue;
-    }
-    try {
-      const rule = buildRule(entry.id || entry.path, sections[0].data, sections[0].body);
-      const mismatch = manifestMismatchField(entry, manifestEntry(entry.path, rule, content));
-      if (mismatch) {
-        stale = true;
-        mismatches.push(droppedPath + ' (' + mismatch + ')');
-      }
-      rules.push(enrichRule(rule, ATOMIC_RULES_DIR.replace(/\\/g, '/') + '/' + entry.path.replace(/\\/g, '/'), content));
-    } catch (_) {
-      stale = true;
-      dropped.push(droppedPath);
+  const out = [];
+  for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+    const rel = prefix ? prefix + '/' + entry.name : entry.name;
+    const abs = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...collectMarkdownFiles(abs, rel));
+    } else if (entry.name.endsWith('.md')) {
+      out.push({ rel, abs, name: entry.name });
     }
   }
-  return { rules, stale, dropped, mismatches };
+  return out;
+}
+
+/** The retired stores that still hold rule files, for the migration nudge. */
+function pendingLegacyStores(projectDir) {
+  const stores = [];
+  try {
+    const atomic = path.join(getLegacyAtomicDir(projectDir), 'rules');
+    // Only a store that still holds rule files counts: after migration the
+    // directory may survive empty, and an empty directory must stay silent.
+    if (collectMarkdownFiles(atomic).length) {
+      stores.push({ kind: 'atomic', dir: atomic, display: displayPath(projectDir, atomic) });
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  try {
+    const legacyFile = getLegacyRulesFile(projectDir);
+    if (fs.existsSync(legacyFile)) {
+      stores.push({ kind: 'monolith', file: legacyFile, display: displayPath(projectDir, legacyFile) });
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return stores;
+}
+
+/**
+ * A one-line nudge when a project still has rules in a retired store. Without
+ * it the storage move would look like "my rules stopped working", silently. It
+ * fires even when .claude/rules already has rules, because a half-migrated
+ * project is exactly the case where the rules left behind go unnoticed.
+ */
+function legacyStoreNotice(projectDir) {
+  const stores = pendingLegacyStores(projectDir);
+  if (!stores.length) return '';
+  return (
+    'live-rules now reads ' + RULES_DIR.replace(/\\/g, '/') + '/*.md. Rules are still in ' +
+    stores.map((store) => store.display).join(' and ') + ' and are NOT in effect. Migrate them with: ' +
+    'node "${CLAUDE_PLUGIN_ROOT}/scripts/migrate-rules.js" --project "${CLAUDE_PROJECT_DIR}"'
+  );
 }
 
 function loadRuleSet(projectDir) {
-  const atomic = loadAtomicRules(projectDir);
-  if (atomic) return { ...atomic, source: getAtomicRulesDir(projectDir) };
-  return { rules: loadLegacyRules(projectDir), stale: false, legacy: true, source: getRulesFile(projectDir) };
+  return {
+    rules: loadRules(projectDir),
+    source: getRulesDir(projectDir),
+    notice: legacyStoreNotice(projectDir),
+  };
 }
 
-function formatRuleSetStatus(ruleSet) {
-  if (!ruleSet.stale) return '';
-  const status = ['The manifest does not match the loaded rule files, but these rules were read directly and are in effect.'];
-  if (ruleSet.mismatches && ruleSet.mismatches.length) {
-    status.push('Mismatched manifest fields: ' + ruleSet.mismatches.join(', ') + '.');
-  }
-  if (ruleSet.dropped && ruleSet.dropped.length) {
-    status.push('Dropped rule files: ' + ruleSet.dropped.join(', ') + '.');
-  }
-  return status.join(' ') + ' ';
-}
-
-function loadRules(projectDir) {
-  return loadRuleSet(projectDir).rules;
-}
+/* ------------------------------------------------------------------ *
+ *  Rendering a rule file (migration, and the seeding helper below)
+ * ------------------------------------------------------------------ */
 
 function renderRuleFile(data, body) {
   const lines = [];
-  for (const key of ['description', 'globs', 'dirs', 'prompt', 'priority', 'enabled', 'include']) {
+  for (const key of ['description', 'paths', 'prompt', 'priority', 'include']) {
     if (data[key] == null || data[key] === '') continue;
+    if (Array.isArray(data[key]) && data[key].length === 0) continue;
     const value = Array.isArray(data[key]) ? JSON.stringify(data[key]) : String(data[key]);
     lines.push(key + ': ' + value);
   }
-  return lines.length ? '---\n' + lines.join('\n') + '\n---\n' + String(body || '').trim() + '\n' : String(body || '').trim() + '\n';
+  return lines.length
+    ? '---\n' + lines.join('\n') + '\n---\n' + String(body || '').trim() + '\n'
+    : String(body || '').trim() + '\n';
 }
 
-function manifestEntry(relativePath, rule, content) {
+function ruleFileFrontmatter(rule) {
   return {
-    path: relativePath,
-    hash: hashContent(content),
     description: rule.description,
-    globs: rule.globs,
-    dirs: rule.dirs,
+    paths: rule.paths,
     prompt: rule.prompts,
     priority: rule.priority,
-    enabled: rule.enabled,
     include: rule.includes,
   };
 }
 
-function ruleFromAtomicFile(relativePath, content) {
-  const sections = splitSections(content);
-  if (sections.length !== 1) {
-    throw new Error(relativePath + ' must contain exactly one rule. Split or repair it, then run live-rules sync again.');
+/**
+ * Seed a fresh rule set into .claude/rules, written to a temp directory and
+ * renamed into place so a crash never leaves half a rule set behind. Refuses
+ * when the project already has rule files: seeding is for a new project, and
+ * silently merging into someone's existing rules is not a safe default.
+ *
+ * Kept exported under the old name as well (`writeAtomicRuleSet`) because
+ * plugins/sidequest/test/hooks.test.ts seeds its SQ-200 fixture through it.
+ */
+function seedRuleSet(projectDir, ruleFiles) {
+  const destination = getRulesDir(projectDir);
+  if (listRuleFiles(destination).length) {
+    throw new Error(displayPath(projectDir, destination) + ' already exists and holds rule files');
   }
-  return buildRule(relativePath, sections[0].data, sections[0].body);
-}
-
-function manifestMismatchField(entry, expected) {
-  const fields = [
-    ['path', entry.path, expected.path],
-    ['hash', entry.hash, expected.hash],
-    ['description', entry.description, expected.description],
-    ['globs', entry.globs || [], expected.globs],
-    ['dirs', entry.dirs || [], expected.dirs],
-    ['prompt', entry.prompt || [], expected.prompt],
-    ['priority', entry.priority == null ? 0 : entry.priority, expected.priority],
-    ['enabled', entry.enabled, expected.enabled],
-    ['include', entry.include || [], expected.include],
-  ];
-  for (const [field, actual, target] of fields) {
-    if (JSON.stringify(actual) !== JSON.stringify(target)) return field;
-  }
-  return '';
-}
-
-function sameManifestEntry(entry, expected) {
-  return manifestMismatchField(entry, expected) === '';
-}
-
-function validateAtomicDirectory(directory, manifest) {
-  if (!manifest || manifest.version !== 1 || !Array.isArray(manifest.rules)) return false;
-  for (const entry of manifest.rules) {
-    if (!entry || !isSafeRulePath(entry.path)) return false;
-    try {
-      const content = fs.readFileSync(path.join(directory, entry.path), 'utf8');
-      const rule = ruleFromAtomicFile(entry.path, content);
-      if (!sameManifestEntry(entry, manifestEntry(entry.path, rule, content))) return false;
-    } catch (_) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function createManifest(ruleFiles) {
-  return {
-    version: 1,
-    rules: ruleFiles.map(({ path: relativePath, content }) => {
-      const rule = ruleFromAtomicFile(relativePath, content);
-      return manifestEntry(relativePath, rule, content);
-    }),
-  };
-}
-
-function writeAtomicDirectory(destination, ruleFiles) {
+  const files = ruleFiles.map((item, index) => ({
+    name: item.name || String(index + 1).padStart(3, '0') + '.md',
+    content: item.content,
+  }));
   const temp = destination + '.tmp-' + process.pid + '-' + crypto.randomBytes(6).toString('hex');
   try {
-    for (const item of ruleFiles) {
-      const target = path.join(temp, item.path);
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.writeFileSync(target, item.content);
+    fs.mkdirSync(temp, { recursive: true });
+    for (const file of files) fs.writeFileSync(path.join(temp, file.name), file.content);
+    if (fs.existsSync(destination)) {
+      // The directory exists but holds no rule files: fill it in place.
+      for (const file of files) fs.renameSync(path.join(temp, file.name), path.join(destination, file.name));
+      fs.rmSync(temp, { recursive: true, force: true });
+    } else {
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.renameSync(temp, destination);
     }
-    const manifest = createManifest(ruleFiles);
-    if (!validateAtomicDirectory(temp, manifest)) throw new Error('Atomic live-rules validation failed');
-    fs.writeFileSync(path.join(temp, ATOMIC_MANIFEST), JSON.stringify(manifest, null, 2) + '\n');
-    if (!validateAtomicDirectory(temp, JSON.parse(fs.readFileSync(path.join(temp, ATOMIC_MANIFEST), 'utf8')))) throw new Error('Atomic live-rules manifest validation failed');
-    return { manifest, temp };
+    return files.map((file) => RULES_DIR.replace(/\\/g, '/') + '/' + file.name);
   } catch (error) {
     try {
       fs.rmSync(temp, { recursive: true, force: true });
     } catch (_) {
+      /* best effort */
     }
     throw error;
-  }
-}
-
-function writeAtomicRuleSet(projectDir, ruleFiles) {
-  const destination = getAtomicRulesDir(projectDir);
-  if (fs.existsSync(destination)) throw new Error('Atomic live-rules directory already exists');
-  const files = ruleFiles.map((item, index) => ({
-    path: 'rules/' + String(index + 1).padStart(3, '0') + '.md',
-    content: item.content,
-  }));
-  const staged = writeAtomicDirectory(destination, files);
-  try {
-    fs.renameSync(staged.temp, destination);
-    return staged.manifest;
-  } catch (error) {
-    try {
-      fs.rmSync(staged.temp, { recursive: true, force: true });
-    } catch (_) {
-    }
-    throw error;
-  }
-}
-
-function listAtomicRuleFiles(directory) {
-  const rulesDirectory = path.join(directory, 'rules');
-  if (!fs.existsSync(rulesDirectory)) {
-    throw new Error(rulesDirectory + ' is missing. Create rule files under .claude/live-rules/rules, then run live-rules sync again.');
-  }
-  const files = [];
-  const visit = (current) => {
-    for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
-      const target = path.join(current, entry.name);
-      if (entry.isDirectory()) visit(target);
-      else if (entry.isFile() && entry.name.endsWith('.md')) {
-        const relativePath = path.relative(directory, target).replace(/\\/g, '/');
-        if (!isSafeRulePath(relativePath)) throw new Error(target + ' is not a safe atomic rule path. Move it under rules/ and run live-rules sync again.');
-        files.push({ path: relativePath, content: fs.readFileSync(target, 'utf8') });
-      }
-    }
-  };
-  visit(rulesDirectory);
-  if (!files.length) throw new Error(rulesDirectory + ' has no .md rule files. Add a rule, then run live-rules sync again.');
-  return files;
-}
-
-function changedRulePath(before, after) {
-  const later = new Map(after.map((item) => [item.path, item.content]));
-  for (const item of before) {
-    if (later.get(item.path) !== item.content) return item.path;
-    later.delete(item.path);
-  }
-  return later.keys().next().value || null;
-}
-
-function stageAtomicManifest(destination, manifest) {
-  const manifestFile = path.join(destination, ATOMIC_MANIFEST);
-  const temp = manifestFile + '.tmp-' + process.pid + '-' + crypto.randomBytes(6).toString('hex');
-  try {
-    fs.writeFileSync(temp, JSON.stringify(manifest, null, 2) + '\n');
-    return temp;
-  } catch (error) {
-    try {
-      fs.rmSync(temp, { force: true });
-    } catch (_) {
-    }
-    throw error;
-  }
-}
-
-function replaceAtomicManifest(temp, manifestFile) {
-  try {
-    fs.renameSync(temp, manifestFile);
-  } catch (error) {
-    try {
-      fs.rmSync(temp, { force: true });
-    } catch (_) {
-    }
-    throw new Error('Could not replace ' + manifestFile + '. Rule files were left unchanged; retry live-rules sync. ' + error.message);
-  }
-}
-
-function checkAtomicRuleSet(projectDir) {
-  const destination = getAtomicRulesDir(projectDir);
-  if (!fs.existsSync(destination)) {
-    throw new Error(destination + ' is missing. Create atomic rule files first, then run live-rules sync again.');
-  }
-
-  let manifest;
-  const manifestFile = getManifestFile(projectDir);
-  try {
-    manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
-  } catch (error) {
-    throw new Error('Could not read ' + manifestFile + ': ' + error.message);
-  }
-  if (!manifest || manifest.version !== 1 || !Array.isArray(manifest.rules)) {
-    throw new Error(manifestFile + ' must contain a version 1 manifest with a rules array.');
-  }
-
-  const errors = [];
-  const ruleFiles = new Map(listAtomicRuleFiles(destination).map((file) => [file.path, file.content]));
-  const manifestPaths = new Set();
-  for (let index = 0; index < manifest.rules.length; index++) {
-    const entry = manifest.rules[index];
-    if (!entry || !isSafeRulePath(entry.path)) {
-      errors.push('manifest entry ' + (index + 1) + ' has an invalid rule path.');
-      continue;
-    }
-    const relativePath = entry.path.replace(/\\/g, '/');
-    if (manifestPaths.has(relativePath)) {
-      errors.push(relativePath + ': duplicate manifest entry.');
-      continue;
-    }
-    manifestPaths.add(relativePath);
-    const content = ruleFiles.get(relativePath);
-    if (content == null) {
-      errors.push(relativePath + ': listed in the manifest but its rule file is missing.');
-      continue;
-    }
-    const calculatedHash = hashContent(content);
-    if (entry.hash !== calculatedHash) {
-      errors.push(relativePath + ': manifest hash does not match the calculated sha256.');
-    }
-  }
-  for (const relativePath of ruleFiles.keys()) {
-    if (!manifestPaths.has(relativePath)) {
-      errors.push(relativePath + ': rule file is missing from the manifest.');
-    }
-  }
-  return errors;
-}
-
-function syncAtomicRuleSet(projectDir) {
-  const destination = getAtomicRulesDir(projectDir);
-  if (!fs.existsSync(destination)) {
-    throw new Error(destination + ' is missing. Create atomic rule files first, then run live-rules sync again.');
-  }
-  const lockPath = path.join(projectDir, '.claude', 'live-rules.write.lock');
-  const result = migrationLock.withLock(lockPath, { locked: true }, () => {
-    let lastChanged = null;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const snapshot = listAtomicRuleFiles(destination);
-      const manifest = createManifest(snapshot);
-      const temp = stageAtomicManifest(destination, manifest);
-      let changed = changedRulePath(snapshot, listAtomicRuleFiles(destination));
-      if (changed) {
-        lastChanged = changed;
-        fs.rmSync(temp, { force: true });
-        if (attempt === 1) break;
-        continue;
-      }
-      replaceAtomicManifest(temp, getManifestFile(projectDir));
-      changed = changedRulePath(snapshot, listAtomicRuleFiles(destination));
-      if (!changed) return { manifest };
-      lastChanged = changed;
-      if (attempt === 1) break;
-    }
-    throw new Error((lastChanged || 'An atomic rule file') + ' changed while generating the manifest. Wait for rule edits to finish, then run live-rules sync again.');
-  });
-  if (result.locked) throw new Error(lockPath + ' is held by another live-rules update. Wait for it to finish, then run live-rules sync again.');
-  return result.manifest;
-}
-
-function atomicSchema(projectDir) {
-  const destination = getAtomicRulesDir(projectDir);
-  if (!fs.existsSync(destination)) return 'missing';
-  let manifest;
-  try {
-    manifest = JSON.parse(fs.readFileSync(getManifestFile(projectDir), 'utf8'));
-  } catch (_) {
-    return 'untrusted';
-  }
-  if (typeof manifest.version === 'number' && manifest.version > 1) return 'future';
-  if (manifest.version !== 1 || !Array.isArray(manifest.rules)) return 'untrusted';
-  for (const entry of manifest.rules) {
-    if (!entry || !isSafeRulePath(entry.path) || !fs.existsSync(path.join(destination, entry.path))) return 'untrusted';
-  }
-  return 'current';
-}
-
-function archiveUntrustedAtomicDirectory(projectDir) {
-  const destination = getAtomicRulesDir(projectDir);
-  fs.renameSync(destination, destination + '.untrusted-' + process.pid + '-' + crypto.randomBytes(4).toString('hex'));
-}
-
-function migrationRuleDifference(legacyRules, atomicRules) {
-  if (legacyRules.length !== atomicRules.length) {
-    return 'rule count differs (' + legacyRules.length + ' expected, ' + atomicRules.length + ' found)';
-  }
-  const fields = [
-    ['globs', 'globs'],
-    ['dirs', 'dirs'],
-    ['prompts', 'prompt selectors'],
-    ['priority', 'priority'],
-    ['enabled', 'enabled flag'],
-    ['includes', 'includes'],
-    ['body', 'body'],
-  ];
-  for (let index = 0; index < legacyRules.length; index++) {
-    for (const [field, label] of fields) {
-      if (JSON.stringify(legacyRules[index][field]) !== JSON.stringify(atomicRules[index][field])) {
-        return 'rule ' + (index + 1) + ' has different ' + label;
-      }
-    }
-  }
-  return '';
-}
-
-function migrationResult(migrated, notice) {
-  return { migrated, notice: notice || '' };
-}
-
-function migrateLegacyRules(projectDir, options) {
-  const detailed = options && options.detailed;
-  const legacy = getRulesFile(projectDir);
-  const resultFor = (result) => detailed ? result : result.migrated;
-  if (!fs.existsSync(legacy)) return resultFor(migrationResult(false));
-  const status = atomicSchema(projectDir);
-  if (status === 'current' || status === 'future') return resultFor(migrationResult(false));
-  const lockPath = path.join(projectDir, '.claude', 'live-rules.migration.lock');
-  try {
-    const result = migrationLock.withMigrationLock(lockPath, () => {
-      const nextStatus = atomicSchema(projectDir);
-      if (nextStatus === 'current' || nextStatus === 'future') return migrationResult(false);
-      if (nextStatus === 'untrusted') archiveUntrustedAtomicDirectory(projectDir);
-      const legacyRules = loadLegacyRules(projectDir);
-      writeAtomicRuleSet(projectDir, legacyRules.map((rule) => ({ rule, content: renderRuleFile({ description: rule.description, globs: rule.globs, dirs: rule.dirs, prompt: rule.prompts, priority: rule.priority, enabled: rule.enabled, include: rule.includes }, rule.body) })));
-      if (options && typeof options.beforeVerification === 'function') options.beforeVerification();
-      const atomic = loadAtomicRules(projectDir);
-      const difference = !atomic ? 'atomic rules could not be loaded' : migrationRuleDifference(legacyRules, atomic.rules);
-      if (difference) {
-        return migrationResult(false, 'Live Rules migrated to ' + displayPath(projectDir, getAtomicRulesDir(projectDir)) + ', but kept ' + displayPath(projectDir, legacy) + ' because verification failed: ' + difference + '.');
-      }
-      if (process.env.LIVE_RULES_PATH && String(process.env.LIVE_RULES_PATH).trim()) {
-        return migrationResult(true, 'Live Rules migrated to ' + displayPath(projectDir, getAtomicRulesDir(projectDir)) + '; kept ' + displayPath(projectDir, legacy) + ' because LIVE_RULES_PATH is set.');
-      }
-      fs.rmSync(legacy);
-      return migrationResult(true, 'Live Rules migrated to ' + displayPath(projectDir, getAtomicRulesDir(projectDir)) + '; removed ' + displayPath(projectDir, legacy) + '.');
-    });
-    return resultFor(result);
-  } catch (error) {
-    return resultFor(migrationResult(false, 'Live Rules migration failed; kept ' + displayPath(projectDir, legacy) + ': ' + error.message));
   }
 }
 
@@ -885,12 +777,11 @@ function truncLabel(s) {
   return s.length > 28 ? s.slice(0, 27) + '...' : s;
 }
 
-// UserPromptSubmit: always-on rules, prompt-keyword matches, and dir rules
-// whose directory contains the session cwd.
+// UserPromptSubmit: always-on rules, prompt-keyword matches, and directory-style
+// path rules whose directory contains the session cwd.
 function selectForPrompt(rules, ctx) {
   const out = [];
   for (const rule of rules) {
-    if (!rule.enabled) continue;
     if (isAlways(rule)) {
       out.push({ rule, label: 'always' });
       continue;
@@ -903,9 +794,9 @@ function selectForPrompt(rules, ctx) {
       }
     }
     if (!label && ctx.cwdRel != null) {
-      for (const d of rule.dirs) {
-        if (pathInDir(ctx.cwdRel, d)) {
-          label = 'cwd:' + d;
+      for (const p of rule.paths) {
+        if (pathPatternMatchesDir(p, ctx.cwdRel)) {
+          label = 'cwd:' + normalizeDir(p);
           break;
         }
       }
@@ -915,26 +806,17 @@ function selectForPrompt(rules, ctx) {
   return sortSelected(out);
 }
 
-// PreToolUse: glob rules matching the edited file, and dir rules whose
-// directory contains the edited file. Always-on rules are skipped here (the
-// prompt hook already carries them).
+// PreToolUse: path rules that apply to the edited file. Always-on rules are
+// skipped here (the prompt hook already carries them).
 function selectForEdit(rules, relPath) {
   const out = [];
   for (const rule of rules) {
-    if (!rule.enabled || isAlways(rule)) continue;
+    if (isAlways(rule)) continue;
     let label = null;
-    for (const g of rule.globs) {
-      if (ruleGlobMatches(g, relPath)) {
-        label = g;
+    for (const p of rule.paths) {
+      if (pathPatternMatchesFile(p, relPath)) {
+        label = p;
         break;
-      }
-    }
-    if (!label) {
-      for (const d of rule.dirs) {
-        if (pathInDir(relPath, d)) {
-          label = 'dir:' + d;
-          break;
-        }
       }
     }
     if (label) out.push({ rule, label });
@@ -948,7 +830,7 @@ function selectForEdit(rules, relPath) {
 function selectAlways(rules) {
   const out = [];
   for (const rule of rules) {
-    if (!rule.enabled || !isAlways(rule)) continue;
+    if (!isAlways(rule)) continue;
     out.push({ rule, label: 'always' });
   }
   return sortSelected(out);
@@ -986,7 +868,7 @@ function attachIncludes(selected, projectDir) {
     }
     if (!resolved.length) continue; // all includes missing -> drop the rule
     entry.includes = resolved;
-    entry.rule.hash = hashContent(entry.rule.hash + ' ' + resolved.map((file) => file.display + ' ' + file.content).join(' '));
+    entry.rule.hash = hashContent(entry.rule.hash + ' ' + resolved.map((file) => file.display + ' ' + file.content).join(' '));
     out.push(entry);
   }
   return out;
@@ -997,7 +879,7 @@ function attachIncludes(selected, projectDir) {
  * ------------------------------------------------------------------ */
 
 function renderRules(selected, header) {
-  const TRUNC = '\n(rule body truncated to fit the context limit; see your live-rules file)\n';
+  const TRUNC = '\n(rule body truncated to fit the context limit; see your rule file)\n';
   let out = header + '\n';
   let included = 0;
   for (let k = 0; k < selected.length; k++) {
@@ -1019,14 +901,14 @@ function renderRules(selected, header) {
         out +=
           '\n(' +
           remaining +
-          ' more matching rule(s) not shown to stay within the context limit; see your live-rules file.)\n';
+          ' more matching rule(s) not shown to stay within the context limit; see your rule files.)\n';
       } else {
         // The highest-priority rule alone overflows: truncate its body so the
         // emitted string still honors the cap rather than spilling whole.
         const budget = CONTEXT_CAP - out.length - TRUNC.length;
         if (budget > 0) out += block.slice(0, budget) + TRUNC;
         if (remaining > 1 && out.length + 80 < CONTEXT_CAP) {
-          out += '(' + (remaining - 1) + ' more matching rule(s) not shown; see your live-rules file.)\n';
+          out += '(' + (remaining - 1) + ' more matching rule(s) not shown; see your rule files.)\n';
         }
       }
       break;
@@ -1047,30 +929,41 @@ function emit(eventName, context) {
 
 module.exports = {
   CONTEXT_CAP,
+  RULES_DIR,
+  LEGACY_ATOMIC_DIR,
+  LEGACY_MONOLITH_FILE,
   readStdin,
   getProjectDir,
   globToRegExp,
   ruleGlobMatches,
   pathInDir,
+  isDirectoryStylePattern,
+  pathPatternMatchesFile,
+  pathPatternMatchesDir,
   promptMatches,
   compilePromptPattern,
+  toPatternList,
   buildRule,
   isAlways,
-  getRulesFile,
-  getAtomicRulesDir,
-  getManifestFile,
+  getRulesDir,
+  getLegacyAtomicDir,
+  getLegacyRulesFile,
   hashContent,
   loadRuleSet,
-  formatRuleSetStatus,
-  atomicSchema,
-  migrateLegacyRules,
-  writeAtomicRuleSet,
-  checkAtomicRuleSet,
-  syncAtomicRuleSet,
+  loadRules,
+  legacyStoreNotice,
   resolveIncludePath,
   displayPath,
   splitSections,
-  loadRules,
+  parseRuleFile,
+  listRuleFiles,
+  collectMarkdownFiles,
+  pendingLegacyStores,
+  renderRuleFile,
+  ruleFileFrontmatter,
+  seedRuleSet,
+  // Back-compat alias: plugins/sidequest/test/hooks.test.ts seeds through this name.
+  writeAtomicRuleSet: seedRuleSet,
   selectForPrompt,
   selectForEdit,
   selectAlways,
