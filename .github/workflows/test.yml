@@ -35,8 +35,6 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - name: Check live-rules manifest
-        run: node plugins/live-rules/scripts/sync-atomic-rules.js --check
       - run: node --test scripts/release/test/*.test.mjs scripts/test/*.test.mjs
 
   plugin-matrix:
@@ -157,7 +155,7 @@ jobs:
           if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
             base="$(git rev-parse HEAD^)"
           fi
-          if git diff --quiet "$base" "$GITHUB_SHA" -- "${{ matrix.path }}" .claude-plugin/marketplace.json scripts/release .github/workflows; then
+          if git diff --quiet "$base" "$GITHUB_SHA" -- "${{ matrix.path }}" .claude-plugin/marketplace.json scripts/release .github/workflows .claude/rules/** .gitignore; then
             echo "${{ matrix.name }} is unaffected"
             exit 0
           fi
