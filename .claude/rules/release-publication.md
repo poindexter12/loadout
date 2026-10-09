@@ -1,5 +1,6 @@
 ---
 description: Automated release policy
+paths: [".live-rules-never-match/**"]
 prompt: ["ship", "publish", "release", "bump", "hotfix", "marketplace"]
 ---
 - Integrate ticket work on `main`; write a release fragment in the same push with `node scripts/release/note.mjs <REF> --plugins <p> --bump <level> --commit <sha>`.

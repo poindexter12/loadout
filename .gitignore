@@ -9,13 +9,13 @@ desktop.ini
 
 # Claude Code local settings + tool artifacts (never commit to this public repo)
 # — everything under .claude/ is ignored EXCEPT shared project settings, team
-# live rules, the upstream-check skill, and the codebase map (tracked so sessions and CI share one map;
+# rules, the upstream-check skill, and the codebase map (tracked so sessions and CI share one map;
 # without the negation, git add warns and agents wrongly conclude it is
 # local-only). settings.local.json (per-machine overrides) stays ignored.
 .claude/*
 !.claude/settings.json
-!.claude/live-rules/
-!.claude/live-rules/**
+!.claude/rules/
+!.claude/rules/**
 !.claude/.codebase-info/
 !.claude/.codebase-info/**
 !.claude/skills/
@@ -39,3 +39,6 @@ yarn-error.log*
 
 # Local-only Windows Sandbox clean-room harness (maintainer tooling, not published)
 /sandbox/
+
+# live-rules: personal rules, not shared
+.claude/rules/*.local.md

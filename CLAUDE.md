@@ -18,7 +18,7 @@ Use the project-local `/upstream-check` skill (`.claude/skills/upstream-check/SK
 
 ## Release guidance
 
-Conditional release and manifest rules live in `.claude/live-rules/`. They are injected for matching manifest edits and release-related prompts.
+Conditional release and manifest rules live in `.claude/rules/`. They are injected for matching manifest edits and release-related prompts.
 
 ## Screenshots
 

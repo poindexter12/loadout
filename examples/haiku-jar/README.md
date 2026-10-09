@@ -73,11 +73,12 @@ Then `/reload-plugins` (or restart Claude Code).
 The auto-loading half of codebase-mapper (re-inject the map every prompt) is just "inject a live
 file," which the [live-rules](../../plugins/live-rules) plugin does with its `include:` field. If you
 already run live-rules, you can surface this exact map without installing codebase-mapper at all. Drop
-this one rule into `.claude/live-rules.md`:
+this one rule into `.claude/rules/<name>.md`:
 
 ```markdown
 ---
 description: Codebase map protocol
+paths: ["**/*"]
 include: .claude/.codebase-info/INDEX.md
 ---
 This repo has a maintained codebase map. Before starting any task, say which doc(s)
