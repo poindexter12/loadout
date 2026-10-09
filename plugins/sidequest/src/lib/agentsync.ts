@@ -26,6 +26,38 @@
  * leaving frontmatter as the only carrier. The def set is therefore fixed —
  * route edits never write or register agent files.
  *
+ * SQ-298 decided how effort travels once the marker goes away, and found why it
+ * cannot go away yet. Recorded here so it is not re-derived:
+ *
+ *   Effort carrier: `output_config.effort` on the request body. Claude Code
+ *   already emits it from a definition's `effort:` frontmatter, and
+ *   model-gateway's grok backend already honours it on a marker-free
+ *   `via: 'direct'` route (grok-backend.js:213 maps it to `reasoning.effort`).
+ *   So a relay needs no Sidequest-specific grammar for effort at all; it maps
+ *   `output_config.effort` to `reasoning_effort`, clamping xhigh/max to high.
+ *   Rejected: effort-suffixed model ids (multiplies the published roster and
+ *   pollutes every human /model picker) and a new request header (Sidequest
+ *   never makes the request, so its only per-dispatch header lever is
+ *   process-global env — identical for two concurrent executors at different
+ *   efforts, therefore unusable).
+ *
+ *   Why the MODEL id still needs the marker: a resolved id can only reach the
+ *   wire through a definition's `model:` frontmatter pin. It cannot ride the
+ *   Agent tool's `model` parameter, which is an alias enum
+ *   (sonnet|opus|haiku|fable) and rejects `claude-gpt-5.6-terra[1m]` outright.
+ *   Since external models are discovered at runtime and this def set is fixed
+ *   at build time, pinning real ids means runtime per-(model, effort)
+ *   definitions, which moves the bundledAgentType and force-exec-bypass hook
+ *   gates with it. The data is already in hand when that lands:
+ *   `exec.apiModel`/`exec.spawnId` carry the full published id, while the
+ *   marker deliberately carries a stripped form (routing.ts dispatchModelFor
+ *   drops the `claude-` prefix and the `[1m]` suffix, so the marker id is NOT
+ *   the published id — a second gateway-specific convention a relay would
+ *   otherwise have to mirror).
+ *
+ * Until that lands, marker emission below IS the compatibility path and stays
+ * on: it is the only carriage model-gateway resolves today.
+ *
  * syncExecAgents() renders through scripts/_exec-template.md via
  * renderExecAgent() below, so the ticket-execution protocol body stays in one
  * place for every generated file.

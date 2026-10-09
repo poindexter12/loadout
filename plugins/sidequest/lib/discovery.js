@@ -30,6 +30,7 @@ var discovery_exports = {};
 __export(discovery_exports, {
   CATALOG_SOURCES: () => CATALOG_SOURCES,
   CATALOG_STALE_MS: () => CATALOG_STALE_MS,
+  HTTP_MODEL_SOURCE: () => HTTP_MODEL_SOURCE,
   catalogStateFingerprint: () => catalogStateFingerprint,
   configuredExternalModelProvider: () => configuredExternalModelProvider,
   discoverExternalModels: () => discoverExternalModels,
@@ -37,6 +38,7 @@ __export(discovery_exports, {
 });
 module.exports = __toCommonJS(discovery_exports);
 var import_node_child_process = require("node:child_process");
+var import_node_crypto = __toESM(require("node:crypto"));
 var import_node_fs = __toESM(require("node:fs"));
 var import_node_path = __toESM(require("node:path"));
 var import_claude_home = require("./claude-home.js");
@@ -137,12 +139,101 @@ function catalogWithinFreshnessWindow(data) {
   const age = Date.now() - Date.parse(data.updatedAt);
   return Number.isFinite(age) && age >= 0 && age <= CATALOG_STALE_MS;
 }
+const HTTP_MODEL_SOURCE = "anthropic-base-url";
+function effectiveAnthropicBaseUrl() {
+  const raw = process.env.ANTHROPIC_BASE_URL;
+  const trimmed = typeof raw === "string" ? raw.trim().replace(/\/+$/, "") : "";
+  return /^https?:\/\/[^\s/]+/.test(trimmed) ? trimmed : null;
+}
+const MODELS_PROBE_TIMEOUT_MS = 3 * 1e3;
+const MODELS_PROBE_SCRIPT = "const u=process.argv[1];fetch(u,{headers:{accept:'application/json'}}).then((r)=>r.ok?r.text():Promise.reject(new Error('status '+r.status))).then((t)=>{process.stdout.write(t);},()=>{process.exitCode=1;});";
+function fetchModelRows(baseUrl) {
+  try {
+    const probe = (0, import_node_child_process.spawnSync)(process.execPath, ["-e", MODELS_PROBE_SCRIPT, `${baseUrl}/v1/models`], {
+      encoding: "utf8",
+      timeout: MODELS_PROBE_TIMEOUT_MS,
+      windowsHide: true
+    });
+    if (probe.status !== 0 || !probe.stdout) return null;
+    const parsed = JSON.parse(probe.stdout);
+    const data = isRecord(parsed) ? parsed.data : null;
+    return Array.isArray(data) ? data : null;
+  } catch {
+    return null;
+  }
+}
+const CLAUDE_FIRST_PARTY_RE = /^(?:claude-)?(?:opus|sonnet|haiku|fable|instant)(?:[-.]|$)|^claude-\d/;
+const VIRTUAL_DISPATCH_IDS = /* @__PURE__ */ new Set(["claude-codex-auto"]);
+function providerDetails(id) {
+  const bare = id.replace(/^claude-(?:codex-)?/, "").replace(/\[1m\]$/, "");
+  if (/^gpt-/.test(bare)) return { provider: "codex", base: bare };
+  if (/^grok-/.test(bare)) return { provider: "grok", base: bare };
+  if (/^gemini-/.test(bare)) return { provider: "antigravity", base: bare };
+  return { provider: "relay", base: bare };
+}
+function slugFor(provider, base, used) {
+  const providerPrefix = `${provider}-`;
+  const providerBase = base.startsWith(providerPrefix) ? base.slice(providerPrefix.length) : base;
+  let s = (providerPrefix + providerBase).toLowerCase().replace(/\[1m\]$/, "").replace(/\./g, "-").replace(/[^a-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+  if (!/^[a-z0-9]/.test(s)) s = `x${s}`;
+  if (s.length > 32) {
+    const hash = import_node_crypto.default.createHash("sha1").update(s).digest("hex").slice(0, 6);
+    s = `${s.slice(0, 32 - 1 - hash.length)}-${hash}`;
+  }
+  let unique = s;
+  let n = 2;
+  while (used.has(unique)) {
+    const suffix = `-${n}`;
+    unique = s.slice(0, Math.max(1, 32 - suffix.length)) + suffix;
+    n++;
+  }
+  used.add(unique);
+  return unique;
+}
+function httpModelFromRow(raw, used) {
+  if (!isRecord(raw)) return null;
+  if (typeof raw.type === "string" && raw.type !== "model") return null;
+  const id = typeof raw.id === "string" ? raw.id.trim() : "";
+  if (!id || VIRTUAL_DISPATCH_IDS.has(id) || CLAUDE_FIRST_PARTY_RE.test(id)) return null;
+  const { provider, base } = providerDetails(id);
+  if (!base || !SLUG_RE.test(provider)) return null;
+  const slug = slugFor(provider, base, used);
+  if (!SLUG_RE.test(slug)) return null;
+  const displayName = typeof raw.display_name === "string" ? raw.display_name.trim() : "";
+  return { slug, id, label: displayName || slug, provider, source: HTTP_MODEL_SOURCE };
+}
+let httpModelCache = null;
+function httpExternalModels() {
+  const baseUrl = effectiveAnthropicBaseUrl();
+  if (!baseUrl) return [];
+  const cached = httpModelCache && httpModelCache.baseUrl === baseUrl ? httpModelCache : null;
+  const window = cached?.models ? CATALOG_STALE_MS : REFRESH_RETRY_MS;
+  if (cached && Date.now() - cached.at <= window) return cached.models ?? [];
+  const rows = fetchModelRows(baseUrl);
+  const used = /* @__PURE__ */ new Set();
+  const models = rows ? rows.map((row) => httpModelFromRow(row, used)).filter((model) => model !== null) : null;
+  httpModelCache = { baseUrl, at: Date.now(), models };
+  return models ?? [];
+}
+function httpProviderReadiness(provider) {
+  const baseUrl = effectiveAnthropicBaseUrl();
+  if (!baseUrl) return null;
+  const served = httpExternalModels().filter((model) => model.provider === provider);
+  if (!served.length) return null;
+  return {
+    provider,
+    ready: true,
+    state: "endpoint",
+    message: `ANTHROPIC_BASE_URL ${baseUrl} served ${served.length} ${provider} model${served.length === 1 ? "" : "s"} from GET /v1/models.`
+  };
+}
 function catalogStateFingerprint() {
-  return discoveryRoots().flatMap((root) => CATALOG_SOURCES.map(({ relPath }) => {
+  const catalogs = discoveryRoots().flatMap((root) => CATALOG_SOURCES.map(({ relPath }) => {
     const catalogPath = import_node_path.default.resolve(root, relPath);
     const freshness = catalogWithinFreshnessWindow(readCatalogSafe(catalogPath)) ? "fresh" : "stale";
     return `${catalogPath}:${catalogFileFingerprint(catalogPath) ?? "missing"}:${freshness}`;
-  })).join("|");
+  }));
+  return [...catalogs, `${HTTP_MODEL_SOURCE}:${effectiveAnthropicBaseUrl() ?? "unset"}`].join("|");
 }
 function usableCatalog(data, schemas) {
   if (!isRecord(data) || !catalogWithinFreshnessWindow(data)) return null;
@@ -181,7 +272,7 @@ function providerReadiness(provider) {
       if (readiness) return readiness;
     }
   }
-  return null;
+  return httpProviderReadiness(provider);
 }
 function currentCatalog(catalogPath, schemas) {
   const storedCatalog = readCatalogSafe(catalogPath);
@@ -214,6 +305,9 @@ function configuredExternalModelProvider(slug) {
       }
     }
   }
+  for (const model of httpExternalModels()) {
+    if (model.slug === normalizedSlug) return model.provider;
+  }
   return null;
 }
 function discoverExternalModels() {
@@ -233,12 +327,26 @@ function discoverExternalModels() {
       }
     }
   }
+  const namedIds = new Set(out.map((model) => model.id));
+  const namedSlugs = new Set(out.map((model) => model.slug));
+  const readinessByProvider = /* @__PURE__ */ new Map();
+  for (const model of httpExternalModels()) {
+    if (namedIds.has(model.id) || namedSlugs.has(model.slug)) continue;
+    if (!readinessByProvider.has(model.provider)) {
+      readinessByProvider.set(model.provider, providerReadiness(model.provider)?.ready === true);
+    }
+    if (!readinessByProvider.get(model.provider)) continue;
+    namedIds.add(model.id);
+    namedSlugs.add(model.slug);
+    out.push(model);
+  }
   return out;
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   CATALOG_SOURCES,
   CATALOG_STALE_MS,
+  HTTP_MODEL_SOURCE,
   catalogStateFingerprint,
   configuredExternalModelProvider,
   discoverExternalModels,

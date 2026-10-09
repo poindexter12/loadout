@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveClaudeHome } from './claude-home.js';
@@ -167,12 +168,182 @@ function catalogWithinFreshnessWindow(data: unknown): boolean {
   return Number.isFinite(age) && age >= 0 && age <= CATALOG_STALE_MS;
 }
 
+// ------------------------------------------------------- ANTHROPIC_BASE_URL
+//
+// catalog.json only exists when model-gateway is installed locally, which made
+// every external model on this board a model-gateway model by construction. The
+// endpoint Claude Code already talks to can answer the same question directly:
+// `GET /v1/models` on the effective ANTHROPIC_BASE_URL, which is exactly what
+// Claude Code reads for its own picker under
+// CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1. Any relay that serves that
+// route now contributes models, with or without the plugin (SQ-298).
+//
+// This source is ADDITIVE, not a replacement. Catalog rows keep their own
+// naming and readiness, and an id present in both sources is named by the
+// catalog. The reason is not caution for its own sake: the board's persisted
+// routes pin SLUGS, and a slug this file derived differently from the one
+// catalog.json published would silently repoint every stored route on the
+// board at once. The catalog wins on naming wherever it exists, so an existing
+// install sees byte-identical slugs and only gains rows it never had.
+export const HTTP_MODEL_SOURCE = 'anthropic-base-url';
+
+// Only the process environment. Claude Code applies a settings `env` block to
+// the session environment, so a hook or the board MCP server inherits the
+// effective value without this file re-implementing the settings precedence
+// walk (which it could not do correctly anyway: it has no project path). A bare
+// CLI run outside such a session sees whatever its shell exports.
+function effectiveAnthropicBaseUrl(): string | null {
+  const raw = process.env.ANTHROPIC_BASE_URL;
+  const trimmed = typeof raw === 'string' ? raw.trim().replace(/\/+$/, '') : '';
+  return /^https?:\/\/[^\s/]+/.test(trimmed) ? trimmed : null;
+}
+
+// Discovery is synchronous — routing and the hooks call it inline — and Node has
+// no synchronous fetch, so the probe runs in a child process exactly like the
+// gateway catalog refresh above. The 3s budget is the one discovery.ts has always
+// given a /v1/models read.
+const MODELS_PROBE_TIMEOUT_MS = 3 * 1000;
+const MODELS_PROBE_SCRIPT = "const u=process.argv[1];fetch(u,{headers:{accept:'application/json'}})"
+  + ".then((r)=>r.ok?r.text():Promise.reject(new Error('status '+r.status)))"
+  + '.then((t)=>{process.stdout.write(t);},()=>{process.exitCode=1;});';
+
+// Only the first page is read. has_more paging exists in the Anthropic shape but
+// no relay this talks to has ever needed it, and a synchronous probe must stay
+// inside one bounded child process.
+function fetchModelRows(baseUrl: string): unknown[] | null {
+  try {
+    const probe = spawnSync(process.execPath, ['-e', MODELS_PROBE_SCRIPT, `${baseUrl}/v1/models`], {
+      encoding: 'utf8', timeout: MODELS_PROBE_TIMEOUT_MS, windowsHide: true,
+    });
+    if (probe.status !== 0 || !probe.stdout) return null;
+    const parsed = JSON.parse(probe.stdout) as unknown;
+    const data = isRecord(parsed) ? parsed.data : null;
+    return Array.isArray(data) ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+// A first-party Claude model is NOT an external model. Without this an
+// ANTHROPIC_BASE_URL pointed at the real API (or at model-gateway's
+// RC-compatibility mode, which legitimately sets the base URL to
+// http://api.anthropic.com and redirects it through the hosts file) would
+// register claude-opus-*/claude-sonnet-* as external routes shadowing the Claude
+// ladder. Matching on the family segment rather than the host is what keeps
+// compat mode working.
+// Two families, because Anthropic has used two id shapes: the family-first form
+// (claude-opus-4-5-20260514, sonnet) and the legacy version-first form
+// (claude-3-5-sonnet-20241022, claude-3-opus-20240229). Matching only the first
+// would let every legacy id through as an external model the moment
+// ANTHROPIC_BASE_URL named the real API.
+const CLAUDE_FIRST_PARTY_RE = /^(?:claude-)?(?:opus|sonnet|haiku|fable|instant)(?:[-.]|$)|^claude-\d/;
+// The virtual dispatch id model-gateway advertises for marker-resolved routing.
+// It is a routing sentinel, not a model anything may be routed to directly.
+const VIRTUAL_DISPATCH_IDS = new Set(['claude-codex-auto']);
+
+// Faithful port of model-gateway's catalog slugFor()/modelCatalogDetails()
+// (plugins/model-gateway/lib/catalog.js). It is duplicated rather than imported
+// because sidequest must derive these with the plugin absent, which is the whole
+// point of this source. Drift here renames routes, so
+// 'HTTP rows derive the slugs catalog.json publishes' pins the pairs in
+// test/discovery.test.ts against the real published ids.
+function providerDetails(id: string): { provider: string; base: string } {
+  const bare = id.replace(/^claude-(?:codex-)?/, '').replace(/\[1m\]$/, '');
+  if (/^gpt-/.test(bare)) return { provider: 'codex', base: bare };
+  if (/^grok-/.test(bare)) return { provider: 'grok', base: bare };
+  if (/^gemini-/.test(bare)) return { provider: 'antigravity', base: bare };
+  // Anything else is a relay serving its own roster. One namespace keeps those
+  // slugs collision-free against the three known families.
+  return { provider: 'relay', base: bare };
+}
+
+function slugFor(provider: string, base: string, used: Set<string>): string {
+  const providerPrefix = `${provider}-`;
+  const providerBase = base.startsWith(providerPrefix) ? base.slice(providerPrefix.length) : base;
+  let s = (providerPrefix + providerBase).toLowerCase()
+    .replace(/\[1m\]$/, '')
+    .replace(/\./g, '-')
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (!/^[a-z0-9]/.test(s)) s = `x${s}`;
+  if (s.length > 32) {
+    const hash = crypto.createHash('sha1').update(s).digest('hex').slice(0, 6);
+    s = `${s.slice(0, 32 - 1 - hash.length)}-${hash}`;
+  }
+  let unique = s;
+  let n = 2;
+  while (used.has(unique)) {
+    const suffix = `-${n}`;
+    unique = s.slice(0, Math.max(1, 32 - suffix.length)) + suffix;
+    n++;
+  }
+  used.add(unique);
+  return unique;
+}
+
+function httpModelFromRow(raw: unknown, used: Set<string>): ExternalModel | null {
+  if (!isRecord(raw)) return null;
+  // model-gateway stamps type:"model"; a leaner relay may omit it. Reject only a
+  // row that declares itself something else.
+  if (typeof raw.type === 'string' && raw.type !== 'model') return null;
+  const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+  if (!id || VIRTUAL_DISPATCH_IDS.has(id) || CLAUDE_FIRST_PARTY_RE.test(id)) return null;
+  const { provider, base } = providerDetails(id);
+  if (!base || !SLUG_RE.test(provider)) return null;
+  const slug = slugFor(provider, base, used);
+  if (!SLUG_RE.test(slug)) return null;
+  const displayName = typeof raw.display_name === 'string' ? raw.display_name.trim() : '';
+  return { slug, id, label: displayName || slug, provider, source: HTTP_MODEL_SOURCE };
+}
+
+// Cached per base URL on the same windows the catalog refresh uses: a served
+// answer is trusted for the catalog window, a failure is retried sooner but not
+// on every call, so a relay that is down costs one child process per retry
+// window rather than one per route resolution.
+let httpModelCache: { baseUrl: string; at: number; models: ExternalModel[] | null } | null = null;
+
+function httpExternalModels(): ExternalModel[] {
+  const baseUrl = effectiveAnthropicBaseUrl();
+  if (!baseUrl) return [];
+  const cached = httpModelCache && httpModelCache.baseUrl === baseUrl ? httpModelCache : null;
+  const window = cached?.models ? CATALOG_STALE_MS : REFRESH_RETRY_MS;
+  if (cached && Date.now() - cached.at <= window) return cached.models ?? [];
+  const rows = fetchModelRows(baseUrl);
+  const used = new Set<string>();
+  const models = rows
+    ? rows.map((row) => httpModelFromRow(row, used)).filter((model): model is ExternalModel => model !== null)
+    : null;
+  httpModelCache = { baseUrl, at: Date.now(), models };
+  return models ?? [];
+}
+
+// Readiness for a provider whose rows came off the endpoint. There is no
+// credential or proxy to probe here: the endpoint answered and listed the model,
+// which is the whole of what this source can attest. Stating the source in the
+// message is what makes a board able to tell the two apart.
+function httpProviderReadiness(provider: string): ProviderReadiness | null {
+  const baseUrl = effectiveAnthropicBaseUrl();
+  if (!baseUrl) return null;
+  const served = httpExternalModels().filter((model) => model.provider === provider);
+  if (!served.length) return null;
+  return {
+    provider,
+    ready: true,
+    state: 'endpoint',
+    message: `ANTHROPIC_BASE_URL ${baseUrl} served ${served.length} ${provider} model${served.length === 1 ? '' : 's'} from GET /v1/models.`,
+  };
+}
+
 export function catalogStateFingerprint(): string {
-  return discoveryRoots().flatMap((root) => CATALOG_SOURCES.map(({ relPath }) => {
+  const catalogs = discoveryRoots().flatMap((root) => CATALOG_SOURCES.map(({ relPath }) => {
     const catalogPath = path.resolve(root, relPath);
     const freshness = catalogWithinFreshnessWindow(readCatalogSafe(catalogPath)) ? 'fresh' : 'stale';
     return `${catalogPath}:${catalogFileFingerprint(catalogPath) ?? 'missing'}:${freshness}`;
-  })).join('|');
+  }));
+  // The endpoint identity, never the probe timestamp: a downstream routing cache
+  // must notice the base URL changing without churning every few seconds.
+  return [...catalogs, `${HTTP_MODEL_SOURCE}:${effectiveAnthropicBaseUrl() ?? 'unset'}`].join('|');
 }
 
 function usableCatalog(data: unknown, schemas: ReadonlySet<number>): CatalogData | null {
@@ -218,7 +389,10 @@ export function providerReadiness(provider: string): ProviderReadiness | null {
       if (readiness) return readiness;
     }
   }
-  return null;
+  // Only where the catalog is silent. An installed gateway reporting its own
+  // backend as proxy-down is a stronger statement than "the endpoint listed a
+  // row", so the catalog keeps the last word wherever it has one.
+  return httpProviderReadiness(provider);
 }
 
 // Nothing writes the catalog on its own, so once the stored one ages past CATALOG_STALE_MS every model in it
@@ -260,6 +434,9 @@ export function configuredExternalModelProvider(slug: string): string | null {
       }
     }
   }
+  for (const model of httpExternalModels()) {
+    if (model.slug === normalizedSlug) return model.provider;
+  }
   return null;
 }
 
@@ -279,6 +456,22 @@ export function discoverExternalModels(): ExternalModel[] {
         out.push(entry);
       }
     }
+  }
+  // Endpoint rows come last and never displace a catalog row: an id or slug the
+  // catalog already named keeps that name, so an existing install's persisted
+  // routes are untouched and only genuinely new rows are added.
+  const namedIds = new Set(out.map((model) => model.id));
+  const namedSlugs = new Set(out.map((model) => model.slug));
+  const readinessByProvider = new Map<string, boolean>();
+  for (const model of httpExternalModels()) {
+    if (namedIds.has(model.id) || namedSlugs.has(model.slug)) continue;
+    if (!readinessByProvider.has(model.provider)) {
+      readinessByProvider.set(model.provider, providerReadiness(model.provider)?.ready === true);
+    }
+    if (!readinessByProvider.get(model.provider)) continue;
+    namedIds.add(model.id);
+    namedSlugs.add(model.slug);
+    out.push(model);
   }
   return out;
 }

@@ -114,6 +114,12 @@ For substantial changes, Claude can turn the request into a story with linked ti
 
 Sidequest keeps ticket activity visible in the board. Ask Claude to check active work after a restart or when you need help with a ticket that was started in another session.
 
+### Where the non-Claude models come from
+
+Routing can send a ticket to a non-Claude model, and Sidequest finds those models in two places. If Model Gateway is installed, its published catalog is read directly. Sidequest also asks whichever endpoint `ANTHROPIC_BASE_URL` points at for its model list, the same list Claude Code reads for its own `/model` picker, so a relay you run yourself contributes models without Model Gateway being installed at all. The two sources combine: a model both of them publish keeps its Model Gateway name, so existing routes are never renamed, and an endpoint-only model is added alongside. First-party Claude models are never treated as external, so pointing the variable at the real API changes nothing about routing.
+
+If a routing profile offers fewer models than you expect, ask Claude to check model readiness. It will say which source answered, so you can tell "Model Gateway reports its backend as down" apart from "the endpoint never answered".
+
 ## Keep GitHub issues aligned
 
 Link a GitHub issue to its execution ticket when that issue should follow the delivery lifecycle. Agents use the `issue_link` MCP tool; the CLI equivalent is:
