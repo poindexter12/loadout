@@ -126,7 +126,7 @@
     {
       "name": "live-rules",
       "source": "./plugins/live-rules",
-      "description": "Atomic project rules in .claude/live-rules/rules/ with a generated manifest. Claude injects applicable rules at SessionStart, then only new or changed unseen rules as prompts and edits match; legacy single-file storage is for migration or explicit overrides.",
+      "description": "Project rules in .claude/rules/*.md, the directory Claude Code reads natively, one rule per file scoped by a paths: glob list. No manifest and no sync step: Live Rules adds timing only, re-grounding a rule when its content changes mid-session and delivering keyword-scoped rules Claude Code cannot trigger on its own. Disable a rule by renaming it to .md.off.",
       "version": "2.12.0",
       "author": {
         "name": "poindexter12"
