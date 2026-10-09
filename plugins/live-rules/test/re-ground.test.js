@@ -9,6 +9,13 @@
  * content hash is computed on every read. Migration out of the retired stores
  * is covered by test/migrate-rules.test.js.
  *
+ * SQ-293 made live-rules native-first, which changed the baseline every test
+ * here starts from: native Claude Code loads the rule files itself, so the
+ * FIRST sight of a rule is silent and live-rules speaks only when it has
+ * something native does not have. A session start is therefore the setup step
+ * for most of these tests, because it is what records what native loaded. The
+ * native-first contract itself is pinned in test/native-first.test.js.
+ *
  * Run: node --test plugins/live-rules/test/re-ground.test.js
  */
 
@@ -82,11 +89,12 @@ function windowsShortPath(target) {
  *  The session ledger
  * ------------------------------------------------------------------ */
 
-test('unchanged prompts emit no rule content after the first grounding', () => {
+test('unchanged prompts emit no rule content once a rule is in context', () => {
   const dir = project();
   const state = path.join(dir, 'state');
   seed(dir, [{ data: { description: 'Always' }, body: 'First version.' }]);
-  assert.match(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), /First version/);
+  hook(startHook, dir, state, { session_id: 'one', source: 'startup' });
+  assert.strictEqual(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), '');
   assert.strictEqual(hook(promptHook, dir, state, { session_id: 'one', prompt: 'again' }), '');
 });
 
@@ -97,7 +105,7 @@ test('only a changed relevant rule file is re-grounded', () => {
     { data: { description: 'One' }, body: 'One v1.' },
     { data: { description: 'Two' }, body: 'Two v1.' },
   ]);
-  hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' });
+  hook(startHook, dir, state, { session_id: 'one', source: 'startup' });
   fs.writeFileSync(ruleFile(dir, '001.md'), '---\ndescription: One\n---\nOne v2.\n');
   const output = hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' });
   assert.match(output, /One v2/);
@@ -110,7 +118,7 @@ test('a rule edited on disk re-grounds on the next prompt with no restart', () =
   const dir = project();
   const state = path.join(dir, 'state');
   seed(dir, [{ data: { description: 'Always' }, body: 'Version one.' }]);
-  assert.match(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), /Version one/);
+  hook(startHook, dir, state, { session_id: 'one', source: 'startup' });
   fs.writeFileSync(ruleFile(dir, '001.md'), '---\ndescription: Always\n---\nVersion two.\n');
   assert.match(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), /Version two/);
 });
@@ -119,7 +127,7 @@ test('a rule file added after the session started is grounded on the next prompt
   const dir = project();
   const state = path.join(dir, 'state');
   seed(dir, [{ data: { description: 'First' }, body: 'First body.' }]);
-  hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' });
+  hook(startHook, dir, state, { session_id: 'one', source: 'startup' });
 
   fs.writeFileSync(ruleFile(dir, '002.md'), '---\ndescription: Second\n---\nSecond body.\n');
   const output = hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' });
@@ -131,10 +139,12 @@ test('renaming a rule to .md.off stops it being grounded', () => {
   const dir = project();
   const state = path.join(dir, 'state');
   seed(dir, [{ data: { description: 'Always' }, body: 'Disable me.' }]);
-  assert.match(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), /Disable me/);
+  // A summarizing compaction is the one path that re-states a global rule, so
+  // it is also the way to show the rule still exists before it is disabled.
+  assert.match(hook(startHook, dir, state, { session_id: 'one', source: 'compact' }), /Disable me/);
 
   fs.renameSync(ruleFile(dir, '001.md'), ruleFile(dir, '001.md.off'));
-  assert.strictEqual(hook(promptHook, dir, state, { session_id: 'two', prompt: 'hello' }), '', 'a fresh session sees no rules at all');
+  assert.strictEqual(hook(startHook, dir, state, { session_id: 'two', source: 'compact' }), '', 'a fresh session sees no rules at all');
 });
 
 test('CRLF rule files hash the same as their LF form, so a line-ending change alone does not re-ground', () => {
@@ -142,31 +152,47 @@ test('CRLF rule files hash the same as their LF form, so a line-ending change al
   const state = path.join(dir, 'state');
   seed(dir, [{ data: { description: 'Always', priority: 95 }, body: 'Rule body.' }]);
   const target = ruleFile(dir, '001.md');
-  assert.match(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), /Rule body/);
+  hook(startHook, dir, state, { session_id: 'one', source: 'startup' });
 
   fs.writeFileSync(target, fs.readFileSync(target, 'utf8').replace(/\n/g, '\r\n'));
   assert.strictEqual(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), '');
 });
 
 test('session ledgers are isolated across concurrent session ids', () => {
+  // A keyword rule is the one kind live-rules always delivers itself, so it is
+  // what shows each session keeping its own record of what it has been told.
   const dir = project();
   const state = path.join(dir, 'state');
-  seed(dir, [{ data: { description: 'Always' }, body: 'Rule.' }]);
-  assert.match(hook(promptHook, dir, state, { session_id: 'first', prompt: 'hello' }), /Rule/);
-  assert.match(hook(promptHook, dir, state, { session_id: 'second', prompt: 'hello' }), /Rule/);
-  assert.strictEqual(hook(promptHook, dir, state, { session_id: 'first', prompt: 'hello' }), '');
+  seed(dir, [{ data: { description: 'Deploys', paths: [rules.NEVER_MATCH_PATH], prompt: ['deploy'] }, body: 'Rule.' }]);
+  assert.match(hook(promptHook, dir, state, { session_id: 'first', prompt: 'deploy' }), /Rule/);
+  assert.match(hook(promptHook, dir, state, { session_id: 'second', prompt: 'deploy' }), /Rule/);
+  assert.strictEqual(hook(promptHook, dir, state, { session_id: 'first', prompt: 'deploy' }), '');
 });
 
-test('startup, resume, compact, and clear rehydrate current prompt rules once', () => {
+test('startup, resume and clear record the rules native loaded without saying them', () => {
+  // SQ-293: native reads .claude/rules itself when a context begins, so
+  // emitting there would say every global rule twice.
   const dir = project();
   const state = path.join(dir, 'state');
   seed(dir, [{ data: { description: 'Always' }, body: 'Rule.' }]);
-  for (const source of ['startup', 'resume', 'compact', 'clear']) {
-    const output = hook(startHook, dir, state, { session_id: 'one', source });
-    assert.match(output, new RegExp('SessionStart \\(' + source + '\\)'));
-    assert.match(output, /Rule/);
-    assert.strictEqual(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), '');
+  for (const source of ['startup', 'resume', 'clear']) {
+    assert.strictEqual(hook(startHook, dir, state, { session_id: 'one-' + source, source }), '');
+    assert.strictEqual(hook(promptHook, dir, state, { session_id: 'one-' + source, prompt: 'hello' }), '');
   }
+});
+
+test('a summarizing compaction re-grounds the rules once, because nothing else puts them back', () => {
+  // The summary replaced the transcript and no component re-reads the rule
+  // files at that boundary, so this is live-rules' job alone.
+  const dir = project();
+  const state = path.join(dir, 'state');
+  seed(dir, [{ data: { description: 'Always' }, body: 'Rule.' }]);
+  hook(startHook, dir, state, { session_id: 'one', source: 'startup' });
+
+  const output = hook(startHook, dir, state, { session_id: 'one', source: 'compact' });
+  assert.match(output, /SessionStart \(compact\)/);
+  assert.match(output, /Rule/);
+  assert.strictEqual(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), '', 'and not again on the next prompt');
 });
 
 /* ------------------------------------------------------------------ *
@@ -221,36 +247,44 @@ test('a replacement-compaction marker collapses SessionStart(compact) to a short
  *  Path scoping
  * ------------------------------------------------------------------ */
 
-test('path-scoped rules ground once when their edited path first applies', () => {
+test('path-scoped rules stay silent on the touch that makes native load them', () => {
   const dir = project();
   const state = path.join(dir, 'state');
   seed(dir, [{ data: { description: 'TypeScript', paths: ['src/**/*.ts'] }, body: 'Use strict types.' }]);
   const data = { session_id: 'one', tool_input: { file_path: 'src/a.ts' } };
-  assert.match(hook(editHook, dir, state, data), /Use strict types/);
+  assert.strictEqual(hook(editHook, dir, state, data), '');
   assert.strictEqual(hook(editHook, dir, state, data), '');
   assert.strictEqual(hook(editHook, dir, state, { session_id: 'one', tool_input: { file_path: 'other/a.ts' } }), '');
 });
 
-test('a comma-separated paths scalar scopes every pattern it names through the edit hook', () => {
+// Which paths a rule scopes is a question about the matcher, so it is asserted
+// against the matcher. Going through the edit hook would only show the
+// native-first ledger decision on top of it, which is covered elsewhere.
+test('a comma-separated paths scalar scopes every pattern it names', () => {
   const dir = project();
-  const state = path.join(dir, 'state');
   seed(dir, [{ data: { description: 'Two trees', paths: 'src/**/*.ts, docs/**/*.md' }, body: 'Scoped rule.' }]);
-  assert.match(hook(editHook, dir, state, { session_id: 'a', tool_input: { file_path: 'src/a.ts' } }), /Scoped rule/);
-  assert.match(hook(editHook, dir, state, { session_id: 'b', tool_input: { file_path: 'docs/guide.md' } }), /Scoped rule/);
-  assert.strictEqual(hook(editHook, dir, state, { session_id: 'c', tool_input: { file_path: 'src/a.js' } }), '');
+  const [rule] = rules.loadRules(dir);
+  assert.deepStrictEqual(rule.paths, ['src/**/*.ts', 'docs/**/*.md']);
+
+  const scopes = (file) => rules.selectForEdit([rule], file).length === 1;
+  assert.ok(scopes('src/a.ts'));
+  assert.ok(scopes('docs/guide.md'));
+  assert.ok(!scopes('src/a.js'));
 });
 
 test('a rule still using the retired globs: key keeps its scope and warns on stderr', () => {
   const dir = project();
   const state = path.join(dir, 'state');
   seed(dir, [{ data: { description: 'Legacy key', globs: ['src/**/*.js'] }, body: 'Still scoped.' }]);
+  const [rule] = rules.loadRules(dir);
+  assert.deepStrictEqual(rule.paths, ['src/**/*.js'], 'the rule is not silently unscoped');
+
   const result = require('node:child_process').spawnSync(process.execPath, [editHook], {
     cwd: dir,
     env: { ...process.env, CLAUDE_PROJECT_DIR: dir, LIVE_RULES_STATE_DIR: state },
     input: JSON.stringify({ cwd: dir, session_id: 'one', tool_input: { file_path: 'src/a.js' } }),
     encoding: 'utf8',
   });
-  assert.match(result.stdout, /Still scoped/, 'the rule is not silently unscoped');
   assert.match(result.stderr, /globs.*deprecated; rename it to paths:/);
   assert.strictEqual(result.status, 0, 'a deprecation never breaks an edit');
 });
@@ -268,20 +302,26 @@ test('scoped hooks match paths with a different Windows drive-letter case', (tes
   fs.writeFileSync(path.join(dir, 'src', 'rule.js'), '');
   seed(dir, [{ data: { description: 'Source rule', paths: ['src/**/*.js', 'src'] }, body: 'Use source rules.' }]);
 
-  assert.match(hook(editHook, dir, state, {
+  // Native-first means first sight is silent, so each hook is observed on the
+  // second sight, after the rule changed. That still proves the alternate-cased
+  // path matched: if it did not, the rule would never be selected and both
+  // calls would be empty.
+  const changed = (script, data) => {
+    hook(script, dir, state, data);
+    fs.writeFileSync(ruleFile(dir, '001.md'),
+      '---\ndescription: Source rule\npaths: ["src/**/*.js", "src"]\n---\nUse source rules v2 ' + data.session_id + '.\n');
+    return hook(script, dir, state, data);
+  };
+
+  assert.match(changed(editHook, {
     session_id: 'edit',
     tool_input: { file_path: path.join(alternate, 'src', 'rule.js') },
-  }), /Use source rules/);
-  assert.match(hook(promptHook, dir, state, {
+  }), /Use source rules v2 edit/);
+  assert.match(changed(promptHook, {
     session_id: 'prompt',
     cwd: path.join(alternate, 'src'),
     prompt: 'hello',
-  }), /Use source rules/);
-  assert.match(hook(startHook, dir, state, {
-    session_id: 'start',
-    cwd: path.join(alternate, 'src'),
-    source: 'startup',
-  }), /Use source rules/);
+  }), /Use source rules v2 prompt/);
 });
 
 test('edit rules match a short Windows path when the project root is long', (testContext) => {
@@ -297,10 +337,11 @@ test('edit rules match a short Windows path when the project root is long', (tes
   fs.writeFileSync(path.join(dir, 'src', 'rule.js'), '');
   seed(dir, [{ data: { description: 'Source rule', paths: ['src/**/*.js'] }, body: 'Use source rules.' }]);
 
-  assert.match(hook(editHook, dir, state, {
-    session_id: 'short-path',
-    tool_input: { file_path: path.join(shortDir, 'src', 'rule.js') },
-  }), /Use source rules/);
+  const data = { session_id: 'short-path', tool_input: { file_path: path.join(shortDir, 'src', 'rule.js') } };
+  hook(editHook, dir, state, data); // first sight is native's; this records it
+  fs.writeFileSync(ruleFile(dir, '001.md'),
+    '---\ndescription: Source rule\npaths: ["src/**/*.js"]\n---\nUse source rules v2.\n');
+  assert.match(hook(editHook, dir, state, data), /Use source rules v2/);
 });
 
 test('a Windows project alias keeps the existing session ledger', (testContext) => {
@@ -313,7 +354,7 @@ test('a Windows project alias keeps the existing session ledger', (testContext) 
 
   const state = path.join(dir, 'state');
   seed(dir, [{ data: { description: 'Always' }, body: 'Ledger rule.' }]);
-  assert.match(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), /Ledger rule/);
+  assert.match(hook(startHook, dir, state, { session_id: 'one', source: 'compact' }), /Ledger rule/);
   assert.strictEqual(hook(promptHook, dir, state, { session_id: 'one', prompt: 'again' }, { CLAUDE_PROJECT_DIR: alternate }), '');
 });
 
@@ -359,9 +400,16 @@ test('a half-migrated project is grounded from the new store and still warned ab
   fs.mkdirSync(path.join(dir, '.claude', 'live-rules', 'rules'), { recursive: true });
   fs.writeFileSync(path.join(dir, '.claude', 'live-rules', 'rules', 'left.md'), 'Left behind.\n');
 
-  const context = JSON.parse(hook(startHook, dir, state, { session_id: 'one', source: 'startup' })).hookSpecificOutput.additionalContext;
-  assert.match(context, /are NOT in effect/);
-  assert.match(context, /Moved rule body/, 'the migrated rules are still grounded');
+  // At startup the notice is the only thing worth saying: native has already
+  // read the migrated rule, and the retired store is reported, never read.
+  const startup = JSON.parse(hook(startHook, dir, state, { session_id: 'one', source: 'startup' })).hookSpecificOutput.additionalContext;
+  assert.match(startup, /are NOT in effect/);
+  assert.doesNotMatch(startup, /Moved rule body/);
+  assert.doesNotMatch(startup, /Left behind/);
+
+  const compact = JSON.parse(hook(startHook, dir, state, { session_id: 'one', source: 'compact' })).hookSpecificOutput.additionalContext;
+  assert.match(compact, /are NOT in effect/);
+  assert.match(compact, /Moved rule body/, 'the migrated rules are still grounded');
 });
 
 test('no rules and no retired store is completely silent on every hook', () => {

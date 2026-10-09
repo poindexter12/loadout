@@ -2,11 +2,14 @@
 /**
  * live-rules - PreToolUse hook (Edit | Write | MultiEdit | NotebookEdit)
  *
- * Right before Claude edits a file, injects the project's rules scoped to that
- * file: every `paths:` entry that matches it, including a directory-style entry
- * that contains it. This is the "just-in-time, file-scoped" half of
- * live-rules; always-on and prompt-keyword rules are handled by the
- * UserPromptSubmit hook instead.
+ * Right before Claude edits a file, re-states any project rule scoped to that
+ * file whose content has CHANGED since the rule was loaded.
+ *
+ * SQ-293, native first: native Claude Code loads a `paths:` rule itself when a
+ * tool touches a matching file, so on the first match the rule is already on
+ * its way into context and live-rules stays silent, recording the hash in the
+ * session ledger. What native cannot do is notice that a rule file was edited
+ * after it loaded, leaving a stale copy in context. That is this hook's job.
  *
  * It emits ONLY hookSpecificOutput.additionalContext. It deliberately does NOT
  * return a permissionDecision: setting "allow" would skip the user's normal
@@ -63,13 +66,18 @@ function main() {
     process.exit(0);
   }
 
+  // SQ-293, native first: this touch is exactly what makes native load a
+  // matching `paths:` rule, so on a first match live-rules records the hash and
+  // says nothing. It speaks on a later touch only if the file changed since,
+  // which native will not notice on its own.
   const selected = lib.attachIncludes(lib.selectForEdit(ruleSet.rules, relPath), projectDir);
-  const changed = ledger.changed(projectDir, data.session_id, selected, false);
+  const changed = ledger.reconcile(projectDir, data.session_id, selected, { reset: false });
   if (!changed.length) process.exit(0);
 
   const header =
     '=== LIVE RULES for ' + relPath + ' (live-rules) ===\n' +
-    'Project rules that apply to the file you are about to edit. Follow them in this change. ' +
+    'A project rule that applies to this file changed since it was loaded. ' +
+    'Follow the updated rule in this change. ' +
     'Source: ' + lib.displayPath(projectDir, ruleSet.source);
 
   lib.emit('PreToolUse', lib.renderRules(changed, header));
