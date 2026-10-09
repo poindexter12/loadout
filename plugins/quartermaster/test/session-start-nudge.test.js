@@ -11,7 +11,7 @@ const { recordSessionTally } = require('../lib/state.js');
 
 const HOOK = path.join(__dirname, '..', 'hooks', 'session-start-nudge.js');
 
-function runHook(projectDir, stateDir) {
+function runHookRaw(projectDir, stateDir) {
   const result = spawnSync(process.execPath, [HOOK], {
     env: {
       ...process.env,
@@ -22,8 +22,24 @@ function runHook(projectDir, stateDir) {
     encoding: 'utf8',
   });
   assert.equal(result.status, 0, result.stderr);
-  return JSON.parse(result.stdout).hookSpecificOutput.additionalContext;
+  return result.stdout;
 }
+
+function runHook(projectDir, stateDir) {
+  return JSON.parse(runHookRaw(projectDir, stateDir)).hookSpecificOutput.additionalContext;
+}
+
+test('session-start suppresses the capability charter only for the native self-improvement rule', () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quartermaster-project-'));
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quartermaster-state-'));
+
+  assert.match(runHookRaw(projectDir, stateDir), /notice repeated manual work/i);
+
+  const rulePath = path.join(projectDir, '.claude', 'rules', 'self-improvement.md');
+  fs.mkdirSync(path.dirname(rulePath), { recursive: true });
+  fs.writeFileSync(rulePath, 'native self-improvement rule\n');
+  assert.equal(runHookRaw(projectDir, stateDir), '');
+});
 
 test('session-start proactively offers an optimization round and waits for approval', () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quartermaster-project-'));

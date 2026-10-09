@@ -38,7 +38,7 @@ function emit(context) {
 }
 
 function seededSelfImprovementRuleExists(projectDir) {
-  return fs.existsSync(path.join(projectDir, '.claude', 'live-rules', 'rules', 'self-improvement.md'));
+  return fs.existsSync(path.join(projectDir, '.claude', 'rules', 'self-improvement.md'));
 }
 
 function resupplyNudge(projectDir) {

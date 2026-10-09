@@ -100,16 +100,6 @@ test('Quartermaster seed catalogs preserve Live Rules one-rule-per-file and re-g
   fs.rmSync(path.join(testFixture.project, '.claude'), { recursive: true, force: true });
   fs.mkdirSync(ruleDir, { recursive: true });
   fs.writeFileSync(rulePath, seed);
-  // Transitional: Quartermaster's nudge still probes the pre-SQ-292 store
-  // (quartermaster/hooks/session-start-nudge.js:41) to decide it has nothing to
-  // say. SQ-292 moved live-rules to .claude/rules but may not touch
-  // quartermaster; SQ-289 repoints that detector. Seed the legacy marker so the
-  // silence assertion below holds either way, and DELETE this block once the
-  // detector reads .claude/rules.
-  const legacyMarker = path.join(testFixture.project, '.claude', 'live-rules', 'rules', 'self-improvement.md');
-  fs.mkdirSync(path.dirname(legacyMarker), { recursive: true });
-  fs.writeFileSync(legacyMarker, seed);
-
   const start = runHook('live-rules', 'session-start-rules.js', testFixture, { source: 'startup' });
   assertApprovalSplit(JSON.parse(start).hookSpecificOutput.additionalContext);
   assert.equal(runHook('live-rules', 'inject-prompt-rules.js', testFixture, { prompt: 'continue' }), '');
