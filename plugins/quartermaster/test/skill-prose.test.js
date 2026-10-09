@@ -15,6 +15,16 @@ function readReference(skill, name) {
   return fs.readFileSync(path.join(__dirname, '..', 'skills', skill, 'references', name + '.md'), 'utf8');
 }
 
+/** Every Markdown file under skills/, as [repo-relative path, contents] pairs. */
+function allSkillProse(dir = path.join(__dirname, '..', 'skills'), out = []) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) allSkillProse(full, out);
+    else if (entry.name.endsWith('.md')) out.push([path.relative(path.join(__dirname, '..'), full), fs.readFileSync(full, 'utf8')]);
+  }
+  return out;
+}
+
 function fixture(t) {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'quartermaster-seeds-'));
   t.after(() => fs.rmSync(project, { recursive: true, force: true }));
@@ -60,9 +70,12 @@ test('documents namespaced Quartermaster commands and Live Rules deduplication',
 
   assert.match(doctor, /`\/quartermaster:update-loadout`, then `\/reload-plugins`/);
   assert.doesNotMatch(doctor, /`\/update-loadout`/);
-  assert.match(setup, /injects a rule again only when it newly matches or its content\/hash changes/);
+  assert.match(setup, /injects it again when its content changes mid-session/);
   assert.match(setup, /Unchanged rules do not repeat on every prompt or edit/);
   assert.doesNotMatch(setup, /every prompt for the always-on ones/);
+  // live-rules adds timing to native storage; it must not be sold as the store itself.
+  assert.match(setup, /It owns no storage/);
+  assert.doesNotMatch(setup, /`live-rules` holds project rules/);
 });
 
 test('setup, resupply, and references agree on reuse and consent rather than build-first work', () => {
@@ -92,15 +105,70 @@ test('setup, resupply, and references agree on reuse and consent rather than bui
   }
   assert.match(setup, /not approval to migrate or overwrite/);
   assert.match(self, /Preserve existing rules/);
-  assert.match(readReference('setup', 'rule-templates'), /only when that destination does not exist/);
+  assert.match(readReference('setup', 'rule-templates'), /Seed `\.claude\/rules\/` only when it holds no rule files yet/);
 });
 
-test('self-improvement and routing describe path/hash deduplication, not per-prompt repetition', () => {
-  for (const text of [readReference('setup', 'self-improvement'), readReference('resupply', 'routing')]) {
-    assert.match(text, /path.*(?:content hash|content\/hash)/);
-    assert.match(text, /Unchanged rules do not repeat\s+on every prompt or edit/);
-    assert.doesNotMatch(text, /re-injected every prompt|re-injects it on every prompt|on every prompt so it doesn't get forgotten/);
+test('self-improvement describes path/hash deduplication, not per-prompt repetition', () => {
+  const text = readReference('setup', 'self-improvement');
+  assert.match(text, /path.*(?:content hash|content\/hash)/);
+  assert.match(text, /Unchanged rules do not repeat\s+on every prompt or edit/);
+  assert.doesNotMatch(text, /re-injected every prompt|re-injects it on every prompt|on every prompt so it doesn't get forgotten/);
+});
+
+test('routing picks a rule destination by who the rule is true for, not by what is installed', () => {
+  const routing = readReference('resupply', 'routing');
+  const section = routing.slice(routing.indexOf('## 7.'), routing.indexOf('## 8.'));
+  assert.ok(section, 'routing.md keeps a rule-destination section');
+
+  // All three destinations, and the choice is independent of live-rules being present.
+  assert.match(section, /`\.claude\/rules\/<theme-slug>\.md`/);
+  assert.match(section, /`\.claude\/rules\/<theme-slug>\.local\.md`/);
+  assert.match(section, /`~\/\.claude\/rules\/<theme-slug>\.md`/);
+  assert.match(section.replace(/\s+/g, ' '), /whether or\s*not live-rules is installed/i);
+  assert.match(section.replace(/\s+/g, ' '), /changes when a rule is said, never where it is stored/);
+
+  // The old framing made the three-way choice conditional on the plugin and sold
+  // its cadence as the reason to prefer it.
+  assert.doesNotMatch(section, /If the live-rules plugin is installed[\s\S]*?\n- Else:/);
+  assert.doesNotMatch(section, /path\/content hash changes|manifest/i);
+});
+
+test('quartermaster routes personal themes out of the repo and names the native rule store', () => {
+  const setup = readSkill('setup');
+  const routing = readReference('resupply', 'routing');
+  const templates = readReference('setup', 'rule-templates');
+  const self = readReference('setup', 'self-improvement');
+
+  // Cross-project correction themes are the user's, so they go to the user's tree.
+  for (const [label, text] of [['setup', setup], ['routing', routing], ['rule-templates', templates]]) {
+    assert.match(text, /~\/\.claude\/rules/, `${label} names ~/.claude/rules as a destination`);
   }
+  assert.match(setup.replace(/\s+/g, ' '), /cross-project correction theme[\s\S]*?`~\/\.claude\/rules\/<name>\.md`/i);
+  assert.match(setup.replace(/\s+/g, ' '), /project-derived rule[\s\S]*?`\.claude\/rules\/<name>\.md`/i);
+  assert.match(setup, /never into the repo/);
+  assert.match(routing.replace(/\s+/g, ' '), /Response format and length, voice, tone, punctuation, and cross-project workflow habits are always this row/);
+
+  // Project-derived starter rules go to the native project directory.
+  assert.match(templates, /Write each selected rule to its own `\.claude\/rules\/<stable-name>\.md` file/);
+  assert.match(setup, /one rule per file under `\.claude\/rules\/\*\.md`/);
+
+  // The self-improvement sentinel is still one exact path, at the new location.
+  assert.match(self, /exactly\s+`\.claude\/rules\/self-improvement\.md`/);
+  assert.match(self, /only when the exact\s+`\.claude\/rules\/self-improvement\.md` path is absent/);
+  assert.doesNotMatch(self, /enabled/);
+
+  // Nothing anywhere in the skill text points at the retired store or its index.
+  for (const [file, text] of allSkillProse()) {
+    assert.doesNotMatch(text, /live-rules\/rules/, `${file} must not name the retired rule store`);
+    assert.doesNotMatch(text, /manifest\.json/, `${file} must not name a rule manifest`);
+    assert.doesNotMatch(text, /^(?:globs|dirs):/m, `${file} must use the native paths: scope key`);
+  }
+
+  // Template bodies follow the project's conventions, not the user's voice.
+  assert.doesNotMatch(templates, /user's stated voice/);
+  assert.match(templates, /Adapt each body to the project's own conventions/);
+  assert.match(templates, /cite the project's own editorial guideline file as its source/);
+  assert.match(templates, /<editorial-guidelines-path>/);
 });
 
 test('unseeded fallback offers reuse with the same two approval boundaries, without mining', (t) => {

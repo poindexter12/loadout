@@ -76,7 +76,7 @@ One visible plan, then per-item approval. Draw from three sources, in this order
     so Claude begins oriented instead of re-exploring the tree every time. It refreshes itself
     from the diff as the code changes. Worth it for any real codebase; pointless for an empty
     scaffold until there is code to map.
-  - `live-rules` holds project rules as Markdown. SessionStart injects rules that apply at startup, and during the session it injects a rule again only when it newly matches or its content/hash changes. Unchanged rules do not repeat on every prompt or edit. Content changes take effect on the next prompt or relevant edit, with no restart. That is the difference from CLAUDE.md, which is always in context whether or not it is relevant. Worth it anywhere the user has conventions they keep having to repeat.
+  - `live-rules` adds timing to the project rules Claude Code already reads from `.claude/rules/`. It owns no storage, so those files stay the only copy and a project that later removes the plugin keeps every rule. What it adds is re-saying: native loads a rule once per session, and live-rules injects it again when its content changes mid-session, so an edited convention takes effect on the next prompt or relevant edit with no restart. It also fires keyword-scoped rules on a matching prompt, which native has no trigger for. Unchanged rules do not repeat on every prompt or edit. That is the difference from CLAUDE.md, which is always in context whether or not it is relevant. Worth it anywhere the user has conventions they keep having to repeat, or keeps editing rules mid-session.
   - `sidequest` is the delegation system, not just a ticket tracker, and the routing and
     executor half is where the value is. Tickets are the input; what it does with them is
     classify each into a category, route that category to a concrete model and effort level so
@@ -131,7 +131,25 @@ One visible plan, then per-item approval. Draw from three sources, in this order
   project-required tests and security, trust-boundary, data-loss, and accessibility safeguards.
   Focused checks supplement required gates; honor an assigned integration owner's testing split,
   with full required verification for solo work. Do not seed automatic cleanup or size quotas.
-  Preserve existing rule files; a template update is not approval to migrate or overwrite them.
+  Preserve the rule files already in `.claude/rules/`; a template update
+  is not approval to migrate or overwrite them.
+
+  Seeded rules have two destinations and the split decides which, so say which one each rule is
+  going to before you write it:
+
+  - A **project-derived rule**, built from this repo's code, tooling, docs, or stated conventions,
+    is true of the repo for anyone who clones it. It goes to `.claude/rules/<name>.md` in the
+    project and gets committed with the rest of `.claude/`.
+  - A **cross-project correction theme**, meaning anything the mining shows the user correcting in
+    more than one project (response format and length, voice, tone, punctuation, workflow habits),
+    is true of the user and not of this repo. It goes to `~/.claude/rules/<name>.md` in the user's
+    own config tree, never into the repo, however often the history repeats it. Claude Code reads
+    that directory in every project, which is the point: writing it here would seed it once and
+    miss everywhere else.
+
+  A theme with evidence from exactly one project is a project rule until a second project repeats
+  it. When a theme has both a project half and a personal half, split it and write each half to
+  its own destination rather than duplicating one rule into both.
 
 Default plugin installs to project scope so the config travels with the repo. Show the full
 install and write list (every file path, including any `~/.claude/settings.json` change) and get
@@ -143,11 +161,13 @@ Order matters: plugins install first, workspace artifacts that depend on them se
 nothing that needs a plugin loaded happens until after the activation boundary.
 
 - Install approved plugins with `claude plugin install <name>@<marketplace> --scope project`.
-- Write the approved artifacts: live rules under `.claude/live-rules/rules/*.md` via live-rules'
-  documented atomic format (or its `add-rule` skill after reload), `permissions.allow` entries
-  in `.claude/settings.json`, a structure note for greenfield projects per
-  [references/structure-notes.md](references/structure-notes.md), and optionally a lightweight
-  CLAUDE.md seeded through the built-in `/init`.
+- Write the approved artifacts: project rules as one rule per file under `.claude/rules/*.md`, the
+  directory Claude Code reads natively (or through live-rules' `add-rule` skill after reload);
+  approved cross-project themes as their own files under `~/.claude/rules/*.md`;
+  `permissions.allow` entries in `.claude/settings.json`; a structure note for greenfield projects per
+  [references/structure-notes.md](references/structure-notes.md); and optionally a lightweight
+  CLAUDE.md seeded through the built-in `/init`. The write list names every destination outside the
+  repo explicitly, because a file under `~/.claude/` outlives this project.
 - Then stop once: ask the user to activate the selected installs with `/reload-plugins`, or restart
   Claude Code when the changes affect the process environment, and tell you to continue. Do not
   pretend the plugins are loaded and barrel on in the same turn.
@@ -156,8 +176,8 @@ nothing that needs a plugin loaded happens until after the activation boundary.
 
 After the reload or restart: `claude plugin list --json` confirms every selected plugin is installed and
 enabled at its requested scope. Then verify each piece is actually usable, not just present:
-build the codebase map via `map-codebase` (skip for not-a-codebase), confirm live-rules content
-is visibly injected in your context, bring up the sidequest board if selected, and check each
+build the codebase map via `map-codebase` (skip for not-a-codebase), confirm the seeded
+`.claude/rules/` files are visibly in your context, bring up the sidequest board if selected, and check each
 LSP responds. If model-gateway is installed but unwired, point at its skill rather than wiring
 it yourself. Fix what fails and re-verify; report what you confirmed, concretely.
 

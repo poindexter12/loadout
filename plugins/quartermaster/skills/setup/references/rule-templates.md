@@ -1,47 +1,55 @@
-# Starter atomic live-rule templates
+# Starter project rule templates
 
 These are lift-ready **individual rule files** for a new workspace. Use this catalog as reference while writing rules for **THIS project**. Derive each rule from the project's visible structure, stated purpose, existing conventions, and own guideline files. Do not pick blocks because they look close. A rule that lands byte-identical to a catalog block is evidence that it was copied rather than derived, so rewrite it in the project's terms before installing it.
 
-Write each selected rule to its own `.claude/live-rules/rules/<stable-name>.md` file, with no shared header and exactly one frontmatter-plus-body rule per file. Ship the craft baseline on every workspace; add stack-specific rules only when the detected stack needs them. Keep bodies tight: all rules matching one event share a ~10k-character injection budget. Higher `priority` injects first.
+Write each selected rule to its own `.claude/rules/<stable-name>.md` file, with no shared header and exactly one frontmatter-plus-body rule per file. Ship the craft baseline on every workspace; add stack-specific rules only when the detected stack needs them. Keep bodies tight: all rules matching one event share a ~10k-character injection budget. Higher `priority` injects first.
 
 **Installer requirement: generated rule text must conform to the target project's own voice and style rules. If the project's rules ban a construction, the generated rules cannot use that construction. Check the final text against the project's guidelines before writing any rule file.**
 
 **Priority convention (standardized):** 90–100 = global craft baselines · 50–70 = stack/design rules ·
 40–45 = prompt-keyword and self-improvement rules · 10 = narrow domain-file rules.
 
-## Atomic directory and manifest
+## The native rule directory
 
-A new workspace uses `.claude/live-rules/`, never a new `.claude/live-rules.md`. Give every rule a
-stable kebab-case file name derived from its heading, such as `atomic-commits.md` or
-`svelte-5-components.md`. Then write `.claude/live-rules/manifest.json` from the UTF-8 contents of the
-selected rule files with `\r` bytes removed. Do not hand-type hashes: SHA-256 each complete normalized
-rule file, including its final newline, and copy scope metadata from its frontmatter. Every manifest entry
-has this shape:
+Rules are native Claude Code rule files: one rule per Markdown file at the top level of
+`.claude/rules/`, read straight off disk by Claude Code itself and, when it is installed, by
+live-rules reading the same files. There is nothing generated beside them. No index to write, no
+hash to record, no sync step to run, no lock to take. Give every rule a stable kebab-case file name
+derived from its heading, such as `atomic-commits.md` or `svelte-5-components.md`.
 
-```json
-{
-  "version": 1,
-  "rules": [
-    {
-      "path": "rules/atomic-commits.md",
-      "hash": "<sha256 of the LF-normalized rules/atomic-commits.md contents>",
-      "description": "Atomic commits & two hats",
-      "globs": [],
-      "dirs": [],
-      "prompt": [],
-      "priority": 95,
-      "enabled": true,
-      "include": []
-    }
-  ]
-}
+Scope lives in each file's own frontmatter and nowhere else:
+
+```yaml
+---
+description: Atomic commits & two hats   # the rule's human title
+paths: ["src/**/*.ts", "docs/**"]        # scope; omit entirely for an always-on rule
+prompt: ["deploy", "/migrat(e|ion)/i"]   # keyword trigger, honored by live-rules
+priority: 95                             # higher injects first
+---
 ```
 
-Write the complete directory through a temporary sibling, validate every hash against the files, then
-rename it into `.claude/live-rules/` only when that destination does not exist. For an existing
-workspace, preserve its rule files and manifest; propose specific additions or edits for approval
-instead of replacing the directory. Updating this catalog does not refresh installed rules.
-The manifest's `path` values are relative to that directory.
+`paths:` is the scope key Claude Code reads. Do not write `globs:` or `dirs:`: native ignores them,
+so a rule still carrying one loads with no scope at all and says itself everywhere. A rule
+declaring neither `paths:` nor `prompt:` is always-on. There is no `enabled:` key either, for the
+same reason; disabling a rule is a rename to `<name>.md.off`, which hides it from both readers at
+once.
+
+Seed `.claude/rules/` only when it holds no rule files yet. For a workspace that already has rules,
+preserve every file already there and propose specific additions or edits for approval instead of
+replacing the set. Updating this catalog does not refresh installed rules.
+
+Personal preference never lands in the repo, and this catalog is only the first of three
+destinations:
+
+| The rule is true of | Destination | Committed |
+| --- | --- | --- |
+| this repo, for anyone who clones it | `.claude/rules/<name>.md` | yes |
+| this repo, for this user only | `.claude/rules/<name>.local.md` | no, needs a `.claude/rules/*.local.md` line in `.gitignore` |
+| this user everywhere | `~/.claude/rules/<name>.md` | not in any repo |
+
+Response format and length, voice, tone, punctuation, and cross-project workflow habits are the
+third row. They are not project rules, so they are not this catalog's business: write them to
+`~/.claude/rules/` where Claude Code picks them up in every project, and never into the repo.
 
 ---
 
@@ -174,7 +182,7 @@ priority: 5
 ```markdown
 ---
 description: Python tooling : always use uv
-globs: ["**/*.py", "**/pyproject.toml"]
+paths: ["**/*.py", "**/pyproject.toml"]
 priority: 60
 ---
 - Run and manage Python only through uv: `uv run <script>`, `uv run python -c ...`, `uv add <pkg>`,
@@ -189,7 +197,7 @@ Use instead of the single-package rule when there's a `[tool.uv.workspace]` root
 ```markdown
 ---
 description: Python tooling : uv workspace
-globs: ["**/*.py", "**/pyproject.toml"]
+paths: ["**/*.py", "**/pyproject.toml"]
 priority: 60
 ---
 - Manage Python only through uv; never bare `python`/`pip`/`venv`.
@@ -205,7 +213,7 @@ priority: 60
 ```markdown
 ---
 description: Responsibility-driven Python & API design (Metz / Wirfs-Brock / Bloch)
-globs: ["**/*.py"]
+paths: ["**/*.py"]
 priority: 50
 ---
 - One clear responsibility per function/class, named for its role (not its data).
@@ -222,7 +230,7 @@ priority: 50
 ```markdown
 ---
 description: Python testing discipline
-globs: ["**/tests/**", "**/test_*.py", "**/*_test.py", "**/conftest.py"]
+paths: ["**/tests/**", "**/test_*.py", "**/*_test.py", "**/conftest.py"]
 priority: 55
 ---
 - Red → Green → Refactor. One behavior per test; Arrange-Act-Assert; name `test_<situation>_<expected>`.
@@ -234,7 +242,7 @@ priority: 55
 ```markdown
 ---
 description: Svelte 5 components : runes, tokens, thin shell
-globs: ["**/*.svelte"]
+paths: ["**/*.svelte"]
 priority: 60
 ---
 - Svelte 5 runes only: `$state`, `$derived`, `$props`, `$effect`; use `SvelteMap`/`SvelteSet` from
@@ -249,7 +257,7 @@ priority: 60
 ```markdown
 ---
 description: Pure core : no framework in the domain layer
-globs: ["src/lib/<core>/**"]
+paths: ["src/lib/<core>/**"]
 priority: 55
 ---
 - This is a pure leaf: no framework/DOM/env imports. Features depend on it, never the reverse.
@@ -289,16 +297,18 @@ priority: 70
 
 ## Not-a-codebase (wiki / notes / content): first-class writing rules
 
-Derive these rules from the target project's own guideline files, note types, folder taxonomy, and link conventions. Adapt globs and dirs to the actual project. Skip rules whose evidence is absent.
+Derive these rules from the target project's own guideline files, note types, folder taxonomy, and link conventions. Adapt each `paths:` list to the actual project. Skip rules whose evidence is absent.
 
 ### Project voice and editorial shape
+
+**Installer requirement: this rule has to cite the project's own editorial guideline file as its source.** Replace `<editorial-guidelines-path>` with the real file, whatever the project keeps: a style guide, a contributing doc, a writing note, a README section. If the project has no such file, drop this rule instead of substituting a house style or the user's own voice. A project voice rule with no project source is a personal preference wearing a project label, and personal preferences belong in `~/.claude/rules/`, not in the repo.
 
 ```markdown
 ---
 description: Project voice and note shape
 priority: 80
 ---
-- Read the target project's own writing or editorial guidelines before drafting. Follow that voice, terminology, audience, and formatting; do not restate a generic house style here.
+- `<editorial-guidelines-path>` is this project's source for voice, terminology, audience, and formatting. Read it before drafting and follow what it says; this rule restates none of it and overrides none of it.
 - Keep one durable idea per note or section. Preserve the project's expected note length, heading depth, and structure when neighboring notes show a pattern.
 - When the project has different note types, use each type's documented shape instead of applying one format everywhere.
 ```
@@ -308,7 +318,7 @@ priority: 80
 ```markdown
 ---
 description: Note-type frontmatter stays conformant
-globs: ["**/*.md"]
+paths: ["**/*.md"]
 priority: 65
 ---
 - Match the frontmatter schema for the note's type: required fields, allowed values, date format, tags, aliases, and status.
@@ -321,7 +331,7 @@ priority: 65
 ```markdown
 ---
 description: Date claims that will go stale
-globs: ["**/*.md"]
+paths: ["**/*.md"]
 priority: 55
 ---
 - Date claims about people, projects, versions, policies, prices, availability, or current state with the claim's source date or a clear `last_verified` field.
@@ -333,7 +343,7 @@ priority: 55
 ```markdown
 ---
 description: Reconcile notes that disagree
-globs: ["**/*.md"]
+paths: ["**/*.md"]
 priority: 55
 ---
 - When a new note contradicts an existing one, locate the older claim, compare their sources and dates, and decide whether one supersedes the other or both describe different conditions.
@@ -345,7 +355,7 @@ priority: 55
 ```markdown
 ---
 description: Keep note provenance traceable
-globs: ["**/*.md"]
+paths: ["**/*.md"]
 priority: 50
 ---
 - For research, meeting, or imported notes, record where the material came from using the project's source, author, date, or capture fields.
@@ -357,7 +367,7 @@ priority: 50
 ```markdown
 ---
 description: Keep internal links healthy
-globs: ["**/*.md"]
+paths: ["**/*.md"]
 priority: 50
 ---
 - Wikilinks and relative links resolve to an existing note or intended destination. Match the project's canonical link spelling and use aliases only when the project supports them.
@@ -374,7 +384,7 @@ Research rules apply to research notes and to any note that makes a factual clai
 ```markdown
 ---
 description: Research claims cite their sources
-globs: ["**/research/**/*.md", "**/sources/**/*.md"]
+paths: ["**/research/**/*.md", "**/sources/**/*.md"]
 priority: 70
 ---
 - Attach a source to each material factual claim, using the project's citation format and source fields. A source link alone is not enough when the claim depends on a particular page, section, table, or timestamp.
@@ -386,11 +396,11 @@ priority: 70
 ```markdown
 ---
 description: Mark uncertainty and research freshness
-globs: ["**/research/**/*.md", "**/sources/**/*.md"]
+paths: ["**/research/**/*.md", "**/sources/**/*.md"]
 priority: 65
 ---
 - Preserve uncertainty in the note with the project's markers for confidence, open questions, disputed claims, or missing evidence. Do not smooth a qualified source into a definitive statement.
 - Date the source, the claim, and the note's verification when any part can change. Add a review date or stale marker when the project has a freshness convention.
 ```
 
-Adapt the bodies to the user's stated voice and structure from the interview. Install only rules that the project can justify from its own evidence.
+Adapt each body to the project's own conventions: its editorial guideline file, its note types, its folder taxonomy, its citation fields. The interview establishes what the project is for, not how the rules should sound. Install only rules that the project can justify from its own evidence.
