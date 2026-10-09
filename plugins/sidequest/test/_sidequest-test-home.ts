@@ -12,6 +12,13 @@ Object.assign(process.env, {
 });
 process.env.SIDEQUEST_HOME = sidequestTestHome;
 
+// Discovery reads GET /v1/models off the effective ANTHROPIC_BASE_URL (SQ-298).
+// A developer or CI box with a live gateway wired into its shell would otherwise
+// inject that machine's real external models into every discovery expectation,
+// so no suite inherits it. A test that wants the endpoint source sets this to
+// its own local fixture server.
+delete process.env.ANTHROPIC_BASE_URL;
+
 process.once('exit', () => {
   try {
     fs.rmSync(sidequestTestHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
