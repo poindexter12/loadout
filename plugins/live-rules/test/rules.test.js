@@ -40,13 +40,12 @@ function project() {
   return dir;
 }
 
-function writeAtomicRule(projectDir, data = { description: 'Always' }) {
-  const body = 'Atomic rule.';
-  const rule = rules.buildRule('rule', data, body);
+function writeRule(projectDir, data = { description: 'Always' }, name = 'rule.md') {
+  const body = 'Project rule.';
   const frontmatter = Object.entries(data)
     .map(([key, value]) => key + ': ' + (Array.isArray(value) ? JSON.stringify(value) : value))
     .join('\n');
-  rules.writeAtomicRuleSet(projectDir, [{ rule, content: '---\n' + frontmatter + '\n---\n' + body + '\n' }]);
+  rules.seedRuleSet(projectDir, [{ name, content: '---\n' + frontmatter + '\n---\n' + body + '\n' }]);
 }
 
 function runHook(script, projectDir, stateDir, data) {
@@ -284,8 +283,8 @@ test('selectForPrompt: a prompt-keyword rule selects only when its pattern match
   assert.strictEqual(nonMatching.length, 0);
 });
 
-test('selectForPrompt: a directory rule selects only when cwdRel is inside that directory', () => {
-  const dirRule = rules.buildRule('dir.md', { description: 'Dir Rule', dirs: ['packages/api'] }, 'Body.');
+test('selectForPrompt: a directory-style paths rule selects only when cwdRel is inside that directory', () => {
+  const dirRule = rules.buildRule('dir.md', { description: 'Dir Rule', paths: ['packages/api'] }, 'Body.');
   const inside = rules.selectForPrompt([dirRule], { promptText: 'hello', cwdRel: 'packages/api/src' });
   assert.strictEqual(inside.length, 1);
   assert.strictEqual(inside[0].label, 'cwd:packages/api');
@@ -294,59 +293,156 @@ test('selectForPrompt: a directory rule selects only when cwdRel is inside that 
   assert.strictEqual(outside.length, 0);
 });
 
-test('selectForPrompt: a disabled rule is never selected, even if always-on', () => {
-  const disabled = rules.buildRule('disabled.md', { description: 'Disabled', enabled: false }, 'Body.');
-  const sel = rules.selectForPrompt([disabled], { promptText: 'anything', cwdRel: null });
+test('selectForPrompt: a wildcard paths rule never selects on cwd alone', () => {
+  // Collapsing the retired `dirs:` key into `paths:` must not widen what the
+  // prompt hook emits: a file pattern stays a file pattern.
+  const fileRule = rules.buildRule('files.md', { paths: ['packages/api/**/*.ts'] }, 'Body.');
+  const sel = rules.selectForPrompt([fileRule], { promptText: 'hello', cwdRel: 'packages/api/src' });
   assert.strictEqual(sel.length, 0);
 });
 
-test('selectAlways: returns only always-on, enabled rules', () => {
+test('buildRule: the retired dirs:/globs: keys fold into paths:', () => {
+  const fromDirs = rules.buildRule('a.md', { dirs: ['packages/api'] }, 'Body.');
+  assert.deepStrictEqual(fromDirs.paths, ['packages/api']);
+
+  const fromGlobs = rules.buildRule('b.md', { globs: ['src/**/*.js'] }, 'Body.');
+  assert.deepStrictEqual(fromGlobs.paths, ['src/**/*.js']);
+
+  // A file carrying both keys keeps both scopes rather than losing one.
+  const both = rules.buildRule('c.md', { paths: ['a.ts'], globs: ['b.js'], dirs: ['pkg'] }, 'Body.');
+  assert.deepStrictEqual(both.paths, ['a.ts', 'b.js', 'pkg']);
+});
+
+test('buildRule: enabled: false is ignored, because disabling is a rename to .md.off', () => {
+  // Native Claude Code ignores unknown frontmatter keys, so a rule "disabled"
+  // in frontmatter would still load natively. Honoring it here would have
+  // live-rules silently disagree with what the model was already given.
+  const rule = rules.buildRule('disabled.md', { description: 'Disabled', enabled: false }, 'Body.');
+  assert.ok(rules.isAlways(rule));
+  const sel = rules.selectForPrompt([rule], { promptText: 'anything', cwdRel: null });
+  assert.strictEqual(sel.length, 1);
+  assert.strictEqual(rules.selectAlways([rule]).length, 1);
+});
+
+test('selectAlways: returns only always-on rules', () => {
   const alwaysRule = rules.buildRule('always.md', { description: 'Always Rule' }, 'Body.');
   const promptRule = rules.buildRule('prompt.md', { description: 'Prompt Rule', prompt: ['deploy'] }, 'Body.');
-  const disabledAlways = rules.buildRule('disabled.md', { description: 'Disabled', enabled: false }, 'Body.');
+  const pathRule = rules.buildRule('paths.md', { description: 'Path Rule', paths: ['*.ts'] }, 'Body.');
 
-  const sel = rules.selectAlways([alwaysRule, promptRule, disabledAlways]);
+  const sel = rules.selectAlways([alwaysRule, promptRule, pathRule]);
   assert.strictEqual(sel.length, 1);
   assert.strictEqual(sel[0].rule.id, 'always.md');
 });
 
-test('atomic rules report the atomic directory as their source', () => {
+/* ------------------------------------------------------------------ *
+ *  Storage: .claude/rules/*.md (SQ-292)
+ * ------------------------------------------------------------------ */
+
+test('rules report .claude/rules as their source', () => {
   const dir = project();
-  writeAtomicRule(dir);
+  writeRule(dir);
   const output = runHook(promptHook, dir, path.join(dir, 'state'), { session_id: 'prompt', prompt: 'hello' });
-  assert.match(output, /Source: \.claude\/live-rules/);
+  assert.match(output, /Source: \.claude\/rules/);
 
   const editDir = project();
-  writeAtomicRule(editDir, { description: 'Edit', globs: ['src/**/*.js'] });
+  writeRule(editDir, { description: 'Edit', paths: ['src/**/*.js'] });
   const editOutput = runHook(editHook, editDir, path.join(editDir, 'state'), { session_id: 'edit', tool_input: { file_path: 'src/a.js' } });
-  assert.match(editOutput, /Source: \.claude\/live-rules/);
+  assert.match(editOutput, /Source: \.claude\/rules/);
 });
 
-test('legacy-only rules report their monolithic source', () => {
+test('loadRules: only *.md is read, so a .md.off rename disables a rule', () => {
   const dir = project();
-  fs.writeFileSync(path.join(dir, '.claude', 'live-rules.md'), 'Legacy rule.\n');
-  const output = runHook(promptHook, dir, path.join(dir, 'state'), { session_id: 'legacy', prompt: 'hello' });
-  assert.match(output, /Source: \.claude\/live-rules\.md/);
+  const rulesDir = path.join(dir, '.claude', 'rules');
+  fs.mkdirSync(rulesDir, { recursive: true });
+  fs.writeFileSync(path.join(rulesDir, 'on.md'), 'Active rule.\n');
+  fs.writeFileSync(path.join(rulesDir, 'off.md.off'), 'Disabled rule.\n');
+
+  const loaded = rules.loadRules(dir);
+  assert.deepStrictEqual(loaded.map((rule) => rule.id), ['on.md']);
 });
 
-test('atomic rules take precedence over a legacy monolith in the source header', () => {
+test('loadRules: a .local.md file is a rule like any other', () => {
   const dir = project();
-  writeAtomicRule(dir);
-  fs.writeFileSync(path.join(dir, '.claude', 'live-rules.md'), 'Legacy rule.\n');
-  const output = runHook(promptHook, dir, path.join(dir, 'state'), { session_id: 'both', prompt: 'hello' });
-  assert.match(output, /Source: \.claude\/live-rules/);
-  assert.doesNotMatch(output, /Source: \.claude\/live-rules\.md/);
+  const rulesDir = path.join(dir, '.claude', 'rules');
+  fs.mkdirSync(rulesDir, { recursive: true });
+  fs.writeFileSync(path.join(rulesDir, 'personal.local.md'), 'Personal rule.\n');
+
+  const loaded = rules.loadRules(dir);
+  assert.deepStrictEqual(loaded.map((rule) => rule.id), ['personal.local.md']);
+  assert.strictEqual(loaded[0].body, 'Personal rule.');
 });
 
-test('a missing atomic rule is named as dropped while loaded rules remain in effect', () => {
+test('loadRules: content hashes are computed from the file, so an edit changes the hash', () => {
   const dir = project();
-  writeAtomicRule(dir);
-  const manifestFile = path.join(dir, '.claude', 'live-rules', 'manifest.json');
-  const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
-  manifest.rules.push({ path: 'rules/missing.md' });
-  fs.writeFileSync(manifestFile, JSON.stringify(manifest) + '\n');
+  const file = path.join(dir, '.claude', 'rules', 'a.md');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, 'First body.\n');
+  const first = rules.loadRules(dir)[0].hash;
 
-  const output = runHook(promptHook, dir, path.join(dir, 'state'), { session_id: 'missing', prompt: 'hello' });
-  assert.match(output, /The manifest does not match the loaded rule files, but these rules were read directly and are in effect\./);
-  assert.match(output, /Dropped rule files: rules\/missing\.md\./);
+  fs.writeFileSync(file, 'Second body.\n');
+  const second = rules.loadRules(dir)[0].hash;
+  assert.notStrictEqual(first, second);
+  assert.strictEqual(rules.loadRules(dir)[0].hash, second, 'a re-read of unchanged content is stable');
+});
+
+test('parseRuleFile: a bare "---" in the body is body text, not a second rule', () => {
+  // The retired monolith split on every fence, so a horizontal rule silently
+  // truncated a rule. One rule per file removes that trap.
+  const parsed = rules.parseRuleFile('---\ndescription: One\n---\nIntro.\n\n---\n\nMore body.\n');
+  assert.strictEqual(parsed.data.description, 'One');
+  assert.match(parsed.body, /Intro\./);
+  assert.match(parsed.body, /More body\./);
+});
+
+test('parseRuleFile: a file with no frontmatter is one rule whose body is the whole file', () => {
+  const parsed = rules.parseRuleFile('Write code as poetry.\n');
+  assert.deepStrictEqual(parsed.data, {});
+  assert.match(parsed.body, /Write code as poetry\./);
+});
+
+test('loadRuleSet: a project whose rules are still in a retired store gets a migration notice', () => {
+  const dir = project();
+  fs.mkdirSync(path.join(dir, '.claude', 'live-rules', 'rules'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.claude', 'live-rules', 'rules', 'old.md'), 'Old rule.\n');
+
+  const ruleSet = rules.loadRuleSet(dir);
+  assert.strictEqual(ruleSet.rules.length, 0, 'a retired store is not read');
+  assert.match(ruleSet.notice, /now reads \.claude\/rules\/\*\.md/);
+  assert.match(ruleSet.notice, /migrate-rules\.js/);
+});
+
+test('loadRuleSet: the notice also fires for a half-migrated project', () => {
+  const dir = project();
+  fs.mkdirSync(path.join(dir, '.claude', 'rules'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.claude', 'rules', 'new.md'), 'New rule.\n');
+  fs.mkdirSync(path.join(dir, '.claude', 'live-rules', 'rules'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.claude', 'live-rules', 'rules', 'left-behind.md'), 'Left behind.\n');
+
+  const ruleSet = rules.loadRuleSet(dir);
+  assert.strictEqual(ruleSet.rules.length, 1);
+  assert.match(ruleSet.notice, /are NOT in effect/);
+});
+
+test('loadRuleSet: an empty retired directory stays silent', () => {
+  const dir = project();
+  fs.mkdirSync(path.join(dir, '.claude', 'live-rules', 'rules'), { recursive: true });
+  fs.mkdirSync(path.join(dir, '.claude', 'rules'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.claude', 'rules', 'new.md'), 'New rule.\n');
+
+  assert.strictEqual(rules.loadRuleSet(dir).notice, '');
+});
+
+test('the prompt hook is silent for a project with no rules at all', () => {
+  const dir = project();
+  const output = runHook(promptHook, dir, path.join(dir, 'state'), { session_id: 'empty', prompt: 'hello' });
+  assert.strictEqual(output, '');
+});
+
+test('seedRuleSet refuses to overwrite a project that already holds rule files', () => {
+  const dir = project();
+  writeRule(dir);
+  assert.throws(
+    () => rules.seedRuleSet(dir, [{ name: 'other.md', content: 'Another rule.\n' }]),
+    /already exists/
+  );
 });

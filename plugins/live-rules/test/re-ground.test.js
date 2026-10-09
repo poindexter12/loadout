@@ -1,10 +1,22 @@
 'use strict';
+/**
+ * Re-grounding behaviour: which rules each hook emits, and when a rule is
+ * emitted AGAIN. The session ledger is what keeps an unchanged rule from being
+ * repeated on every prompt, so most of this file is about the ledger.
+ *
+ * Storage is .claude/rules/*.md read straight off disk (SQ-292), so there is no
+ * manifest to be stale against: a rule's identity is its filename and its
+ * content hash is computed on every read. Migration out of the retired stores
+ * is covered by test/migrate-rules.test.js.
+ *
+ * Run: node --test plugins/live-rules/test/re-ground.test.js
+ */
 
 const assert = require('node:assert');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync, spawnSync } = require('node:child_process');
+const { execFileSync } = require('node:child_process');
 const test = require('node:test');
 
 const rules = require('../hooks/lib/rules');
@@ -20,12 +32,24 @@ function project() {
   return dir;
 }
 
-function atomic(projectDir, files) {
-  const entries = files.map(({ data, body }) => {
-    const rule = rules.buildRule('rule', data, body);
-    return { rule, content: '---\n' + Object.entries(data).map(([key, value]) => key + ': ' + (Array.isArray(value) ? JSON.stringify(value) : value)).join('\n') + '\n---\n' + body + '\n' };
-  });
-  rules.writeAtomicRuleSet(projectDir, entries);
+// Seed .claude/rules with one file per rule, named 001.md, 002.md, ... so a
+// test can target a specific file when it wants to simulate an edit.
+function seed(projectDir, files) {
+  rules.seedRuleSet(
+    projectDir,
+    files.map(({ data, body }) => ({
+      content:
+        '---\n' +
+        Object.entries(data)
+          .map(([key, value]) => key + ': ' + (Array.isArray(value) ? JSON.stringify(value) : value))
+          .join('\n') +
+        '\n---\n' + body + '\n',
+    }))
+  );
+}
+
+function ruleFile(projectDir, name) {
+  return path.join(projectDir, '.claude', 'rules', name);
 }
 
 function hook(script, projectDir, stateDir, data, env) {
@@ -54,93 +78,80 @@ function windowsShortPath(target) {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ *  The session ledger
+ * ------------------------------------------------------------------ */
+
 test('unchanged prompts emit no rule content after the first grounding', () => {
   const dir = project();
   const state = path.join(dir, 'state');
-  atomic(dir, [{ data: { description: 'Always' }, body: 'First version.' }]);
+  seed(dir, [{ data: { description: 'Always' }, body: 'First version.' }]);
   assert.match(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), /First version/);
   assert.strictEqual(hook(promptHook, dir, state, { session_id: 'one', prompt: 'again' }), '');
 });
 
-test('only a changed relevant atomic file is re-grounded', () => {
+test('only a changed relevant rule file is re-grounded', () => {
   const dir = project();
   const state = path.join(dir, 'state');
-  atomic(dir, [
+  seed(dir, [
     { data: { description: 'One' }, body: 'One v1.' },
     { data: { description: 'Two' }, body: 'Two v1.' },
   ]);
   hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' });
-  const changed = path.join(dir, '.claude', 'live-rules', 'rules', '001.md');
-  fs.writeFileSync(changed, '---\ndescription: One\n---\nOne v2.\n');
+  fs.writeFileSync(ruleFile(dir, '001.md'), '---\ndescription: One\n---\nOne v2.\n');
   const output = hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' });
   assert.match(output, /One v2/);
   assert.doesNotMatch(output, /Two v1/);
 });
 
-test('a stale manifest is detected and direct file hashes still re-ground rules', () => {
+test('a rule edited on disk re-grounds on the next prompt with no restart', () => {
+  // The whole point of reading .claude/rules at hook time: no sync step stands
+  // between editing a rule and the model being told about it.
   const dir = project();
   const state = path.join(dir, 'state');
-  atomic(dir, [{ data: { description: 'Always' }, body: 'Version one.' }]);
-  const target = path.join(dir, '.claude', 'live-rules', 'rules', '001.md');
-  fs.writeFileSync(target, '---\ndescription: Always\n---\nVersion two.\n');
+  seed(dir, [{ data: { description: 'Always' }, body: 'Version one.' }]);
+  assert.match(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), /Version one/);
+  fs.writeFileSync(ruleFile(dir, '001.md'), '---\ndescription: Always\n---\nVersion two.\n');
+  assert.match(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), /Version two/);
+});
+
+test('a rule file added after the session started is grounded on the next prompt', () => {
+  const dir = project();
+  const state = path.join(dir, 'state');
+  seed(dir, [{ data: { description: 'First' }, body: 'First body.' }]);
+  hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' });
+
+  fs.writeFileSync(ruleFile(dir, '002.md'), '---\ndescription: Second\n---\nSecond body.\n');
   const output = hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' });
-  assert.match(output, /Version two/);
-  assert.match(output, /The manifest does not match the loaded rule files, but these rules were read directly and are in effect\./);
+  assert.match(output, /Second body/);
+  assert.doesNotMatch(output, /First body/, 'an unchanged rule is not repeated');
 });
 
-test('a template-style manifest entry with priority and include matches its rule', () => {
-  const dir = project();
-  const rulesDirectory = path.join(dir, '.claude', 'live-rules', 'rules');
-  const content = '---\ndescription: Atomic commits & two hats\npriority: 95\n---\nRule body.\n';
-  fs.mkdirSync(rulesDirectory, { recursive: true });
-  fs.writeFileSync(path.join(rulesDirectory, 'atomic-commits.md'), content);
-  fs.writeFileSync(path.join(dir, '.claude', 'live-rules', 'manifest.json'), JSON.stringify({
-    version: 1,
-    rules: [{
-      path: 'rules/atomic-commits.md',
-      hash: rules.hashContent(content),
-      description: 'Atomic commits & two hats',
-      globs: [],
-      dirs: [],
-      prompt: [],
-      priority: 95,
-      enabled: true,
-      include: [],
-    }],
-  }) + '\n');
-
-  assert.strictEqual(rules.loadRuleSet(dir).stale, false);
-});
-
-test('CRLF atomic rule files retain their LF manifest hash', () => {
+test('renaming a rule to .md.off stops it being grounded', () => {
   const dir = project();
   const state = path.join(dir, 'state');
-  atomic(dir, [{ data: { description: 'Always', priority: 95 }, body: 'Rule body.' }]);
-  const target = path.join(dir, '.claude', 'live-rules', 'rules', '001.md');
+  seed(dir, [{ data: { description: 'Always' }, body: 'Disable me.' }]);
+  assert.match(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), /Disable me/);
+
+  fs.renameSync(ruleFile(dir, '001.md'), ruleFile(dir, '001.md.off'));
+  assert.strictEqual(hook(promptHook, dir, state, { session_id: 'two', prompt: 'hello' }), '', 'a fresh session sees no rules at all');
+});
+
+test('CRLF rule files hash the same as their LF form, so a line-ending change alone does not re-ground', () => {
+  const dir = project();
+  const state = path.join(dir, 'state');
+  seed(dir, [{ data: { description: 'Always', priority: 95 }, body: 'Rule body.' }]);
+  const target = ruleFile(dir, '001.md');
+  assert.match(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), /Rule body/);
+
   fs.writeFileSync(target, fs.readFileSync(target, 'utf8').replace(/\n/g, '\r\n'));
-
-  const output = hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' });
-  assert.match(output, /Rule body/);
-  assert.doesNotMatch(output, /The manifest does not match/);
-});
-
-test('manifest mismatch warnings name the differing field', () => {
-  const dir = project();
-  const state = path.join(dir, 'state');
-  atomic(dir, [{ data: { description: 'Always', priority: 95 }, body: 'Rule body.' }]);
-  const manifestPath = path.join(dir, '.claude', 'live-rules', 'manifest.json');
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  manifest.rules[0].priority = 0;
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest) + '\n');
-
-  const output = hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' });
-  assert.match(output, /Mismatched manifest fields: rules\/001\.md \(priority\)\./);
+  assert.strictEqual(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), '');
 });
 
 test('session ledgers are isolated across concurrent session ids', () => {
   const dir = project();
   const state = path.join(dir, 'state');
-  atomic(dir, [{ data: { description: 'Always' }, body: 'Rule.' }]);
+  seed(dir, [{ data: { description: 'Always' }, body: 'Rule.' }]);
   assert.match(hook(promptHook, dir, state, { session_id: 'first', prompt: 'hello' }), /Rule/);
   assert.match(hook(promptHook, dir, state, { session_id: 'second', prompt: 'hello' }), /Rule/);
   assert.strictEqual(hook(promptHook, dir, state, { session_id: 'first', prompt: 'hello' }), '');
@@ -149,17 +160,20 @@ test('session ledgers are isolated across concurrent session ids', () => {
 test('startup, resume, compact, and clear rehydrate current prompt rules once', () => {
   const dir = project();
   const state = path.join(dir, 'state');
-  atomic(dir, [{ data: { description: 'Always' }, body: 'Rule.' }]);
+  seed(dir, [{ data: { description: 'Always' }, body: 'Rule.' }]);
   for (const source of ['startup', 'resume', 'compact', 'clear']) {
     const output = hook(startHook, dir, state, { session_id: 'one', source });
     assert.match(output, new RegExp('SessionStart \\(' + source + '\\)'));
     assert.match(output, /Rule/);
-    assert.doesNotMatch(output, /Live Rules migrated/);
     assert.strictEqual(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), '');
   }
 });
 
-// SQ-197: sidequest's PostCompact hook marks a replacement compaction (no summary generated) at
+/* ------------------------------------------------------------------ *
+ *  SQ-197: replacement compaction
+ * ------------------------------------------------------------------ */
+
+// sidequest's PostCompact hook marks a replacement compaction (no summary generated) at
 // SIDEQUEST_HOME/replacement-compactions/<encoded session id>.json. This plugin peeks at that
 // same path (duplicated formula, not imported) to skip full rule re-injection on
 // SessionStart(compact). Only sidequest deletes the marker, so it must be removed by hand here to
@@ -180,7 +194,7 @@ test('a replacement-compaction marker collapses SessionStart(compact) to a short
   const dir = project();
   const state = path.join(dir, 'state');
   const sidequestHome = fs.mkdtempSync(path.join(os.tmpdir(), 'live-rules-sq197-'));
-  atomic(dir, [{ data: { description: 'Always' }, body: 'Rule.' }]);
+  seed(dir, [{ data: { description: 'Always' }, body: 'Rule.' }]);
   hook(startHook, dir, state, { session_id: 'one', source: 'startup' }, { SIDEQUEST_HOME: sidequestHome });
 
   const markerFile = writeReplacementMarker(sidequestHome, 'one');
@@ -203,14 +217,42 @@ test('a replacement-compaction marker collapses SessionStart(compact) to a short
   assert.match(staleMarker, /SessionStart \(compact\)/);
 });
 
+/* ------------------------------------------------------------------ *
+ *  Path scoping
+ * ------------------------------------------------------------------ */
+
 test('path-scoped rules ground once when their edited path first applies', () => {
   const dir = project();
   const state = path.join(dir, 'state');
-  atomic(dir, [{ data: { description: 'TypeScript', globs: ['src/**/*.ts'] }, body: 'Use strict types.' }]);
+  seed(dir, [{ data: { description: 'TypeScript', paths: ['src/**/*.ts'] }, body: 'Use strict types.' }]);
   const data = { session_id: 'one', tool_input: { file_path: 'src/a.ts' } };
   assert.match(hook(editHook, dir, state, data), /Use strict types/);
   assert.strictEqual(hook(editHook, dir, state, data), '');
   assert.strictEqual(hook(editHook, dir, state, { session_id: 'one', tool_input: { file_path: 'other/a.ts' } }), '');
+});
+
+test('a comma-separated paths scalar scopes every pattern it names through the edit hook', () => {
+  const dir = project();
+  const state = path.join(dir, 'state');
+  seed(dir, [{ data: { description: 'Two trees', paths: 'src/**/*.ts, docs/**/*.md' }, body: 'Scoped rule.' }]);
+  assert.match(hook(editHook, dir, state, { session_id: 'a', tool_input: { file_path: 'src/a.ts' } }), /Scoped rule/);
+  assert.match(hook(editHook, dir, state, { session_id: 'b', tool_input: { file_path: 'docs/guide.md' } }), /Scoped rule/);
+  assert.strictEqual(hook(editHook, dir, state, { session_id: 'c', tool_input: { file_path: 'src/a.js' } }), '');
+});
+
+test('a rule still using the retired globs: key keeps its scope and warns on stderr', () => {
+  const dir = project();
+  const state = path.join(dir, 'state');
+  seed(dir, [{ data: { description: 'Legacy key', globs: ['src/**/*.js'] }, body: 'Still scoped.' }]);
+  const result = require('node:child_process').spawnSync(process.execPath, [editHook], {
+    cwd: dir,
+    env: { ...process.env, CLAUDE_PROJECT_DIR: dir, LIVE_RULES_STATE_DIR: state },
+    input: JSON.stringify({ cwd: dir, session_id: 'one', tool_input: { file_path: 'src/a.js' } }),
+    encoding: 'utf8',
+  });
+  assert.match(result.stdout, /Still scoped/, 'the rule is not silently unscoped');
+  assert.match(result.stderr, /globs.*deprecated; rename it to paths:/);
+  assert.strictEqual(result.status, 0, 'a deprecation never breaks an edit');
 });
 
 test('scoped hooks match paths with a different Windows drive-letter case', (testContext) => {
@@ -224,7 +266,7 @@ test('scoped hooks match paths with a different Windows drive-letter case', (tes
   const state = path.join(dir, 'state');
   fs.mkdirSync(path.join(dir, 'src'));
   fs.writeFileSync(path.join(dir, 'src', 'rule.js'), '');
-  atomic(dir, [{ data: { description: 'Source rule', globs: ['src/**/*.js'], dirs: ['src'] }, body: 'Use source rules.' }]);
+  seed(dir, [{ data: { description: 'Source rule', paths: ['src/**/*.js', 'src'] }, body: 'Use source rules.' }]);
 
   assert.match(hook(editHook, dir, state, {
     session_id: 'edit',
@@ -253,7 +295,7 @@ test('edit rules match a short Windows path when the project root is long', (tes
   const state = path.join(dir, 'state');
   fs.mkdirSync(path.join(dir, 'src'));
   fs.writeFileSync(path.join(dir, 'src', 'rule.js'), '');
-  atomic(dir, [{ data: { description: 'Source rule', globs: ['src/**/*.js'] }, body: 'Use source rules.' }]);
+  seed(dir, [{ data: { description: 'Source rule', paths: ['src/**/*.js'] }, body: 'Use source rules.' }]);
 
   assert.match(hook(editHook, dir, state, {
     session_id: 'short-path',
@@ -270,258 +312,62 @@ test('a Windows project alias keeps the existing session ledger', (testContext) 
   }
 
   const state = path.join(dir, 'state');
-  atomic(dir, [{ data: { description: 'Always' }, body: 'Ledger rule.' }]);
+  seed(dir, [{ data: { description: 'Always' }, body: 'Ledger rule.' }]);
   assert.match(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), /Ledger rule/);
   assert.strictEqual(hook(promptHook, dir, state, { session_id: 'one', prompt: 'again' }, { CLAUDE_PROJECT_DIR: alternate }), '');
 });
 
-test('legacy monolithic files migrate into equivalent atomic files and remove the source', () => {
-  const dir = project();
-  const legacy = path.join(dir, '.claude', 'live-rules.md');
-  fs.writeFileSync(legacy, [
-    '---', 'description: Always', '---', 'Always body.',
-    '---', 'description: Deploy', 'prompt: [deploy]', '---', 'Deploy body.',
-  ].join('\n'));
-  assert.strictEqual(rules.migrateLegacyRules(dir), true);
-  assert.ok(!fs.existsSync(legacy));
-  const manifest = JSON.parse(fs.readFileSync(path.join(dir, '.claude', 'live-rules', 'manifest.json'), 'utf8'));
-  assert.strictEqual(manifest.rules.length, 2);
-  const loaded = rules.loadRuleSet(dir);
-  assert.strictEqual(loaded.stale, false);
-  assert.deepStrictEqual(rules.selectForPrompt(loaded.rules, { promptText: 'please deploy', cwdRel: '' }).map((entry) => entry.rule.description), ['Always', 'Deploy']);
-});
+/* ------------------------------------------------------------------ *
+ *  Retired stores
+ * ------------------------------------------------------------------ */
 
-test('SessionStart reports a completed migration once', () => {
+test('SessionStart tells a project whose rules are still in the retired atomic store how to migrate', () => {
   const dir = project();
   const state = path.join(dir, 'state');
-  const legacy = path.join(dir, '.claude', 'live-rules.md');
-  fs.writeFileSync(legacy, '---\ndescription: Always\n---\nKeep this exact rule.\n');
-  const first = hook(startHook, dir, state, { session_id: 'one', source: 'startup' });
-  assert.match(first, /Live Rules migrated to \.claude\/live-rules; removed \.claude\/live-rules\.md\./);
-  assert.match(first, /Keep this exact rule/);
-  assert.ok(!fs.existsSync(legacy));
-  const second = hook(startHook, dir, state, { session_id: 'one', source: 'startup' });
-  assert.doesNotMatch(second, /Live Rules migrated/);
+  fs.mkdirSync(path.join(dir, '.claude', 'live-rules', 'rules'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.claude', 'live-rules', 'rules', 'old.md'), 'Old rule body.\n');
+
+  const output = hook(startHook, dir, state, { session_id: 'one', source: 'startup' });
+  const context = JSON.parse(output).hookSpecificOutput.additionalContext;
+  assert.match(context, /now reads \.claude\/rules\/\*\.md/);
+  assert.match(context, /migrate-rules\.js/);
+  assert.doesNotMatch(context, /Old rule body/, 'a retired store is not read, only reported');
 });
 
-test('a failed migration verification keeps the monolith and names the difference', () => {
-  const dir = project();
-  const legacy = path.join(dir, '.claude', 'live-rules.md');
-  fs.writeFileSync(legacy, '---\ndescription: Always\n---\nKeep this exact rule.\n');
-  const result = rules.migrateLegacyRules(dir, {
-    detailed: true,
-    beforeVerification() {
-      fs.writeFileSync(path.join(dir, '.claude', 'live-rules', 'rules', '001.md'), '---\ndescription: Always\n---\nA changed rule.\n');
-    },
-  });
-  assert.strictEqual(result.migrated, false);
-  assert.match(result.notice, /kept \.claude\/live-rules\.md because verification failed: rule 1 has different body/);
-  assert.ok(fs.existsSync(legacy));
-  assert.ok(fs.existsSync(path.join(dir, '.claude', 'live-rules', 'manifest.json')));
-});
-
-test('LIVE_RULES_PATH migrations retain their source file', () => {
+test('SessionStart reports a retired monolith the same way', () => {
   const dir = project();
   const state = path.join(dir, 'state');
-  const legacy = path.join(dir, 'shared-rules.md');
-  fs.writeFileSync(legacy, '---\ndescription: Always\n---\nKeep this shared rule.\n');
-  const output = hook(startHook, dir, state, { session_id: 'one', source: 'startup' }, { LIVE_RULES_PATH: legacy });
-  assert.match(output, /kept shared-rules\.md because LIVE_RULES_PATH is set/);
-  assert.ok(fs.existsSync(legacy));
-  assert.ok(fs.existsSync(path.join(dir, '.claude', 'live-rules', 'manifest.json')));
+  fs.writeFileSync(path.join(dir, '.claude', 'live-rules.md'), 'Legacy rule.\n');
+
+  const context = JSON.parse(hook(startHook, dir, state, { session_id: 'one', source: 'startup' })).hookSpecificOutput.additionalContext;
+  assert.match(context, /live-rules\.md.*are NOT in effect/s);
 });
 
-test('a failed monolith deletion leaves both copies available for rollback', () => {
+test('the prompt and edit hooks stay silent about a retired store, so the nudge is not repeated', () => {
   const dir = project();
-  const legacy = path.join(dir, '.claude', 'live-rules.md');
-  fs.writeFileSync(legacy, 'Rollback rule.\n');
-  const remove = fs.rmSync;
-  fs.rmSync = (target, options) => {
-    if (target === legacy) throw new Error('delete blocked');
-    return remove(target, options);
-  };
-  try {
-    const result = rules.migrateLegacyRules(dir, { detailed: true });
-    assert.strictEqual(result.migrated, false);
-    assert.match(result.notice, /kept \.claude\/live-rules\.md: delete blocked/);
-  } finally {
-    fs.rmSync = remove;
-  }
-  assert.ok(fs.existsSync(legacy));
-  assert.ok(fs.existsSync(path.join(dir, '.claude', 'live-rules', 'manifest.json')));
+  const state = path.join(dir, 'state');
+  fs.writeFileSync(path.join(dir, '.claude', 'live-rules.md'), 'Legacy rule.\n');
+
+  assert.strictEqual(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), '');
+  assert.strictEqual(hook(editHook, dir, state, { session_id: 'one', tool_input: { file_path: 'a.ts' } }), '');
 });
 
-test('interrupted temp state, an active lock, and future manifests never replace trusted data', () => {
+test('a half-migrated project is grounded from the new store and still warned about the old one', () => {
   const dir = project();
-  const legacy = path.join(dir, '.claude', 'live-rules.md');
-  fs.writeFileSync(legacy, 'Legacy rule.\n');
-  fs.mkdirSync(path.join(dir, '.claude', 'live-rules.tmp-interrupted'));
-  assert.strictEqual(rules.migrateLegacyRules(dir), true);
-  assert.ok(fs.existsSync(path.join(dir, '.claude', 'live-rules.tmp-interrupted')));
-  const future = path.join(dir, '.claude', 'live-rules', 'manifest.json');
-  fs.writeFileSync(future, JSON.stringify({ version: 99, rules: [] }) + '\n');
-  assert.strictEqual(rules.migrateLegacyRules(dir), false);
-  assert.strictEqual(JSON.parse(fs.readFileSync(future, 'utf8')).version, 99);
-  assert.match(hook(startHook, dir, path.join(dir, 'state'), { session_id: 'future', source: 'startup' }), /newer schema/);
+  const state = path.join(dir, 'state');
+  seed(dir, [{ data: { description: 'Moved' }, body: 'Moved rule body.' }]);
+  fs.mkdirSync(path.join(dir, '.claude', 'live-rules', 'rules'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.claude', 'live-rules', 'rules', 'left.md'), 'Left behind.\n');
+
+  const context = JSON.parse(hook(startHook, dir, state, { session_id: 'one', source: 'startup' })).hookSpecificOutput.additionalContext;
+  assert.match(context, /are NOT in effect/);
+  assert.match(context, /Moved rule body/, 'the migrated rules are still grounded');
 });
 
-test('stale migration locks recover while fresh locks serialize concurrent starts', () => {
+test('no rules and no retired store is completely silent on every hook', () => {
   const dir = project();
-  fs.writeFileSync(path.join(dir, '.claude', 'live-rules.md'), 'Locked rule.\n');
-  const lock = path.join(dir, '.claude', 'live-rules.migration.lock');
-  fs.writeFileSync(lock, 'active\n');
-  assert.strictEqual(rules.migrateLegacyRules(dir), false);
-  const old = new Date(Date.now() - 61 * 1000);
-  fs.utimesSync(lock, old, old);
-  assert.strictEqual(rules.migrateLegacyRules(dir), true);
-});
-
-test('atomic sync repairs a mistyped manifest hash from the rule file', () => {
-  const dir = project();
-  atomic(dir, [{ data: { description: 'Always' }, body: 'Trust the rule file.' }]);
-  const manifestPath = path.join(dir, '.claude', 'live-rules', 'manifest.json');
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  manifest.rules[0].hash = 'not-a-sha256';
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest) + '\n');
-
-  const repaired = rules.syncAtomicRuleSet(dir);
-  assert.match(repaired.rules[0].hash, /^[a-f0-9]{64}$/);
-  assert.strictEqual(rules.loadRuleSet(dir).stale, false);
-});
-
-test('atomic sync derives changed content and metadata from rule files', () => {
-  const dir = project();
-  atomic(dir, [{ data: { description: 'Old', globs: ['*.js'] }, body: 'Old body.' }]);
-  const target = path.join(dir, '.claude', 'live-rules', 'rules', '001.md');
-  fs.writeFileSync(target, '---\ndescription: New\nglobs: ["src/**/*.ts"]\npriority: 4\nenabled: false\ninclude: docs/rules.md\n---\nNew body.\n');
-
-  const manifest = rules.syncAtomicRuleSet(dir);
-  assert.deepStrictEqual(manifest.rules[0], {
-    path: 'rules/001.md',
-    hash: rules.hashContent(fs.readFileSync(path.join(dir, '.claude', 'live-rules', 'rules', '001.md'), 'utf8')),
-    description: 'New',
-    globs: ['src/**/*.ts'],
-    dirs: [],
-    prompt: [],
-    priority: 4,
-    enabled: false,
-    include: ['docs/rules.md'],
-  });
-});
-
-test('atomic sync is stable for unchanged rules and normalizes Windows paths', () => {
-  const dir = project();
-  atomic(dir, [{ data: { description: 'One' }, body: 'One.' }]);
-  const first = rules.syncAtomicRuleSet(dir);
-  const before = fs.readFileSync(path.join(dir, '.claude', 'live-rules', 'manifest.json'), 'utf8');
-  const second = rules.syncAtomicRuleSet(dir);
-  const after = fs.readFileSync(path.join(dir, '.claude', 'live-rules', 'manifest.json'), 'utf8');
-  assert.deepStrictEqual(second, first);
-  assert.strictEqual(after, before);
-  assert.strictEqual(second.rules[0].path, 'rules/001.md');
-});
-
-test('atomic sync repairs a partial manifest and fails loudly while another writer holds the lock', () => {
-  const dir = project();
-  atomic(dir, [{ data: { description: 'One' }, body: 'One.' }]);
-  const manifestPath = path.join(dir, '.claude', 'live-rules', 'manifest.json');
-  fs.writeFileSync(manifestPath, '{');
-  assert.strictEqual(rules.syncAtomicRuleSet(dir).rules.length, 1);
-
-  const lock = path.join(dir, '.claude', 'live-rules.write.lock');
-  fs.writeFileSync(lock, 'active\n');
-  assert.throws(() => rules.syncAtomicRuleSet(dir), /live-rules\.write\.lock is held.*run live-rules sync again/);
-});
-
-test('atomic sync leaves the manifest intact when a partial rule file is invalid', () => {
-  const dir = project();
-  atomic(dir, [{ data: { description: 'One' }, body: 'One.' }]);
-  const manifestPath = path.join(dir, '.claude', 'live-rules', 'manifest.json');
-  const before = fs.readFileSync(manifestPath, 'utf8');
-  const target = path.join(dir, '.claude', 'live-rules', 'rules', '001.md');
-  fs.writeFileSync(target, '---\ndescription: One\n---\nOne.\n---\ndescription: Two\n---\nTwo.\n');
-
-  assert.throws(() => rules.syncAtomicRuleSet(dir), /rules\/001\.md must contain exactly one rule.*run live-rules sync again/);
-  assert.strictEqual(fs.readFileSync(manifestPath, 'utf8'), before);
-});
-
-test('atomic sync retries after a concurrent rule edit without clobbering it', () => {
-  const dir = project();
-  atomic(dir, [{ data: { description: 'One' }, body: 'Before.' }]);
-  const target = path.join(dir, '.claude', 'live-rules', 'rules', '001.md');
-  const manifestPath = path.join(dir, '.claude', 'live-rules', 'manifest.json');
-  const originalRename = fs.renameSync;
-  let edited = false;
-  fs.renameSync = (from, to) => {
-    if (!edited && to === manifestPath && String(from).includes('manifest.json.tmp-')) {
-      edited = true;
-      fs.writeFileSync(target, '---\ndescription: One\n---\nConcurrent update.\n');
-    }
-    return originalRename(from, to);
-  };
-  try {
-    const manifest = rules.syncAtomicRuleSet(dir);
-    assert.strictEqual(edited, true);
-    assert.match(fs.readFileSync(target, 'utf8'), /Concurrent update/);
-    assert.strictEqual(manifest.rules[0].hash, rules.hashContent(fs.readFileSync(target, 'utf8')));
-  } finally {
-    fs.renameSync = originalRename;
-  }
-});
-
-test('failed manifest replacement leaves rule files unchanged and discoverable', () => {
-  const dir = project();
-  atomic(dir, [{ data: { description: 'One' }, body: 'Before.' }]);
-  const target = path.join(dir, '.claude', 'live-rules', 'rules', '001.md');
-  const manifestPath = path.join(dir, '.claude', 'live-rules', 'manifest.json');
-  const updated = '---\ndescription: One\n---\nStill discoverable.\n';
-  fs.writeFileSync(target, updated);
-  const originalRename = fs.renameSync;
-  fs.renameSync = (from, to) => {
-    if (to === manifestPath && String(from).includes('manifest.json.tmp-')) throw new Error('simulated rename failure');
-    return originalRename(from, to);
-  };
-  try {
-    assert.throws(() => rules.syncAtomicRuleSet(dir), /Could not replace .*manifest.json.*Rule files were left unchanged/);
-    assert.strictEqual(fs.readFileSync(target, 'utf8'), updated);
-    const loaded = rules.loadRuleSet(dir);
-    assert.strictEqual(loaded.rules[0].body, 'Still discoverable.');
-    assert.strictEqual(loaded.stale, true);
-  } finally {
-    fs.renameSync = originalRename;
-  }
-});
-
-test('atomic check reports hash drift plus missing and extra rule files without writing', () => {
-  const dir = project();
-  atomic(dir, [{ data: { description: 'One' }, body: 'Before.' }]);
-  const manifestPath = path.join(dir, '.claude', 'live-rules', 'manifest.json');
-  const before = fs.readFileSync(manifestPath, 'utf8');
-  const rulesDirectory = path.join(dir, '.claude', 'live-rules', 'rules');
-  fs.writeFileSync(path.join(rulesDirectory, '001.md'), '---\ndescription: One\n---\nChanged.\n');
-  fs.writeFileSync(path.join(rulesDirectory, 'extra.md'), '---\ndescription: Extra\n---\nExtra.\n');
-  const manifest = JSON.parse(before);
-  manifest.rules.push({ path: 'rules/missing.md', hash: 'missing' });
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest) + '\n');
-  const checkManifest = fs.readFileSync(manifestPath, 'utf8');
-
-  assert.deepStrictEqual(rules.checkAtomicRuleSet(dir), [
-    'rules/001.md: manifest hash does not match the calculated sha256.',
-    'rules/missing.md: listed in the manifest but its rule file is missing.',
-    'rules/extra.md: rule file is missing from the manifest.',
-  ]);
-  assert.strictEqual(fs.readFileSync(manifestPath, 'utf8'), checkManifest, 'check must not rewrite the manifest');
-});
-
-test('sync command --check prints each detected mismatch and exits non-zero', () => {
-  const dir = project();
-  atomic(dir, [{ data: { description: 'One' }, body: 'Before.' }]);
-  const manifestPath = path.join(dir, '.claude', 'live-rules', 'manifest.json');
-  fs.writeFileSync(path.join(dir, '.claude', 'live-rules', 'rules', '001.md'), '---\ndescription: One\n---\nChanged.\n');
-  const before = fs.readFileSync(manifestPath, 'utf8');
-  const result = spawnSync(process.execPath, [path.join(root, 'scripts', 'sync-atomic-rules.js'), '--check', '--project', dir], { encoding: 'utf8' });
-
-  assert.strictEqual(result.status, 1);
-  assert.match(result.stderr, /live-rules check failed: rules\/001\.md: manifest hash does not match the calculated sha256\./);
-  assert.strictEqual(fs.readFileSync(manifestPath, 'utf8'), before, '--check must not rewrite the manifest');
+  const state = path.join(dir, 'state');
+  assert.strictEqual(hook(startHook, dir, state, { session_id: 'one', source: 'startup' }), '');
+  assert.strictEqual(hook(promptHook, dir, state, { session_id: 'one', prompt: 'hello' }), '');
+  assert.strictEqual(hook(editHook, dir, state, { session_id: 'one', tool_input: { file_path: 'a.ts' } }), '');
 });

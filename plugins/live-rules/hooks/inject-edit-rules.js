@@ -3,8 +3,8 @@
  * live-rules - PreToolUse hook (Edit | Write | MultiEdit | NotebookEdit)
  *
  * Right before Claude edits a file, injects the project's rules scoped to that
- * file: path/glob rules whose pattern matches the file, and directory rules
- * whose directory contains it. This is the "just-in-time, file-scoped" half of
+ * file: every `paths:` entry that matches it, including a directory-style entry
+ * that contains it. This is the "just-in-time, file-scoped" half of
  * live-rules; always-on and prompt-keyword rules are handled by the
  * UserPromptSubmit hook instead.
  *
@@ -16,7 +16,7 @@
  * Design constraints:
  *   - No external dependencies (Node stdlib only).
  *   - Cross-platform (Windows / macOS / Linux).
- *   - Silent when there is no live-rules file / no matching rule.
+ *   - Silent when there are no .claude/rules/*.md files / no matching rule.
  *   - Never blocks or breaks an edit: any error -> exit 0 with no output.
  *     (Exit 2 would block the tool; we never do that.)
  */
@@ -57,7 +57,7 @@ function main() {
     relPath = filePath.replace(/\\/g, '/');
   }
 
-  // The file is outside this project: rule globs/dirs are repo-relative, so a
+  // The file is outside this project: `paths:` patterns are repo-relative, so a
   // catch-all pattern should not match it. Stay silent.
   if (relPath === '..' || relPath.startsWith('../') || path.isAbsolute(relPath)) {
     process.exit(0);
@@ -70,7 +70,6 @@ function main() {
   const header =
     '=== LIVE RULES for ' + relPath + ' (live-rules) ===\n' +
     'Project rules that apply to the file you are about to edit. Follow them in this change. ' +
-    lib.formatRuleSetStatus(ruleSet) +
     'Source: ' + lib.displayPath(projectDir, ruleSet.source);
 
   lib.emit('PreToolUse', lib.renderRules(changed, header));

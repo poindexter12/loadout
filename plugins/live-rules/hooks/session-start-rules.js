@@ -21,7 +21,7 @@
  * Design constraints (shared with the rest of live-rules):
  *   - No external dependencies (Node stdlib only).
  *   - Cross-platform (Windows / macOS / Linux).
- *   - Silent when there is no live-rules file, or no always-on rule in it.
+ *   - Silent when there are no .claude/rules/*.md files, or no always-on rule.
  *   - Never breaks a session: any error -> exit 0 with no output.
  */
 
@@ -74,15 +74,14 @@ function main() {
   // README's promise that they survive compaction would silently break.
   const data = lib.readStdin();
   const projectDir = lib.getProjectDir(data);
-  const migration = lib.migrateLegacyRules(projectDir, { detailed: true });
-  if (lib.atomicSchema(projectDir) === 'future') {
-    lib.emit('SessionStart', 'Live Rules uses a newer schema. Preserve its files and update the plugin before changing its metadata.');
-    process.exit(0);
-  }
 
+  // SQ-292: rules live in .claude/rules/*.md and are read straight off disk, so
+  // there is nothing to migrate or verify here. A project whose rules are still
+  // in a retired store gets one notice telling it how to move them; this hook is
+  // the only one that emits it, so the nudge does not repeat on every prompt.
   const ruleSet = lib.loadRuleSet(projectDir);
   if (!ruleSet.rules.length) {
-    if (migration.notice) lib.emit('SessionStart', migration.notice);
+    if (ruleSet.notice) lib.emit('SessionStart', ruleSet.notice);
     process.exit(0);
   }
 
@@ -90,7 +89,7 @@ function main() {
   // history; emit a short note instead. A normal summarized compaction keeps today's behaviour
   // (the reset-every-time re-injection below, which exists so always-on rules survive compaction).
   if (data.source === 'compact' && isReplacementCompaction(data.session_id)) {
-    lib.emit('SessionStart', (migration.notice ? migration.notice + '\n\n' : '') +
+    lib.emit('SessionStart', (ruleSet.notice ? ruleSet.notice + '\n\n' : '') +
       'live-rules: history retained across a replacement compaction; the rule set is already in the transcript.');
     process.exit(0);
   }
@@ -100,15 +99,14 @@ function main() {
   const selected = lib.attachIncludes(lib.selectForPrompt(ruleSet.rules, { promptText: '', cwdRel }), projectDir);
   const changed = ledger.changed(projectDir, data.session_id, selected, true);
   if (!changed.length) {
-    if (migration.notice) lib.emit('SessionStart', migration.notice);
+    if (ruleSet.notice) lib.emit('SessionStart', ruleSet.notice);
     process.exit(0);
   }
 
   const header =
-    (migration.notice ? migration.notice + '\n\n' : '') +
+    (ruleSet.notice ? ruleSet.notice + '\n\n' : '') +
     '=== LIVE RULES (live-rules, session start) ===\n' +
     'Rules re-grounded after SessionStart (' + (data.source || 'startup') + '). ' +
-    lib.formatRuleSetStatus(ruleSet) +
     'Source: ' + lib.displayPath(projectDir, ruleSet.source);
 
   lib.emit('SessionStart', lib.renderRules(changed, header));
