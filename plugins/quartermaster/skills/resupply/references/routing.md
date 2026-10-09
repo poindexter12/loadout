@@ -87,17 +87,42 @@ Only when no plugin wraps the capability. Search the registry:
 if no `--scope` flag is passed.
 Fingerprint: `mcp:<name>`.
 
-## 7. Rule (live-rules or CLAUDE.md)
+## 7. Rule (project rule file, local rule file, or the user's own rule file)
 
 For repeated corrections on one theme, conventions, and "stop doing X" findings.
 
-- If the live-rules plugin is installed (check `catalog --installed` for `live-rules@`), use its
-  add-rule skill: rules inject when they first apply (keyword, glob, or dir scoped), and again when
-  their path/content hash changes. Unchanged rules do not repeat on every prompt or edit within a
-  tracked session. Prefer it.
-- Else: project conventions go in the project's `CLAUDE.md`; the user's personal preferences
-  (voice, workflow, cross-project habits) go in `~/.claude/CLAUDE.md`. Keep the added rule to a few
-  lines, in the file's existing style, and show the exact diff first.
+Decide the destination first, with one question when the answer is not obvious. Ask it whether or
+not live-rules is installed: the destination is a question about who the rule is true for, and no
+plugin changes the answer.
+
+- **True of this repo for anyone who clones it** (its stack, conventions, tooling, test commands)
+  goes to `.claude/rules/<theme-slug>.md` and gets committed.
+- **True of this repo for this user only** (a local path, a personal habit confined to this one
+  project) goes to `.claude/rules/<theme-slug>.local.md`. Claude Code loads it because it sits in
+  that directory, and a `.claude/rules/*.local.md` line in `.gitignore` is what keeps it out of
+  the repo. Confirm that line exists before choosing this destination and propose adding it when
+  it does not, because without it the file is a committed rule wearing a personal name. Promoting
+  it later is a rename to `<theme-slug>.md`.
+- **True of this user everywhere** goes to `~/.claude/rules/<theme-slug>.md` in the user's own
+  config tree, which Claude Code reads in every project. Response format and length, voice, tone,
+  punctuation, and cross-project workflow habits are always this row. They are never project
+  rules, so never write them into the repo no matter how strong this project's evidence looks: the
+  evidence is about the user, and the repo is the one place the rule would not follow them.
+
+A theme with evidence from this project alone is a project rule until a second project repeats it.
+Mining with `--all-projects` is what distinguishes the two, so say which evidence the choice rests
+on.
+
+Claude Code reads all three natively. If live-rules is installed (check `catalog --installed` for
+`live-rules@`), those same files also get its timing: an edited rule is re-said mid-session instead
+of waiting for a restart, and a keyword-scoped rule fires on a matching prompt. It changes when a
+rule is said, never where it is stored, so prefer its `add-rule` skill for the writing and keep the
+destination exactly as chosen above.
+
+Keep the added rule to a few lines, in the destination file's existing style, and show the exact
+diff first. `CLAUDE.md` is the destination only for a project that has deliberately chosen not to
+keep a `.claude/rules/` directory; its personal counterpart is `~/.claude/CLAUDE.md`.
+
 - Fingerprint: `rule:<theme-slug>`.
 
 ## 8. Permission rule

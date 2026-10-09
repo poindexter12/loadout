@@ -4,12 +4,15 @@ Use a global live rule to notice useful improvements during the requested work, 
 unrequested work. Offer `/quartermaster:resupply` for a deeper review when the evidence warrants it.
 An offer needs no round approval; running the round, including transcript mining, does.
 
-## Install this atomic rule
+## Install this rule
 
-For an approved new setup, derive a project-specific rule at
-`.claude/live-rules/rules/self-improvement.md`, global scope, `priority: 40`. Include its path,
-SHA-256 hash, and frontmatter metadata in `.claude/live-rules/manifest.json` as described in
-`rule-templates.md`. Preserve existing rules; do not refresh them from this template without approval.
+For an approved new setup, derive a project-specific rule at exactly
+`.claude/rules/self-improvement.md`, always-on (no `paths:` key), `priority: 40`. That file is the
+whole record: it is a native Claude Code rule file, so there is no index entry, hash, or sync step
+to write beside it, as `rule-templates.md` describes. The path is load-bearing, not a convention
+(see **Injection and fallback** below), so do not rename it, nest it, or write it as
+`self-improvement.local.md`. Preserve existing rules; do not refresh them from this template
+without approval.
 
 ```markdown
 ---
@@ -37,9 +40,12 @@ on every prompt or edit when the session ledger is available. Without a session 
 repeated grounding is possible.
 
 Quartermaster's SessionStart hook supplies a condensed charter only when the exact
-`.claude/live-rules/rules/self-improvement.md` path is absent. Its presence suppresses that fallback;
-the hook does not inspect whether the seeded rule is enabled. Both forms offer improvements without
-authorizing them. Seeding content adds no new background process or hook.
+`.claude/rules/self-improvement.md` path is absent. Its presence suppresses that fallback. The
+check is that one exact path and nothing more: the hook never reads the file, so it does not care
+what the seeded rule says, and a rule seeded under another name, in a subdirectory, as
+`self-improvement.local.md`, or renamed to `self-improvement.md.off` leaves the fallback speaking.
+Both forms offer improvements without authorizing them. Seeding content adds no new background
+process or hook.
 
 ## Choose the smallest useful response
 

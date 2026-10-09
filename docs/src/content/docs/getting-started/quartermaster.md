@@ -56,9 +56,21 @@ The health check is read-only. It identifies stale installs, dead `enabledPlugin
 
 ## The in-the-moment loop
 
-Quartermaster's SessionStart hook supplies a short improvement charter when `.claude/live-rules/rules/self-improvement.md` is absent. An approved setup seeds a project-specific rule at that path instead. Both forms favor existing capabilities and offer improvements rather than automatically building tools or starting resupply.
+Quartermaster's SessionStart hook supplies a short improvement charter when `.claude/rules/self-improvement.md` is absent. An approved setup seeds a project-specific rule at that exact path instead, which suppresses the charter. Both forms favor existing capabilities and offer improvements rather than automatically building tools or starting resupply.
 
 Live Rules re-grounds applicable rules at SessionStart and tracks their path/content hashes per session. Later prompts or edits inject newly matching or changed rules, not unchanged rules repeatedly. Missing session IDs or an unavailable ledger can cause repeated grounding.
+
+## Where rules go
+
+Setup and resupply write rules to one of three places, and which one depends only on who the rule is true for. Claude Code reads all three natively, so the choice survives uninstalling any plugin.
+
+| The rule is true of | Where it goes | In the repo |
+| --- | --- | --- |
+| this project, for anyone who clones it | `.claude/rules/<name>.md` | yes, commit it |
+| this project, for you only | `.claude/rules/<name>.local.md` | no, as long as `.gitignore` carries `.claude/rules/*.local.md` |
+| you, in every project | `~/.claude/rules/<name>.md` | no, it lives in your config tree |
+
+Starter rules derived from the project itself, meaning its stack, tooling, docs, and stated conventions, land in the first row. Correction themes that your history shows you repeating across more than one project, such as response format and length, voice, tone, punctuation, and workflow habits, land in the third: they are true of you rather than of this repository, so Quartermaster writes them to `~/.claude/rules/` and never into the project. A theme with evidence from one project only is treated as a project rule until a second project repeats it. Promoting a personal rule to a shared one is a rename.
 
 ## Resupply an existing workspace
 
