@@ -8,6 +8,37 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v4.8.0 (2026-10-09)
+
+### model-gateway 0.52.4 → 0.53.0
+
+#### Features
+
+- Give the Sidequest route marker precedence over output_config.effort, and pin the marker-free Codex id route (SQ-299)
+  Requesting a real published Codex id with no route marker already worked, and now it is guaranteed. Such a request was never refused: only the virtual `claude-codex-auto` id requires a `[sidequest-route]` marker, and a published id fell through to the ordinary direct route, which forwards the request body untouched, so reasoning effort on `output_config.effort` already reached upstream. That carriage was load-bearing for any relay serving Sidequest executors but rested on fall-through that nothing pinned, so it is now covered by tests: the published id is accepted verbatim with its `[1m]` suffix, and an absent effort still means "upstream default" rather than an error.
+
+  What changes is precedence when both carriages arrive together. A route marker alongside a real published id used to be ignored, letting the body's effort win; it now takes precedence and the request is attributed as a dispatch. Sidequest still emits the marker and will until its own follow-up lands, so a mixed-version pair can no longer change effort silently. The marker is only honoured here when its model id, which Sidequest deliberately strips of the `claude-`/`claude-codex-` prefix and the `[1m]` suffix, names the same resolved model as the requested id, because on this route the id picks the model. The virtual id's own marker handling is unchanged, and marker trouble that rejects it, such as duplicate markers, still never rejects a real id. Effort is forwarded verbatim and not clamped, matching the Grok direct route, which does not clamp either.
+
+### sidequest 5.6.0 → 5.7.0
+
+#### Features
+
+- Retire a dispatch killed by a pre-claim model failure on the host task-failure id (SQ-302)
+  An executor whose model request fails at the API dies before its first turn, so `SubagentStop` never fires and no terminal record is ever written. `dispatch` now accepts `recoveryTaskId` (CLI `--recovery-task-id`), and when that failed host task id matches the unclaimed attempt's own bound runtime the evidence applies immediately instead of waiting out the hour-long claim-idle backstop.
+
+#### Fixes
+
+- Keep once-per-agent identity work off the hook hot path (SQ-303)
+  `guard-worktree-isolation` and `subagent-start` were both doing once-per-agent work on every call, which on a contended host pushed them past their 10s hook deadline: Claude Code killed the hook having decided nothing, so an executor's Edit and an executor spawn each waited ten seconds for an answer that never came, and under load the fail-closed guard refused the write outright.
+
+  The expensive part turned out to be process spawns, not the database: `git rev-parse` cost ~370ms per call on the host this was measured on, the Edit path made three of them plus an ancestry probe, and the identity binding made six inside its write transaction. Those facts are all files in git's own on-disk layout, so the lease kernel now reads them and both paths use it, keeping the spawns as the fallback for a layout it will not read confidently.
+
+  On top of that, the Edit path memoizes the one probe it cannot read from disk (`merge-base --is-ancestor`) against the pair of revisions it answers for, and attempts the board write that binds runtime identity once per agent and offered checkout rather than once per write. `subagent-start` records the binding offer in hook state before attempting it, so a binding lost to a busy board or to the hook being killed is picked up by the next hook that reaches the store instead of being dropped silently.
+
+  Measured end to end on a 300-ticket board, the `guard-worktree-isolation` process went from 2295.8ms to 470.6ms per Edit, and the identity binding from 3489.9ms to tens of milliseconds.
+
+  Every refusal the guard made before, it still makes.
+
 ## v4.7.0 (2026-10-09)
 
 ### live-rules 2.12.0 → 3.0.0
