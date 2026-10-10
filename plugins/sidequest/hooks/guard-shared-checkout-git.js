@@ -89,8 +89,8 @@ function refuseWhenBoardBusy(error) {
 }
 
 // src/hooks/guard-shared-checkout-git.ts
-var import_node_fs4 = __toESM(require("node:fs"));
-var import_node_path4 = __toESM(require("node:path"));
+var import_node_fs5 = __toESM(require("node:fs"));
+var import_node_path6 = __toESM(require("node:path"));
 var import_node_child_process = require("node:child_process");
 
 // src/hooks/shared/input.ts
@@ -207,8 +207,8 @@ function writeDeny(hookEventName, permissionDecisionReason) {
 }
 
 // src/hooks/shared/runtime-identity.ts
-var import_node_fs3 = __toESM(require("node:fs"));
-var import_node_path3 = __toESM(require("node:path"));
+var import_node_fs4 = __toESM(require("node:fs"));
+var import_node_path5 = __toESM(require("node:path"));
 
 // src/hooks/shared/paths.ts
 var import_node_path2 = __toESM(require("node:path"));
@@ -218,6 +218,14 @@ function pluginRoot() {
 function runtimeModule(name) {
   return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
 }
+
+// src/hooks/shared/session-state.ts
+var import_node_fs3 = __toESM(require("node:fs"));
+var import_node_path4 = __toESM(require("node:path"));
+
+// src/lib/claude-home.ts
+var import_node_os = __toESM(require("node:os"));
+var import_node_path3 = __toESM(require("node:path"));
 
 // src/hooks/shared/runtime-identity.ts
 function executorAgent(type) {
@@ -273,9 +281,9 @@ function commandText(input) {
 }
 function canonicalPath(value) {
   try {
-    return import_node_fs4.default.realpathSync.native(value);
+    return import_node_fs5.default.realpathSync.native(value);
   } catch (_) {
-    return import_node_path4.default.resolve(value);
+    return import_node_path6.default.resolve(value);
   }
 }
 function samePath(left, right) {
@@ -290,7 +298,7 @@ function gitInvocation(command) {
   return { target, subcommand: match[2].toLowerCase() };
 }
 function targetRoot(target, cwd) {
-  const directory = import_node_path4.default.resolve(cwd || ".", target);
+  const directory = import_node_path6.default.resolve(cwd || ".", target);
   try {
     return canonicalPath((0, import_node_child_process.execFileSync)("git", ["rev-parse", "--show-toplevel"], {
       cwd: directory,

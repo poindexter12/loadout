@@ -6,16 +6,20 @@ import { readStdin, stringField, isRecord } from './shared/input.js';
 import { writeDeny } from './shared/output.js';
 import { runtimeModule } from './shared/paths.js';
 import {
-  bindObservedRuntimeIdentity,
+  bindObservedRuntimeIdentityOnce,
+  cachedBaselineAncestry,
   canonicalPath,
   enclosingCheckout,
   executorAgent,
+  hookSessionId,
   identityDiagnosis,
   isolationExpectation,
+  observedGitFacts,
   unboundClaim,
   type CheckoutLocation,
   type IdentityDiagnosis,
   type IsolationExpectation,
+  type ObservedGitFacts,
 } from './shared/runtime-identity.js';
 
 // An isolation guard: refuse under board lock contention rather than allow a write unchecked (SQ-133).
@@ -56,7 +60,7 @@ function registeredProjectCheckout(root: string): boolean {
   }
 }
 
-function observedWorktreeLease(found: IsolationExpectation | null, worktree: string, agentId: string) {
+function observedWorktreeLease(found: IsolationExpectation | null, worktree: string, agentId: string, sessionId: string) {
   const git = (args: string[]) => execFileSync('git', args, {
     cwd: worktree,
     encoding: 'utf8',
@@ -64,29 +68,42 @@ function observedWorktreeLease(found: IsolationExpectation | null, worktree: str
     stdio: ['ignore', 'pipe', 'ignore'],
   }).trim();
   const gitPath = (value: string) => path.isAbsolute(value) ? value : path.resolve(worktree, value);
+  // SQ-303: these three facts are files in git's own layout, so read them rather than spawning three
+  // `git rev-parse` processes on every executor write. The spawns stay as the fallback for a layout the
+  // reader will not guess at, including an unborn HEAD, where the throw below is the refusal.
+  let observed: ObservedGitFacts | null = observedGitFacts(worktree);
+  if (!observed) {
+    observed = {
+      gitDirectory: gitPath(git(['rev-parse', '--git-dir'])),
+      commonGitDirectory: gitPath(git(['rev-parse', '--git-common-dir'])),
+      revision: git(['rev-parse', '--verify', 'HEAD^{commit}']),
+    };
+  }
   // `merge-base --is-ancestor` reports its answer as an exit code, so the false case arrives as a throw
   // and has to be told apart from a probe that could not run at all. Anything other than a clean exit 1
   // stays 'unknown', which keeps refusing rather than guessing the worktree is on the right history.
   const baselineAncestry = (baseline: string | null): 'ancestor' | 'unrelated' | 'unknown' => {
     if (!baseline) return 'unknown';
-    try {
-      git(['merge-base', '--is-ancestor', baseline, 'HEAD']);
-      return 'ancestor';
-    } catch (error) {
-      return (error as { status?: number }).status === 1 ? 'unrelated' : 'unknown';
-    }
+    return cachedBaselineAncestry(sessionId, baseline, observed!.revision, () => {
+      try {
+        git(['merge-base', '--is-ancestor', baseline, 'HEAD']);
+        return 'ancestor';
+      } catch (error) {
+        return (error as { status?: number }).status === 1 ? 'unrelated' : 'unknown';
+      }
+    });
   };
   const repository = found?.projectPath || worktree;
   return leaseKernel.createWorktreeLease({
     repository,
-    gitDirectory: gitPath(git(['rev-parse', '--git-dir'])),
-    commonGitDirectory: gitPath(git(['rev-parse', '--git-common-dir'])),
+    gitDirectory: observed.gitDirectory,
+    commonGitDirectory: observed.commonGitDirectory,
     dispatchRef: found?.ref || null,
     dispatchBaseline: found?.dispatchBaseline || null,
     sanctionedRevisions: found?.sanctionedRevisions || [],
     baselineAncestry: baselineAncestry(found?.dispatchBaseline || null),
     claimHeld: Boolean(found?.claimHeld),
-    observedRevision: git(['rev-parse', '--verify', 'HEAD^{commit}']),
+    observedRevision: observed.revision,
     observedWorktree: worktree,
     boundRevision: found?.expectedRevision || null,
     boundWorktree: found?.sharedTree ? found.projectPath : found?.expectedWorktree || null,
@@ -227,9 +244,12 @@ function main(): void {
   if (!target) return;
   const repo = enclosingCheckout(path.dirname(canonicalPath(target)));
   if (!repo) return;
+  const sessionId = hookSessionId(input);
   let found = isolationExpectation(input, agentId, executor, true, repo.root);
-  if (!found?.terminal && !found?.identityBound && (repo.linked || (!found && registeredProjectCheckout(repo.root)))) {
-    bindObservedRuntimeIdentity(input, agentId, executor, repo.root);
+  // SQ-303: binding is once-per-agent work. Re-offering the same checkout every write re-ran a board write
+  // transaction on the Edit path, and a second full board read behind it, for an answer that cannot change.
+  if (!found?.terminal && !found?.identityBound && (repo.linked || (!found && registeredProjectCheckout(repo.root)))
+    && bindObservedRuntimeIdentityOnce(input, agentId, executor, repo.root)) {
     found = isolationExpectation(input, agentId, executor, true, repo.root);
   }
   if (found?.terminal) {
@@ -238,7 +258,7 @@ function main(): void {
   }
   if (!found) {
     try {
-      const decision = leaseKernel.worktreeWriteDecision(observedWorktreeLease(null, repo.root, agentId), target);
+      const decision = leaseKernel.worktreeWriteDecision(observedWorktreeLease(null, repo.root, agentId, sessionId), target);
       if (!decision.allowed) {
         const diagnosis = identityDiagnosis(input, agentId, executor, repo.root);
         const unbound = unboundClaim(input, executor, repo.root);
@@ -252,7 +272,7 @@ function main(): void {
     return;
   }
   try {
-    const decision = leaseKernel.worktreeWriteDecision(observedWorktreeLease(found, repo.root, agentId), target);
+    const decision = leaseKernel.worktreeWriteDecision(observedWorktreeLease(found, repo.root, agentId, sessionId), target);
     if (!decision.allowed) {
       const message = !found.sharedTree && repo.linked
         ? linkedWorktreeLeaseRefusal(found, target, repo.root, decision.reason)

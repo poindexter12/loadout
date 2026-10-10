@@ -18,7 +18,7 @@ const { DEFAULT_CATEGORIES, ROUTING_PROFILE_SEED_REVISION, starterRoutingProfile
 const commitScope = require("./commit-scope.js");
 const { commitPaths } = commitScope;
 const { preferredWorktreeIntegrationTarget, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, reclaimUnclaimedDispatchWorktree } = require("./worktrees.js");
-const { canonicalPath, checkoutInstanceIdentity, createWorktreeLease, worktreeResumeDecision, isCanonicalRegisteredWorktree } = require("./kernel/worktree.js");
+const { canonicalPath, checkoutInstanceIdentity, checkoutLayout, createWorktreeLease, worktreeResumeDecision, isCanonicalRegisteredWorktree } = require("./kernel/worktree.js");
 const { reviewLockMessage } = require("./kernel/review-binding.js");
 const { migrateIfNeeded } = require("./migrate.js");
 const { catalogStateFingerprint, configuredExternalModelProvider, discoverExternalModels, providerReadiness } = require("./discovery.js");
@@ -622,6 +622,7 @@ const {
   claudeQuotaFailure: (...args) => claudeQuotaFailure(...args),
   canonicalPath,
   checkoutInstanceIdentity,
+  checkoutLayout,
   createWorktreeLease,
   worktreeResumeDecision,
   isCanonicalRegisteredWorktree,

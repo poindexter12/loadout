@@ -37,7 +37,7 @@ function requirementsMatch(left, right) {
   return JSON.stringify(left || null) === JSON.stringify(right || null);
 }
 function createDispatch(dependencies) {
-  const { ARTIFACT_BASELINE_MAX_PATHS, SHARED_TREE_ARTIFACT_MARKER, assertDispatchTransport, assertSidequestInstall, checkSidequestInstall, prepareAttempt, transitionAttempt, attemptDiagnostic, ensurePythonIoEncoding, localAheadOfUpstreamWarning, availableRoute, boardConfig, claimIdleMs, claimReclaimable, claimVerification, classifyDispatchFailure, terminalAgentFailure, commitScope, crypto, database, db, dispatchReadOnly, dispatchBaselineForProject, dispatchVerifyCommandError, dispatchRouteRefusal, dispatchRouteState, effectiveScope, execFileSync, execProjection, fs, getCategory, getStory, homeRoot, integrationTarget, integrationTargetCommit, legacyCategoryForComplexity, listProjects, listTickets, nonRepoExternalOutput, normalizeArtifactRoots, normalizeFiles, normalizeRoute, normalizeWorktreeIsolation, path, hasOriginRemote, pendingSubmission, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, reclaimUnclaimedDispatchWorktree, preparedDispatchTtlMs, putTicket, readMeta, releaseTerminalClaim, resolveCategoryFallback, resolveCategoryRoute, resolveTicketRoute, resolveExec, stableExecutorName, staleWorktreeCwdWarning, storyExecutionContract, ticketCategory, ticketStorageRow, withTicketLock, normalizeCategoryId, projectRoutingEnabled, routingDisabledMessage, getTicket, dispatchLaunchName, nextDispatchLaunchSeq, spawnDescription, claudeQuotaFailure, canonicalPath, checkoutInstanceIdentity, createWorktreeLease, worktreeResumeDecision, isCanonicalRegisteredWorktree } = dependencies;
+  const { ARTIFACT_BASELINE_MAX_PATHS, SHARED_TREE_ARTIFACT_MARKER, assertDispatchTransport, assertSidequestInstall, checkSidequestInstall, prepareAttempt, transitionAttempt, attemptDiagnostic, ensurePythonIoEncoding, localAheadOfUpstreamWarning, availableRoute, boardConfig, claimIdleMs, claimReclaimable, claimVerification, classifyDispatchFailure, terminalAgentFailure, commitScope, crypto, database, db, dispatchReadOnly, dispatchBaselineForProject, dispatchVerifyCommandError, dispatchRouteRefusal, dispatchRouteState, effectiveScope, execFileSync, execProjection, fs, getCategory, getStory, homeRoot, integrationTarget, integrationTargetCommit, legacyCategoryForComplexity, listProjects, listTickets, nonRepoExternalOutput, normalizeArtifactRoots, normalizeFiles, normalizeRoute, normalizeWorktreeIsolation, path, hasOriginRemote, pendingSubmission, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, reclaimUnclaimedDispatchWorktree, preparedDispatchTtlMs, putTicket, readMeta, releaseTerminalClaim, resolveCategoryFallback, resolveCategoryRoute, resolveTicketRoute, resolveExec, stableExecutorName, staleWorktreeCwdWarning, storyExecutionContract, ticketCategory, ticketStorageRow, withTicketLock, normalizeCategoryId, projectRoutingEnabled, routingDisabledMessage, getTicket, dispatchLaunchName, nextDispatchLaunchSeq, spawnDescription, claudeQuotaFailure, canonicalPath, checkoutInstanceIdentity, checkoutLayout, createWorktreeLease, worktreeResumeDecision, isCanonicalRegisteredWorktree } = dependencies;
   function syncLiveDispatchVerification(slug, ticket, amendment) {
     const state = dispatchState(ticket);
     if (!state || state.terminalAt) return null;
@@ -938,19 +938,40 @@ function createDispatch(dependencies) {
     const value = nativeGitPath(directory);
     return canonicalPath(path.isAbsolute(value) ? value : path.resolve(String(repository || ""), value));
   }
+  function layoutWorktreePaths(projectPath, supplied) {
+    const worktree = checkoutLayout(supplied);
+    const project = checkoutLayout(projectPath);
+    if (!worktree?.revision || !project) return null;
+    return {
+      repository: canonicalPath(project.root),
+      worktree: canonicalPath(worktree.root),
+      gitDirectoryPath: canonicalPath(worktree.gitDirectory),
+      commonGitDirectory: canonicalPath(worktree.commonGitDirectory),
+      repositoryGitDirectory: canonicalPath(project.commonGitDirectory),
+      revision: worktree.revision
+    };
+  }
+  function gitWorktreePaths(projectPath, supplied) {
+    const repository = canonicalPath(gitOutput(projectPath, ["rev-parse", "--show-toplevel"]));
+    const worktree = canonicalPath(gitOutput(supplied, ["rev-parse", "--show-toplevel"]));
+    return {
+      repository,
+      worktree,
+      gitDirectoryPath: gitDirectory(worktree, gitOutput(worktree, ["rev-parse", "--git-dir"])),
+      commonGitDirectory: gitDirectory(worktree, gitOutput(worktree, ["rev-parse", "--git-common-dir"])),
+      repositoryGitDirectory: gitDirectory(repository, gitOutput(repository, ["rev-parse", "--git-common-dir"])),
+      revision: gitOutput(worktree, ["rev-parse", "--verify", "HEAD^{commit}"])
+    };
+  }
   function immutableWorktreeFacts(slug, candidate) {
     const projectPath = String(readMeta(slug)?.path || "").trim();
     const supplied = String(candidate || "").trim();
     if (!projectPath || !supplied) return null;
     try {
-      const repository = canonicalPath(gitOutput(projectPath, ["rev-parse", "--show-toplevel"]));
-      const worktree = canonicalPath(gitOutput(supplied, ["rev-parse", "--show-toplevel"]));
-      const gitDirectoryPath = gitDirectory(worktree, gitOutput(worktree, ["rev-parse", "--git-dir"]));
-      const commonGitDirectory = gitDirectory(worktree, gitOutput(worktree, ["rev-parse", "--git-common-dir"]));
-      const repositoryGitDirectory = gitDirectory(repository, gitOutput(repository, ["rev-parse", "--git-common-dir"]));
+      const paths = layoutWorktreePaths(projectPath, supplied) || gitWorktreePaths(projectPath, supplied);
+      const { repository, worktree, gitDirectoryPath, commonGitDirectory, repositoryGitDirectory, revision } = paths;
       const checkoutInstance = checkoutInstanceIdentity(gitDirectoryPath);
       if (commonGitDirectory !== repositoryGitDirectory || gitDirectoryPath === commonGitDirectory || !checkoutInstance) return null;
-      const revision = gitOutput(worktree, ["rev-parse", "--verify", "HEAD^{commit}"]);
       return { repository, worktree, gitDirectory: gitDirectoryPath, commonGitDirectory, checkoutInstance, revision };
     } catch (_) {
       return null;

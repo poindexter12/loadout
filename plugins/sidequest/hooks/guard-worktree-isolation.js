@@ -89,7 +89,7 @@ function refuseWhenBoardBusy(error) {
 }
 
 // src/hooks/guard-worktree-isolation.ts
-var import_node_path4 = __toESM(require("node:path"));
+var import_node_path6 = __toESM(require("node:path"));
 var import_node_child_process = require("node:child_process");
 
 // src/hooks/shared/input.ts
@@ -215,8 +215,42 @@ function runtimeModule(name) {
 }
 
 // src/hooks/shared/runtime-identity.ts
+var import_node_fs4 = __toESM(require("node:fs"));
+var import_node_path5 = __toESM(require("node:path"));
+
+// src/hooks/shared/session-state.ts
 var import_node_fs3 = __toESM(require("node:fs"));
+var import_node_path4 = __toESM(require("node:path"));
+
+// src/lib/claude-home.ts
+var import_node_os = __toESM(require("node:os"));
 var import_node_path3 = __toESM(require("node:path"));
+function resolveSidequestHome(env = process.env) {
+  const explicit = String(env.SIDEQUEST_HOME || "").trim();
+  if (explicit) return import_node_path3.default.resolve(explicit);
+  const configDir = String(env.CLAUDE_CONFIG_DIR || "").trim();
+  return import_node_path3.default.join(configDir ? import_node_path3.default.resolve(configDir) : import_node_path3.default.join(import_node_os.default.homedir(), ".claude"), "sidequest");
+}
+
+// src/hooks/shared/session-state.ts
+function sessionStateFile(prefix, sessionId) {
+  const home = resolveSidequestHome();
+  return import_node_path4.default.join(home, "tmp", "state", `${prefix}-${encodeURIComponent(sessionId)}.json`);
+}
+function readSessionState(file) {
+  try {
+    const parsed = JSON.parse(import_node_fs3.default.readFileSync(file, "utf8"));
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+function writeSessionState(file, state) {
+  import_node_fs3.default.mkdirSync(import_node_path4.default.dirname(file), { recursive: true });
+  import_node_fs3.default.writeFileSync(file, JSON.stringify(state));
+}
+
+// src/hooks/shared/runtime-identity.ts
 function canonicalPath(value) {
   const kernel = require(runtimeModule("kernel/worktree"));
   return kernel.canonicalPath(value);
@@ -235,18 +269,61 @@ function hookSessionId(input) {
 function enclosingCheckout(start) {
   let directory = canonicalPath(start);
   for (; ; ) {
-    const gitEntry = import_node_path3.default.join(directory, ".git");
+    const gitEntry = import_node_path5.default.join(directory, ".git");
     let stats = null;
     try {
-      stats = import_node_fs3.default.statSync(gitEntry);
+      stats = import_node_fs4.default.statSync(gitEntry);
     } catch (_) {
       stats = null;
     }
     if (stats) return { root: directory, linked: stats.isFile() };
-    const parent = import_node_path3.default.dirname(directory);
+    const parent = import_node_path5.default.dirname(directory);
     if (parent === directory) return null;
     directory = parent;
   }
+}
+function observedGitFacts(worktree) {
+  const { checkoutLayout } = require(runtimeModule("kernel/worktree"));
+  const layout = checkoutLayout(worktree);
+  if (!layout?.revision) return null;
+  return { gitDirectory: layout.gitDirectory, commonGitDirectory: layout.commonGitDirectory, revision: layout.revision };
+}
+var RUNTIME_IDENTITY_STATE_PREFIX = "runtime-identity";
+var MAX_TRACKED_AGENTS = 32;
+var MAX_TRACKED_ANCESTRY = 32;
+function identityStateFile(sessionId) {
+  return sessionStateFile(RUNTIME_IDENTITY_STATE_PREFIX, sessionId);
+}
+function readIdentityState(sessionId) {
+  return readSessionState(identityStateFile(sessionId));
+}
+function writeIdentityState(sessionId, state) {
+  try {
+    writeSessionState(identityStateFile(sessionId), state);
+  } catch (_) {
+  }
+}
+function boundedEntries(entries, limit) {
+  const keys = Object.keys(entries);
+  if (keys.length <= limit) return entries;
+  return Object.fromEntries(keys.slice(keys.length - limit).map((key) => [key, entries[key]]));
+}
+function agentKey(agentId, agentName, worktree) {
+  return `${agentId || agentName || ""}\0${worktree}`;
+}
+function cachedBaselineAncestry(sessionId, baseline, revision, probe) {
+  const key = `${baseline}\0${revision}`;
+  if (!sessionId) return probe();
+  const state = readIdentityState(sessionId);
+  const cached = state.ancestry?.[key];
+  if (cached === "ancestor" || cached === "unrelated") return cached;
+  const answer = probe();
+  if (answer === "unknown") return answer;
+  writeIdentityState(sessionId, {
+    ...state,
+    ancestry: boundedEntries({ ...state.ancestry || {}, [key]: answer }, MAX_TRACKED_ANCESTRY)
+  });
+  return answer;
 }
 function isolationExpectation(input, agentId, executor, includeSessionFallback = true, observedWorktree = "") {
   try {
@@ -297,6 +374,21 @@ function bindObservedRuntimeIdentity(input, agentId, executor, worktree) {
     refuseWhenBoardBusy(error);
   }
 }
+function bindObservedRuntimeIdentityOnce(input, agentId, executor, worktree) {
+  const sessionId = hookSessionId(input);
+  if (!sessionId) return false;
+  const agentName = stringField(input, "agent_name", "agentName", "name") || null;
+  const key = agentKey(agentId, agentName, worktree);
+  const state = readIdentityState(sessionId);
+  const agents = state.agents || {};
+  if (agents[key]?.attempted && !agents[key]?.deferred) return false;
+  writeIdentityState(sessionId, {
+    ...state,
+    agents: boundedEntries({ ...agents, [key]: { attempted: true, executor, agentName, worktree } }, MAX_TRACKED_AGENTS)
+  });
+  bindObservedRuntimeIdentity(input, agentId, executor, worktree);
+  return true;
+}
 
 // src/hooks/guard-worktree-isolation.ts
 failClosedOnBoardBusy();
@@ -307,7 +399,7 @@ function targetPath(input) {
   if (!isRecord(toolInput)) return "";
   const value = toolInput.file_path ?? toolInput.notebook_path ?? toolInput.path;
   const target = value == null ? "" : String(value);
-  return target && import_node_path4.default.isAbsolute(target) ? import_node_path4.default.resolve(target) : "";
+  return target && import_node_path6.default.isAbsolute(target) ? import_node_path6.default.resolve(target) : "";
 }
 function samePath(a, b) {
   const normalize = (value) => {
@@ -325,34 +417,44 @@ function registeredProjectCheckout(root) {
     return false;
   }
 }
-function observedWorktreeLease(found, worktree, agentId) {
+function observedWorktreeLease(found, worktree, agentId, sessionId) {
   const git = (args) => (0, import_node_child_process.execFileSync)("git", args, {
     cwd: worktree,
     encoding: "utf8",
     windowsHide: true,
     stdio: ["ignore", "pipe", "ignore"]
   }).trim();
-  const gitPath = (value) => import_node_path4.default.isAbsolute(value) ? value : import_node_path4.default.resolve(worktree, value);
+  const gitPath = (value) => import_node_path6.default.isAbsolute(value) ? value : import_node_path6.default.resolve(worktree, value);
+  let observed = observedGitFacts(worktree);
+  if (!observed) {
+    observed = {
+      gitDirectory: gitPath(git(["rev-parse", "--git-dir"])),
+      commonGitDirectory: gitPath(git(["rev-parse", "--git-common-dir"])),
+      revision: git(["rev-parse", "--verify", "HEAD^{commit}"])
+    };
+  }
   const baselineAncestry = (baseline) => {
     if (!baseline) return "unknown";
-    try {
-      git(["merge-base", "--is-ancestor", baseline, "HEAD"]);
-      return "ancestor";
-    } catch (error) {
-      return error.status === 1 ? "unrelated" : "unknown";
-    }
+    return cachedBaselineAncestry(sessionId, baseline, observed.revision, () => {
+      try {
+        git(["merge-base", "--is-ancestor", baseline, "HEAD"]);
+        return "ancestor";
+      } catch (error) {
+        return error.status === 1 ? "unrelated" : "unknown";
+      }
+    });
   };
   const repository = found?.projectPath || worktree;
   return leaseKernel.createWorktreeLease({
     repository,
-    gitDirectory: gitPath(git(["rev-parse", "--git-dir"])),
-    commonGitDirectory: gitPath(git(["rev-parse", "--git-common-dir"])),
+    gitDirectory: observed.gitDirectory,
+    commonGitDirectory: observed.commonGitDirectory,
     dispatchRef: found?.ref || null,
     dispatchBaseline: found?.dispatchBaseline || null,
     sanctionedRevisions: found?.sanctionedRevisions || [],
     baselineAncestry: baselineAncestry(found?.dispatchBaseline || null),
     claimHeld: Boolean(found?.claimHeld),
-    observedRevision: git(["rev-parse", "--verify", "HEAD^{commit}"]),
+    observedRevision: observed.revision,
     observedWorktree: worktree,
     boundRevision: found?.expectedRevision || null,
     boundWorktree: found?.sharedTree ? found.projectPath : found?.expectedWorktree || null,
@@ -443,11 +545,11 @@ function main() {
   if (!agentId || !executorAgent(executor)) return;
   const target = targetPath(input);
   if (!target) return;
-  const repo = enclosingCheckout(import_node_path4.default.dirname(canonicalPath(target)));
+  const repo = enclosingCheckout(import_node_path6.default.dirname(canonicalPath(target)));
   if (!repo) return;
+  const sessionId = hookSessionId(input);
   let found = isolationExpectation(input, agentId, executor, true, repo.root);
-  if (!found?.terminal && !found?.identityBound && (repo.linked || !found && registeredProjectCheckout(repo.root))) {
-    bindObservedRuntimeIdentity(input, agentId, executor, repo.root);
+  if (!found?.terminal && !found?.identityBound && (repo.linked || !found && registeredProjectCheckout(repo.root)) && bindObservedRuntimeIdentityOnce(input, agentId, executor, repo.root)) {
     found = isolationExpectation(input, agentId, executor, true, repo.root);
   }
   if (found?.terminal) {
@@ -456,7 +558,7 @@ function main() {
   }
   if (!found) {
     try {
-      const decision = leaseKernel.worktreeWriteDecision(observedWorktreeLease(null, repo.root, agentId), target);
+      const decision = leaseKernel.worktreeWriteDecision(observedWorktreeLease(null, repo.root, agentId, sessionId), target);
       if (!decision.allowed) {
         const diagnosis = identityDiagnosis(input, agentId, executor, repo.root);
         const unbound = unboundClaim(input, executor, repo.root);
@@ -470,7 +572,7 @@ function main() {
     return;
   }
   try {
-    const decision = leaseKernel.worktreeWriteDecision(observedWorktreeLease(found, repo.root, agentId), target);
+    const decision = leaseKernel.worktreeWriteDecision(observedWorktreeLease(found, repo.root, agentId, sessionId), target);
     if (!decision.allowed) {
       const message = !found.sharedTree && repo.linked ? linkedWorktreeLeaseRefusal(found, target, repo.root, decision.reason) : !found.sharedTree ? refusal(found, target, repo.root, stringField(input, "cwd")) : leaseRefusal(found, target, decision.reason);
       writeDeny("PreToolUse", message);
