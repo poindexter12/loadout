@@ -3,6 +3,7 @@ import './shared/sqlite-budget.js';
 import { readStdin, stringField } from './shared/input.js';
 import { writeContext } from './shared/output.js';
 import { runtimeModule } from './shared/paths.js';
+import { deferRuntimeIdentityBinding, settleRuntimeIdentityBinding } from './shared/runtime-identity.js';
 import { DIAGNOSTIC_PROBE_NAME } from '../lib/exec-names.js';
 import { diagnosticWorktreeWarning } from './diagnostic-worktree-warning.js';
 
@@ -45,13 +46,29 @@ function main(): void {
   if (!sessionId || !executor || (!agentId && !agentName)) return;
   const classification = classifyExecutor(executor);
   if (classification.kind === 'unknown') return;
+  const worktree = stringField(data, 'cwd', 'project_dir', 'projectDir');
+  // SQ-303: this binding overran SubagentStart's 10s deadline on every executor spawn, because it re-derived
+  // immutable worktree facts with six git spawns inside its write transaction. Those facts now come off disk
+  // (src/lib/kernel/worktree.ts, checkoutLayout), which is what makes an inline bind affordable again.
+  //
+  // What remains unbounded is the lock. The hook SQLite budget already caps that at one 1.5s wait and then
+  // fails open (SQ-125), but failing open exits this process, so a binding lost to a busy board used to be
+  // lost silently. Record the offer in hook state BEFORE attempting it and clear it on success: whatever
+  // ends this process early — an exhausted budget, or Claude Code killing the hook at its deadline — leaves
+  // the offer on disk for the next hook that reaches the store. Nothing reads the binding before the agent's
+  // first board call or first write, and both of those paths bind.
+  deferRuntimeIdentityBinding(sessionId, executor, agentId || null, agentName || null, worktree || '');
   try {
     const store = require(runtimeModule('store')) as {
       bindDispatchAgent: (sessionId: string, executor: string, agentId: string | null, agentName: string | null, worktree: string | null) => unknown;
     };
-    const worktree = stringField(data, 'cwd', 'project_dir', 'projectDir');
     store.bindDispatchAgent(sessionId, executor, agentId || null, agentName || null, worktree || null);
+    // Reaching the store spends the offer, whatever it answered. A refusal is an answer — an agent the
+    // board holds no dispatch for will be refused every time — and treating that as still owed would put
+    // the write back on the Edit path for exactly the agents this was meant to keep it off.
+    settleRuntimeIdentityBinding(sessionId, agentId || null, agentName || null, worktree || '');
   } catch (_) {
+    // The store was never reached, so the offer stays owed. The next hook that gets there settles it.
   }
   const warning = diagnosticWorktreeWarning(data);
   if (warning) writeContext('SubagentStart', warning);

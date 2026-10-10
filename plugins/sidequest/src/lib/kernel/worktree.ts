@@ -108,6 +108,113 @@ export function sameCanonicalPath(left: string, right: string): boolean {
   return canonicalPath(left) === canonicalPath(right);
 }
 
+// SQ-303. Four facts about a checkout that the codebase used to learn by spawning `git rev-parse`:
+// `--show-toplevel`, `--git-dir`, `--git-common-dir` and `--verify HEAD^{commit}`. The spawns are the
+// expensive part by a wide margin — on a contended host each costs ~370ms, so the six that
+// `immutableWorktreeFacts` made cost ~2.2s inside a board write transaction, and the three the Edit-path
+// guard made cost ~1.1s on every write an executor performed. Both hooks have 10s before Claude Code kills
+// them and discards the decision, and both were hitting it.
+//
+// All four are files in git's documented on-disk layout, so read them. This returns null for any layout it
+// will not state plainly — no `.git` to find, a pointer file it cannot parse, a ref it cannot resolve — and
+// every caller falls back to the spawns, so an unusual repository loses the speed rather than the answer.
+// `revision` is separately nullable: an unborn HEAD has no commit, which is a real state and not a failure
+// to read one.
+export type CheckoutLayout = Readonly<{
+  root: string;
+  gitDirectory: string;
+  commonGitDirectory: string;
+  revision: string | null;
+}>;
+
+const REVISION_PATTERN = /^[0-9a-f]{40,64}$/i;
+
+function readTrimmedFile(file: string): string | null {
+  try {
+    const contents = fs.readFileSync(file, 'utf8').trim();
+    return contents || null;
+  } catch {
+    return null;
+  }
+}
+
+// `git rev-parse --show-toplevel` resolves a path inside a checkout to that checkout's root, so a candidate
+// naming a subdirectory normalizes the same way it always did.
+//
+// The existence check is load-bearing, not defensive. `rev-parse` runs with the candidate as its working
+// directory and fails outright when that directory is gone, which is how a removed worktree reads as "no
+// facts". Walking up from a path that does not exist would instead keep climbing to whatever checkout
+// encloses it — for a worktree under the repository, the shared checkout itself — and report ITS identity
+// as the candidate's. That is the SQ-2189 failure this code exists to prevent, so stop where git stops.
+function enclosingCheckoutRoot(start: string): string | null {
+  let current = path.resolve(start);
+  try {
+    if (!fs.statSync(current).isDirectory()) return null;
+  } catch {
+    return null;
+  }
+  for (;;) {
+    if (fs.existsSync(path.join(current, '.git'))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+// A primary checkout's `.git` is a directory and is its own common dir. A linked worktree's `.git` is a
+// file naming its per-worktree git dir, and that dir's `commondir` names the shared one.
+function gitDirectoryOf(root: string): string | null {
+  const entry = path.join(root, '.git');
+  let stats: fs.Stats;
+  try {
+    stats = fs.statSync(entry);
+  } catch {
+    return null;
+  }
+  if (stats.isDirectory()) return entry;
+  const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(readTrimmedFile(entry) || '')?.[1];
+  if (!pointer) return null;
+  return path.isAbsolute(pointer) ? pointer : path.resolve(root, pointer);
+}
+
+// A linked worktree keeps HEAD and its other per-worktree refs in its own git dir and shares `refs/heads`
+// through the common dir. Git resolves a ref in that order, so this does too, with packed-refs last.
+function resolveRefRevision(gitDirectory: string, commonGitDirectory: string, ref: string): string | null {
+  const segments = ref.split('/');
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..')) return null;
+  const bases = gitDirectory === commonGitDirectory ? [gitDirectory] : [gitDirectory, commonGitDirectory];
+  for (const base of bases) {
+    const loose = readTrimmedFile(path.join(base, ...segments));
+    if (loose && REVISION_PATTERN.test(loose)) return loose;
+  }
+  const packed = readTrimmedFile(path.join(commonGitDirectory, 'packed-refs'));
+  for (const line of packed ? packed.split(/\r?\n/) : []) {
+    const entry = /^([0-9a-f]{40,64})\s+(\S+)$/i.exec(line.trim());
+    if (entry && entry[2] === ref) return entry[1]!;
+  }
+  return null;
+}
+
+function headRevision(gitDirectory: string, commonGitDirectory: string): string | null {
+  const head = readTrimmedFile(path.join(gitDirectory, 'HEAD'));
+  if (!head) return null;
+  if (REVISION_PATTERN.test(head)) return head;
+  const ref = /^ref:\s*(.+?)\s*$/.exec(head)?.[1];
+  return ref ? resolveRefRevision(gitDirectory, commonGitDirectory, ref) : null;
+}
+
+export function checkoutLayout(start: string): CheckoutLayout | null {
+  const root = enclosingCheckoutRoot(start);
+  if (!root) return null;
+  const gitDirectory = gitDirectoryOf(root);
+  if (!gitDirectory) return null;
+  const pointer = readTrimmedFile(path.join(gitDirectory, 'commondir'));
+  const commonGitDirectory = pointer
+    ? (path.isAbsolute(pointer) ? pointer : path.resolve(gitDirectory, pointer))
+    : gitDirectory;
+  return { root, gitDirectory, commonGitDirectory, revision: headRevision(gitDirectory, commonGitDirectory) };
+}
+
 export function createWorktreeLease(facts: WorktreeLeaseFacts): WorktreeLease {
   return Object.freeze({
     ...facts,

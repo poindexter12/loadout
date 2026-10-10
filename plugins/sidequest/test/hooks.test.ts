@@ -5400,3 +5400,229 @@ test('session-start audit report is quiet at zero, surfaces carried summaries, a
   const deferred = runHook(SESSION, { session_id: 'audit-deferred', source: 'startup', cwd }, { ...env, SIDEQUEST_AUDIT_DEADLINE_MS: '0' });
   assert.match(deferred, /audit report exceeded its SessionStart budget/);
 });
+
+// SQ-303. On a contended host guard-worktree-isolation hit its 10s PreToolUse deadline on 20 of the Edits
+// a dispatched executor made, and subagent-start hit the same deadline on 15 executor spawns, where Claude
+// Code kills the hook having decided nothing and the caller waited ten seconds for that. Both hooks were
+// doing once-per-agent work on every single call: three `git rev-parse` spawns plus a board write
+// transaction per Edit, and a whole-board ticket scan plus six git spawns inside a write transaction per
+// spawn. These cover the Edit path deciding without spawning git, the binding happening once, and the
+// spawn-time binding staying inside a budget with a deferral behind it.
+
+// The shared hook modules resolve the built runtime through CLAUDE_PLUGIN_ROOT, which runHook sets for the
+// hook subprocesses it spawns. These tests require those modules in-process, so set it here too.
+process.env.CLAUDE_PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || PLUGIN_ROOT;
+
+function sq303Repo(prefix: string): string {
+  const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+  gitFixture(['init', '-b', 'main'], repo);
+  gitFixture(['config', 'user.name', 'Sidequest Test'], repo);
+  gitFixture(['config', 'user.email', 'sidequest-test@example.invalid'], repo);
+  fs.writeFileSync(path.join(repo, 'README.md'), 'sq-303 fixture\n');
+  gitFixture(['add', '.'], repo);
+  gitFixture(['commit', '-m', 'base'], repo);
+  return repo;
+}
+
+test('SQ-303: observedGitFacts reads git-dir, common-dir and HEAD off disk, matching git itself', () => {
+  const identity = require('../src/hooks/shared/runtime-identity.ts');
+  const repo = sq303Repo('sq-303-facts-');
+  const expectFacts = (checkout: string) => {
+    const resolve = (value: string) => path.isAbsolute(value) ? value : path.resolve(checkout, value);
+    const facts = identity.observedGitFacts(checkout);
+    assert.ok(facts, `${checkout} must be readable from disk`);
+    assert.equal(fs.realpathSync(facts.gitDirectory), fs.realpathSync(resolve(gitFixture(['rev-parse', '--git-dir'], checkout))));
+    assert.equal(fs.realpathSync(facts.commonGitDirectory), fs.realpathSync(resolve(gitFixture(['rev-parse', '--git-common-dir'], checkout))));
+    assert.equal(facts.revision, gitFixture(['rev-parse', '--verify', 'HEAD^{commit}'], checkout));
+  };
+
+  // A primary checkout, where `.git` is a directory and is its own common dir.
+  expectFacts(repo);
+
+  // A linked worktree, where `.git` is a file naming a per-worktree dir whose `commondir` names the
+  // shared one, and whose HEAD is detached rather than a ref.
+  const linked = path.join(path.dirname(repo), `${path.basename(repo)}-linked`);
+  gitFixture(['worktree', 'add', '--detach', linked], repo);
+  try {
+    expectFacts(linked);
+    // And a branch-backed HEAD in a linked worktree, where the ref it names lives in the common dir.
+    gitFixture(['switch', '-c', 'sq303/branch'], linked);
+    expectFacts(linked);
+    // Packed refs are the other place a branch tip can live.
+    gitFixture(['pack-refs', '--all'], repo);
+    expectFacts(linked);
+  } finally {
+    gitFixture(['worktree', 'remove', '--force', linked], repo);
+  }
+
+  // An unborn HEAD has no revision at all. Reporting the layout as unreadable keeps the `git rev-parse
+  // --verify` spawn, and its throw, as the refusal the guard already produced there.
+  const unborn = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sq-303-unborn-')));
+  gitFixture(['init', '-b', 'main'], unborn);
+  assert.equal(identity.observedGitFacts(unborn), null, 'an unborn HEAD must fall back to the git spawn');
+  assert.equal(identity.observedGitFacts(fs.mkdtempSync(path.join(os.tmpdir(), 'sq-303-plain-'))), null, 'a directory that is not a checkout reads as unreadable');
+
+  // The case that makes this reader dangerous if it walks up from nothing. `git rev-parse` runs with the
+  // candidate as its working directory and fails when that directory is gone, which is how a removed
+  // worktree reads as "no facts". A reader that kept climbing would find the enclosing checkout and report
+  // ITS identity as the removed worktree's, binding a dispatch to the shared tree (the SQ-2189 class).
+  const removed = path.join(repo, 'worktrees', 'gone');
+  assert.equal(identity.observedGitFacts(removed), null, 'a path that no longer exists must not inherit the enclosing checkout');
+  const { checkoutLayout } = require('../src/lib/kernel/worktree.ts');
+  assert.equal(checkoutLayout(removed), null, 'the kernel reader must stop where git stops');
+  assert.equal(checkoutLayout(path.join(repo, '.git', 'HEAD')), null, 'a file is not a working directory');
+});
+
+test('SQ-303: the Edit-path guard allows the assigned worktree with no git on PATH', () => {
+  const repo = sq303Repo('sq-303-guard-');
+  const project = store.ensureProject(repo).slug;
+  const category = `sq-303-guard-${++fixtureSeq}`;
+  store.setCategory({ id: category, name: category, route: { model: 'sonnet', effort: 'medium' }, fallback: null, enabled: true });
+  const ticket = store.createTicket(project, { title: 'sq-303 edit path', category, source: 'cli', files: ['README.md'] });
+  const agentId = 'sq303edit';
+  const sessionId = `sq-303-guard-${++sqSeq}`;
+  const prepared = store.prepareDispatch(project, ticket.ref, { sessionId });
+  const executor = prepared.ticket.dispatchExecutor;
+  assert.equal(store.recordDispatchLaunch(project, ticket.ref, {
+    token: prepared.token, executor, sessionId, agentName: agentId,
+  }).ok, true);
+  const worktree = worktrees.resolvedAgentWorktree(repo, agentId);
+  assert.equal(store.bindDispatchWorktreeCreation(project, sessionId, worktree).ok, true);
+  gitFixture(['worktree', 'add', '--detach', worktree], repo);
+  try {
+    completeCheckoutCreation(project, sessionId, worktree);
+    assert.equal(store.bindDispatchAgent(sessionId, executor, agentId, agentId, worktree).ok, true);
+    const payload = {
+      session_id: sessionId,
+      agent_id: agentId,
+      agent_type: executor,
+      cwd: worktree,
+      tool_name: 'Edit',
+      tool_input: { file_path: path.join(worktree, 'README.md'), old_string: 'a', new_string: 'b' },
+    };
+
+    // The first write is the one allowed to pay for a `merge-base --is-ancestor` probe: reachability is
+    // not a fact on disk. It is a pure function of two revisions, so it is memoized per session.
+    assert.equal(runHookOutput(GUARD_WORKTREE_ISOLATION, payload, { SIDEQUEST_HOME }), null, 'the assigned worktree is allowed');
+
+    // Every write after it must decide from the board read and git's on-disk layout alone. An empty PATH
+    // makes any surviving spawn an ENOENT the guard turns into a refusal, so an allow here is the
+    // assertion that the Edit path no longer shells out to git.
+    const noGit = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-303-nogit-'));
+    const second = runHookOutput(GUARD_WORKTREE_ISOLATION, payload, { SIDEQUEST_HOME, PATH: noGit, Path: noGit });
+    assert.equal(second, null, 'the Edit path must not spawn git once the ancestry probe is memoized');
+
+    // The guard must still refuse a write into the shared checkout, with no git on PATH either: the
+    // decision it exists to make cannot depend on the spawns that were removed.
+    const shared = runHookOutput(GUARD_WORKTREE_ISOLATION, {
+      ...payload,
+      cwd: repo,
+      tool_input: { file_path: path.join(repo, 'README.md'), old_string: 'a', new_string: 'b' },
+    }, { SIDEQUEST_HOME, PATH: noGit, Path: noGit });
+    assert.equal(shared.hookSpecificOutput.permissionDecision, 'deny');
+    assert.ok(shared.hookSpecificOutput.permissionDecisionReason.includes(ticket.ref), 'the refusal still names the ticket');
+  } finally {
+    gitFixture(['worktree', 'remove', '--force', worktree], repo);
+  }
+});
+
+test('SQ-303: identity binding is attempted once per agent and checkout, not once per write', () => {
+  const identity = require('../src/hooks/shared/runtime-identity.ts');
+  const repo = sq303Repo('sq-303-bind-');
+  const other = sq303Repo('sq-303-bind-other-');
+  const sessionId = `sq-303-bind-${++sqSeq}`;
+  const input = { session_id: sessionId, agent_id: 'sq303bind', agent_name: 'sq303bind' };
+  const once = (checkout: string) => identity.bindObservedRuntimeIdentityOnce(input, 'sq303bind', 'sidequest-exec-high', checkout);
+
+  assert.equal(once(repo), true, 'the first offer binds');
+  assert.equal(once(repo), false, 'repeating the same offer must not reach the board again');
+  assert.equal(once(repo), false, 'and must stay skipped for the life of the session');
+  // Re-offering a DIFFERENT checkout is the SQ-2153 retry, where the worktree was not ready at spawn.
+  assert.equal(once(other), true, 'a newly offered checkout must still bind');
+  assert.equal(once(other), false);
+
+  // The marker is hook state, so it survives into the next hook process rather than only this one.
+  const stateFile = path.join(SIDEQUEST_HOME, 'tmp', 'state', `runtime-identity-${encodeURIComponent(sessionId)}.json`);
+  const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  assert.equal(Object.keys(state.agents).length, 2, 'one entry per agent and offered checkout');
+  assert.ok(Object.keys(state.agents).every((key) => state.agents[key].attempted), 'each records that the bind was spent');
+});
+
+test('SQ-303: a deferred binding is still owed, and a memoized ancestry answer is not re-probed', () => {
+  const identity = require('../src/hooks/shared/runtime-identity.ts');
+  const repo = sq303Repo('sq-303-defer-');
+  const sessionId = `sq-303-defer-${++sqSeq}`;
+
+  // A bind that never reached the store leaves the offer in hook state. The next hook to hold the store
+  // has to settle it, so the once-per-agent marker must not count it as spent.
+  identity.deferRuntimeIdentityBinding(sessionId, 'sidequest-exec-high', 'sq303defer', 'sq303defer', repo);
+  const deferred = JSON.parse(fs.readFileSync(path.join(SIDEQUEST_HOME, 'tmp', 'state', `runtime-identity-${encodeURIComponent(sessionId)}.json`), 'utf8'));
+  assert.equal((Object.values(deferred.agents) as any[])[0].deferred, true);
+  assert.equal(
+    identity.bindObservedRuntimeIdentityOnce({ session_id: sessionId, agent_id: 'sq303defer', agent_name: 'sq303defer' }, 'sq303defer', 'sidequest-exec-high', repo),
+    true,
+    'a deferred binding is owed one attempt, not already spent',
+  );
+
+  // Settling it is what a hook that reaches the store does, and it must leave the offer spent.
+  identity.settleRuntimeIdentityBinding(sessionId, 'sq303defer', 'sq303defer', repo);
+  const settled = JSON.parse(fs.readFileSync(path.join(SIDEQUEST_HOME, 'tmp', 'state', `runtime-identity-${encodeURIComponent(sessionId)}.json`), 'utf8'));
+  assert.equal((Object.values(settled.agents) as any[])[0].deferred, false, 'a settled binding is no longer owed');
+
+  // The ancestry probe is the one git spawn the Edit path cannot read off disk, so it is memoized on the
+  // pair of revisions it answers for. A second write must not re-run it.
+  let probes = 0;
+  const probe = () => { probes += 1; return 'ancestor'; };
+  assert.equal(identity.cachedBaselineAncestry(sessionId, 'base1', 'rev1', probe), 'ancestor');
+  assert.equal(identity.cachedBaselineAncestry(sessionId, 'base1', 'rev1', probe), 'ancestor');
+  assert.equal(probes, 1, 'the memoized answer must not re-spawn git');
+  // A moved HEAD is a different question and must be probed again.
+  assert.equal(identity.cachedBaselineAncestry(sessionId, 'base1', 'rev2', probe), 'ancestor');
+  assert.equal(probes, 2);
+  // 'unknown' means the probe could not run. Caching it would freeze a transient failure into a
+  // standing refusal for the rest of the session.
+  let unknowns = 0;
+  const failing = () => { unknowns += 1; return 'unknown'; };
+  assert.equal(identity.cachedBaselineAncestry(sessionId, 'base2', 'rev1', failing), 'unknown');
+  assert.equal(identity.cachedBaselineAncestry(sessionId, 'base2', 'rev1', failing), 'unknown');
+  assert.equal(unknowns, 2, 'a probe that could not run must never be cached');
+});
+
+test('SQ-303: subagent-start records the binding offer, binds inline, and settles the offer', () => {
+  const repo = sq303Repo('sq-303-spawn-');
+  const project = store.ensureProject(repo).slug;
+  const category = `sq-303-spawn-${++fixtureSeq}`;
+  store.setCategory({ id: category, name: category, route: { model: 'sonnet', effort: 'medium' }, fallback: null, enabled: true });
+  const ticket = store.createTicket(project, { title: 'sq-303 spawn path', category, source: 'cli', files: ['README.md'] });
+  const agentId = 'sq303spawn';
+  const sessionId = `sq-303-spawn-${++sqSeq}`;
+  const prepared = store.prepareDispatch(project, ticket.ref, { sessionId });
+  const executor = prepared.ticket.dispatchExecutor;
+  assert.equal(store.recordDispatchLaunch(project, ticket.ref, {
+    token: prepared.token, executor, sessionId, agentName: agentId,
+  }).ok, true);
+
+  runHookOutput(SUBAGENT_START, {
+    session_id: sessionId,
+    agent_type: executor,
+    agent_id: agentId,
+    agent_name: agentId,
+    cwd: repo,
+  }, { SIDEQUEST_HOME });
+
+  // The offer is written BEFORE the bind is attempted, which is the whole mechanism: anything that ends this
+  // hook early — an exhausted SQLite budget failing open, or Claude Code killing it at the 10s deadline —
+  // now leaves the binding owed on disk instead of silently lost. The hook still binds inline, so the
+  // offer is the fallback and not the normal path; that the inline bind survives is covered by the
+  // worktree-create tests above, which assert dispatch.agentId against a real linked worktree.
+  const offers = JSON.parse(fs.readFileSync(path.join(SIDEQUEST_HOME, 'tmp', 'state', `runtime-identity-${encodeURIComponent(sessionId)}.json`), 'utf8'));
+  const offer = (Object.values(offers.agents) as any[])[0];
+  assert.equal(offer.worktree, repo, 'the spawn records which checkout it offered');
+  assert.equal(offer.executor, executor);
+
+  // And reaching the store spends the offer. This checkout is a primary one, so the bind has no worktree
+  // facts to record and answers with a refusal — which is still an answer. Leaving it owed would send the
+  // guard back to the store on every Edit for the life of the agent, which is the loop being removed here.
+  assert.ok(offer.attempted, 'the offer is marked attempted');
+  assert.ok(!offer.deferred, 'a bind that reached the store is spent, however it answered');
+});

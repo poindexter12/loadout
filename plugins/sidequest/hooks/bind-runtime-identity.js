@@ -151,8 +151,18 @@ function runtimeModule(name) {
 }
 
 // src/hooks/shared/runtime-identity.ts
+var import_node_fs4 = __toESM(require("node:fs"));
+var import_node_path5 = __toESM(require("node:path"));
+
+// src/hooks/shared/session-state.ts
 var import_node_fs3 = __toESM(require("node:fs"));
+var import_node_path4 = __toESM(require("node:path"));
+
+// src/lib/claude-home.ts
+var import_node_os = __toESM(require("node:os"));
 var import_node_path3 = __toESM(require("node:path"));
+
+// src/hooks/shared/runtime-identity.ts
 function canonicalPath(value) {
   const kernel = require(runtimeModule("kernel/worktree"));
   return kernel.canonicalPath(value);
@@ -171,15 +181,15 @@ function hookSessionId(input) {
 function enclosingCheckout(start) {
   let directory = canonicalPath(start);
   for (; ; ) {
-    const gitEntry = import_node_path3.default.join(directory, ".git");
+    const gitEntry = import_node_path5.default.join(directory, ".git");
     let stats = null;
     try {
-      stats = import_node_fs3.default.statSync(gitEntry);
+      stats = import_node_fs4.default.statSync(gitEntry);
     } catch (_) {
       stats = null;
     }
     if (stats) return { root: directory, linked: stats.isFile() };
-    const parent = import_node_path3.default.dirname(directory);
+    const parent = import_node_path5.default.dirname(directory);
     if (parent === directory) return null;
     directory = parent;
   }

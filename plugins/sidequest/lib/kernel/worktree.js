@@ -30,6 +30,7 @@ var worktree_exports = {};
 __export(worktree_exports, {
   canonicalPath: () => canonicalPath,
   checkoutInstanceIdentity: () => checkoutInstanceIdentity,
+  checkoutLayout: () => checkoutLayout,
   createCheckoutInstanceMarker: () => createCheckoutInstanceMarker,
   createWorktreeLease: () => createWorktreeLease,
   isCanonicalRegisteredWorktree: () => isCanonicalRegisteredWorktree,
@@ -88,6 +89,73 @@ function canonicalPath(value) {
 }
 function sameCanonicalPath(left, right) {
   return canonicalPath(left) === canonicalPath(right);
+}
+const REVISION_PATTERN = /^[0-9a-f]{40,64}$/i;
+function readTrimmedFile(file) {
+  try {
+    const contents = import_node_fs.default.readFileSync(file, "utf8").trim();
+    return contents || null;
+  } catch {
+    return null;
+  }
+}
+function enclosingCheckoutRoot(start) {
+  let current = import_node_path.default.resolve(start);
+  try {
+    if (!import_node_fs.default.statSync(current).isDirectory()) return null;
+  } catch {
+    return null;
+  }
+  for (; ; ) {
+    if (import_node_fs.default.existsSync(import_node_path.default.join(current, ".git"))) return current;
+    const parent = import_node_path.default.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+function gitDirectoryOf(root) {
+  const entry = import_node_path.default.join(root, ".git");
+  let stats;
+  try {
+    stats = import_node_fs.default.statSync(entry);
+  } catch {
+    return null;
+  }
+  if (stats.isDirectory()) return entry;
+  const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(readTrimmedFile(entry) || "")?.[1];
+  if (!pointer) return null;
+  return import_node_path.default.isAbsolute(pointer) ? pointer : import_node_path.default.resolve(root, pointer);
+}
+function resolveRefRevision(gitDirectory, commonGitDirectory, ref) {
+  const segments = ref.split("/");
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) return null;
+  const bases = gitDirectory === commonGitDirectory ? [gitDirectory] : [gitDirectory, commonGitDirectory];
+  for (const base of bases) {
+    const loose = readTrimmedFile(import_node_path.default.join(base, ...segments));
+    if (loose && REVISION_PATTERN.test(loose)) return loose;
+  }
+  const packed = readTrimmedFile(import_node_path.default.join(commonGitDirectory, "packed-refs"));
+  for (const line of packed ? packed.split(/\r?\n/) : []) {
+    const entry = /^([0-9a-f]{40,64})\s+(\S+)$/i.exec(line.trim());
+    if (entry && entry[2] === ref) return entry[1];
+  }
+  return null;
+}
+function headRevision(gitDirectory, commonGitDirectory) {
+  const head = readTrimmedFile(import_node_path.default.join(gitDirectory, "HEAD"));
+  if (!head) return null;
+  if (REVISION_PATTERN.test(head)) return head;
+  const ref = /^ref:\s*(.+?)\s*$/.exec(head)?.[1];
+  return ref ? resolveRefRevision(gitDirectory, commonGitDirectory, ref) : null;
+}
+function checkoutLayout(start) {
+  const root = enclosingCheckoutRoot(start);
+  if (!root) return null;
+  const gitDirectory = gitDirectoryOf(root);
+  if (!gitDirectory) return null;
+  const pointer = readTrimmedFile(import_node_path.default.join(gitDirectory, "commondir"));
+  const commonGitDirectory = pointer ? import_node_path.default.isAbsolute(pointer) ? pointer : import_node_path.default.resolve(gitDirectory, pointer) : gitDirectory;
+  return { root, gitDirectory, commonGitDirectory, revision: headRevision(gitDirectory, commonGitDirectory) };
 }
 function createWorktreeLease(facts) {
   return Object.freeze({
@@ -228,6 +296,7 @@ function isCanonicalRegisteredWorktree(lease, registeredWorktrees) {
 0 && (module.exports = {
   canonicalPath,
   checkoutInstanceIdentity,
+  checkoutLayout,
   createCheckoutInstanceMarker,
   createWorktreeLease,
   isCanonicalRegisteredWorktree,
