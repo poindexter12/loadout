@@ -35,21 +35,71 @@ function settingsPath(scope) {
   return path.join(CLAUDE_CONFIG_DIR, 'settings.json');
 }
 
+// Claude Code reads settings in this order, so a definition earlier in the list
+// shadows every later one.
+const SETTINGS_SOURCES = ['project-local', 'project-shared', 'user'];
+
+function scopeForSource(source) {
+  return source === 'project-local' ? 'project' : source;
+}
+
+function settingsBaseUrl(source) {
+  const file = settingsPath(scopeForSource(source));
+  try {
+    const value = JSON.parse(fs.readFileSync(file, 'utf8')).env?.ANTHROPIC_BASE_URL;
+    return typeof value === 'string' ? { source, file, value } : null;
+  } catch { return null; }
+}
+
 function effectiveBaseUrl() {
   const definitions = [];
   if (typeof process.env.ANTHROPIC_BASE_URL === 'string') {
     definitions.push({ source: 'env', file: null, value: process.env.ANTHROPIC_BASE_URL });
   }
-  for (const source of ['project-local', 'project-shared', 'user']) {
-    const scope = source === 'project-local' ? 'project' : source;
-    const file = settingsPath(scope);
-    try {
-      const value = JSON.parse(fs.readFileSync(file, 'utf8')).env?.ANTHROPIC_BASE_URL;
-      if (typeof value === 'string') definitions.push({ source, file, value });
-    } catch {}
+  for (const source of SETTINGS_SOURCES) {
+    const definition = settingsBaseUrl(source);
+    if (definition) definitions.push(definition);
   }
   const [winner, ...shadowed] = definitions;
   return winner ? { ...winner, shadowed } : { value: null, source: null, file: null, shadowed: [] };
+}
+
+// SQ-307. Anthropic's own endpoint is what Claude Code uses with no setting at
+// all, and every URL in ourBaseUrls() is one this plugin wrote, so both are ours
+// to replace. Anything else is an endpoint the user pointed Claude Code at
+// deliberately: another local gateway, a relay, a corporate proxy. setup read
+// such a project as merely "not wired" and overwrote the value with no notice,
+// which both broke that project and destroyed the only record of the choice.
+function isForeignBaseUrl(value) {
+  if (typeof value !== 'string') return false;
+  const url = value.trim();
+  if (!url || ourBaseUrls().includes(url)) return false;
+  let hostname;
+  // An unparsable value is still not ours, and guessing at it is how a typo
+  // becomes a silent overwrite.
+  try { hostname = new URL(url).hostname.toLowerCase(); } catch { return true; }
+  return hostname !== 'anthropic.com' && !hostname.endsWith('.anthropic.com');
+}
+
+// The files a write to `scope` would become the effective ANTHROPIC_BASE_URL
+// for: its own target plus every lower-precedence file it would newly shadow. A
+// user-scope write shadows nothing, so it only answers for its own file.
+const WRITE_PRECEDENCE_SOURCES = {
+  project: SETTINGS_SOURCES,
+  user: ['user'],
+};
+
+// The foreign base URL a write to `scope` would replace or shadow, or null when
+// there is none. Only the highest-precedence definition can be answered for:
+// once a gateway URL already wins, a foreign value underneath it is already
+// shadowed and the write changes nothing about it.
+function foreignBaseUrlForWrite(scope) {
+  for (const source of WRITE_PRECEDENCE_SOURCES[scope] || SETTINGS_SOURCES) {
+    const definition = settingsBaseUrl(source);
+    if (!definition) continue;
+    return isForeignBaseUrl(definition.value) ? definition : null;
+  }
+  return null;
 }
 
 function readSettingsForWrite(file) {
@@ -293,8 +343,8 @@ function wiredMode() {
 
 
 module.exports = {
-  cleanLegacyEnvSettings, cleanLegacyGatewayModelCache, effectiveBaseUrl, isWired,
-  migrateLegacyProjectSettings, readSettingsForWrite, reconcileRegisteredProjectWirings,
-  recordProjectWiring, registeredProjectWirings, retireWiringModeConfig, selectedWiringScope,
-  settingsPath, wiredMode, writeSettings,
+  cleanLegacyEnvSettings, cleanLegacyGatewayModelCache, effectiveBaseUrl, foreignBaseUrlForWrite,
+  isForeignBaseUrl, isWired, migrateLegacyProjectSettings, readSettingsForWrite,
+  reconcileRegisteredProjectWirings, recordProjectWiring, registeredProjectWirings,
+  retireWiringModeConfig, selectedWiringScope, settingsPath, wiredMode, writeSettings,
 };
