@@ -14,6 +14,7 @@ const { claimRefusalMessage } = require('../lib/refusal-guidance');
 const { assertSidequestInstall, assertDispatchTransport } = require('../lib/dispatch-preflight');
 
 const { fail, resolveProject, workerId, controlPlaneIdentity, sessionId, bodyFromOpts } = require('./sidequest-cmd-shared');
+const { authorityCommentAuthorMessage, authorityCommentMarkers } = require('../lib/kernel/verification.js');
 const { modelMark, PRIORITY_MARK } = require('./sidequest-cmd-tickets');
 const { validateModelFilter } = require('./sidequest-cmd-execution');
 async function cmdSweepClaims(opts: any) {
@@ -309,6 +310,13 @@ async function cmdComment(opts: any, positional: any) {
   const body = await bodyFromOpts(acceptedMessage ? Object.assign({}, opts, { body: opts.message }) : opts, 'comment');
   if (!body || !String(body).trim()) fail('comment: -m/--body or --body-file is required, e.g. sidequest comment SQ-3 -m "note"');
   const { slug, meta } = await resolveProject(opts);
+  // SQ-306: --by is never guessed for a marker the board judges by its author. Without it this
+  // falls back to SIDEQUEST_AGENT or a session-derived label, either of which can read as the
+  // claim holder and silently void the decision the comment is trying to record.
+  const authorityMarkers = authorityCommentMarkers(body);
+  if (authorityMarkers.length && !String(opts.by || '').trim()) {
+    fail(`comment: ${authorityCommentAuthorMessage(authorityMarkers)} On the CLI that is --by "<identity>".`);
+  }
   const by = controlPlaneIdentity(opts);
   const res = store.addComment(slug, idOrRef, { by, body, source: opts.source || 'cli' });
   if (opts.json) {
@@ -320,11 +328,15 @@ async function cmdComment(opts: any, positional: any) {
     console.log(`✓ » comment added to ${res.ticket.ref} by "${by}"  — ${meta.name}`);
     if (acceptedMessage) console.log('  accepted message as body');
     if (res.advisory) console.log(`  advisory: ${res.advisory}`);
+    if (res.captureWaiver) {
+      console.log(`  capture waiver ${res.captureWaiver.binds ? 'binds' : 'does NOT bind'}: ${res.captureWaiver.note}`);
+    }
   } else {
     process.exitCode = 1;
     const messages: any = {
       not_found: `no ticket "${idOrRef}" in ${meta.name}.`,
       empty: 'comment body cannot be empty.',
+      authority_comment_author: res.message,
       too_long: `comment body is ${res.length} chars, over the ${res.max}-char cap — trim it, or put long-form content in the ticket's plan document (the MCP \`plan\` verb) and point to it here (nothing was stored).`,
       busy: `${idOrRef} is locked right now — retry in a moment.`,
     };

@@ -1,5 +1,7 @@
 'use strict';
 
+const { authorityCommentAuthorMessage, authorityCommentMarkers, captureWaiverBinding } = require('../kernel/verification.js');
+
 function createComments(dependencies: any) {
   const {
     crypto,
@@ -93,6 +95,55 @@ function duplicateClaimMarker(ticket?: any, fields?: any) {
     : null;
 }
 
+// SQ-306: the one shared write path refuses an authority comment whose RECORDED author is the
+// claim holder, however that author was derived. On SQ-299 an orchestrator posted a capture
+// waiver with no `by`, the MCP handler defaulted the author to the live claim holder (an executor
+// subagent shares its orchestrator's runtime session id, so the "same session" test passed), and
+// submit then discarded the waiver as self-authored. Refusing at the write path covers every
+// caller — MCP, CLI, dashboard — and also catches an explicit `by` that names the executor.
+// Nothing is stored, so there is no misleading waiver sitting in the thread.
+function authorityCommentRefusal(ticket?: any, fields?: any) {
+  const markers = authorityCommentMarkers(fields?.body);
+  if (!markers.length) return null;
+  const claimOwner = String(ticket?.claim?.by || '').trim();
+  const author = String(fields?.by || '').trim();
+  if (!claimOwner || author !== claimOwner) return null;
+  return { ok: false, reason: 'authority_comment_author', message: authorityCommentAuthorMessage(markers) };
+}
+
+// The candidate the board can see the ticket working against right now: a pending submission's
+// commit, else the newest capture of the live dispatch attempt. A waiver names one capture, and a
+// capture is bound to the exact revision it checked, so this is what tells the poster whether the
+// waiver still covers the candidate that will be submitted. The board cannot see an amendment that
+// has not been captured, which is why the ack says a waiver stops binding when the candidate moves.
+function liveCandidate(ticket?: any) {
+  const submitted = String(ticket?.submission?.commit || '').trim().toLowerCase();
+  if (submitted && !ticket?.submission?.integratedAt) return submitted;
+  const nonce = String(ticket?.dispatchNonce || '').trim();
+  const captures = Array.isArray(ticket?.verificationCaptures) ? ticket.verificationCaptures : [];
+  for (let index = captures.length - 1; index >= 0; index -= 1) {
+    const capture = captures[index];
+    if (nonce && String(capture?.dispatchNonce || '') !== nonce) continue;
+    const value = String(capture?.candidate?.value || '').trim().toLowerCase();
+    if (value) return value;
+  }
+  return '';
+}
+
+// SQ-306: a recorded waiver used to say nothing about whether it could bind; that was learned at
+// the executor's next submit, after an amendment had been made on the assumption it was in force.
+// The ack now carries the same three facts the submit gate decides on.
+function captureWaiverAck(ticket?: any, comment?: any) {
+  const binding = captureWaiverBinding({
+    comment,
+    captures: Array.isArray(ticket?.verificationCaptures) ? ticket.verificationCaptures : [],
+    claimHolder: ticket?.claim?.by,
+    dispatchNonce: ticket?.dispatchNonce,
+    pinnedCandidate: liveCandidate(ticket),
+  });
+  return binding ? { captureWaiver: binding } : null;
+}
+
 function addComment(slug?: any, idOrRef?: any, fields?: any) {
   const prepared = prepareComment(fields);
   if (!prepared.ok) return prepared;
@@ -102,6 +153,8 @@ function addComment(slug?: any, idOrRef?: any, fields?: any) {
     const t = getTicket(slug, found.id);
     if (!t) return { ok: false, reason: 'not_found' };
     const attributed = claimedMarkerComment(prepared, t);
+    const authority = authorityCommentRefusal(t, attributed);
+    if (authority) return Object.assign({ ticket: t }, authority);
     const duplicate = duplicateClaimMarker(t, attributed);
     if (duplicate) return { ok: true, ticket: t, comment: duplicate, duplicate: true };
     const verification = verificationCompletionCheck(slug, t, attributed);
@@ -116,7 +169,13 @@ function addComment(slug?: any, idOrRef?: any, fields?: any) {
     t.updatedAt = comment.at;
     putTicket(slug, t);
     queueEventNotification(slug, t, t.lastEventType, t.lastEventSource, { commentBody: comment.body });
-    return { ok: true, ticket: t, comment, ...((attributed as any).advisory ? { advisory: (attributed as any).advisory } : {}) };
+    return {
+      ok: true,
+      ticket: t,
+      comment,
+      ...((attributed as any).advisory ? { advisory: (attributed as any).advisory } : {}),
+      ...captureWaiverAck(t, comment),
+    };
   });
 }
 

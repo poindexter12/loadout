@@ -955,6 +955,94 @@ test('MCP comment attribution keeps the control plane distinct from a claim hold
   assert.equal(store.getTicket(project, ticket.ref).comments.at(-1).by, 'orchestrator-review');
 });
 
+test('SQ-306: a capture waiver comment needs an explicit author, and its ack says whether the waiver can bind', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-mcp-capture-waiver-author-'));
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ scripts: { test: 'node --test' } }));
+  const project = store.ensureProject(root).slug;
+  const command = 'npm test';
+  const ticket = store.createTicket(project, { title: 'Capture waiver authorship', executorVerify: command });
+  // An executor subagent runs inside its orchestrator's runtime session, which is exactly why the
+  // claim-holder default fired on an orchestrator comment in the SQ-299 repro.
+  const executorSession = `sq306-executor-${process.pid}`;
+  assert.equal(store.claimTicket(project, ticket.ref, 'sq306-claim-holder', { direct: true, sessionId: executorSession }).ok, true);
+  const recorded = store.recordVerificationCapture(project, ticket.ref, {
+    id: 'cap-sq306',
+    command,
+    status: 'timeout',
+    candidate: { source: 'git', value: 'a'.repeat(40) },
+    completedAt: '2026-10-09T00:00:00.000Z',
+  });
+  assert.equal(recorded.ok, true, recorded.message);
+  const waiver = '[sidequest:capture-waiver] capture=cap-sq306 signature=timeout authority=orchestrator-sq306; capture budget timeout while three sibling suites ran and reruns keep timing out';
+  const comments = () => store.getTicket(project, ticket.ref).comments || [];
+
+  const defaulted = await callToolAsSession(executorSession, 'comment', { project, ref: ticket.ref, body: waiver });
+  assert.equal(defaulted.ok, false);
+  assert.equal(defaulted.reason, 'authority_comment_author');
+  assert.match(defaulted.message, /Nothing was recorded\./);
+  assert.match(defaulted.message, /Repost it with by:/);
+  assert.equal(comments().length, 0, 'a waiver that cannot bind is never left sitting in the thread');
+
+  const asClaimHolder = await callTool('comment', { project, ref: ticket.ref, body: waiver, by: 'sq306-claim-holder' });
+  assert.equal(asClaimHolder.ok, false);
+  assert.equal(asClaimHolder.reason, 'authority_comment_author');
+  assert.equal(comments().length, 0, 'naming the claim holder explicitly is refused at the shared write path too');
+
+  const accepted = await callToolAsSession(executorSession, 'comment', { project, ref: ticket.ref, body: waiver, by: 'orchestrator-sq306' });
+  assert.equal(accepted.ok, true, accepted.message);
+  assert.deepEqual({
+    capture: accepted.captureWaiver.capture,
+    author: accepted.captureWaiver.author,
+    authorEligible: accepted.captureWaiver.authorEligible,
+    captureKnown: accepted.captureWaiver.captureKnown,
+    candidate: accepted.captureWaiver.candidate,
+    candidateMatchesPinned: accepted.captureWaiver.candidateMatchesPinned,
+    binds: accepted.captureWaiver.binds,
+  }, {
+    capture: 'cap-sq306',
+    author: 'orchestrator-sq306',
+    authorEligible: true,
+    captureKnown: true,
+    candidate: 'a'.repeat(40),
+    candidateMatchesPinned: true,
+    binds: true,
+  });
+  assert.match(accepted.captureWaiver.note, /stops binding the moment that candidate changes/);
+  assert.equal(comments().at(-1).by, 'orchestrator-sq306');
+
+  // SQ-299's second failure: the capture the waiver names is no longer the candidate in play.
+  assert.equal(store.recordVerificationCapture(project, ticket.ref, {
+    id: 'cap-sq306-amended',
+    command,
+    status: 'timeout',
+    candidate: { source: 'git', value: 'b'.repeat(40) },
+    completedAt: '2026-10-09T01:00:00.000Z',
+  }).ok, true);
+  const superseded = await callToolAsSession(executorSession, 'comment', { project, ref: ticket.ref, body: waiver, by: 'orchestrator-sq306' });
+  assert.equal(superseded.ok, true, superseded.message);
+  assert.equal(superseded.captureWaiver.binds, false);
+  assert.equal(superseded.captureWaiver.candidateMatchesPinned, false);
+  assert.match(superseded.captureWaiver.note, /the live pinned candidate is b{40}/);
+
+  // A non-authority comment keeps the claim-holder fallback and the lean ack. The fallback is
+  // load-bearing, not cosmetic: recordClaimVerification only captures a [sidequest:verify-complete]
+  // marker whose by equals the claim holder, so defaulting these to the caller identity would drop
+  // verify capture for every executor that omits by.
+  const plain = await callToolAsSession(executorSession, 'comment', { project, ref: ticket.ref, body: 'Load evidence attached.' });
+  assert.equal(plain.ok, true);
+  assert.equal(comments().at(-1).by, 'sq306-claim-holder');
+  assert.equal(plain.captureWaiver, undefined);
+  assert.deepStrictEqual(Object.keys(plain).sort(), ['at', 'commentId', 'ok', 'project', 'ref', 'status']);
+
+  const marker = await callToolAsSession(executorSession, 'comment', {
+    project,
+    ref: ticket.ref,
+    body: `[sidequest:verify-complete] passed: ${command} exercised the waiver binding.`,
+  });
+  assert.equal(marker.ok, true, marker.message);
+  assert.equal(comments().at(-1).by, 'sq306-claim-holder', 'the verify marker stays the claim holder\'s so submit can capture it');
+});
+
 test('MCP accepts curated natural aliases and names each accepted mapping', async () => {
   const project = store.ensureProject(fs.mkdtempSync(path.join(os.tmpdir(), 'sq-mcp-argument-aliases-'))).slug;
   const first = store.createTicket(project, { title: 'Alias source', source: 'test' });
