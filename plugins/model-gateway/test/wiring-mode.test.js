@@ -323,6 +323,157 @@ test('SessionStart names recorded project-local wiring before project setup', (t
   assert.match(result.output, /env --write-project/);
 });
 
+// SQ-307. A project whose settings.local.json already points ANTHROPIC_BASE_URL
+// at a different gateway (muximus's relay on 127.0.0.1:4001) read as merely "not
+// wired", so `setup` ran its unwired project write and replaced the value with
+// this gateway's URL, the static env block and the alias pins. No notice, and
+// the only record of the user's choice was the file it overwrote.
+const FOREIGN_BASE_URL = 'http://127.0.0.1:4001';
+
+function escapeForRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function writeEnvForScope(home, project, scope, options = '{ mode: \'default\' }') {
+  return runNode(home, project, `process.stdout.write(JSON.stringify(require(${JSON.stringify(COMMANDS)}).writeEnv(${JSON.stringify(scope)}, false, ${options})))`);
+}
+
+test('SQ-307: the unwired project write leaves a foreign base URL alone and names it', (t) => {
+  const { home, project } = fixture(t);
+  const localFile = path.join(project, '.claude', 'settings.local.json');
+  writeJson(localFile, { env: { ANTHROPIC_BASE_URL: FOREIGN_BASE_URL, UNRELATED: 'keep-me' } });
+  const before = fs.readFileSync(localFile, 'utf8');
+
+  // Exactly setup's unwired branch: writeEnv(selectedWiringScope(), false, { mode }).
+  const result = writeEnvForScope(home, project, 'project');
+
+  assert.equal(result.code, 0, result.output);
+  const [printed, returned] = result.output.split('{"changed"');
+  assert.match(printed, new RegExp(escapeForRegExp(FOREIGN_BASE_URL)));
+  assert.match(printed, new RegExp(escapeForRegExp(localFile)));
+  assert.match(printed, /not a model-gateway endpoint/);
+  assert.match(printed, /env --write-project/);
+  assert.equal(printed.trim().includes('\n'), false, 'the notice is one line');
+  assert.equal(JSON.parse(`{"changed"${returned}`).changed, false);
+  assert.equal(fs.readFileSync(localFile, 'utf8'), before, 'the foreign wiring survives byte-identical');
+  assert.equal(fs.existsSync(projectRegistry(home)), false);
+});
+
+test('SQ-307: an unasked-for project write refuses to shadow a foreign user setting', (t) => {
+  const { home, project } = fixture(t);
+  const userFile = path.join(home, '.claude', 'settings.json');
+  writeJson(userFile, { env: { ANTHROPIC_BASE_URL: FOREIGN_BASE_URL } });
+  const before = fs.readFileSync(userFile, 'utf8');
+
+  const result = writeEnvForScope(home, project, 'project');
+
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, new RegExp(escapeForRegExp(userFile)));
+  assert.match(result.output, new RegExp(escapeForRegExp(path.join(project, '.claude', 'settings.local.json'))));
+  assert.equal(fs.existsSync(path.join(project, '.claude', 'settings.local.json')), false);
+  assert.equal(fs.readFileSync(userFile, 'utf8'), before);
+});
+
+test('SQ-307: a user-scope write answers only for the user file', (t) => {
+  const { home, project } = fixture(t);
+  const userFile = path.join(home, '.claude', 'settings.json');
+  // The project's foreign URL already outranks the user file, so writing the
+  // shared fallback neither replaces nor shadows it; refusing here would break
+  // `env --write-user`'s reconciliation reporting for no gain.
+  writeJson(path.join(project, '.claude', 'settings.local.json'), { env: { ANTHROPIC_BASE_URL: FOREIGN_BASE_URL } });
+
+  const result = writeEnvForScope(home, project, 'user', '{ mode: \'default\', quiet: true }');
+
+  assert.equal(result.code, 0, result.output);
+  assert.equal(JSON.parse(fs.readFileSync(userFile, 'utf8')).env.ANTHROPIC_BASE_URL, DEFAULT_BASE_URL);
+});
+
+test('SQ-307: Anthropic\'s own endpoint and an absent value stay writable', (t) => {
+  const { home, project } = fixture(t);
+  const localFile = path.join(project, '.claude', 'settings.local.json');
+
+  assert.equal(writeEnvForScope(home, project, 'project').code, 0);
+  assert.equal(JSON.parse(fs.readFileSync(localFile, 'utf8')).env.ANTHROPIC_BASE_URL, DEFAULT_BASE_URL);
+
+  for (const anthropic of ['https://api.anthropic.com', COMPAT_BASE_URL]) {
+    writeJson(localFile, { env: { ANTHROPIC_BASE_URL: anthropic } });
+    assert.equal(writeEnvForScope(home, project, 'project').code, 0, anthropic);
+    assert.equal(JSON.parse(fs.readFileSync(localFile, 'utf8')).env.ANTHROPIC_BASE_URL, DEFAULT_BASE_URL, anthropic);
+  }
+});
+
+test('SQ-307: env --write-project is still allowed to replace a foreign base URL', (t) => {
+  const { home, project } = fixture(t);
+  const localFile = path.join(project, '.claude', 'settings.local.json');
+  writeJson(localFile, { env: { ANTHROPIC_BASE_URL: FOREIGN_BASE_URL, UNRELATED: 'keep-me' } });
+
+  const result = run(home, project, ['env', '--write-project']);
+
+  assert.equal(result.code, 0, result.output);
+  const settings = JSON.parse(fs.readFileSync(localFile, 'utf8'));
+  assert.equal(settings.env.ANTHROPIC_BASE_URL, DEFAULT_BASE_URL);
+  assert.equal(settings.env.UNRELATED, 'keep-me');
+  assert.match(result.output, new RegExp(`written to ${escapeForRegExp(localFile)}`));
+  assert.doesNotMatch(result.output, /not a model-gateway endpoint/);
+});
+
+test('SQ-307: the SessionStart notice names the foreign URL instead of just urging a rewire', (t) => {
+  const { home, project } = fixture(t);
+  const localFile = path.join(project, '.claude', 'settings.local.json');
+  writeJson(localFile, { env: { ANTHROPIC_BASE_URL: FOREIGN_BASE_URL } });
+
+  const result = runNode(home, project, `
+    const { effectiveBaseUrl } = require(${JSON.stringify(SETTINGS_WIRING)});
+    const { sessionStartWiringNotice } = require(${JSON.stringify(COMMANDS)});
+    process.stdout.write(sessionStartWiringNotice({
+      readiness: { checks: { codexAuth: true } },
+      effectiveWiring: effectiveBaseUrl(),
+      projectWirings: [],
+    }));
+  `);
+
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, new RegExp(escapeForRegExp(FOREIGN_BASE_URL)));
+  assert.match(result.output, new RegExp(escapeForRegExp(localFile)));
+  assert.match(result.output, /left that file alone/);
+  assert.match(result.output, /env --write-project/);
+  assert.equal(result.output.includes('\n'), false, 'the SessionStart notice stays one line');
+});
+
+test('SQ-307: saved pins say what a rewire would replace', (t) => {
+  const { home, project } = fixture(t);
+  writeJson(path.join(project, '.claude', 'settings.local.json'), { env: { ANTHROPIC_BASE_URL: FOREIGN_BASE_URL } });
+
+  const result = run(home, project, ['pin', '--opus', 'gpt-5.1-codex']);
+
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, new RegExp(escapeForRegExp(FOREIGN_BASE_URL)));
+  assert.match(result.output, /env --write-project/);
+  assert.doesNotMatch(result.output, /^Rewire this project with env --write-project/m);
+});
+
+test('SQ-307: isForeignBaseUrl classifies gateway, Anthropic, absent and foreign values', (t) => {
+  const { home, project } = fixture(t);
+
+  const result = runNode(home, project, `
+    const { isForeignBaseUrl } = require(${JSON.stringify(SETTINGS_WIRING)});
+    const { ourBaseUrls } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'pins.js'))});
+    process.stdout.write(JSON.stringify({
+      ours: ourBaseUrls().map(isForeignBaseUrl),
+      anthropic: ['http://api.anthropic.com', 'https://api.anthropic.com/', 'https://anthropic.com'].map(isForeignBaseUrl),
+      empty: [undefined, null, '', '   '].map(isForeignBaseUrl),
+      foreign: ['http://127.0.0.1:4001', 'http://localhost:8080', 'https://relay.example.com', 'not a url'].map(isForeignBaseUrl),
+    }))
+  `);
+
+  assert.equal(result.code, 0, result.output);
+  const verdicts = JSON.parse(result.output);
+  assert.deepEqual(verdicts.ours, verdicts.ours.map(() => false));
+  assert.deepEqual(verdicts.anthropic, [false, false, false]);
+  assert.deepEqual(verdicts.empty, [false, false, false, false]);
+  assert.deepEqual(verdicts.foreign, [true, true, true, true]);
+});
+
 test('doctor explains the no-model-fallback diagnostic for model divergence', (t) => {
   const { home, project } = fixture(t);
   const result = runDoctor(home, project);

@@ -166,6 +166,9 @@ const USAGE = `usage: model-gateway.js <command>
                    print the Claude Code env block, or merge/remove wiring
                    (--write-project writes .claude/settings.local.json; --write-user
                    is an opt-in shared fallback in ~/.claude/settings.json)
+                   these two are the only commands that replace an ANTHROPIC_BASE_URL
+                   pointing somewhere other than this gateway or Anthropic; setup and
+                   ensure leave such a project alone and name the URL instead
   doctor           full health check
   remote-control <enable|disable|doctor>
                    manage the opt-in hosts-file compatibility mode
@@ -335,7 +338,8 @@ const {
 const HEALTH_RELAY_TIMEOUT_MS = 5000;
 
 const {
-  cleanLegacyEnvSettings, cleanLegacyGatewayModelCache, effectiveBaseUrl, isWired, migrateLegacyProjectSettings,
+  cleanLegacyEnvSettings, cleanLegacyGatewayModelCache, effectiveBaseUrl, foreignBaseUrlForWrite,
+  isForeignBaseUrl, isWired, migrateLegacyProjectSettings,
   readSettingsForWrite, reconcileRegisteredProjectWirings, recordProjectWiring, registeredProjectWirings,
   selectedWiringScope, retireWiringModeConfig, settingsPath, wiredMode, writeSettings,
 } = require('./settings-wiring.js');
@@ -1226,6 +1230,14 @@ function pinCommand() {
   }
   writePinOverrides(overrides);
   log(`saved Claude alias pins to ${PIN_OVERRIDE_PATH}`);
+  // SQ-307: "rewire this project" is advice to run a command that replaces the
+  // project's base URL, so when that URL is someone else's gateway, say what the
+  // rewire would cost before recommending it.
+  const foreign = foreignBaseUrlForWrite(selectedWiringScope());
+  if (foreign) {
+    log(`${foreignBaseUrlSentence(foreign)}, so these pins stay inactive until you run \`node "${CLI_PATH}" env --write-project\`, which replaces that URL with this project's gateway wiring.`);
+    return;
+  }
   log('Rewire this project with env --write-project, then start a new Claude Code session for the change to apply.');
 }
 
@@ -1273,7 +1285,9 @@ async function envCommand() {
   const scope = writeUser ? 'user' : 'project';
   recordProjectWiring();
   if (!remove) await refreshDetectedPins({ force: true });
-  writeEnv(scope, remove, { mode: remove ? 'default' : (await resolveIntendedMode()).mode });
+  // explicit: this is the named command SQ-307's notice points at, so it is the
+  // one path that may replace a base URL pointing at someone else's gateway.
+  writeEnv(scope, remove, { explicit: true, mode: remove ? 'default' : (await resolveIntendedMode()).mode });
   retireWiringModeConfig();
   if (remove || !writeUser) return;
 
@@ -1286,10 +1300,32 @@ async function envCommand() {
   else log('project files were not changed. To confirm cleanup, invoke env --write-user --reconcile for the model-gateway-owned entries shown above.');
 }
 
+// SQ-307. The one fact every caller has to state when it declines to wire, and
+// the one caller-independent half of that line, so the two notices cannot drift.
+function foreignBaseUrlSentence(foreign) {
+  return `ANTHROPIC_BASE_URL in ${foreign.file} is ${foreign.value}, which is not a model-gateway endpoint`;
+}
+
 // mode only matters when writing (not removing); quiet suppresses this
 // function's own logging so a caller doing an automatic mode switch can print
-// its own single, more specific line instead.
-function writeEnv(scope, remove, { mode = 'default', quiet = false } = {}) {
+// its own single, more specific line instead. explicit marks a write the user
+// asked for by name (env --write-project / --write-user), which is the only
+// thing allowed to replace a base URL this plugin does not own.
+function writeEnv(scope, remove, { mode = 'default', quiet = false, explicit = false } = {}) {
+  // SQ-307: setup reads a project pointed at a different gateway as simply "not
+  // wired" and used to overwrite it here, silently. Removing only ever deletes
+  // keys this plugin owns, so it stays safe; an unasked-for write does not.
+  // Refusing must come before migrateLegacyProjectSettings, which would
+  // otherwise move gateway keys around inside a project left untouched.
+  const foreign = remove || explicit ? null : foreignBaseUrlForWrite(scope);
+  if (foreign) {
+    const target = settingsPath(scope);
+    if (!quiet) {
+      const untouched = path.resolve(target) === path.resolve(foreign.file) ? target : `${target} and ${foreign.file}`;
+      log(`model-gateway: left ${untouched} unchanged: ${foreignBaseUrlSentence(foreign)}. Run \`node "${CLI_PATH}" env --write-project\` to replace it with this project's gateway wiring.`);
+    }
+    return { changed: false, file: target, foreign };
+  }
   // Runs for the user scope too: a committed project settings.json carrying
   // gateway keys outranks ~/.claude/settings.json and would shadow this write.
   const migration = remove ? null : migrateLegacyProjectSettings();
@@ -2525,6 +2561,12 @@ function sessionStartWiringNotice({ readiness, effectiveWiring, projectWirings }
   const locallyWired = effectiveWiring.source === 'project-local' && ourBaseUrls().includes(effectiveWiring.value);
   if (locallyWired) {
     return `Claude Code is wired to model-gateway through project settings.local.json (${effectiveWiring.file}).`;
+  }
+  // SQ-307: telling a session pointed at another gateway to run env
+  // --write-project without naming what that replaces is how the overwrite got
+  // recommended in the first place. The settings file stays untouched either way.
+  if (effectiveWiring.file && isForeignBaseUrl(effectiveWiring.value)) {
+    return `Claude Code is not wired to model-gateway, so your ChatGPT/Codex models are missing from /model. ${foreignBaseUrlSentence(effectiveWiring)}, so model-gateway left that file alone. Run \`node "${CLI_PATH}" env --write-project\` only if the user wants this project routed through the gateway instead of ${effectiveWiring.value}.`;
   }
   const currentProjectFile = path.resolve(settingsPath('project'));
   const siblingWiring = projectWirings.find(({ file }) => path.resolve(file) !== currentProjectFile);

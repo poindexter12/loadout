@@ -24,6 +24,8 @@ After the wiring is confirmed, fully restart the Claude Code process for that sa
 
 Model Gateway writes `ANTHROPIC_BASE_URL` to `.claude/settings.local.json`, never the committed `.claude/settings.json`. That keeps your local gateway endpoint out of other people's checkouts. You can opt into one shared fallback URL in the `settings.json` of your active Claude config tree — `CLAUDE_CONFIG_DIR` when it is set, otherwise `~/.claude` — but a project's local setting wins. `model-gateway doctor` marks the effective source and calls out conflicting gateway modes.
 
+If a project already points `ANTHROPIC_BASE_URL` at something that is neither this gateway nor `api.anthropic.com` (another local gateway, a relay, a corporate proxy), `setup` and `ensure` leave that settings file alone and print one line naming the URL. Only `model-gateway env --write-project` and `env --write-user` replace a base URL the gateway does not own, so an update can never silently reroute a project you wired by hand.
+
 You may need to complete a browser sign-in or restart Claude Code. Claude will ask only when either step is actually needed.
 
 ## Pick a model
