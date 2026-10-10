@@ -302,6 +302,385 @@ function pause(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+// SQ-266: fixture process reaping.
+//
+// Every test below spawns real supervisors, workers and proxies into a temp
+// fixture home. On 2026-10-05 five `claude-code-proxy` processes launched from
+// this file's fixtures were still holding listening TCP ports after six to
+// eight days, three of them from fixture directories that had already been
+// deleted. Three distinct leak paths had to be closed at once:
+//
+//   1. a kill written into the test body never runs once an assertion throws
+//      above it, so a failing test always leaks;
+//   2. a teardown that kills only the pids it happens to remember misses the
+//      replacement supervisor tree `ensure` spawns, and the one place that did
+//      try to kill that tree used `taskkill` -- a Windows command -- on every
+//      platform, so on darwin it was a silent no-op (Windows is an abandoned
+//      platform here as of 2026-09-15, so the fix is POSIX-only);
+//   3. nothing in this process runs at all when the harness itself is killed
+//      (Ctrl-C, or the runner's watchdog SIGKILLing the test file), which is
+//      where the orphans whose fixture directories were already gone came
+//      from.
+//
+// (1) and (2) are closed by reapFixtureHome(): teardown kills by recorded pid
+// AND by any process whose command line still names the fixture root, so a
+// supervisor's children count even when this file never learned their pids. A
+// `t.after` hook runs regardless of how the test ended, and the root-level
+// `test.after` at the end of this file is the backstop for anything a test's
+// own teardown missed. (3) is closed by spawnFixtureReaper(): a detached process
+// that outlives this one and performs the same sweep once this process is
+// gone. Only an out-of-process watcher can cover SIGKILL, which no in-process
+// handler ever sees.
+//
+// Both paths only ever signal a pid this file registered or a process whose
+// command names a `model-gateway-*` directory directly under the OS temp dir,
+// and only ever delete directories of that same shape, so neither can reach a
+// real gateway install under ~/.claude or ~/.poindexter/claude. The model-
+// gateway suite has clobbered a real settings.json once before; nothing here
+// resolves a path outside the temp fixture root.
+const FIXTURE_PREFIX = 'model-gateway-';
+const trackedFixtureHomes = new Set();
+const trackedFixturePids = new Set();
+let fixtureReaper = null;
+let fixtureReaperRegistry = null;
+
+function isFixtureHome(directory) {
+  if (typeof directory !== 'string' || !directory) return false;
+  if (!path.basename(directory).startsWith(FIXTURE_PREFIX)) return false;
+  try {
+    return fs.realpathSync(path.dirname(directory)) === fs.realpathSync(os.tmpdir());
+  } catch { return false; }
+}
+
+// Runs in a detached child, so it shares no state with this file: everything it
+// needs arrives through the JSON registry whose path is in the environment. It
+// is written to a file rather than passed with `-e` so its own `ps` entry stays
+// one short line, which the command-line matching below reads.
+const FIXTURE_REAPER_SOURCE = `
+'use strict';
+const fs = require('node:fs');
+// The script has already been loaded, so drop it immediately: nothing else
+// needs it and nothing is left behind if this process is killed.
+try { fs.unlinkSync(__filename); } catch {}
+const os = require('node:os');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const registryPath = process.env.MODEL_GATEWAY_FIXTURE_REGISTRY;
+const prefix = ${JSON.stringify(FIXTURE_PREFIX)};
+const deadline = Date.now() + 20 * 60 * 1000;
+const sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+const running = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+let realTmp = os.tmpdir();
+try { realTmp = fs.realpathSync(realTmp); } catch {}
+function isFixtureHome(directory) {
+  if (typeof directory !== 'string' || !directory) return false;
+  if (!path.basename(directory).startsWith(prefix)) return false;
+  try { return fs.realpathSync(path.dirname(directory)) === realTmp; } catch { return false; }
+}
+// pid -> start time, for everything ever seen below the harness. Recorded while
+// the harness is alive because once it dies its children are reparented to init
+// and the tree that identified them is gone. The start time is kept so a pid
+// the OS has since recycled onto an unrelated process is never signalled.
+const descendants = new Map();
+// Two queries rather than one: \`lstart\` prints a date full of spaces, so
+// picking it out of a row that also ends in a space-filled command needs a
+// brittle regex. Each row here has exactly one free-form field, at the end.
+function processTable() {
+  const entries = new Map();
+  const tree = String(spawnSync('ps', ['-Ao', 'pid=,ppid=,command='], { encoding: 'utf8' }).stdout || '');
+  for (const line of tree.split(/\\r?\\n/)) {
+    const match = line.trim().match(/^(\\d+)\\s+(\\d+)\\s+(.+)$/);
+    if (match) entries.set(Number(match[1]), { command: match[3], parentPid: Number(match[2]), startedAt: '' });
+  }
+  const starts = String(spawnSync('ps', ['-Ao', 'pid=,lstart='], { encoding: 'utf8' }).stdout || '');
+  for (const line of starts.split(/\\r?\\n/)) {
+    const match = line.trim().match(/^(\\d+)\\s+(.+)$/);
+    const entry = match && entries.get(Number(match[1]));
+    if (entry) entry.startedAt = match[2];
+  }
+  return entries;
+}
+function recordDescendants(parentPid, table) {
+  const children = new Map();
+  for (const [pid, entry] of table) {
+    if (!children.has(entry.parentPid)) children.set(entry.parentPid, []);
+    children.get(entry.parentPid).push(pid);
+  }
+  const queue = [parentPid];
+  const seen = new Set(queue);
+  while (queue.length) {
+    for (const pid of children.get(queue.shift()) || []) {
+      if (seen.has(pid)) continue;
+      seen.add(pid);
+      // Never record this reaper or anything below it: its own \`ps\` probes are
+      // descendants of the harness too, and it must not target itself.
+      if (pid === process.pid) continue;
+      queue.push(pid);
+      const { command, startedAt } = table.get(pid);
+      // Already exited, waiting only to be waited on: \`(name)\` on darwin,
+      // \`<defunct>\` on linux.
+      if (!/^\\(.*\\)$/.test(command) && !command.includes('<defunct>')) descendants.set(pid, startedAt);
+    }
+  }
+}
+function fixturePids(homes, seeded, table) {
+  const pids = new Set(seeded.filter(Boolean));
+  for (const home of homes) {
+    for (const name of ['guardian', 'shim', 'proxy']) {
+      try {
+        const pid = Number(fs.readFileSync(path.join(home, '.claude', 'model-gateway', name + '.pid'), 'utf8').trim());
+        if (pid) pids.add(pid);
+      } catch {}
+    }
+  }
+  for (const [pid, entry] of table) {
+    if (homes.some((home) => entry.command.includes(home))) pids.add(pid);
+    // Only when the recorded start time still matches, so a recycled pid is
+    // left alone.
+    if (descendants.get(pid) === entry.startedAt) pids.add(pid);
+  }
+  pids.delete(process.pid);
+  return [...pids].filter(Boolean);
+}
+function sweep() {
+  let registry;
+  try { registry = JSON.parse(fs.readFileSync(registryPath, 'utf8')); } catch { return; }
+  const homes = (registry.homes || []).filter(isFixtureHome);
+  const seeded = registry.pids || [];
+  for (const signal of ['SIGTERM', 'SIGKILL']) {
+    const pids = fixturePids(homes, seeded, processTable()).filter(running);
+    if (!pids.length) break;
+    for (const pid of pids) { try { process.kill(pid, signal); } catch {} }
+    const until = Date.now() + (signal === 'SIGTERM' ? 3000 : 1000);
+    while (Date.now() < until && fixturePids(homes, seeded, processTable()).some(running)) sleep(100);
+  }
+  for (const home of homes) { try { fs.rmSync(home, { force: true, recursive: true }); } catch {} }
+  try { fs.rmSync(registryPath, { force: true }); } catch {}
+}
+setInterval(() => {
+  let registry;
+  // A missing registry is the clean-exit handshake: the harness tore its own
+  // fixtures down, so there is nothing to sweep.
+  try { registry = JSON.parse(fs.readFileSync(registryPath, 'utf8')); } catch { process.exit(0); }
+  const table = processTable();
+  if (!running(registry.parentPid)) {
+    sweep();
+    process.exit(0);
+  }
+  recordDescendants(registry.parentPid, table);
+  if (Date.now() > deadline) process.exit(0);
+}, 250);
+`;
+
+function writeFixtureReaperRegistry() {
+  if (!fixtureReaperRegistry) return;
+  // Both spellings of every home: a child launched from a `/var/folders/...`
+  // home records the canonicalized `/private/var/folders/...` form of its own
+  // path, so matching on one alone misses it.
+  const homes = new Set();
+  for (const home of trackedFixtureHomes) {
+    homes.add(home);
+    try { homes.add(fs.realpathSync(home)); } catch {}
+  }
+  try {
+    fs.writeFileSync(fixtureReaperRegistry, JSON.stringify({
+      homes: [...homes],
+      parentPid: process.pid,
+      pids: [...trackedFixturePids],
+    }));
+  } catch {}
+}
+
+function spawnDetachedFixtureReaper(registryPath) {
+  const scriptPath = path.join(os.tmpdir(), `${FIXTURE_PREFIX}fixture-reaper-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.js`);
+  fs.writeFileSync(scriptPath, FIXTURE_REAPER_SOURCE);
+  const reaper = spawn(process.execPath, [scriptPath], {
+    detached: true,
+    env: { ...process.env, MODEL_GATEWAY_FIXTURE_REGISTRY: registryPath },
+    stdio: 'ignore',
+  });
+  reaper.unref();
+  return reaper;
+}
+
+function spawnFixtureReaper() {
+  if (fixtureReaper || process.platform === 'win32') return;
+  fixtureReaperRegistry = path.join(os.tmpdir(), `${FIXTURE_PREFIX}fixture-reaper-${process.pid}-${Date.now()}.json`);
+  writeFixtureReaperRegistry();
+  fixtureReaper = spawnDetachedFixtureReaper(fixtureReaperRegistry);
+}
+
+function trackFixtureHome(home, pids = []) {
+  assert.ok(isFixtureHome(home), `refusing to track a fixture home outside the OS temp dir: ${home}`);
+  trackedFixtureHomes.add(home);
+  for (const pid of pids) if (pid) trackedFixturePids.add(pid);
+  spawnFixtureReaper();
+  writeFixtureReaperRegistry();
+  return home;
+}
+
+function trackFixturePid(pid) {
+  if (pid) {
+    trackedFixturePids.add(pid);
+    writeFixtureReaperRegistry();
+  }
+  return pid;
+}
+
+// Anything still running below this process once a test is over. Command-line
+// matching on the fixture home cannot find all of it: the supervisors these
+// tests start through `CLI` are named by this checkout, not by the temp home,
+// and one of those -- a `serve-shim` holding an ephemeral port and this
+// process's inherited stdout pipe -- is what kept a finished run from exiting.
+// Being a descendant of the harness is the property they all share.
+function survivingTestChildren() {
+  if (process.platform === 'win32') return [];
+  const entries = new Map();
+  const output = String(spawnSync('ps', ['-Ao', 'pid=,ppid=,command='], { encoding: 'utf8' }).stdout || '');
+  for (const line of output.split(/\r?\n/)) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+    if (match) entries.set(Number(match[1]), { command: match[3], parentPid: Number(match[2]) });
+  }
+  const children = new Map();
+  for (const [pid, entry] of entries) {
+    if (!children.has(entry.parentPid)) children.set(entry.parentPid, []);
+    children.get(entry.parentPid).push(pid);
+  }
+  const found = [];
+  const queue = [process.pid];
+  const seen = new Set(queue);
+  while (queue.length) {
+    for (const pid of children.get(queue.shift()) || []) {
+      if (seen.has(pid)) continue;
+      seen.add(pid);
+      queue.push(pid);
+      // The detached reaper is meant to outlive this process. The `ps` probe
+      // above is a child of this process and so appears in its own output,
+      // already exited. A process that has exited and is only waiting to be
+      // waited on shows as `(name)` on darwin and `<defunct>` on linux. None of
+      // these holds a port or a pipe.
+      const { command } = entries.get(pid);
+      if (pid === fixtureReaper?.pid) continue;
+      if (/^\(.*\)$/.test(command) || command.includes('<defunct>')) continue;
+      if (/\bps\b.*-Ao pid=/.test(command)) continue;
+      found.push([pid, command]);
+    }
+  }
+  return found;
+}
+
+// SIGTERM, then SIGKILL on a deadline. Several teardowns used
+// `child.kill(); await waitForExit(child)`, which waits forever when the child
+// is slow to honour SIGTERM: the hook never returns, the test is cancelled for
+// exceeding its timeout, and every later hook in it is skipped -- which is how
+// a supervisor outlived its own teardown.
+async function stopSpawnedProcess(child, timeout = 5000) {
+  if (!child || child.pid == null) return;
+  if (processIsRunning(child.pid)) { try { child.kill('SIGTERM'); } catch {} }
+  const until = Date.now() + timeout;
+  while (Date.now() < until && processIsRunning(child.pid)) await pause(50);
+  if (processIsRunning(child.pid)) { try { process.kill(child.pid, 'SIGKILL'); } catch {} }
+  const hardUntil = Date.now() + 2000;
+  while (Date.now() < hardUntil && processIsRunning(child.pid)) await pause(50);
+}
+
+// Every process still naming this fixture root, whether or not the test ever
+// learned its pid. Tolerates a home that has already been removed, which is
+// exactly the state the surviving 2026-10-05 orphans were found in.
+function fixturePidsForHome(home, seeded = []) {
+  const roots = new Set([home]);
+  try { roots.add(fs.realpathSync(home)); } catch {}
+  const pids = new Set([...seeded.filter(Boolean), ...recordedGatewayFixturePids(home)]);
+  if (process.platform !== 'win32') {
+    const table = String(spawnSync('ps', ['-Ao', 'pid=,command='], { encoding: 'utf8' }).stdout || '');
+    for (const line of table.split(/\r?\n/)) {
+      const match = line.trim().match(/^(\d+)\s+(.+)$/);
+      if (match && [...roots].some((root) => match[2].includes(root))) pids.add(Number(match[1]));
+    }
+  }
+  pids.delete(process.pid);
+  return [...pids].filter(Boolean);
+}
+
+async function reapFixtureHome(home, seeded = [], { remove = true } = {}) {
+  assert.ok(isFixtureHome(home), `refusing to reap a fixture home outside the OS temp dir: ${home}`);
+  const signalled = new Set();
+  for (const signal of ['SIGTERM', 'SIGKILL']) {
+    const pids = fixturePidsForHome(home, seeded).filter(processIsRunning);
+    if (!pids.length) break;
+    for (const pid of pids) {
+      signalled.add(pid);
+      try { process.kill(pid, signal); } catch {}
+    }
+    const until = Date.now() + (signal === 'SIGTERM' ? 5000 : 2000);
+    while (Date.now() < until && fixturePidsForHome(home, seeded).some(processIsRunning)) await pause(50);
+  }
+  const survivors = fixturePidsForHome(home, seeded).filter(processIsRunning);
+  trackedFixtureHomes.delete(home);
+  for (const pid of [...signalled, ...seeded]) trackedFixturePids.delete(pid);
+  writeFixtureReaperRegistry();
+  if (remove) {
+    try { fs.rmSync(home, { force: true, maxRetries: 10, recursive: true, retryDelay: 100 }); } catch {}
+  }
+  return { reaped: [...signalled], survivors };
+}
+
+// The last-chance in-process sweep: synchronous, because `exit` handlers cannot
+// await, and bounded so a clean run (nothing registered) costs nothing.
+function reapTrackedFixturesSync() {
+  const sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+  for (const home of [...trackedFixtureHomes]) {
+    const seeded = [...trackedFixturePids];
+    for (const signal of ['SIGTERM', 'SIGKILL']) {
+      const pids = fixturePidsForHome(home, seeded).filter(processIsRunning);
+      if (!pids.length) break;
+      for (const pid of pids) { try { process.kill(pid, signal); } catch {} }
+      const until = Date.now() + (signal === 'SIGTERM' ? 1500 : 500);
+      while (Date.now() < until && fixturePidsForHome(home, seeded).some(processIsRunning)) sleep(100);
+    }
+    try { fs.rmSync(home, { force: true, recursive: true }); } catch {}
+    trackedFixtureHomes.delete(home);
+  }
+  for (const pid of survivingTestChildren().map(([pid]) => pid)) {
+    try { process.kill(pid, 'SIGKILL'); } catch {}
+  }
+  trackedFixturePids.clear();
+  // Removed last: dying part-way through the sweep must leave the detached
+  // reaper a registry to finish the job from.
+  if (fixtureReaperRegistry) {
+    try { fs.rmSync(fixtureReaperRegistry, { force: true }); } catch {}
+  }
+}
+
+process.on('exit', reapTrackedFixturesSync);
+for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    reapTrackedFixturesSync();
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  });
+}
+
+// Belt and braces around every per-test teardown, and the regression guard for
+// requirement 3 of SQ-266: nothing this file spawned may outlive it. A root
+// `afterEach` would be the wrong hook -- node:test runs it BEFORE each test's
+// own `t.after`, so it would reap processes those hooks still assert on. This
+// runs once, after the last test and all of its hooks, and reaps before it
+// asserts, so a red result still leaves a clean machine.
+test.after(async () => {
+  for (const home of [...trackedFixtureHomes]) await reapFixtureHome(home, [...trackedFixturePids]);
+  let leaked = survivingTestChildren();
+  for (const [pid] of leaked) { try { process.kill(pid, 'SIGTERM'); } catch {} }
+  const until = Date.now() + 5000;
+  while (Date.now() < until && leaked.some(([pid]) => processIsRunning(pid))) await pause(100);
+  for (const [pid] of leaked.filter(([pid]) => processIsRunning(pid))) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+  leaked = leaked.filter(([, command]) => !command.includes(`${FIXTURE_PREFIX}fixture-reaper-`));
+  assert.deepEqual(
+    leaked.map(([pid, command]) => `${pid} ${command}`),
+    [],
+    'a test left a spawned process running after its own teardown finished',
+  );
+});
+
 function outerSocketPath(home) {
   return process.platform === 'win32'
     ? `\\\\.\\pipe\\model-gateway-outer-${process.pid}-${Date.now()}`
@@ -393,7 +772,7 @@ function codexMessage() {
 }
 
 test('cache ownership resolves physical install roots before accepting sibling versions', (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-cache-identity-'));
+  const home = trackFixtureHome(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-cache-identity-')));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const cacheRoot = path.join(home, '.claude', 'plugins', 'cache');
   const olderSibling = path.join(cacheRoot, 'loadout', 'model-gateway', '0.48.0');
@@ -416,7 +795,7 @@ test('cache ownership resolves physical install roots before accepting sibling v
 });
 
 test('proxy command identity resolves the physical executable path', (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-proxy-command-'));
+  const home = trackFixtureHome(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-proxy-command-')));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const proxyBinary = path.join(home, 'bin', 'claude-code-proxy');
   fs.mkdirSync(path.dirname(proxyBinary), { recursive: true });
@@ -427,7 +806,7 @@ test('proxy command identity resolves the physical executable path', (t) => {
 });
 
 test('gateway fixture processes isolate outer body, socket, and Codex state', async (t) => {
-  const outerHome = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-outer-user-'));
+  const outerHome = trackFixtureHome(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-outer-user-')));
   t.after(() => fs.rmSync(outerHome, { recursive: true, force: true }));
   let defaultContacts = 0;
   const defaultEndpoint = http.createServer((request, response) => {
@@ -465,21 +844,19 @@ test('gateway fixture processes isolate outer body, socket, and Codex state', as
   assert.notEqual(isolatedEnvironment.MODEL_GATEWAY_REQUEST_BODY_DIR, outer.bodyDirectory);
   assert.notEqual(isolatedEnvironment.CODEX_HOME, outer.codexHome);
   assert.equal(isolatedEnvironment.ANTHROPIC_UNIX_SOCKET, undefined);
-  started.child.kill();
-  await waitForExit(started.child);
+  await stopSpawnedProcess(started.child);
 
   const negativeControl = await startGateway(t, 'serve-shim', {
     CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
     CODEX_GATEWAY_REQUEST_LOG: '0',
   }, { isolatedOverrides: { MODEL_GATEWAY_REQUEST_BODY_DIR: outer.bodyDirectory } });
   assert.equal(await request(negativeControl.port, codexMessage()), 200);
-  negativeControl.child.kill();
-  await waitForExit(negativeControl.child);
+  await stopSpawnedProcess(negativeControl.child);
   assert.throws(() => assertNoBodyRecord(outer.bodyDirectory), /true !== false/);
 });
 
 test('sync gateway fixture cleanup removes helper-owned homes and preserves supplied homes', (t) => {
-  const outerHome = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-outer-user-'));
+  const outerHome = trackFixtureHome(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-outer-user-')));
   t.after(() => fs.rmSync(outerHome, { recursive: true, force: true }));
   const outer = setOuterGatewayEnvironment(t, outerHome, 9);
   const before = testHomes(outer.temporaryDirectory);
@@ -499,7 +876,7 @@ test('sync gateway fixture cleanup removes helper-owned homes and preserves supp
 });
 
 test('isolated ensure preserves a foreign serve-shim process and cleans its own supervisor', async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-ensure-isolation-'));
+  const home = trackFixtureHome(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-ensure-isolation-')));
   const foreignScript = path.join(home, 'foreign-install', 'model-gateway', 'bin', 'model-gateway.js');
   const proxyBinary = path.join(home, '.claude', 'model-gateway', 'bin', process.platform === 'win32' ? 'claude-code-proxy.exe' : 'claude-code-proxy');
   fs.mkdirSync(path.dirname(foreignScript), { recursive: true });
@@ -509,8 +886,7 @@ test('isolated ensure preserves a foreign serve-shim process and cleans its own 
   if (process.platform !== 'win32') fs.chmodSync(proxyBinary, 0o755);
   const foreign = spawn(process.execPath, [foreignScript, 'serve-shim'], { stdio: ['ignore', 'pipe', 'ignore'] });
   t.after(async () => {
-    foreign.kill();
-    await waitForExit(foreign);
+    await stopSpawnedProcess(foreign);
     fs.rmSync(home, { recursive: true, force: true });
   });
   await waitForReady(foreign);
@@ -535,7 +911,7 @@ test('sibling ensure retires dead records without deleting replacement worker an
   // realpath the fixture home: the replacement worker's recorded command comes
   // from the ensure process's canonicalized __filename, so on macOS a /var/...
   // tmpdir home would never match the /private/var/... it logs.
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-sibling-record-replacement-')));
+  const home = trackFixtureHome(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-sibling-record-replacement-'))));
   const { olderCli, newerCli } = installCachedGatewayCliVersions(home);
   const proxyBinary = path.join(home, '.claude', 'model-gateway', 'bin', process.platform === 'win32' ? 'claude-code-proxy.exe' : 'claude-code-proxy');
   installNodeProxy(home);
@@ -570,13 +946,20 @@ test('sibling ensure retires dead records without deleting replacement worker an
   const olderShim = spawn(process.execPath, [olderCli, 'serve-shim'], { cwd: home, env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
   let ensuring = null;
   let replacementGuardianPid = null;
+  trackFixturePid(olderShim.pid);
+  // SQ-266: this teardown is where the leak lived. `taskkill` is a Windows
+  // command and was run unconditionally, so the replacement supervisor tree was
+  // never killed on darwin; `waitForExit(olderShim)` had no timeout; and both
+  // ran only after a `stop` that cannot prove port ownership with every port at
+  // 0. reapFixtureHome() signals by recorded pid and by any process whose
+  // command still names this fixture root, so the replacement tree is reaped
+  // whether or not this test learned its pids, and a thrown assertion above
+  // cannot skip it.
   t.after(async () => {
-    if (ensuring?.exitCode == null) ensuring.kill();
-    await runGatewayCli(newerCli, 'stop', environment, { cwd: home });
-    if (processIsRunning(olderShim.pid)) olderShim.kill();
-    if (replacementGuardianPid && processIsRunning(replacementGuardianPid)) spawnSync('taskkill', ['/pid', String(replacementGuardianPid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-    await waitForExit(olderShim);
-    fs.rmSync(home, { recursive: true, force: true });
+    if (ensuring && ensuring.exitCode == null) ensuring.kill();
+    await runGatewayCli(newerCli, 'stop', environment, { cwd: home }).catch(() => {});
+    const { survivors } = await reapFixtureHome(home, [olderShim.pid, ensuring?.pid, replacementGuardianPid]);
+    assert.deepEqual(survivors, [], 'fixture teardown left a spawned gateway process running');
   });
   const shimPort = await waitForListeningPort(olderShim);
   environment.CODEX_GATEWAY_PORT = String(shimPort);
@@ -667,7 +1050,7 @@ function parentPidOf(pid) {
 }
 
 test('a supervisor launched from the SessionStart hook survives the hook timeout killing its process tree', { skip: process.platform === 'win32' }, async (t) => {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-hook-tree-')));
+  const home = trackFixtureHome(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-hook-tree-'))));
   const configDir = path.join(home, '.claude');
   const state = path.join(configDir, 'model-gateway');
   const hook = spawn(process.execPath, ['-e', `
@@ -730,7 +1113,7 @@ test('a supervisor launched from the SessionStart hook survives the hook timeout
 // shared, cold-start home and asserts that only one of them ever decides recovery
 // is needed: exactly one `ensure-recovery-started` lifecycle record, one guardian.
 test('two concurrent ensure OS processes never both decide the gateway needs recovery', async (t) => {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-concurrent-ensure-')));
+  const home = trackFixtureHome(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-concurrent-ensure-'))));
   installNodeProxy(home);
   fs.writeFileSync(
     path.join(home, 'serve'),
@@ -786,7 +1169,7 @@ test('two concurrent ensure OS processes never both decide the gateway needs rec
 // dying mid-recovery. A lock recorded against a pid that is provably not running must be
 // reclaimed immediately, not held onto until the follower's wait timeout expires.
 test('ensure reclaims a stale lock left by a pid that is no longer running instead of deadlocking', async (t) => {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-stale-ensure-lock-')));
+  const home = trackFixtureHome(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-stale-ensure-lock-'))));
   installNodeProxy(home);
   fs.writeFileSync(
     path.join(home, 'serve'),
@@ -844,7 +1227,7 @@ test('ensure reclaims a stale lock left by a pid that is no longer running inste
 // and must still be reclaimed; a fresh one must not be, which the companion
 // concurrency test above now covers under real racing load.
 test('ensure reclaims an old corrupt (unparseable) lock file instead of treating it as live', async (t) => {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-corrupt-ensure-lock-')));
+  const home = trackFixtureHome(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-corrupt-ensure-lock-'))));
   installNodeProxy(home);
   fs.writeFileSync(
     path.join(home, 'serve'),
@@ -907,7 +1290,7 @@ function runEnsureLockProbe(home, environment, body) {
 // Release must free only a lock still naming its own pid, while still recording the
 // outcome its followers are waiting to read.
 test('releasing the ensure lock frees only a lock this process still holds', (t) => {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-release-ensure-lock-')));
+  const home = trackFixtureHome(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-release-ensure-lock-'))));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home });
 
@@ -941,7 +1324,7 @@ test('releasing the ensure lock frees only a lock this process still holds', (t)
 // and, just as importantly, a lock young enough that its holder could still be doing
 // the work is left alone, or the cap would reintroduce the SQ-23 race it guards.
 test('a lock naming a live foreign pid is reclaimed once past the absolute age cap, not before', (t) => {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-ensure-lock-age-cap-')));
+  const home = trackFixtureHome(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-ensure-lock-age-cap-'))));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home });
   fs.mkdirSync(path.join(home, '.claude', 'model-gateway'), { recursive: true });
@@ -979,7 +1362,7 @@ test('a lock naming a live foreign pid is reclaimed once past the absolute age c
 // recorded for it. tmp+rename (lib/atomic-file.js) makes the replacement one
 // indivisible step — observable here as a new inode rather than a rewritten one.
 test('the ensure result is replaced atomically instead of truncated in place', (t) => {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-ensure-result-atomic-')));
+  const home = trackFixtureHome(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-ensure-result-atomic-'))));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const environment = gatewayTestEnvironment(null, { HOME: home, USERPROFILE: home });
   const state = path.join(home, '.claude', 'model-gateway');
@@ -1004,7 +1387,7 @@ test('the ensure result is replaced atomically instead of truncated in place', (
 });
 
 test('older cache version leaves a newer sibling shim running', async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-sibling-downgrade-'));
+  const home = trackFixtureHome(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-sibling-downgrade-')));
   const { olderCli, newerCli } = installCachedGatewayCliVersions(home);
   // Single spawn, no sibling to agree on a port with -- the environment default
   // of '0' lets the OS assign it with no reservation gap.
@@ -1014,8 +1397,7 @@ test('older cache version leaves a newer sibling shim running', async (t) => {
   const newerShim = spawn(process.execPath, [newerCli, 'serve-shim'], { env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
   t.after(async () => {
     await runGatewayCli(newerCli, 'stop', environment);
-    if (processIsRunning(newerShim.pid)) newerShim.kill();
-    await waitForExit(newerShim);
+    await stopSpawnedProcess(newerShim);
     fs.rmSync(home, { recursive: true, force: true });
   });
   await waitForReady(newerShim);
@@ -1025,14 +1407,13 @@ test('older cache version leaves a newer sibling shim running', async (t) => {
 });
 
 test('foreign configured-port supervisor is preserved and reported', async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-foreign-port-'));
+  const home = trackFixtureHome(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-foreign-port-')));
   const foreignScript = path.join(home, 'foreign-install', 'model-gateway', 'bin', 'model-gateway.js');
   fs.mkdirSync(path.dirname(foreignScript), { recursive: true });
   fs.writeFileSync(foreignScript, `const http = require('node:http'); const server = http.createServer((request, response) => response.end(JSON.stringify({ proxyRecovery: true }))); server.listen(0, '127.0.0.1', () => process.stdout.write('ready:' + server.address().port + '\\n'));\n`);
   const foreign = spawn(process.execPath, [foreignScript, 'serve-shim'], { stdio: ['ignore', 'pipe', 'ignore'] });
   t.after(async () => {
-    foreign.kill();
-    await waitForExit(foreign);
+    await stopSpawnedProcess(foreign);
     fs.rmSync(home, { recursive: true, force: true });
   });
   const port = await waitForReadyPort(foreign);
@@ -1059,7 +1440,7 @@ test('foreign configured-port supervisor is preserved and reported', async (t) =
 });
 
 test('cache-junction gateway process is preserved as a foreign port owner', async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-cache-junction-port-'));
+  const home = trackFixtureHome(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-cache-junction-port-')));
   const { olderCli, newerCli } = installCachedGatewayCliVersions(home);
   const foreignRoot = path.join(home, 'dev', 'foreign-model-gateway');
   const junctionRoot = path.dirname(path.dirname(olderCli));
@@ -1070,8 +1451,7 @@ test('cache-junction gateway process is preserved as a foreign port owner', asyn
   linkDirectory(foreignRoot, junctionRoot);
   const foreign = spawn(process.execPath, [path.join(junctionRoot, 'bin', 'model-gateway.js'), 'serve-shim'], { stdio: ['ignore', 'pipe', 'ignore'] });
   t.after(async () => {
-    if (processIsRunning(foreign.pid)) foreign.kill();
-    await waitForExit(foreign);
+    await stopSpawnedProcess(foreign);
     fs.rmSync(home, { recursive: true, force: true });
   });
   const port = await waitForReadyPort(foreign);
@@ -1089,14 +1469,13 @@ test('cache-junction gateway process is preserved as a foreign port owner', asyn
 });
 
 test('proxy recovery preserves a foreign configured-port proxy owner', async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-foreign-proxy-'));
+  const home = trackFixtureHome(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-foreign-proxy-')));
   const foreignScript = path.join(home, 'foreign-install', 'model-gateway', 'bin', 'model-gateway.js');
   fs.mkdirSync(path.dirname(foreignScript), { recursive: true });
   fs.writeFileSync(foreignScript, `const http = require('node:http'); const server = http.createServer((request, response) => { process.stdout.write('models\\n'); response.writeHead(503); response.end('unhealthy'); }); server.listen(0, '127.0.0.1', () => process.stdout.write('ready:' + server.address().port + '\\n'));`);
   const foreign = spawn(process.execPath, [foreignScript], { stdio: ['ignore', 'pipe', 'ignore'] });
   t.after(async () => {
-    if (processIsRunning(foreign.pid)) foreign.kill();
-    await waitForExit(foreign);
+    await stopSpawnedProcess(foreign);
   });
   const port = await waitForReadyPort(foreign);
   const proxyProbe = waitForOutput(foreign, 'models\n');
@@ -1114,8 +1493,7 @@ test('proxy recovery preserves a foreign configured-port proxy owner', async (t)
     stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(async () => {
-    supervisor.kill();
-    await waitForExit(supervisor);
+    await stopSpawnedProcess(supervisor);
   });
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   t.after(() => assert.equal(
@@ -1191,8 +1569,8 @@ test('proxy recovery preserves a foreign install proxy using the shared binary',
 });
 
 test('ensure and stop discard a stale guardian PID without killing its reused process', async (t) => {
-  const ensureHome = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-stale-ensure-'));
-  const stopHome = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-stale-stop-'));
+  const ensureHome = trackFixtureHome(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-stale-ensure-')));
+  const stopHome = trackFixtureHome(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-stale-stop-')));
   const ensureSleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   const stopSleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   t.after(async () => {
@@ -1234,14 +1612,13 @@ test('ensure and stop discard a stale guardian PID without killing its reused pr
 });
 
 test('setup restart path refuses a foreign shim before it can restart its worker', async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-foreign-setup-'));
+  const home = trackFixtureHome(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-foreign-setup-')));
   const foreignScript = path.join(home, 'foreign-install', 'model-gateway', 'bin', 'model-gateway.js');
   fs.mkdirSync(path.dirname(foreignScript), { recursive: true });
   fs.writeFileSync(foreignScript, `const { spawn } = require('node:child_process'); const http = require('node:http'); const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); const server = http.createServer((request, response) => { if (request.url === '/restart') worker.kill(); response.end(JSON.stringify({ workerPid: worker.pid })); }); server.listen(0, '127.0.0.1', () => process.stdout.write('ready:' + server.address().port + '\\n')); process.on('SIGTERM', () => { worker.kill(); server.close(() => process.exit(0)); });`);
   const foreign = spawn(process.execPath, [foreignScript], { stdio: ['ignore', 'pipe', 'ignore'] });
   t.after(async () => {
-    foreign.kill();
-    await waitForExit(foreign);
+    await stopSpawnedProcess(foreign);
     fs.rmSync(home, { recursive: true, force: true });
   });
   const port = await waitForReadyPort(foreign);
@@ -1301,7 +1678,7 @@ test('supervisor health remains responsive while a timed-out ownership probe def
 });
 
 test('supervisor shutdown reaps a timed probe child before fixture cleanup', async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-probe-child-'));
+  const home = trackFixtureHome(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-probe-child-')));
   const supervisionPath = path.join(__dirname, '..', 'lib', 'process-supervision.js');
   const supervisorScript = `
     const { commandResultAsync, createProbeChildRegistry, createProxyRecovery } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'process-supervision.js'))});
@@ -1331,8 +1708,7 @@ test('supervisor shutdown reaps a timed probe child before fixture cleanup', asy
     stdio: ['ignore', 'pipe', 'ignore', 'ipc'],
   });
   t.after(async () => {
-    if (processIsRunning(supervisor.pid)) supervisor.kill();
-    await waitForExit(supervisor);
+    await stopSpawnedProcess(supervisor);
     fs.rmSync(home, { recursive: true, force: true });
   });
   await waitForReady(supervisor);
@@ -1347,6 +1723,99 @@ test('supervisor shutdown reaps a timed probe child before fixture cleanup', asy
   await waitForExit(supervisor);
   await waitForProcessesToExit(probePids);
   assert.doesNotThrow(() => fs.rmSync(home, { recursive: true, force: true }));
+});
+
+// SQ-266: the leak reached seven days of uptime because nothing asserted that
+// a fixture's processes were gone once its test finished. These two tests cover
+// the two ways this file can stop: a teardown that runs, and a harness that is
+// killed before any teardown can.
+function spawnIdleProcess(executable, cwd) {
+  return spawn(executable, ['-e', 'setInterval(() => {}, 1000);'], {
+    cwd,
+    detached: process.platform !== 'win32',
+    stdio: 'ignore',
+  });
+}
+
+async function waitUntil(condition, message, timeout = 20000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await pause(100);
+  }
+  assert.fail(message);
+}
+
+test('fixture teardown reaps every process spawned into a fixture home', { skip: process.platform === 'win32' }, async (t) => {
+  const home = trackFixtureHome(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-teardown-reaping-'))));
+  installNodeProxy(home);
+  const proxyBinary = path.join(home, '.claude', 'model-gateway', 'bin', 'claude-code-proxy');
+
+  // Discovered by command line only: the pid is never handed to the reaper,
+  // which is the case that matters for a supervisor's own children.
+  const unrecordedProxy = spawnIdleProcess(proxyBinary, home);
+  // Discovered through the pid record only: its command names nothing under the
+  // fixture home, exactly like a real proxy binary resolved outside it.
+  const recordedOnly = spawnIdleProcess(process.execPath, os.tmpdir());
+  fs.writeFileSync(path.join(home, '.claude', 'model-gateway', 'proxy.pid'), String(recordedOnly.pid));
+  // Neither recorded nor named by the fixture: the reaper must leave it alone.
+  // A sweep that killed this would be free to kill the real gateway shim.
+  const bystander = spawnIdleProcess(process.execPath, os.tmpdir());
+  t.after(() => {
+    for (const child of [unrecordedProxy, recordedOnly, bystander]) {
+      if (processIsRunning(child.pid)) { try { process.kill(child.pid, 'SIGKILL'); } catch {} }
+    }
+  });
+  await waitUntil(
+    () => [unrecordedProxy, recordedOnly, bystander].every((child) => processIsRunning(child.pid)),
+    'fixture stand-in processes did not start',
+  );
+
+  const { reaped, survivors } = await reapFixtureHome(home);
+
+  assert.deepEqual(survivors, [], 'teardown left a spawned fixture process running');
+  assert.equal(processIsRunning(unrecordedProxy.pid), false, 'teardown missed a process it could only find by command line');
+  assert.equal(processIsRunning(recordedOnly.pid), false, 'teardown missed a process it could only find by pid record');
+  assert.ok(reaped.includes(unrecordedProxy.pid), `reaped pids ${reaped} omit the command-matched fixture process`);
+  assert.ok(reaped.includes(recordedOnly.pid), `reaped pids ${reaped} omit the recorded fixture process`);
+  assert.equal(processIsRunning(bystander.pid), true, 'teardown killed a process outside the fixture home');
+  assert.ok(reaped.every((pid) => pid !== bystander.pid), 'teardown signalled a process outside the fixture home');
+  assert.equal(fs.existsSync(home), false, 'teardown left the fixture home behind');
+});
+
+test('the detached reaper reaps fixture processes when the harness dies before teardown', { skip: process.platform === 'win32' }, async (t) => {
+  const home = trackFixtureHome(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-abort-reaping-'))));
+  installNodeProxy(home);
+  const proxyBinary = path.join(home, '.claude', 'model-gateway', 'bin', 'claude-code-proxy');
+  const registryPath = path.join(os.tmpdir(), `${FIXTURE_PREFIX}fixture-reaper-abort-${process.pid}-${Date.now()}.json`);
+
+  // Stands in for this test file's own process: SIGKILLed below, the way the
+  // runner's watchdog kills a test file, so no exit or signal handler of its
+  // own ever runs.
+  const harness = spawnIdleProcess(process.execPath, os.tmpdir());
+  const orphan = spawnIdleProcess(proxyBinary, home);
+  const bystander = spawnIdleProcess(process.execPath, os.tmpdir());
+  fs.writeFileSync(registryPath, JSON.stringify({ homes: [home], parentPid: harness.pid, pids: [] }));
+  const reaper = spawnDetachedFixtureReaper(registryPath);
+  t.after(() => {
+    for (const child of [reaper, harness, orphan, bystander]) {
+      if (processIsRunning(child.pid)) { try { process.kill(child.pid, 'SIGKILL'); } catch {} }
+    }
+    fs.rmSync(registryPath, { force: true });
+  });
+  await waitUntil(
+    () => [harness, orphan, bystander, reaper].every((child) => processIsRunning(child.pid)),
+    'abort-path stand-in processes did not start',
+  );
+  assert.equal(processIsRunning(orphan.pid), true, 'fixture orphan was not running before the harness died');
+
+  process.kill(harness.pid, 'SIGKILL');
+
+  await waitUntil(() => !processIsRunning(orphan.pid), 'the detached reaper left a fixture process running after the harness died');
+  await waitUntil(() => !fs.existsSync(home), 'the detached reaper left the fixture home behind');
+  await waitUntil(() => !fs.existsSync(registryPath), 'the detached reaper left its registry behind');
+  await waitUntil(() => !processIsRunning(reaper.pid), 'the detached reaper did not exit after sweeping');
+  assert.equal(processIsRunning(bystander.pid), true, 'the detached reaper killed a process outside the fixture home');
 });
 
 test('async parent ownership walk reads the process table once', async () => {
