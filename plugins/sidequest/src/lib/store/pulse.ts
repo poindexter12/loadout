@@ -199,6 +199,16 @@ function createPulse(dependencies: any) {
       return { state: 'binding_fault', evidence: 'dispatch.boundAt is null, so Sidequest cannot identify the executor process; the claim stays held because no death was observed' };
     }
     if (claim) return { state: 'unknown', evidence: 'claim held without live-process evidence' };
+    // SQ-302: inside the backstop this same shape used to fall through to "no active claim or death record",
+    // which reads like a ticket nobody ever dispatched. It is the opposite: a runtime was bound and has not
+    // claimed yet. Naming that, and the host task-failure route out of it, is the difference between the
+    // orchestrator retiring a dead launch now and waiting out an hour for a stop hook that will never fire.
+    if (dispatch && !dispatch.terminalAt && dispatch.boundAt && !dispatch.claimedAt && !ticket?.checkpoint) {
+      return {
+        state: 'unknown',
+        evidence: 'dispatch bound a runtime that has not claimed yet and is still inside the claim-idle backstop; if the host reported that task failed, retire it now with recoveryTaskId rather than waiting for a terminal hook',
+      };
+    }
     return { state: 'unknown', evidence: 'no active claim or death record' };
   }
 

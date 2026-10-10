@@ -495,29 +495,42 @@ function createDispatch(dependencies) {
     const boundMs = Date.parse(state.boundAt);
     return Number.isFinite(boundMs) && Date.now() - boundMs >= claimIdleMs();
   }
-  function evidenceRetirableAttempt(ticket, state) {
-    return supersedableUnboundAttempt(ticket, state) || strandedBoundAttempt(ticket, state);
+  function hostTaskFailureRuntime(state, taskId) {
+    const id = String(taskId || "").trim();
+    if (!id) return null;
+    if (String(state?.agentId || "").trim() === id) return "agentId";
+    if (String(state?.agentName || "").trim() === id) return "agentName";
+    return null;
+  }
+  function hostTaskFailureRetirableAttempt(ticket, state, taskId) {
+    if (!state || !ticket?.dispatchNonce || !PRE_RUNTIME_DISPATCH_OUTCOMES.has(state.outcome)) return false;
+    if (state.terminalAt || state.claimedAt || ticket.claim?.by || ticket.checkpoint) return false;
+    return Boolean(hostTaskFailureRuntime(state, taskId));
+  }
+  function evidenceRetirableAttempt(ticket, state, taskId) {
+    return supersedableUnboundAttempt(ticket, state) || strandedBoundAttempt(ticket, state) || hostTaskFailureRetirableAttempt(ticket, state, taskId);
   }
   function describeMinutes(ms) {
     const minutes = Math.max(1, Math.round(ms / 6e4));
     return `${minutes} minute${minutes === 1 ? "" : "s"}`;
   }
-  function boundRuntimeBlocker(state) {
+  function boundRuntimeBlocker(state, taskId) {
     if (state?.worktreeBindingSource === "worktree-create" && state.worktree && !state.worktreeCreationCompletedAt) {
       return "bound by WorktreeCreate without a completed checkout identity and is immediately retirable on recovery evidence";
     }
+    const mismatch = String(taskId || "").trim() ? ", and the recoveryTaskId passed names no runtime this attempt ever bound, so it is evidence about some other launch" : "";
     const boundMs = Date.parse(state?.boundAt);
-    if (!Number.isFinite(boundMs)) return "bound to a runtime";
+    if (!Number.isFinite(boundMs)) return `bound to a runtime${mismatch}`;
     const waited = Date.now() - boundMs;
-    return `bound to a runtime ${describeMinutes(waited)} ago and still unclaimed, which becomes retirable on evidence in ${describeMinutes(claimIdleMs() - waited)} unless its terminal hook fires first`;
+    return `bound to a runtime ${describeMinutes(waited)} ago and still unclaimed, which becomes retirable on evidence in ${describeMinutes(claimIdleMs() - waited)} unless its terminal hook fires first${mismatch}`;
   }
-  function evidenceSupersessionBlocker(ticket, state) {
+  function evidenceSupersessionBlocker(ticket, state, taskId) {
     if (!state || !ticket?.dispatchNonce) return "not an active attempt";
     if (state.terminalAt) return `already terminal (${state.outcome || "terminal"})`;
     if (ticket.claim?.by) return `claimed by ${ticket.claim.by}`;
     if (state.claimedAt) return "claimed";
     if (ticket.checkpoint) return "checkpointed";
-    if (state.boundAt || state.agentId) return boundRuntimeBlocker(state);
+    if (state.boundAt || state.agentId) return boundRuntimeBlocker(state, taskId);
     return `in unrecognized state ${pulseDispatchState(state)}`;
   }
   function retirePreparedCompatibilityStaleAttempt(slug, ticket, source = "tokened-claim-refusal") {
@@ -541,27 +554,31 @@ function createDispatch(dependencies) {
   }
   function supersedeUnboundAttempt(slug, idOrRef, opts) {
     const evidence = String(opts?.evidence || "").trim();
+    const taskId = String(opts?.taskId || "").trim();
     if (!evidence) return { ok: false, reason: "recovery_evidence_required", message: "Superseding an unbound dispatch attempt requires observed failure evidence." };
     const found = getTicket(slug, idOrRef);
     if (!found) return { ok: false, reason: "not_found" };
     return withTicketLock(slug, found.id, () => {
       const ticket = getTicket(slug, found.id);
       const state = dispatchState(ticket);
-      if (!evidenceRetirableAttempt(ticket, state)) {
+      if (!evidenceRetirableAttempt(ticket, state, taskId)) {
         return {
           ok: false,
           reason: "unclaimed_launch_not_supersedable",
           ticket,
-          message: `${ticket?.ref || idOrRef} cannot be superseded on recovery evidence because its dispatch is ${evidenceSupersessionBlocker(ticket, state)}. Evidence retires an attempt whose runtime is gone: one that minted a token and never reached a runtime, or one bound and unclaimed past the claim-idle backstop. Anything past that waits for its own terminal record.`
+          message: `${ticket?.ref || idOrRef} cannot be superseded on recovery evidence because its dispatch is ${evidenceSupersessionBlocker(ticket, state, taskId)}. Evidence retires an attempt whose runtime is gone: one that minted a token and never reached a runtime, one bound and unclaimed past the claim-idle backstop, or one whose own bound runtime is the failed task in a host task-failure notification, passed as recoveryTaskId. Anything past that waits for its own terminal record.`
         };
       }
-      const strandedBound = strandedBoundAttempt(ticket, state);
+      const failureShape = strandedBoundAttempt(ticket, state) ? "stranded_bound_launch_superseded" : supersedableUnboundAttempt(ticket, state) ? "unclaimed_launch_superseded" : "host_task_failure_superseded";
       setDispatchTerminal(ticket, "failed", opts?.source || "control-plane-unclaimed-launch-supersession", {
         slug,
-        failureShape: strandedBound ? "stranded_bound_launch_superseded" : "unclaimed_launch_superseded"
+        failureShape
       });
       const attempt = state.attempts?.at(-1);
-      if (attempt) attempt.recoveryEvidence = evidence;
+      if (attempt) {
+        attempt.recoveryEvidence = evidence;
+        if (hostTaskFailureRuntime(state, taskId)) attempt.recoveryTaskId = taskId;
+      }
       ticket.dispatchNonce = null;
       ticket.dispatchExecutor = null;
       const previousStatus = ticket.status;
@@ -1239,6 +1256,7 @@ function createDispatch(dependencies) {
     if (opts.recoveryEvidence) {
       const superseded = supersedeUnboundAttempt(slug, found.id, {
         evidence: opts.recoveryEvidence,
+        taskId: opts.recoveryTaskId,
         source: opts.source || opts.transport || "dispatch"
       });
       if (!superseded.ok) throw new Error(`prepare dispatch: ${superseded.message || `${found.ref} has no unbound dispatch attempt to supersede (${superseded.reason}).`}`);
@@ -1272,9 +1290,11 @@ function createDispatch(dependencies) {
       const activeRuntimeAttempt = current && !current.terminalAt && !(t.claim && t.claim.by) && Boolean(current.launchedAt || current.boundAt);
       if (activeRuntimeAttempt) {
         const evidenceCall = `so the orchestrator can supersede it in one call: \`sidequest dispatch ${t.ref} --recovery-evidence "<observed failed-claim evidence>"\`.`;
+        const taskIdCall = ` If the host already reported that task failed, retire it now with the failed task id: \`sidequest dispatch ${t.ref} --recovery-evidence "<host task-failure error>" --recovery-task-id ${current?.agentId || current?.agentName || "<failed task id>"}\` (MCP \`recoveryTaskId\`).`;
         let recovery2 = ` Wait for that executor's terminal hook, then dispatch once from the returned todo state; do not mint a replacement token while it is still winding down. It is ${evidenceSupersessionBlocker(t, current)}.`;
         if (supersedableUnboundAttempt(t, current)) recovery2 = ` It is unbound and unclaimed, ${evidenceCall}`;
         else if (strandedBoundAttempt(t, current)) recovery2 = ` It bound a runtime and never claimed, and a claim is a bound runtime's first action, so that runtime is gone: ${evidenceCall}`;
+        else if (hostTaskFailureRetirableAttempt(t, current, current?.agentId) || hostTaskFailureRetirableAttempt(t, current, current?.agentName)) recovery2 += taskIdCall;
         throw new Error(`prepare dispatch: ${t.ref} already has a live dispatch attempt (${pulseDispatchState(current)}).${recovery2}`);
       }
       const repeatFailure = repeatNoCommitDispatchError(t, current);

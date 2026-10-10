@@ -146,6 +146,8 @@ SessionStart runs the audit in report-only mode with a short background budget. 
 
 **A ticket will not dispatch.** Ask Claude to diagnose the ticket. Common causes are an incomplete work description, a blocked dependency, or an unavailable configured route. Claude reports the specific recovery instead of silently changing the work's route.
 
+**An executor died the moment it started, and the ticket will not take a replacement.** This is what a failed model request looks like: the executor is told to use a model its endpoint rejects, so it never gets as far as its first action. Sidequest normally learns an executor finished from the executor itself, and an executor that died this early never reports anything, so the board protects the attempt for an hour in case the work is merely slow to start. Claude no longer has to wait that hour: your session tells it that the task failed, and because that report names the same task Sidequest recorded when it started, Claude can retire the dead attempt straight away and dispatch a replacement. Ask Claude to diagnose the ticket and it reports whether it retired the attempt on that evidence or is still waiting out the hour. If the model itself is what failed, fix the route or the endpoint first, or the replacement dies the same way.
+
 **A read-only ticket cannot start in a new repository.** Claude reports the checkout choice and keeps the ticket read-only. You do not need to commit notes or change board settings.
 
 **A worktree-isolated executor cannot write.** Ask Claude to redispatch if the recorded checkout is missing or does not match the assigned checkout.

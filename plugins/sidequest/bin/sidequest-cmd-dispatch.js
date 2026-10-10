@@ -34,6 +34,7 @@ async function cmdDispatch(opts, positional) {
       allowRepeatFailure: !!opts["allow-repeat-failure"],
       allowUnscoped: !!opts["allow-unscoped"],
       recoveryEvidence: opts["recovery-evidence"],
+      recoveryTaskId: opts["recovery-task-id"],
       source: "cli",
       transport: "cli",
       allowUnverifiedTransport: unverifiedTransport
