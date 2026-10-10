@@ -447,6 +447,10 @@ function noteCompactEvent(attempt, event) {
 }
 
 const ROUTE_MARKER_RE = /\[(sidequest-route) model=([a-z0-9][a-z0-9.-]{0,63})(?: effort=(low|medium|high|xhigh|max))?\]/g;
+// Cheap byte prefilter so the id-direct codex route (SQ-299) only pays for a
+// structured message scan when the body could carry a marker at all. Every
+// ordinary picker request for a published id skips it.
+const ROUTE_MARKER_PROBE = 'sidequest-route';
 const configuredDispatchCacheTtlMs = Number(process.env.CODEX_GATEWAY_DISPATCH_CACHE_TTL_MS);
 const DISPATCH_CACHE_TTL_MS = Number.isFinite(configuredDispatchCacheTtlMs) && configuredDispatchCacheTtlMs > 0
   ? configuredDispatchCacheTtlMs
@@ -2036,6 +2040,30 @@ function runWorker() {
                 requestRouteLog(req, 'codex', advertisedModel, pathOnly, 'dispatch-unbound', null, dispatchIdentity, dispatchMarkersLength);
                 res.writeHead(400, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
                 return res.end(body);
+              }
+            } else if (raw && raw.includes(ROUTE_MARKER_PROBE)) {
+              // SQ-299: a request for a real published codex id is a first-class
+              // dispatch on its own. No marker is required and reasoning effort
+              // rides `output_config.effort` on the body, which is the shape the
+              // grok direct route already honours (grok-backend.js:213). Absent
+              // means "upstream default", never an error, so there is nothing to
+              // do for the marker-free case -- the id resolves the model below
+              // and the body's effort is forwarded untouched.
+              //
+              // Sidequest still emits the marker and will until its own
+              // follow-up lands, so both carriages have to coexist through that
+              // window. When a marker is present it wins on effort, so a
+              // mixed-version pair cannot change effort silently. The id, not
+              // the marker, still picks the model: the marker deliberately
+              // carries a STRIPPED id (sidequest routing.ts dispatchModelFor
+              // drops the claude-/claude-codex- prefix and the [1m] suffix), so
+              // it is only trusted here when it names this same resolved base.
+              const markers = dispatchRouteMarkersFromMessages(parsed.messages);
+              dispatchMarkersLength = markers.length;
+              if (markers.length === 1 && markers[0].model === requestedBase) {
+                dispatchRoute = { model: requestedBase, effort: markers[0].effort };
+                dispatchIdentity = dispatchRequestIdentity(req, parsed);
+                dispatchVia = 'dispatch';
               }
             }
             // Accept legacy typed ids from pre-0.4.2 sessions even though new

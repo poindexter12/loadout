@@ -168,6 +168,142 @@ test('dispatch model stays routable when omitted from the default model listing'
   });
 });
 
+// SQ-299: a request for a real published codex id is a dispatch in its own
+// right. Effort rides `output_config.effort` on the body (the shape the grok
+// direct route already honours), so a relay serving Sidequest executors no
+// longer has to implement the private marker grammar. The marker keeps working
+// and keeps winning on effort while Sidequest still emits it.
+test('a directly-requested published codex id dispatches on output_config.effort with no route marker', async (t) => {
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-id-direct-'));
+  const routeLog = path.join(logDir, 'routes.jsonl');
+  const forwarded = [];
+  const proxy = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      if (req.url === '/v1/models') {
+        res.end(JSON.stringify({ data: [{ id: 'gpt-5.6-terra' }] }));
+        return;
+      }
+      forwarded.push(JSON.parse(Buffer.concat(chunks).toString()));
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ type: 'message', model: 'gpt-5.6-terra', content: [] }));
+    });
+  });
+  const proxyPort = await listen(proxy);
+  t.after(() => {
+    proxy.close();
+    fs.rmSync(logDir, { recursive: true, force: true });
+  });
+
+  const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
+    env: {
+      ...process.env,
+      CODEX_GATEWAY_PORT: '0',
+      CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
+      CODEX_GATEWAY_REQUEST_LOG_PATH: routeLog,
+      CODEX_GATEWAY_SENTRY: '0',
+    },
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
+  await waitForHealthz(shimPort);
+
+  // 1. The published id verbatim, [1m] included, carrying effort on the body and
+  // no marker anywhere. This is the carriage SQ-298 settled on.
+  const bodyEffort = await request(shimPort, '/v1/messages', JSON.stringify({
+    model: 'claude-gpt-5.6-terra[1m]',
+    messages: [{ role: 'user', content: 'work the ticket' }],
+    output_config: { preserve: true, effort: 'high' },
+  }));
+  assert.equal(bodyEffort.status, 200);
+  assert.equal(forwarded[0].model, 'gpt-5.6-terra');
+  assert.deepEqual(forwarded[0].output_config, { preserve: true, effort: 'high' });
+
+  // 2. Effort above the upstream ladder is forwarded verbatim, exactly as the
+  // marker path forwards it. Nothing in this repo models a codex accepted set,
+  // so the two carriages must not disagree (see the SQ-299 handback note).
+  const xhigh = await request(shimPort, '/v1/messages', JSON.stringify({
+    model: 'claude-gpt-5.6-terra',
+    messages: [{ role: 'user', content: 'work the ticket' }],
+    output_config: { effort: 'xhigh' },
+  }));
+  assert.equal(xhigh.status, 200);
+  assert.deepEqual(forwarded[1].output_config, { effort: 'xhigh' });
+
+  // 3. Absent effort means "upstream default", not an error, and nothing is
+  // invented onto the body.
+  const noEffort = await request(shimPort, '/v1/messages', JSON.stringify({
+    model: 'claude-gpt-5.6-terra[1m]',
+    messages: [{ role: 'user', content: 'work the ticket' }],
+  }));
+  assert.equal(noEffort.status, 200);
+  assert.equal(forwarded[2].model, 'gpt-5.6-terra');
+  assert.equal('output_config' in forwarded[2], false);
+
+  // 4. Both carriages present and disagreeing: the marker wins, so a
+  // mixed-version Sidequest/model-gateway pair cannot change effort silently.
+  // The marker carries the STRIPPED id while the request carries the published
+  // one, which is why the two strings differ here.
+  const bothCarriages = await request(shimPort, '/v1/messages', JSON.stringify({
+    model: 'claude-gpt-5.6-terra[1m]',
+    messages: [{ role: 'user', content: '[sidequest-route model=gpt-5.6-terra effort=low] work the ticket' }],
+    output_config: { effort: 'high' },
+  }));
+  assert.equal(bothCarriages.status, 200);
+  assert.equal(forwarded[3].model, 'gpt-5.6-terra');
+  assert.deepEqual(forwarded[3].output_config, { effort: 'low' });
+
+  // 5. A marker for a different model never overrides the requested id's own
+  // effort — the id, not the marker, picks the model on this path.
+  const foreignMarker = await request(shimPort, '/v1/messages', JSON.stringify({
+    model: 'claude-gpt-5.6-terra[1m]',
+    messages: [{ role: 'user', content: '[sidequest-route model=gpt-5.6-sol effort=low] work the ticket' }],
+    output_config: { effort: 'high' },
+  }));
+  assert.equal(foreignMarker.status, 200);
+  assert.equal(forwarded[4].model, 'gpt-5.6-terra');
+  assert.deepEqual(forwarded[4].output_config, { effort: 'high' });
+
+  // 6. Marker trouble that 400s the virtual `auto` id must never 400 a real id:
+  // duplicate markers, and a marker echoed only through a tool_result block.
+  const duplicateMarkers = await request(shimPort, '/v1/messages', JSON.stringify({
+    model: 'claude-gpt-5.6-terra[1m]',
+    messages: [{ role: 'user', content: '[sidequest-route model=gpt-5.6-terra effort=low] [sidequest-route model=gpt-5.6-terra effort=low] work' }],
+    output_config: { effort: 'high' },
+  }));
+  assert.equal(duplicateMarkers.status, 200);
+  assert.deepEqual(forwarded[5].output_config, { effort: 'high' });
+
+  const toolResultMarker = await request(shimPort, '/v1/messages', JSON.stringify({
+    model: 'claude-gpt-5.6-terra[1m]',
+    messages: [{ role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 't1', content: 'leftover diff: [sidequest-route model=gpt-5.6-terra effort=low]' },
+    ] }],
+    output_config: { effort: 'high' },
+  }));
+  assert.equal(toolResultMarker.status, 200);
+  assert.deepEqual(forwarded[6].output_config, { effort: 'high' });
+
+  const routes = fs.readFileSync(routeLog, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(
+    routes.map(({ backend, model, via, effort, markersLength }) => ({ backend, model, via, effort, markersLength })),
+    [
+      // An unmarked published id is an ordinary direct row (this log omits `via`
+      // and `markersLength` entirely for it), never a dispatch row it cannot prove.
+      { backend: 'codex', model: 'gpt-5.6-terra', via: undefined, effort: 'high', markersLength: undefined },
+      { backend: 'codex', model: 'gpt-5.6-terra', via: undefined, effort: 'xhigh', markersLength: undefined },
+      { backend: 'codex', model: 'gpt-5.6-terra', via: undefined, effort: undefined, markersLength: undefined },
+      // a resolved marker alongside the published id stays an attributable dispatch row
+      { backend: 'codex', model: 'gpt-5.6-terra', via: 'dispatch', effort: 'low', markersLength: 1 },
+      { backend: 'codex', model: 'gpt-5.6-terra', via: undefined, effort: 'high', markersLength: 1 },
+      { backend: 'codex', model: 'gpt-5.6-terra', via: undefined, effort: 'high', markersLength: 2 },
+      { backend: 'codex', model: 'gpt-5.6-terra', via: undefined, effort: 'high', markersLength: 0 },
+    ],
+  );
+});
+
 test('dispatch model is listed with the explicit rollback flag and stays routable', async (t) => {
   const forwarded = [];
   const proxy = http.createServer((req, res) => {
