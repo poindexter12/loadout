@@ -54,8 +54,9 @@ test('a ticket route override prepares its own marker and leaves sibling routing
   const overrideDispatch = store.prepareDispatch(slug, overridden.ref, { allowUnscoped: true, sessionId: 'ticket-override' });
   const siblingDispatch = store.prepareDispatch(slug, sibling.ref, { allowUnscoped: true, sessionId: 'ticket-sibling' });
 
-  assert.deepEqual(overrideDispatch.ticket.dispatch.route, { model: 'codex-sol', effort: 'high', marker: 'gpt-5.6-sol' });
-  assert.deepEqual(siblingDispatch.ticket.dispatch.route, { model: 'codex-terra', effort: 'medium', marker: 'gpt-5.6-terra' });
+  // A pinned route carries no marker; the override still has to reach only its own ticket.
+  assert.deepEqual(overrideDispatch.ticket.dispatch.route, { model: 'codex-sol', effort: 'high' });
+  assert.deepEqual(siblingDispatch.ticket.dispatch.route, { model: 'codex-terra', effort: 'medium' });
   assert.deepEqual(store.getCategory('ticket.override').route, { model: 'codex-terra', effort: 'medium' });
 });
 
@@ -119,7 +120,7 @@ test('native-agent applies explicit route override refusals before spawning', ()
   assert.equal(sameProviderResult.status, 0, sameProviderResult.stderr);
   const spawned = JSON.parse(sameProviderResult.stdout);
   assert.equal(spawned.effort, 'high');
-  assert.equal(spawned.spawn.subagent_type, 'sidequest:sidequest-exec-dispatch');
+  assert.equal(spawned.spawn.subagent_type, 'sidequest-exec-codex-gpt-5-6-sol-1m-high');
 });
 
 export {};

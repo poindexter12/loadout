@@ -143,7 +143,7 @@ function otherEffort(effort?: any) {
 test('Codex category routes reject a generic executor even when effort matches', () => {
   const ref = seed('guard.codex');
   const derived = ticket(ref);
-  const expected = 'sidequest-exec-dispatch';
+  const expected = 'sidequest-exec-codex-test-high';
   const rejected = runCli(['claim', ref, '--by', 'w1', '--effort', derived.effort, '--executor', `sidequest-exec-${derived.effort}`]);
   assert.notEqual(rejected.status, 0);
   assert.match(rejected.stdout + rejected.stderr, new RegExp(expected));
@@ -160,16 +160,16 @@ test('SQ-2205: an unprepared readonly Codex claim expects the readonly executor,
   const slug = store.ensureProject(PROJ).slug;
   const ref = seed('guard.readonly');
   const derived = ticket(ref);
-  assert.equal(derived.exec.agent, 'sidequest-exec-dispatch');
+  assert.equal(derived.exec.agent, 'sidequest-exec-codex-test-high');
   assert.ok(!derived.dispatchNonce, 'the fixture claims with no dispatch prepared');
 
-  const readonlyName = store.claimTicket(slug, ref, 'sq-2205-readonly-name', { executor: 'sidequest-exec-dispatch-readonly' });
+  const readonlyName = store.claimTicket(slug, ref, 'sq-2205-readonly-name', { executor: 'sidequest-exec-codex-readonly-test-high' });
   assert.equal(readonlyName.reason, 'dispatch_required', 'the ticket answers to its readonly name, so the only thing missing is a dispatch');
 
-  const readWriteName = store.claimTicket(slug, ref, 'sq-2205-read-write-name', { executor: 'sidequest-exec-dispatch' });
+  const readWriteName = store.claimTicket(slug, ref, 'sq-2205-read-write-name', { executor: 'sidequest-exec-codex-test-high' });
   assert.equal(readWriteName.reason, 'executor_mismatch');
-  assert.equal(readWriteName.expectedExecutor, 'sidequest-exec-dispatch-readonly');
-  assert.match(readWriteName.message, /spawn sidequest-exec-dispatch-readonly/);
+  assert.equal(readWriteName.expectedExecutor, 'sidequest-exec-codex-readonly-test-high');
+  assert.match(readWriteName.message, /spawn sidequest-exec-codex-readonly-test-high/);
   assert.equal(ticket(ref).status, 'todo');
 
   const refusedDirect = store.claimTicket(slug, ref, 'sq-2205-direct', {
@@ -177,7 +177,7 @@ test('SQ-2205: an unprepared readonly Codex claim expects the readonly executor,
     reason: 'Context already loaded in this session for these files.',
   });
   assert.equal(refusedDirect.reason, 'direct_not_allowed');
-  assert.equal(refusedDirect.expectedExecutor, 'sidequest-exec-dispatch-readonly');
+  assert.equal(refusedDirect.expectedExecutor, 'sidequest-exec-codex-readonly-test-high');
 });
 
 test('a category-route effort mismatch refuses the claim without mutation', () => {
@@ -378,9 +378,9 @@ test('instant dispatch targets the stable executor, gates the claim, and clears 
   const preparedDone = prepareBoundDispatch(slug, doneRef);
   assert.equal(preparedDone.ok, true);
   assert.ok(preparedDone.token);
-  // Instant dispatch points the guard at the STABLE per-model executor, not a
-  // fresh per-ticket definition, and writes no def file.
-  assert.equal(preparedDone.ticket.dispatchExecutor, 'sidequest-exec-dispatch');
+  // Instant dispatch points the guard at the STABLE per-(model, effort) pin, not
+  // a fresh per-ticket definition.
+  assert.equal(preparedDone.ticket.dispatchExecutor, 'sidequest-exec-codex-test-high');
   assert.equal(preparedDone.ticket.dispatchExecutor, ticket(doneRef).exec.agent);
   // The stable executor is registered from session start; closeout on done/release
   // must never delete it (it is not a per-ticket temp def).
@@ -401,7 +401,7 @@ test('instant dispatch targets the stable executor, gates the claim, and clears 
 
   const releaseRef = seed('guard.codex');
   const preparedRelease = prepareBoundDispatch(slug, releaseRef);
-  assert.equal(preparedRelease.ticket.dispatchExecutor, 'sidequest-exec-dispatch');
+  assert.equal(preparedRelease.ticket.dispatchExecutor, 'sidequest-exec-codex-test-high');
   assert.equal(cliJson(['claim', releaseRef, '--by', 'release-token', '--token-file', preparedRelease.ticket.dispatch.tokenFile, '--executor', preparedRelease.ticket.dispatchExecutor]).ok, true);
   const released = cliJson(['release', releaseRef, '--by', 'release-token', '--status', 'todo']);
   assert.equal(released.ticket.dispatchNonce, null);
@@ -647,8 +647,8 @@ test('instant dispatch returns a stable executor, fetch stub, and token', () => 
   const dispatched = cliJson(['dispatch', ref, '--unverified-transport', '--allow-unscoped']);
   assert.equal(dispatched.ref, ref);
   assert.equal(dispatched.mode, 'instant');
-  assert.equal(dispatched.agent, 'sidequest-exec-dispatch');
-  assert.equal(dispatched.spawn.subagent_type, `sidequest:${dispatched.agent}`);
+  assert.equal(dispatched.agent, 'sidequest-exec-codex-test-high');
+  assert.equal(dispatched.spawn.subagent_type, dispatched.agent);
   assert.equal(dispatched.tokenPrefix, dispatched.token.slice(0, 12));
   assert.equal(Object.hasOwn(dispatched, 'briefing'), false);
   assert.ok(Buffer.byteLength(dispatched.spawn.prompt) < 1200);
@@ -667,7 +667,7 @@ test('dispatch always returns the stable executor and does not write a ticket de
   const agents = path.join(SIDEQUEST_HOME, 'agents');
   const dispatched = cliJson(['dispatch', ref, '--unverified-transport', '--allow-unscoped']);
   assert.equal(dispatched.mode, 'instant');
-  assert.equal(dispatched.agent, 'sidequest-exec-dispatch');
+  assert.equal(dispatched.agent, 'sidequest-exec-codex-test-high');
   assert.equal(ticket(ref).dispatchExecutor, dispatched.agent);
   assert.ok(!fs.existsSync(path.join(agents, `sidequest-ticket-${ref.toLowerCase()}.md`)));
   assert.doesNotMatch(JSON.stringify(dispatched), /ephemeral/);

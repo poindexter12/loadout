@@ -453,14 +453,22 @@ priority, story and dependency state, every chronological comment, and every att
 path. It inspects every readable attachment and reports missing or unreadable paths before implementation.
 Stable executors are
 ready from session start. Claude routes pass `model: exec.model`; Codex routes
-omit `model`: the shared `sidequest-exec-dispatch` def, or `sidequest-exec-dispatch-readonly` for a readonly
-category, pins the virtual `claude-codex-auto`,
-and `spawn.prompt` ends with `[sidequest-route model=... effort=...]`, which tells the codex-gateway shim which real
-model and effort to run, so pass the prompt verbatim, never write another such line, and never batch tickets
-stamped with different models into one spawn. The gateway route log records both values per dispatch; a marker effort that differs from the board stamp in an audit means the prompt was hand-edited. Claude builtins are provisioned at all five effort
-levels; Codex dispatch is one read-write def and one readonly def, because the route marker carries the
-effort. Route edits change only board data; the executor def set
-is fixed, so nothing is written or registered when a route changes. The executor claims with the
+omit `model`, and the executor definition itself carries the route: a per-(model, effort) def such as
+`sidequest-exec-codex-gpt-5-6-terra-1m-high` (or `sidequest-exec-codex-readonly-...` for a readonly
+category) pins the published model id in `model:` and the effort in `effort:`, which Claude Code sends
+as `output_config.effort`. Both halves are already set, so `spawn.prompt` carries NO
+`[sidequest-route ...]` marker: pass the prompt verbatim, never write such a line (it would override
+the pinned effort, and the spawn gate denies it), and never batch tickets stamped with different
+models into one spawn. The gateway route log records both values per dispatch. Claude builtins are
+provisioned at all five effort levels. Codex defs are written at runtime, because external models are
+discovered at runtime: a route edit to a model and effort not already registered writes two user-scoped
+defs (read-write and readonly) and retires the pair it supersedes, so unlike the Claude ladder the Codex
+def set is NOT fixed. Setting `SIDEQUEST_DISPATCH_EFFORT_CARRIER=marker` restores the legacy carriage for
+a model-gateway older than 0.53.0: the effort-collapsed `sidequest-exec-dispatch` and
+`sidequest-exec-dispatch-readonly` defs pinning the virtual `claude-codex-auto`, with model and effort
+riding one `[sidequest-route model=... effort=...]` marker that must reach the prompt intact; under that
+carriage a marker effort differing from the board stamp in an audit means the prompt was hand-edited.
+`route_recipe`'s `effortCarrier` reports which carriage is live. The executor claims with the
 returned token and exact stable executor name.
 
 Cross-session adoption is a fresh `dispatch <ref>` in the adopting session. It rotates

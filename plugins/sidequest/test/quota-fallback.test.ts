@@ -176,7 +176,8 @@ test('known Fable quota failure prepares the exact category fallback and preserv
   assert.deepEqual(current.category.fallback, { model: 'codex-gpt-5-6-sol', effort: 'max' });
   const pulse = store.pulsePayload(slug, ticket.ref);
   assert.deepEqual(pulse.dispatch.route, { model: 'codex-gpt-5-6-sol', effort: 'max' });
-  assert.equal(current.dispatch.route.marker, 'gpt-5.6-sol');
+  // The prepared fallback is pinned, not marked: no marker survives on the route.
+  assert.equal(current.dispatch.route.marker, undefined);
   assert.equal(pulse.dispatch.attempts.length, 1);
   assert.equal(pulse.dispatch.attempts[0].outcome, 'quota_exhausted');
   assert.equal(pulse.dispatch.attempts[0].failure.signature, "You've reached your Fable limit");
@@ -186,7 +187,7 @@ test('known Fable quota failure prepares the exact category fallback and preserv
   const adopted = store.prepareDispatch(slug, ticket.ref, { allowUnscoped: true, sessionId: 'quota-store-adopted' });
   assert.equal(adopted.reused, true);
   assert.equal(adopted.token, recovered.token);
-  assert.equal(adopted.ticket.dispatchExecutor, 'sidequest-exec-dispatch');
+  assert.equal(adopted.ticket.dispatchExecutor, 'sidequest-exec-codex-gpt-5-6-sol-1m-max');
   assert.notEqual(adopted.ticket.dispatchExecutor, currentExecutor);
   assert.equal(adopted.ticket.dispatch.healedExecutorName, undefined);
   assert.equal(store.getTicket(slug, ticket.ref).dispatch.sessionId, 'quota-store-adopted');
@@ -279,7 +280,10 @@ test('PostToolUseFailure ignores generic errors and prepares quota fallback for 
   assert.equal(cliDispatch.recovery.failedModel, 'fable');
   assert.equal(cliDispatch.effort, 'max');
   assert.equal(cliDispatch.exec.backend, 'codex');
-  assert.match(cliDispatch.spawn.prompt, /\[sidequest-route model=gpt-5\.6-sol effort=max\]/);
+  // The recovered route travels in the pin, so the prompt must carry no marker at all
+  // (one would override the pinned effort, and the spawn gate now denies it).
+  assert.doesNotMatch(cliDispatch.spawn.prompt, /\[sidequest-route/);
+  assert.match(cliDispatch.spawn.subagent_type, /^sidequest-exec-codex-[a-z0-9-]+-max$/);
   assert.equal(store.getTicket(slug, ticket.ref).dispatch.sessionId, 'quota-cli-adopted');
 
   const mcpRuntimeSessionId = 'quota-mcp-runtime-session';
@@ -293,7 +297,7 @@ test('PostToolUseFailure ignores generic errors and prepares quota fallback for 
     });
     assert.equal(mcpDispatch.token, cliDispatch.token);
     assert.equal(mcpDispatch.recovery.model, 'codex-gpt-5-6-sol');
-    assert.equal(mcpDispatch.spawn.subagent_type, 'sidequest:sidequest-exec-dispatch');
+    assert.equal(mcpDispatch.spawn.subagent_type, 'sidequest-exec-codex-gpt-5-6-sol-1m-max');
     assert.equal(store.getTicket(slug, ticket.ref).dispatch.sessionId, mcpRuntimeSessionId);
   } finally {
     if (previousMcpRuntimeSessionId == null) delete process.env.CLAUDE_CODE_SESSION_ID;

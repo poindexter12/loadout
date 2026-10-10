@@ -54,10 +54,13 @@ test('route returns the live workflow recipe as JSON', () => {
     route: { model: 'codex-terra', effort: 'medium' },
     runsLabel: 'Codex Terra',
     agent: {
-      model: 'claude-codex-auto',
-      promptPrefix: '[sidequest-route model=gpt-5.6-terra effort=medium]\n\n',
+      // SQ-300: the recipe advertises the PUBLISHED id the per-(model, effort)
+      // executor definition pins, and no prompt prefix, because the effort rides
+      // that definition's `effort:` frontmatter as output_config.effort.
+      model: 'claude-gpt-5.6-terra[1m]',
+      promptPrefix: '',
     },
-    effortCarrier: 'marker',
+    effortCarrier: 'frontmatter',
     warnings: [],
     profile: { id: 'coding', revision: 2 },
     categorySource: { kind: 'profile', baseProfileId: 'coding' },
@@ -94,7 +97,10 @@ test('route resolves a ticket override without changing its sibling recipe', () 
   const overrideRecipe = jsonCli('route', 'workflow-override', '--ticket', overridden.body.ticket.ref);
   assert.equal(overrideRecipe.result.status, 0, overrideRecipe.result.stderr);
   assert.deepEqual(overrideRecipe.body.route, { model: 'codex-sol', effort: 'high' });
-  assert.equal(overrideRecipe.body.agent.promptPrefix, '[sidequest-route model=gpt-5.6-sol effort=high]\n\n');
+  // The override is carried by the pinned published id, not a prefix (SQ-300).
+  assert.equal(overrideRecipe.body.agent.model, 'claude-gpt-5.6-sol[1m]');
+  assert.equal(overrideRecipe.body.agent.promptPrefix, '');
+  assert.equal(overrideRecipe.body.effortCarrier, 'frontmatter');
   assert.deepEqual(overrideRecipe.body.ticket, {
     ref: overridden.body.ticket.ref,
     route: { model: 'codex-sol', effort: 'high' },
@@ -103,7 +109,23 @@ test('route resolves a ticket override without changing its sibling recipe', () 
   const siblingRecipe = jsonCli('route', 'workflow-override', '--ticket', sibling.body.ticket.ref);
   assert.equal(siblingRecipe.result.status, 0, siblingRecipe.result.stderr);
   assert.deepEqual(siblingRecipe.body.route, { model: 'codex-terra', effort: 'medium' });
-  assert.equal(siblingRecipe.body.agent.promptPrefix, '[sidequest-route model=gpt-5.6-terra effort=medium]\n\n');
+  assert.equal(siblingRecipe.body.agent.model, 'claude-gpt-5.6-terra[1m]');
+  assert.equal(siblingRecipe.body.agent.promptPrefix, '');
+});
+
+test('the marker opt-out restores the virtual pin and the route marker', () => {
+  const added = jsonCli('category', 'add', 'workflow-marker', '--profile', 'coding', '--name', 'Workflow Marker', '--route-model', 'codex-terra', '--route-effort', 'medium');
+  assert.equal(added.result.status, 0, added.result.stderr);
+
+  const markerEnv = Object.assign({}, env, { SIDEQUEST_DISPATCH_EFFORT_CARRIER: 'marker' });
+  const result = spawnSync(process.execPath, [BIN, 'route', 'workflow-marker', '--json'], { encoding: 'utf8', env: markerEnv });
+  assert.equal(result.status, 0, result.stderr);
+  const body = JSON.parse(result.stdout);
+  // A relay older than SQ-299 resolves only the marker, so the legacy carriage
+  // must stay reachable: the virtual pin plus the full marker prefix.
+  assert.equal(body.effortCarrier, 'marker');
+  assert.equal(body.agent.model, 'claude-codex-auto');
+  assert.equal(body.agent.promptPrefix, '[sidequest-route model=gpt-5.6-terra effort=medium]\n\n');
 });
 
 export {};

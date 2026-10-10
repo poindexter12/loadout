@@ -110,11 +110,11 @@ test('prepared executor identity is projected unchanged for writing and readonly
   const preparedWriting = store.prepareDispatch(slug, writing.ref, { sessionId: 'writing-identity' });
   const preparedReadonly = store.prepareDispatch(slug, readonly.ref, { sessionId: 'readonly-identity' });
 
-  assert.equal(preparedWriting.ticket.dispatchExecutor, 'sidequest-exec-dispatch');
-  assert.equal(preparedReadonly.ticket.dispatchExecutor, 'sidequest-exec-dispatch-readonly');
+  assert.equal(preparedWriting.ticket.dispatchExecutor, 'sidequest-exec-codex-test-high');
+  assert.equal(preparedReadonly.ticket.dispatchExecutor, 'sidequest-exec-codex-readonly-test-high');
   for (const prepared of [preparedWriting, preparedReadonly]) {
     assert.equal(prepared.ticket.dispatch.executor, prepared.ticket.dispatchExecutor);
-    assert.equal(agentsync.agentSpawn('binding-worker', undefined, null, prepared.ticket.dispatchExecutor, 'claim first').subagent_type, `sidequest:${prepared.ticket.dispatchExecutor}`);
+    assert.equal(agentsync.agentSpawn('binding-worker', undefined, null, prepared.ticket.dispatchExecutor, 'claim first').subagent_type, prepared.ticket.dispatchExecutor, 'a runtime pin is user-scoped, so it spawns under its bare name with no sidequest: prefix');
     assert.match(agentsync.renderTicketBriefing(prepared.ticket, prepared.token, slug, PROJECT), new RegExp(`executor: "${prepared.ticket.dispatchExecutor}"`));
   }
 
@@ -147,7 +147,7 @@ test('bundled plugin types survive launch, runtime binding and claim without cha
     const executor = prepared.ticket.dispatchExecutor;
     const prompt = agentsync.renderDispatchStub(prepared.ticket, PROJECT);
     const spawn = agentsync.agentSpawn(prepared.ticket.dispatch.launchName, null, null, executor, prompt, prepared.ticket.dispatch.description);
-    assert.equal(spawn.subagent_type, `sidequest:${executor}`);
+    assert.equal(spawn.subagent_type, executor, 'a runtime pin is user-scoped, so it spawns bare');
     for (const rejectedType of [`other:${executor}`, `${spawn.subagent_type}-extra`, 'sidequest:general-purpose']) {
       const rejected: { hookSpecificOutput: { permissionDecision: string } } = JSON.parse(runHook('force-exec-bypass.js', {
         tool_name: 'Agent', cwd: PROJECT, session_id: sessionId, tool_input: { ...spawn, subagent_type: rejectedType },

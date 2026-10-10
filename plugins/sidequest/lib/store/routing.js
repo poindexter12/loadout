@@ -18,6 +18,11 @@ function createRouting(dependencies) {
     residentCache,
     stableClaudeName,
     stableDispatchName,
+    stableReadOnlyClaudeName,
+    stableReadOnlyDispatchName,
+    stablePinnedDispatchName,
+    stableReadOnlyPinnedDispatchName,
+    dispatchPinToken,
     transaction,
     cloneCached,
     dispatchState
@@ -120,21 +125,129 @@ function createRouting(dependencies) {
   function dispatchModelFor(id) {
     return String(id || "").replace(/^claude-(?:codex-)?/, "").replace(/\[1m\]$/, "");
   }
+  function publishedModelFor(id) {
+    return String(id || "").replace(/^claude-codex-/, "claude-");
+  }
+  const EFFORT_CARRIERS = Object.freeze(["frontmatter", "marker"]);
+  const EFFORT_CARRIER_DEFAULT = "frontmatter";
+  const EFFORT_CARRIER_KEY = "dispatch-effort-carrier";
+  function normalizeEffortCarrier(value) {
+    const normalized = String(value == null ? "" : value).trim().toLowerCase();
+    return EFFORT_CARRIERS.includes(normalized) ? normalized : null;
+  }
+  function dispatchEffortCarrier() {
+    const override = normalizeEffortCarrier(process.env.SIDEQUEST_DISPATCH_EFFORT_CARRIER);
+    if (override) return override;
+    const cache = residentCache();
+    if (cache.dispatchEffortCarrier === void 0) {
+      let stored = null;
+      try {
+        const row = readGlobal(EFFORT_CARRIER_KEY, null);
+        stored = normalizeEffortCarrier(row && typeof row === "object" ? row.carrier : row);
+      } catch (_) {
+        stored = null;
+      }
+      cache.dispatchEffortCarrier = stored || EFFORT_CARRIER_DEFAULT;
+    }
+    return cache.dispatchEffortCarrier;
+  }
+  function setDispatchEffortCarrier(carrier) {
+    const normalized = normalizeEffortCarrier(carrier);
+    if (!normalized) throw new Error(`Dispatch effort carrier must be one of: ${EFFORT_CARRIERS.join(", ")}.`);
+    return mutateRoutingPolicy({ allProjects: true }, (handle) => {
+      db.putRow(handle, "globals", { key: EFFORT_CARRIER_KEY, data: { carrier: normalized } });
+      return normalized;
+    }).result;
+  }
   function dispatchRouteState(model, effort, exec) {
+    const carriesMarker = Boolean(exec && exec.dispatchModel && exec.effortCarrier !== "frontmatter");
     return {
       model,
       effort,
-      ...exec && exec.dispatchModel ? { marker: exec.dispatchModel } : {}
+      ...carriesMarker ? { marker: exec.dispatchModel } : {}
     };
+  }
+  function pinnedDispatchNames(apiModel, effort) {
+    const pinnedModel = publishedModelFor(apiModel);
+    const token = dispatchPinToken(pinnedModel);
+    if (!token) return null;
+    try {
+      return {
+        token,
+        pinnedModel,
+        agent: stablePinnedDispatchName(token, effort),
+        readOnlyAgent: stableReadOnlyPinnedDispatchName(token, effort)
+      };
+    } catch (_) {
+      return null;
+    }
   }
   function execFromBackend(backend, effort) {
     if (backend.backend === "codex") {
       const resolvedEffort = effort || HAIKU_BACKEND_EFFORT;
-      return { agent: stableDispatchName(resolvedEffort), effort: resolvedEffort, model: null, spawnId: backend.id, dispatchModel: dispatchModelFor(backend.id), backend: "codex", source: backend.source, slug: backend.slug, runsModel: backend.slug, apiModel: backend.id, runsLabel: backend.label || backend.slug, dispatch: "native-agent" };
+      const pinned = dispatchEffortCarrier() === "frontmatter" ? pinnedDispatchNames(backend.id, resolvedEffort) : null;
+      return {
+        agent: pinned ? pinned.agent : stableDispatchName(resolvedEffort),
+        readOnlyAgent: pinned ? pinned.readOnlyAgent : stableReadOnlyDispatchName(resolvedEffort),
+        effortCarrier: pinned ? "frontmatter" : "marker",
+        pinToken: pinned ? pinned.token : null,
+        pinnedModel: pinned ? pinned.pinnedModel : null,
+        effort: resolvedEffort,
+        model: null,
+        spawnId: backend.id,
+        dispatchModel: dispatchModelFor(backend.id),
+        backend: "codex",
+        source: backend.source,
+        slug: backend.slug,
+        runsModel: backend.slug,
+        apiModel: backend.id,
+        runsLabel: backend.label || backend.slug,
+        dispatch: "native-agent"
+      };
     }
     const runtime = backend.slug;
     const agent = effort ? stableClaudeName(effort) : null;
-    return { agent, model: runtime, spawnId: runtime, backend: "claude", slug: runtime, runsModel: runtime, apiModel: runtime, runsLabel: backend.label || CLAUDE_RUNTIME_LABELS[runtime], dispatch: "native-agent" };
+    return { agent, readOnlyAgent: effort ? stableReadOnlyClaudeName(effort) : null, effortCarrier: "none", pinToken: null, pinnedModel: null, model: runtime, spawnId: runtime, backend: "claude", slug: runtime, runsModel: runtime, apiModel: runtime, runsLabel: backend.label || CLAUDE_RUNTIME_LABELS[runtime], dispatch: "native-agent" };
+  }
+  function configuredDispatchPins(opts) {
+    if (dispatchEffortCarrier() !== "frontmatter") return [];
+    let projects = [void 0];
+    if (opts && opts.project) projects = [opts.project];
+    else {
+      try {
+        projects = projects.concat(listProjects() || []);
+      } catch (_) {
+      }
+    }
+    const pins = /* @__PURE__ */ new Map();
+    for (const project of projects) {
+      const projectPath = project && (project.path || project.root || project);
+      let categories = [];
+      try {
+        categories = getCategories(projectPath ? { project: projectPath } : {}) || [];
+      } catch (_) {
+        continue;
+      }
+      for (const category of categories) {
+        let resolved = null;
+        try {
+          resolved = resolveCategoryRoute(category);
+        } catch (_) {
+          continue;
+        }
+        const exec = resolved && resolved.exec;
+        if (!exec || exec.backend !== "codex" || !exec.pinToken || !exec.effort) continue;
+        pins.set(`${exec.pinToken}:${exec.effort}`, {
+          token: exec.pinToken,
+          effort: exec.effort,
+          apiModel: exec.pinnedModel,
+          runsLabel: exec.runsLabel,
+          agent: exec.agent,
+          readOnlyAgent: exec.readOnlyAgent
+        });
+      }
+    }
+    return Array.from(pins.values());
   }
   function resolveExec(model, effort) {
     const backend = availableRoute(model);
@@ -1177,6 +1290,11 @@ function createRouting(dependencies) {
     resolvedDispatchRoute,
     dispatchModelFor,
     dispatchRouteState,
+    EFFORT_CARRIERS,
+    EFFORT_CARRIER_DEFAULT,
+    dispatchEffortCarrier,
+    setDispatchEffortCarrier,
+    configuredDispatchPins,
     execFromBackend,
     resolveExec,
     resolveReportedExec,

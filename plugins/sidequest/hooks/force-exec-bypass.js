@@ -357,7 +357,16 @@ var PASS_THROUGH_AGENT_TYPES = /* @__PURE__ */ new Set(["Explore", "claude-code-
 var EXECUTOR_HELPER_TYPES = /* @__PURE__ */ new Set(["Explore", "claude-code-guide", "web-researcher", "general-purpose"]);
 var HELPER_REVIEW_WORK_RE = /\b(?:audits?|auditors?|auditing|audited|reviews?|reviewers?|reviewing|reviewed|review-audit)\b/i;
 var WRITE_TOOLS = /* @__PURE__ */ new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+var READ_ONLY_PIN_RE = /^sidequest-exec-codex-readonly-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-(low|medium|high|xhigh|max)$/;
+var PIN_RE = /^sidequest-exec-codex-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-(low|medium|high|xhigh|max)$/;
+function isPinnedDispatchExecutor(type) {
+  return READ_ONLY_PIN_RE.test(type) || PIN_RE.test(type);
+}
 function fallbackClassify(type) {
+  const readOnlyPin = READ_ONLY_PIN_RE.exec(type);
+  if (readOnlyPin) return { kind: "read_only_codex_dispatch", effort: readOnlyPin[1] || null };
+  const pin = PIN_RE.exec(type);
+  if (pin) return { kind: "codex_dispatch", effort: pin[1] || null };
   const readOnlyDispatch = /^sidequest-exec-dispatch-readonly(?:-(low|medium|high|xhigh|max))?$/.exec(type);
   if (readOnlyDispatch) return { kind: "read_only_codex_dispatch", effort: readOnlyDispatch[1] || null };
   const readOnlyBuiltin = /^sidequest-exec-readonly-(low|medium|high|xhigh|max)$/.exec(type);
@@ -1130,9 +1139,18 @@ function main() {
       return;
     }
     const route = preparedRoute;
-    const expectedMarker = route?.marker ?? route?.model;
-    if (!route || markers.length !== 1 || markers[0]?.model !== expectedMarker || markers[0]?.effort !== route.effort) {
-      writeDeny("PreToolUse", `sidequest: ticket resolved route is ${route?.model || "unavailable"} / ${route?.effort || "unavailable"}. Re-run dispatch and pass its spawn unchanged.`);
+    if (!route) {
+      writeDeny("PreToolUse", "sidequest: ticket resolved route is unavailable / unavailable. Re-run dispatch and pass its spawn unchanged.");
+      return;
+    }
+    if (!isPinnedDispatchExecutor(type)) {
+      const expectedMarker = route.marker ?? route.model;
+      if (markers.length !== 1 || markers[0]?.model !== expectedMarker || markers[0]?.effort !== route.effort) {
+        writeDeny("PreToolUse", `sidequest: ticket resolved route is ${route.model || "unavailable"} / ${route.effort || "unavailable"}. Re-run dispatch and pass its spawn unchanged.`);
+        return;
+      }
+    } else if (markers.length !== 0) {
+      writeDeny("PreToolUse", `sidequest: ${type} pins its model and effort in its own definition, so its spawn must carry no [sidequest-route] marker; a marker would override the pinned effort. Re-run dispatch and pass its spawn unchanged.`);
       return;
     }
   }

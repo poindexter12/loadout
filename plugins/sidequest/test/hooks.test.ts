@@ -3354,7 +3354,12 @@ test('session-start: stays inside its byte budget and off the retired doctrine',
   assert.match(ctx, /board path refuses verified work, deliver it yourself through groomClose with deliveryCommit/i);
 });
 
-test('session-start does not create user-scoped stable executor definitions', () => {
+// The bundled ladder ships in the plugin package and must never wait for
+// SessionStart. SQ-300 adds the ONE deliberate exception: a codex route's
+// per-(model, effort) pin names a model discovered at runtime, so it cannot be
+// bundled at build time and is written user-scoped. The invariant that survives
+// is that nothing bundled is ever user-written.
+test('session-start writes only runtime codex pins into the user scope, never a bundled executor', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-hooks-agents-'));
   writeCategory(home, {
     id: 'hooks-codex',
@@ -3366,13 +3371,32 @@ test('session-start does not create user-scoped stable executor definitions', ()
   const first = JSON.parse(runSessionWithHome(home));
   const firstContext = first.hookSpecificOutput.additionalContext;
   assert.doesNotMatch(firstContext, /Executor definitions were just \(re\)provisioned/);
-  assert.ok(!fs.existsSync(path.join(home, 'agents')), 'bundled executors must not wait for SessionStart to create user files');
+  const agentsDir = path.join(home, 'agents');
+  const written = fs.existsSync(agentsDir) ? fs.readdirSync(agentsDir).sort() : [];
+  for (const file of written) {
+    assert.match(
+      file,
+      /^sidequest-exec-codex-(?:readonly-)?[a-z0-9-]+-(?:low|medium|high|xhigh|max)\.md$/,
+      `SessionStart may only write runtime codex pins into the user scope, not ${file}`
+    );
+  }
+  for (const bundled of ['sidequest-exec-dispatch.md', 'sidequest-exec-dispatch-readonly.md', 'sidequest-exec-high.md', 'sidequest-exec-readonly-high.md']) {
+    assert.ok(!written.includes(bundled), `${bundled} ships in the plugin package and must not be user-written`);
+  }
 
   const second = JSON.parse(runSessionWithHome(home));
   const secondContext = second.hookSpecificOutput.additionalContext;
   assert.doesNotMatch(secondContext, /Executor definitions were just \(re\)provisioned/);
+  // Content-compared, so a second start neither rewrites nor re-announces.
+  assert.deepStrictEqual(fs.existsSync(agentsDir) ? fs.readdirSync(agentsDir).sort() : [], written);
 });
-test('session-start removes legacy generated per-combo definitions without provisioning user files', () => {
+// SQ-300 revives the retired per-combo name (`sidequest-exec-codex-<model>-<effort>`)
+// for the published-id pins, so a stale file at that path is no longer pruned on
+// sight: it is content-compared and REWRITTEN when its route is still configured,
+// SessionStart provisions a pin for every configured codex route and prunes
+// every other generated file in the directory, so the retired per-combo scheme
+// is cleaned up rather than mistaken for a live pin.
+test('session-start writes pins for configured routes and prunes retired per-combo definitions', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-hooks-codex-'));
   writeCategory(home, {
     id: 'hooks-codex',
@@ -3383,13 +3407,37 @@ test('session-start removes legacy generated per-combo definitions without provi
   });
   const agents = path.join(home, 'agents');
   fs.mkdirSync(agents, { recursive: true });
-  const legacyFile = path.join(agents, 'sidequest-exec-codex-gpt-5-6-terra-high.md');
-  fs.writeFileSync(legacyFile, '<!-- generated-by: sidequest-agentsync -->\nold');
+  const staleBody = '<!-- generated-by: sidequest-agentsync -->\nold';
+  // The retired per-combo scheme tokenised the board SLUG, so it dropped the
+  // context window: `gpt-5-6-terra`. A pin tokenises the PUBLISHED id and keeps
+  // it: `gpt-5-6-terra-1m`. So none of these legacy names is a live pin, and all
+  // three must be pruned rather than adopted.
+  const legacyFiles = [
+    'sidequest-exec-codex-gpt-5-6-terra-high.md',
+    'sidequest-exec-codex-gpt-5-6-terra-low.md',
+    'sidequest-exec-codex-gpt-9-9-nova-max.md',
+  ].map((name) => path.join(agents, name));
+  for (const file of legacyFiles) fs.writeFileSync(file, staleBody);
+  // The configured route terra/high, under the pin naming.
+  const liveFile = path.join(agents, 'sidequest-exec-codex-gpt-5-6-terra-1m-high.md');
   const catalog = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-hooks-catalog-'));
   fs.mkdirSync(path.join(catalog, 'model-gateway'), { recursive: true });
   fs.writeFileSync(path.join(catalog, 'model-gateway', 'catalog.json'), JSON.stringify({ schemaVersion: 3, updatedAt: new Date().toISOString(), source: 'model-gateway', codexReadiness: { ready: true, state: 'ready', message: 'Codex readiness confirms the local gateway is ready.' }, models: [{ slug: 'codex-gpt-5-6-terra', id: 'claude-gpt-5.6-terra[1m]' }] }));
   runSessionWithHome(home, { SIDEQUEST_AGENTS_DIR: agents, SIDEQUEST_DISCOVERY_DIRS: catalog });
-  assert.ok(!fs.existsSync(legacyFile), 'legacy per-combo Codex executor must be pruned by session migration');
+
+  assert.ok(fs.existsSync(liveFile), 'the configured route must get its pin at SessionStart');
+  const written = fs.readFileSync(liveFile, 'utf8');
+  assert.match(written, /^model: claude-gpt-5\.6-terra\[1m\]$/m, 'the pin names the published id');
+  assert.match(written, /^effort: high$/m, 'the pin carries the route effort in frontmatter');
+  // The body must carry no actual marker DIRECTIVE. It does name the marker, in
+  // the prohibition against writing one, so the check is for `model=` rather than
+  // for the bare token.
+  assert.doesNotMatch(written, /\[sidequest-route model=/, 'the pin must carry no marker directive');
+  assert.match(written, /there is NO `\[sidequest-route \.\.\.\]` marker on this path/, 'the pin must forbid writing one');
+
+  for (const file of legacyFiles) {
+    assert.ok(!fs.existsSync(file), `a retired per-combo definition must be pruned: ${path.basename(file)}`);
+  }
   assert.ok(!fs.existsSync(path.join(agents, 'sidequest-exec-dispatch.md')), 'the plugin package provides the shared dispatch executor before SessionStart');
 });
 
@@ -4837,39 +4885,108 @@ test('pre-tool hook: prepared codex dispatch accepts the gateway-form route mark
     models: [{ slug: 'codex-gpt-5-6-terra', id: 'claude-gpt-5.6-terra[1m]' }],
   }));
   const previousDirs = process.env.SIDEQUEST_DISCOVERY_DIRS;
+  const previousCarrier = process.env.SIDEQUEST_DISPATCH_EFFORT_CARRIER;
   process.env.SIDEQUEST_DISCOVERY_DIRS = catalog;
+  // SQ-300 moved the default carriage to frontmatter, which emits no marker at
+  // all. The marker grammar still has to be audited exactly as before for a relay
+  // older than SQ-299, so this regression runs on the marker carriage explicitly.
+  process.env.SIDEQUEST_DISPATCH_EFFORT_CARRIER = 'marker';
+  const markerEnv = { SIDEQUEST_DISCOVERY_DIRS: catalog, SIDEQUEST_DISPATCH_EFFORT_CARRIER: 'marker' };
   try {
     const ticket = fixtureTicket('SQ-753 marker form regression', 'codex-gpt-5-6-terra', 'high');
     const prepared = store.prepareDispatch(slug, ticket.ref, { allowUnscoped: true, sessionId: `marker-form-${++sqSeq}` });
     assert.equal(prepared.ticket.dispatch.route.model, 'codex-gpt-5-6-terra');
     assert.equal(prepared.ticket.dispatch.route.marker, 'gpt-5.6-terra');
+    // The gate picks the carriage off the executor NAME, so the collapsed name is
+    // part of what keeps the marker grammar live here.
+    assert.equal(prepared.ticket.dispatchExecutor, 'sidequest-exec-dispatch');
 
-    const projectPath = store.readMeta(slug).path;
     const base = {
       subagent_type: prepared.ticket.dispatchExecutor,
       name: prepared.ticket.dispatch.launchName,
       description: prepared.ticket.dispatch.description,
       prompt: preparedPrompt(prepared),
     };
-    const exact = runForceBypassWithEnv(base, { SIDEQUEST_DISCOVERY_DIRS: catalog });
+    const exact = runForceBypassWithEnv(base, markerEnv);
     assert.ok(!exact.hookSpecificOutput.permissionDecision, 'the production marker form must be allowed');
     assert.equal(exact.hookSpecificOutput.updatedInput.mode, 'bypassPermissions');
 
     const retiredMarker = ['switch', 'board-route'].join('');
     const retired = runForceBypassWithEnv(
       { ...base, prompt: base.prompt.replace('sidequest-route', retiredMarker) },
-      { SIDEQUEST_DISCOVERY_DIRS: catalog }
+      markerEnv
     );
     assert.equal(retired.hookSpecificOutput.permissionDecision, 'deny');
     assert.match(retired.hookSpecificOutput.permissionDecisionReason, /ticket resolved route is/);
 
     const drifted = runForceBypassWithEnv(
       { ...base, prompt: base.prompt.replace('model=gpt-5.6-terra', 'model=gpt-5.6-sol') },
-      { SIDEQUEST_DISCOVERY_DIRS: catalog }
+      markerEnv
     );
     assert.equal(drifted.hookSpecificOutput.permissionDecision, 'deny');
     assert.match(drifted.hookSpecificOutput.permissionDecisionReason, /ticket resolved route is codex-gpt-5-6-terra \/ high/);
     assert.match(drifted.hookSpecificOutput.permissionDecisionReason, /pass its spawn unchanged/);
+  } finally {
+    if (previousDirs === undefined) delete process.env.SIDEQUEST_DISCOVERY_DIRS;
+    else process.env.SIDEQUEST_DISCOVERY_DIRS = previousDirs;
+    if (previousCarrier === undefined) delete process.env.SIDEQUEST_DISPATCH_EFFORT_CARRIER;
+    else process.env.SIDEQUEST_DISPATCH_EFFORT_CARRIER = previousCarrier;
+  }
+});
+
+// SQ-300: on the default carriage the pinned definition's frontmatter carries
+// both halves, so the spawn must carry no marker. SQ-299 gives a marker
+// precedence over output_config.effort, so one stray line would silently
+// override the pinned effort — the gate has to refuse it rather than pass it on.
+test('pre-tool hook: a pinned codex dispatch is allowed bare and denied with a marker (SQ-300)', () => {
+  const catalog = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-hooks-pin-form-'));
+  fs.mkdirSync(path.join(catalog, 'model-gateway'), { recursive: true });
+  fs.writeFileSync(path.join(catalog, 'model-gateway', 'catalog.json'), JSON.stringify({
+    schemaVersion: 3,
+    updatedAt: new Date().toISOString(),
+    source: 'model-gateway',
+    codexReadiness: { ready: true, state: 'ready', message: 'Codex readiness confirms the local gateway is ready.' },
+    models: [{ slug: 'codex-gpt-5-6-terra', id: 'claude-gpt-5.6-terra[1m]' }],
+  }));
+  const previousDirs = process.env.SIDEQUEST_DISCOVERY_DIRS;
+  process.env.SIDEQUEST_DISCOVERY_DIRS = catalog;
+  try {
+    const ticket = fixtureTicket('SQ-300 pinned dispatch', 'codex-gpt-5-6-terra', 'high');
+    const prepared = store.prepareDispatch(slug, ticket.ref, { allowUnscoped: true, sessionId: `pin-form-${++sqSeq}` });
+    // The executor is the per-(model, effort) pin, and the prepared route records
+    // no marker, which is how the gate knows to require none.
+    assert.equal(prepared.ticket.dispatchExecutor, 'sidequest-exec-codex-gpt-5-6-terra-1m-high');
+    assert.equal(prepared.ticket.dispatch.route.marker, undefined);
+
+    const base = {
+      subagent_type: prepared.ticket.dispatchExecutor,
+      name: prepared.ticket.dispatch.launchName,
+      description: prepared.ticket.dispatch.description,
+      prompt: preparedPrompt(prepared),
+    };
+    assert.doesNotMatch(base.prompt, /\[sidequest-route/, 'the prepared spawn must carry no marker');
+
+    const exact = runForceBypassWithEnv(base, { SIDEQUEST_DISCOVERY_DIRS: catalog });
+    assert.ok(!exact.hookSpecificOutput.permissionDecision, 'the prepared pinned spawn must be allowed');
+    assert.equal(exact.hookSpecificOutput.updatedInput.mode, 'bypassPermissions');
+    // The pin applies only with the Agent model parameter omitted; the gate must
+    // not reintroduce one.
+    assert.equal(exact.hookSpecificOutput.updatedInput.model, undefined);
+
+    const withMarker = runForceBypassWithEnv(
+      { ...base, prompt: `${base.prompt}\n[sidequest-route model=gpt-5.6-terra effort=high]` },
+      { SIDEQUEST_DISCOVERY_DIRS: catalog }
+    );
+    assert.equal(withMarker.hookSpecificOutput.permissionDecision, 'deny');
+    assert.match(withMarker.hookSpecificOutput.permissionDecisionReason, /must carry no \[sidequest-route\] marker/);
+
+    // Even a marker naming a different effort is refused, not silently honoured.
+    const driftedMarker = runForceBypassWithEnv(
+      { ...base, prompt: `${base.prompt}\n[sidequest-route model=gpt-5.6-terra effort=low]` },
+      { SIDEQUEST_DISCOVERY_DIRS: catalog }
+    );
+    assert.equal(driftedMarker.hookSpecificOutput.permissionDecision, 'deny');
+    assert.match(driftedMarker.hookSpecificOutput.permissionDecisionReason, /override the pinned effort/);
   } finally {
     if (previousDirs === undefined) delete process.env.SIDEQUEST_DISCOVERY_DIRS;
     else process.env.SIDEQUEST_DISCOVERY_DIRS = previousDirs;
@@ -4915,8 +5032,12 @@ test('pre-tool hook: exact prepared briefing is the sole dispatch launch authori
       mutate: (prompt: string) => prompt.replace(`--project "${BOARD_PATH}"`, '--project "C:\\wrong-project"'),
     },
     {
-      name: 'route mismatch',
-      mutate: (prompt: string) => prompt.replace('model=gpt-5.6-terra', 'model=gpt-5.6-sol'),
+      // Under the SQ-300 default carriage the prepared prompt carries no marker,
+      // so route tampering means ADDING one: the gateway would give it precedence
+      // over the pinned output_config.effort. The marker-carriage equivalent, a
+      // marker whose model was swapped, is covered by the SQ-753 regression above.
+      name: 'route marker smuggled onto a pinned spawn',
+      mutate: (prompt: string) => `${prompt}\n[sidequest-route model=gpt-5.6-sol effort=low]`,
     },
   ];
   for (const dispatchCase of cases) {
@@ -5146,9 +5267,12 @@ test('readonly category executors pass spawn correction, start binding, and stop
   try {
     const cases = [
       ['codebase-exploration', 'sonnet', 'low', 'sidequest-exec-readonly-low'],
-      ['research', 'codex-gpt-5-6-sol', 'medium', 'sidequest-exec-dispatch-readonly'],
+      // SQ-300: a readonly codex route resolves to its own per-(model, effort) pin,
+      // so the two codex rows differ by effort where they used to collapse onto one
+      // effort-free name.
+      ['research', 'codex-gpt-5-6-sol', 'medium', 'sidequest-exec-codex-readonly-gpt-5-6-sol-1m-medium'],
       ['review-audit', 'sonnet', 'high', 'sidequest-exec-readonly-high'],
-      ['spike-investigation', 'codex-gpt-5-6-sol', 'xhigh', 'sidequest-exec-dispatch-readonly'],
+      ['spike-investigation', 'codex-gpt-5-6-sol', 'xhigh', 'sidequest-exec-codex-readonly-gpt-5-6-sol-1m-xhigh'],
     ] as const;
     const projectPath = store.readMeta(slug).path;
 
@@ -5158,9 +5282,6 @@ test('readonly category executors pass spawn correction, start binding, and stop
       const sessionId = `readonly-${category}-${++sqSeq}`;
       const prepared = store.prepareDispatch(slug, ticket.ref, { allowUnscoped: true, sessionId });
       assert.equal(prepared.ticket.dispatchExecutor, expectedExecutor);
-      const marker = expectedExecutor.includes('dispatch')
-        ? `\n[sidequest-route model=${prepared.ticket.dispatch.route.marker} effort=${effort}]`
-        : '';
       const prompt = preparedPrompt(prepared);
       const launch = runHookOutput(FORCE_BYPASS, {
         session_id: sessionId,

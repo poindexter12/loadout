@@ -26,8 +26,24 @@
  * leaving frontmatter as the only carrier. The def set is therefore fixed —
  * route edits never write or register agent files.
  *
- * SQ-298 decided how effort travels once the marker goes away, and found why it
- * cannot go away yet. Recorded here so it is not re-derived:
+ * SQ-300 landed the dispatch half and flipped the default. A codex route now
+ * resolves to a RUNTIME per-(model, effort) definition
+ * (sidequest-exec-codex-<token>-<effort>, plus a -readonly- twin) that pins the
+ * PUBLISHED id in `model:` and the effort in `effort:`; the Agent `model`
+ * parameter stays omitted so the pin applies, and no route marker is emitted.
+ * Those definitions are written into the user agent directory, because external
+ * models are discovered at runtime and this plugin's agents/ directory is fixed
+ * at build time. They are registered at agentsync time for the routes the
+ * configured taxonomy actually uses (configuredDispatchPins), so they exist
+ * before any dispatch in the session, and written again if absent when a
+ * dispatch stub is rendered, which covers a ticket-level override outside the
+ * taxonomy. Marker emission survives as an explicit opt-out
+ * (SIDEQUEST_DISPATCH_EFFORT_CARRIER / the dispatch-effort-carrier home setting
+ * set to "marker") for a relay that resolves only the marker; it is never
+ * auto-detected, since relay capability is invisible in discovery.
+ *
+ * SQ-298 decided how effort travels, and recorded why it could not go away in
+ * that ticket. Kept here so it is not re-derived:
  *
  *   Effort carrier: `output_config.effort` on the request body. Claude Code
  *   already emits it from a definition's `effort:` frontmatter, and
@@ -55,8 +71,8 @@
  *   the published id — a second gateway-specific convention a relay would
  *   otherwise have to mirror).
  *
- * Until that lands, marker emission below IS the compatibility path and stays
- * on: it is the only carriage model-gateway resolves today.
+ * Marker emission below is now the compatibility path rather than the default:
+ * it is the only carriage a pre-0.53 model-gateway resolves.
  *
  * syncExecAgents() renders through scripts/_exec-template.md via
  * renderExecAgent() below, so the ticket-execution protocol body stays in one
@@ -73,7 +89,7 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('node:child_process');
 const { resolveClaudeHome } = require('./claude-home.js');
-const { stableClaudeName, stableDispatchName, stableReadOnlyClaudeName, stableReadOnlyDispatchName, DIAGNOSTIC_PROBE_NAME, bundledAgentType } = require('./exec-names.js');
+const { stableClaudeName, stableDispatchName, stableReadOnlyClaudeName, stableReadOnlyDispatchName, stablePinnedDispatchName, stableReadOnlyPinnedDispatchName, dispatchPinToken, DIAGNOSTIC_PROBE_NAME, bundledAgentType } = require('./exec-names.js');
 const { createWorktreeLease, worktreeResumeDecision } = require('./kernel/worktree.js');
 const crypto = require('crypto');
 const store = require('./store.js');
@@ -85,7 +101,7 @@ const { verificationRequirement } = require('./kernel/verification.js');
 
 type SyncOptions = { dir?: string; readOnlyDeniedTools?: any };
 type SyncResult = { written: number; removed: number; unchanged: number };
-type FastSyncResult = SyncResult & { skipped: boolean; installHash: string };
+type FastSyncResult = SyncResult & { skipped: boolean; installHash: string; pins?: SyncResult };
 
 const TEMPLATE_PATH = path.join(__dirname, '..', 'scripts', '_exec-template.md');
 
@@ -158,7 +174,12 @@ function workflowRecipe(category?: any, resolved?: any) {
     warnings: Array.isArray(resolved.warnings) ? resolved.warnings.slice() : [],
   };
 
-  if (exec.backend === 'codex') {
+  if (exec.backend === 'codex' && exec.effortCarrier === 'frontmatter') {
+    // Both halves ride the pinned definition's frontmatter, so the recipe
+    // advertises the published id it pins and no prompt prefix at all.
+    recipe.agent = { model: exec.pinnedModel, promptPrefix: '' };
+    recipe.effortCarrier = 'frontmatter';
+  } else if (exec.backend === 'codex') {
     recipe.agent = {
       model: DISPATCH_MODEL_ID,
       promptPrefix: `${routeMarker(exec.dispatchModel, resolved.effort)}\n\n`,
@@ -303,6 +324,148 @@ function renderReadOnlyClaudeAgent(effort?: any, readOnlyDeniedTools?: any) {
     tools: readOnlyTools.tools,
     disallowedTools: readOnlyTools.disallowedTools,
   });
+}
+
+// Appended to a runtime per-(model, effort) pin. Unlike the collapsed dispatch
+// executors, this definition's own frontmatter IS the carriage for both halves,
+// so marker-shaped text in the conversation is actively harmful: the gateway
+// gives a marker precedence over output_config.effort (SQ-299), so one stray
+// line would override the pinned effort with whatever it names.
+function pinnedDispatchNote(apiModel?: any, effort?: any) {
+  return `\n\n_This agent is the Sidequest executor for exactly one Codex route: its \`model: ${apiModel}\` frontmatter pins the published model id and its \`effort: ${effort}\` frontmatter rides the request as \`output_config.effort\`. Both halves are already set, so there is NO \`[sidequest-route ...]\` marker on this path: never write, quote, or echo a marker-shaped line anywhere, because the gateway gives a marker precedence over the pinned effort. Spawn it with the Agent \`model\` parameter omitted; any value there overrides the pin and sends the run to a Claude model instead. Refuse a batch whose tickets are stamped with different models or efforts: one spawn carries exactly one route._`;
+}
+
+function renderPinnedDispatchAgent(pin?: any) {
+  const name = stablePinnedDispatchName(pin.token, pin.effort);
+  return renderExecAgent({
+    name,
+    effort: pin.effort,
+    modelId: pin.apiModel,
+    marker: MARKER,
+    extraNote: pinnedDispatchNote(pin.apiModel, pin.effort),
+  });
+}
+
+function renderReadOnlyPinnedDispatchAgent(pin?: any, readOnlyDeniedTools?: any) {
+  const readOnlyTools = resolveReadOnlyTools(readOnlyDeniedTools);
+  const name = stableReadOnlyPinnedDispatchName(pin.token, pin.effort);
+  return renderExecAgent({
+    name,
+    effort: pin.effort,
+    modelId: pin.apiModel,
+    marker: MARKER,
+    extraNote: `${pinnedDispatchNote(pin.apiModel, pin.effort)}${readOnlyNote()}`,
+    tools: readOnlyTools.tools,
+    disallowedTools: readOnlyTools.disallowedTools,
+  });
+}
+
+// One pin contributes two files: the write-capable executor and its read-only
+// twin. dispatchReadOnly is a per-ticket property, so both must be registered
+// ahead of knowing which a dispatch will ask for.
+function dispatchPinSources(pins?: any, readOnlyDeniedTools?: any): Map<string, string> {
+  const sources = new Map<string, string>();
+  for (const pin of Array.isArray(pins) ? pins : []) {
+    if (!pin || !pin.token || !pin.effort || !pin.apiModel) continue;
+    try {
+      sources.set(`${stablePinnedDispatchName(pin.token, pin.effort)}.md`, renderPinnedDispatchAgent(pin));
+      sources.set(`${stableReadOnlyPinnedDispatchName(pin.token, pin.effort)}.md`, renderReadOnlyPinnedDispatchAgent(pin, readOnlyDeniedTools));
+    } catch (_) {
+      // A route whose published id yields no name-safe token cannot be pinned;
+      // resolveExec already kept it on the marker carriage.
+    }
+  }
+  return sources;
+}
+
+function configuredDispatchPinSources(opts?: SyncOptions & { project?: any }): Map<string, string> {
+  let pins: any[] = [];
+  try {
+    pins = store.configuredDispatchPins(opts?.project ? { project: opts.project } : {}) || [];
+  } catch (_) {
+    return new Map<string, string>();
+  }
+  return dispatchPinSources(pins, opts?.readOnlyDeniedTools);
+}
+
+// Write a wanted definition set into `dir`, skipping files a user authored and
+// comparing content so an unchanged pin never touches the file (a needless mtime
+// bump re-triggers Claude Code's agent watcher every session).
+function writeGeneratedAgents(dir: string, wanted: Map<string, string>): { written: number; unchanged: number } {
+  let written = 0;
+  let unchanged = 0;
+  if (!wanted.size) return { written, unchanged };
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (_) {
+    return { written, unchanged };
+  }
+  for (const [filename, source] of wanted) {
+    const filePath = path.join(dir, filename);
+    let previous: string | null = null;
+    try { previous = fs.readFileSync(filePath, 'utf8'); } catch (_) {}
+    if (previous !== null && !hasStableMarker(previous)) { unchanged++; continue; }
+    if (previous === source) { unchanged++; continue; }
+    try {
+      fs.writeFileSync(filePath, source);
+      written++;
+    } catch (_) {
+      unchanged++;
+    }
+  }
+  return { written, unchanged };
+}
+
+/**
+ * Register the per-(model, effort) codex pins the configured taxonomy needs, and
+ * retire recognized pins it no longer does. Runs at agentsync time (SessionStart
+ * and the models CLI) so a pin is discoverable before the session's first
+ * dispatch rather than racing the agent watcher.
+ */
+function syncDispatchPins(opts?: SyncOptions & { project?: any }): SyncResult {
+  const dir = opts?.dir || defaultAgentsDir();
+  const wanted = configuredDispatchPinSources(opts);
+  const { written, unchanged } = writeGeneratedAgents(dir, wanted);
+  let removed = 0;
+  let existing: string[] = [];
+  try {
+    existing = fs.readdirSync(dir).filter((filename: string) => filename.toLowerCase().endsWith('.md'));
+  } catch (_) {
+    return { written, removed, unchanged };
+  }
+  for (const filename of existing) {
+    if (wanted.has(filename) || !isDispatchPinFile(filename)) continue;
+    const filePath = path.join(dir, filename);
+    let source = '';
+    try { source = fs.readFileSync(filePath, 'utf8'); } catch (_) { continue; }
+    if (!hasStableMarker(source)) continue;
+    try { fs.unlinkSync(filePath); removed++; } catch (_) {}
+  }
+  return { written, removed, unchanged };
+}
+
+/**
+ * Write the pin a single prepared dispatch needs, if it is not already on disk.
+ * Covers a ticket-level route override outside the configured taxonomy, which
+ * agentsync-time registration cannot have anticipated. Waits for the agent
+ * watcher only when it actually wrote something, so the common hot path (the pin
+ * already registered at SessionStart) costs nothing.
+ */
+function ensureDispatchPin(ticket?: any, opts?: SyncOptions): SyncResult {
+  const empty = { written: 0, removed: 0, unchanged: 0 };
+  let resolved: any = null;
+  try { resolved = store.resolveExec(ticket?.model, ticket?.effort); } catch (_) { return empty; }
+  if (!resolved || resolved.backend !== 'codex' || resolved.effortCarrier !== 'frontmatter' || !resolved.pinToken) return empty;
+  const dir = opts?.dir || defaultAgentsDir();
+  const wanted = dispatchPinSources([{
+    token: resolved.pinToken,
+    effort: resolved.effort,
+    apiModel: resolved.pinnedModel,
+    runsLabel: resolved.runsLabel,
+  }], opts?.readOnlyDeniedTools);
+  const { written, unchanged } = writeGeneratedAgents(dir, wanted);
+  if (written) waitForNativeAgentReload((opts as any)?.waitMs);
+  return { written, removed: 0, unchanged };
 }
 
 function implementationExecutorSources(): Map<string, string> {
@@ -482,9 +645,13 @@ function experimentLogPacket(ticket?: any, slug?: any) {
 
 function ticketRouteMarker(ticket?: any) {
   const resolved = store.resolveExec(ticket.model, ticket.effort);
-  return resolved && resolved.backend === 'codex' && resolved.dispatchModel
-    ? routeMarker(resolved.dispatchModel, ticket.effort)
-    : null;
+  if (!resolved || resolved.backend !== 'codex' || !resolved.dispatchModel) return null;
+  // Under frontmatter carriage the pinned definition carries both halves. Emitting
+  // a marker anyway would hand the gateway a SECOND, authoritative carriage (SQ-299
+  // gives the marker precedence over output_config.effort), so the pin's effort
+  // would be silently overridden by the stripped marker id.
+  if (resolved.effortCarrier === 'frontmatter') return null;
+  return routeMarker(resolved.dispatchModel, ticket.effort);
 }
 
 function ticketCloseout(ticket?: any) {
@@ -1198,6 +1365,10 @@ function renderDispatchStub(ticket?: any, projectPath?: any) {
   if (!project) throw new Error('Dispatch board project path is required.');
   if (!tokenFile) throw new Error('Dispatch token file path is required.');
   const marker = ticketRouteMarker(ticket);
+  // Write the pinned definition if this route's pin is not already registered.
+  // Content-compared, so the common case (registered at agentsync time) neither
+  // writes nor waits. A ticket-level route override lands here and nowhere else.
+  try { ensureDispatchPin(ticket); } catch (_) { /* best effort: the spawn gate still reports a missing executor */ }
   const command = [
     'node',
     quotedShellArgument(ensureDispatchLauncher()),
@@ -1339,13 +1510,26 @@ function stableInstallHash(skills = EXECUTOR_SKILLS, readOnlyDeniedTools?: any) 
     .digest('hex');
 }
 
-function recognizedGeneratedExecutorFile(filename: string, bundledNames: Set<string>): boolean {
-  if (bundledNames.has(filename)) return true;
-  return /^sidequest-exec-codex-[a-z0-9][a-z0-9-]*-(low|medium|high|xhigh|max)\.md$/.test(filename);
+// Matches a runtime per-(model, effort) codex definition, which is both the
+// shape SQ-300 writes and the shape pre-collapse releases left behind.
+const DISPATCH_PIN_FILE_RE = /^sidequest-exec-codex-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-(low|medium|high|xhigh|max)\.md$/;
+
+function isDispatchPinFile(filename: string): boolean {
+  return DISPATCH_PIN_FILE_RE.test(filename);
 }
 
-function migrateExecAgents(_prefs?: any, opts?: SyncOptions): SyncResult {
+function recognizedGeneratedExecutorFile(filename: string, bundledNames: Set<string>): boolean {
+  if (bundledNames.has(filename)) return true;
+  return isDispatchPinFile(filename);
+}
+
+// `opts.keep` names generated files the caller is about to write itself. Without
+// it the migration would delete a live pin and the very next step would rewrite
+// it, bumping the mtime and re-triggering Claude Code's agent watcher on every
+// single session start.
+function migrateExecAgents(_prefs?: any, opts?: SyncOptions & { keep?: Iterable<string> }): SyncResult {
   const dir = opts?.dir || defaultAgentsDir();
+  const keep = new Set(opts?.keep || []);
   const bundledNames = new Set(bundledExecutorSources(opts?.readOnlyDeniedTools).keys());
   let existing: string[] = [];
   try {
@@ -1357,6 +1541,7 @@ function migrateExecAgents(_prefs?: any, opts?: SyncOptions): SyncResult {
   let removed = 0;
   let unchanged = 0;
   for (const filename of existing) {
+    if (keep.has(filename)) continue;
     if (!recognizedGeneratedExecutorFile(filename, bundledNames)) continue;
     const filePath = path.join(dir, filename);
     let source = '';
@@ -1379,10 +1564,20 @@ function migrateExecAgents(_prefs?: any, opts?: SyncOptions): SyncResult {
   return { written: 0, removed, unchanged };
 }
 
-function syncExecAgentsIfChanged(_prefs?: any, opts?: SyncOptions): FastSyncResult {
-  const result = migrateExecAgents(_prefs, opts);
+function syncExecAgentsIfChanged(_prefs?: any, opts?: SyncOptions & { project?: any }): FastSyncResult {
+  // Resolve the wanted pins first so the migration below leaves them alone, then
+  // write them. Both halves share one directory, so ordering is the only thing
+  // keeping a live pin from being deleted and immediately rewritten.
+  const pins = configuredDispatchPinSources(opts);
+  const result = migrateExecAgents(_prefs, Object.assign({}, opts, { keep: pins.keys() }));
+  const dir = opts?.dir || defaultAgentsDir();
+  const pinWrite = writeGeneratedAgents(dir, pins);
+  const pinSync = Object.assign({}, pinWrite, { removed: 0 });
   return Object.assign({}, result, {
-    skipped: result.removed === 0,
+    written: result.written + pinWrite.written,
+    unchanged: result.unchanged + pinWrite.unchanged,
+    skipped: result.removed === 0 && pinWrite.written === 0,
+    pins: pinSync,
     installHash: stableInstallHash(EXECUTOR_SKILLS, opts?.readOnlyDeniedTools),
   });
 }
@@ -1464,7 +1659,15 @@ module.exports = {
   ticketCommentsPacket,
   ticketAssetsPacket,
   routeMarker,
+  ticketRouteMarker,
   workflowRecipe,
+  renderPinnedDispatchAgent,
+  renderReadOnlyPinnedDispatchAgent,
+  dispatchPinSources,
+  configuredDispatchPinSources,
+  syncDispatchPins,
+  ensureDispatchPin,
+  isDispatchPinFile,
   renderDispatchAgent,
   renderReadOnlyDispatchAgent,
   renderReadOnlyClaudeAgent,

@@ -70,18 +70,36 @@ the exact executor and spawn object a fresh `dispatch <ref>` returned.
   Claude-route executor without `model:` — an omitted model inherits the session model (usually the
   priciest route), silently defeating routing. The bundled PreToolUse hook injects or blocks as a
   backstop, but the spawn call must carry it.
-- **Codex routes (`exec.model` null):** spawn the EXACT shared dispatch executor the dispatch returned as
-  `spawn.subagent_type` (`sidequest-exec-dispatch`, or `sidequest-exec-dispatch-readonly` for a readonly
-  category; both are effort-collapsed) with `mode: "bypassPermissions"`, a unique
-  `name`, and the `model` parameter OMITTED entirely — `exec.model` is null precisely so you leave
-  it out. The def pins the virtual `claude-codex-auto`; the REAL model rides the spawn prompt's
-  `[sidequest-route model=... effort=...]` marker, which the codex-gateway shim resolves per
-  request — so the marker must reach the spawn prompt intact, and one spawn carries exactly one
-  marker (never batch tickets stamped with different models). Passing ANY `model` value
-  (`fable|opus|sonnet|haiku`) overrides the pin and silently runs Anthropic instead. Never
-  substitute a generic `sidequest-exec-<effort>` agent for a Codex route — the board refuses its
-  claim. Model provenance lives in the gateway route log, the subagent transcript, and
-  `done --model`, never in the executor name.
+- **Codex routes (`exec.model` null):** spawn the EXACT executor the dispatch returned as
+  `spawn.subagent_type` with `mode: "bypassPermissions"`, a unique `name`, and the `model`
+  parameter OMITTED entirely — `exec.model` is null precisely so you leave it out. Passing ANY
+  `model` value (`fable|opus|sonnet|haiku`) overrides the definition's pin and silently runs
+  Anthropic instead. Never substitute a generic `sidequest-exec-<effort>` agent for a Codex route —
+  the board refuses its claim. Model provenance lives in the gateway route log, the subagent
+  transcript, and `done --model`, never in the executor name.
+
+  Which executor you get, and whether a marker rides along, depends on the carriage, and
+  `route_recipe`'s `effortCarrier` reports which one is live. Either way the rule for you is the
+  same: pass `spawn.subagent_type` and `spawn.prompt` through exactly as dispatch returned them.
+
+  - `effortCarrier: "frontmatter"` (the default) — a per-(model, effort) executor such as
+    `sidequest-exec-codex-gpt-5-6-terra-1m-high` (or `sidequest-exec-codex-readonly-...` for a readonly
+    category). Its own frontmatter pins the published model id in `model:` and the effort in
+    `effort:`, which Claude Code sends as `output_config.effort`, so BOTH halves are already set and
+    the spawn carries NO `[sidequest-route ...]` marker. Never add, quote, or echo one: the gateway
+    gives a marker precedence over `output_config.effort`, so a stray line would silently override
+    the pinned effort. The spawn gate denies a marker on this path. These definitions are written at
+    runtime, because external models are discovered at runtime, so they are user-scoped and NOT
+    namespaced `sidequest:`.
+  - `effortCarrier: "marker"` — the legacy carriage for a model-gateway older than 0.53.0, selected
+    by `SIDEQUEST_DISPATCH_EFFORT_CARRIER=marker`. The effort-collapsed `sidequest-exec-dispatch`
+    (or `sidequest-exec-dispatch-readonly`) pins the virtual `claude-codex-auto`, and the REAL model
+    and effort ride the spawn prompt's `[sidequest-route model=... effort=...]` marker, which the
+    codex-gateway shim resolves per request. The marker must reach the spawn prompt intact, and one
+    spawn carries exactly one marker (never batch tickets stamped with different models).
+
+  Either way, one spawn carries exactly one route: refuse a batch whose tickets resolve to different
+  models or efforts.
 - `<effort>` is the ticket's `effort` verbatim from the fresh read, never a level you judge fits
   better: the executor claims with `--effort <baked level>` and the board refuses the claim on a
   mismatch, bouncing the ticket back.

@@ -5,6 +5,14 @@ export const CLAUDE_PREFIX = 'sidequest-exec-';
 export const DISPATCH_PREFIX = 'sidequest-exec-dispatch-';
 export const READ_ONLY_CLAUDE_PREFIX = 'sidequest-exec-readonly-';
 export const READ_ONLY_DISPATCH_PREFIX = 'sidequest-exec-dispatch-readonly-';
+// Runtime per-(model, effort) codex executors (SQ-300). These pin the PUBLISHED
+// model id in `model:` frontmatter and the effort in `effort:` frontmatter, so
+// neither half needs the route marker. They are written at runtime into the user
+// agent directory (external models are discovered at runtime, so they cannot be
+// bundled at build time) and are therefore deliberately absent from
+// BUNDLED_AGENT_NAMES: a user-scoped definition is never namespaced `sidequest:`.
+export const CODEX_PIN_PREFIX = 'sidequest-exec-codex-';
+export const READ_ONLY_CODEX_PIN_PREFIX = 'sidequest-exec-codex-readonly-';
 export const TICKET_PREFIX = 'sidequest-sq-';
 export const LEGACY_TICKET_PREFIX = 'sidequest-ticket-';
 export const DIAGNOSTIC_PROBE_NAME = 'sidequest-diagnostic-probe';
@@ -121,6 +129,61 @@ export function stableReadOnlyDispatchName(_effort?: Effort): string {
   return READ_ONLY_DISPATCH_NAME;
 }
 
+// A pin token must be a single name-safe segment, and must not open with the
+// `readonly-` segment the read-only family uses, or a write-capable name would
+// land inside the read-only namespace and classify as read-only. Both ends must
+// be alphanumeric: a trailing hyphen would make `<token>-<effort>` carry a double
+// separator, which dispatchPinToken never produces and which only obscures where
+// the token ends.
+const PIN_TOKEN_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+
+function assertPinToken(token: unknown): string {
+  const safe = String(token == null ? '' : token);
+  if (!PIN_TOKEN_RE.test(safe)) throw new Error(`dispatch pin token is not name-safe: ${token}`);
+  if (safe === 'readonly' || safe.startsWith('readonly-')) throw new Error(`dispatch pin token collides with the read-only namespace: ${token}`);
+  return safe;
+}
+
+/**
+ * The name token for a published external model id. Derived from the PUBLISHED
+ * id (`claude-gpt-5.6-terra[1m]` -> `gpt-5-6-terra-1m`) rather than the board
+ * slug, so the definition name tracks the thing actually pinned in its
+ * frontmatter. Returns '' when there is no usable id.
+ *
+ * Every non-alphanumeric run folds to one `-`, INCLUDING a context-window
+ * suffix. Dropping `[1m]` the way dispatchModelFor does would be wrong here: the
+ * marker names a model, but this names a FILE, and a gateway that publishes both
+ * `claude-gpt-5.6-terra` and `claude-gpt-5.6-terra[1m]` would then collapse two
+ * distinct routes onto one pin, so whichever synced last would silently answer
+ * for both.
+ */
+export function dispatchPinToken(apiModel: unknown): string {
+  return String(apiModel == null ? '' : apiModel)
+    .toLowerCase()
+    .replace(/^claude-(?:codex-)?/, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+export function stablePinnedDispatchName(token: unknown, effort: Effort): string {
+  if (!isEffort(effort)) throw new Error(`dispatch pin effort is invalid: ${effort}`);
+  return `${CODEX_PIN_PREFIX}${assertPinToken(token)}-${effort}`;
+}
+
+export function stableReadOnlyPinnedDispatchName(token: unknown, effort: Effort): string {
+  if (!isEffort(effort)) throw new Error(`dispatch pin effort is invalid: ${effort}`);
+  return `${READ_ONLY_CODEX_PIN_PREFIX}${assertPinToken(token)}-${effort}`;
+}
+
+function pinClassification(remainder: string, kind: ExecutorKind): ExecutorClassification {
+  const split = remainder.lastIndexOf('-');
+  if (split <= 0) return { kind: 'ticket', effort: null };
+  const effort = remainder.slice(split + 1);
+  const token = remainder.slice(0, split);
+  if (!isEffort(effort) || !PIN_TOKEN_RE.test(token)) return { kind: 'ticket', effort: null };
+  return { kind, effort };
+}
+
 const BUNDLED_AGENT_NAMES = new Set([
   DISPATCH_NAME,
   READ_ONLY_DISPATCH_NAME,
@@ -156,6 +219,18 @@ export function classify(value: unknown): ExecutorClassification {
   if (name === READ_ONLY_DISPATCH_NAME) return { kind: 'read_only_codex_dispatch', effort: null };
   if (name === DISPATCH_NAME) return { kind: 'codex_dispatch', effort: null };
   if (name === DIAGNOSTIC_PROBE_NAME) return { kind: 'unknown', effort: null };
+
+  // Runtime published-id pins (SQ-300) carry BOTH halves in frontmatter, so their
+  // names carry the effort too. Checked before the generic CLAUDE_PREFIX rule,
+  // which would otherwise swallow them as 'ticket' and have force-exec-bypass deny
+  // the spawn as "invalid or retired". Read-only first: its prefix collides with
+  // the write-capable one.
+  if (name.startsWith(READ_ONLY_CODEX_PIN_PREFIX)) {
+    return pinClassification(name.slice(READ_ONLY_CODEX_PIN_PREFIX.length), 'read_only_codex_dispatch');
+  }
+  if (name.startsWith(CODEX_PIN_PREFIX)) {
+    return pinClassification(name.slice(CODEX_PIN_PREFIX.length), 'codex_dispatch');
+  }
 
   // Pre-collapse records still name per-effort executors; classifying them keeps old
   // dispatch records readable so the board can heal by redispatch instead of erroring.

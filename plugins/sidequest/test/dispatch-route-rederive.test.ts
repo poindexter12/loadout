@@ -105,7 +105,10 @@ test('same-provider fallback is prepared with its reason and re-derives when the
   });
 
   const degraded = store.prepareDispatch(slug, ticket.ref, { allowUnscoped: true, sessionId: 'degraded-roster' });
-  assert.deepEqual(degraded.ticket.dispatch.route, { model: 'codex-gpt-fallback', effort: 'medium', marker: 'gpt-fallback' });
+  // Under the default frontmatter carriage the route state carries no marker: the
+  // pin holds the model and effort, so there is nothing for a prompt to repeat.
+  assert.deepEqual(degraded.ticket.dispatch.route, { model: 'codex-gpt-fallback', effort: 'medium' });
+  assert.equal(degraded.ticket.dispatch.route.marker, undefined, 'a pinned route publishes no marker');
   assert.equal(degraded.ticket.dispatch.fallbackReason, 'category fallback replaced unavailable codex-gpt-recovered.');
 
   writeCatalog([{
@@ -120,9 +123,9 @@ test('same-provider fallback is prepared with its reason and re-derives when the
 
   const recovered = store.prepareDispatch(slug, ticket.ref, { allowUnscoped: true, sessionId: 'recovered-roster' });
   assert.notEqual(recovered.token, degraded.token);
-  assert.deepEqual(recovered.ticket.dispatch.route, { model: 'codex-gpt-recovered', effort: 'medium', marker: 'gpt-recovered' });
+  assert.deepEqual(recovered.ticket.dispatch.route, { model: 'codex-gpt-recovered', effort: 'medium' });
   assert.equal(recovered.ticket.dispatch.fallbackReason, undefined);
-  assert.equal(recovered.ticket.dispatchExecutor, 'sidequest-exec-dispatch');
+  assert.equal(recovered.ticket.dispatchExecutor, 'sidequest-exec-codex-gpt-recovered-medium');
   assert.equal(recovered.ticket.dispatch.supersededTokens.length, 1);
 });
 

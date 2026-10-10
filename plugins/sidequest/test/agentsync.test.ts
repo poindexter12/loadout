@@ -779,6 +779,9 @@ test('sync is idempotent and never overwrites an unmarked collision', () => {
 
 
 test('session migration does not create a stable executor ladder in an explicit user directory', () => {
+  // No catalog means no codex route resolves, so the SQ-300 pin pass has nothing
+  // to want and this stays a pure assertion about the ladder.
+  clearCatalog();
   const dir = tmpDir();
   const first = agentsync.syncExecAgentsIfChanged(null, { dir });
   const second = agentsync.syncExecAgentsIfChanged(null, { dir });
@@ -787,6 +790,9 @@ test('session migration does not create a stable executor ladder in an explicit 
     removed: 0,
     unchanged: 0,
     skipped: true,
+    // No project in this temp home resolves a codex route, so the pin pass is
+    // a clean no-op (SQ-300).
+    pins: { written: 0, unchanged: 0, removed: 0 },
     installHash: first.installHash,
   });
   assert.deepStrictEqual(second, first);
@@ -913,11 +919,12 @@ test('SQ-677: fetched briefings and dispatch orientation retain their supplied t
   assert.match(briefing, /space file\.png/);
   assert.match(briefing, /画像\.png/);
   assert.match(briefing, /missing file\.png.*missing or unreadable/s);
-  assert.ok(briefing.trimEnd().endsWith('[sidequest-route model=gpt-5.6-terra effort=high]'));
+  // SQ-300: under the default frontmatter carriage the pinned executor
+  // definition carries both halves, so neither the briefing nor the stub emits a
+  // route marker. A marker here would take precedence over the pinned effort.
+  assert.doesNotMatch(briefing, /\[sidequest-route/);
   assert.ok(stub.startsWith('GPT-5.6 Terra, high · Instant dispatch\n'), stub);
-  assert.doesNotMatch(stub.split('\n', 1)[0]!, /\[sidequest-route/);
-  assert.ok(stub.trimEnd().endsWith('[sidequest-route model=gpt-5.6-terra effort=high]'));
-  assert.equal(stub.match(/\[sidequest-route /g)!.length, 1);
+  assert.doesNotMatch(stub, /\[sidequest-route/);
   assert.ok(stub.includes(stubDescription));
   assert.doesNotMatch(stub, /excerpt capped|orientation capped/);
   assert.match(stub, /Title: Instant dispatch/);
@@ -1292,7 +1299,7 @@ test('renderTicketBriefing omits closeout when the ticket route is unresolved', 
   assert.doesNotMatch(briefing, /Closeout:/);
 });
 
-test('workflow recipes use the dispatch pin and normalized catalog marker for Codex routes', () => {
+test('workflow recipes pin the published model id for Codex routes', () => {
   seedCatalog([TERRA]);
   const store = require('../lib/store.js');
   configure(store, 'workflow-codex', { model: TERRA.slug, effort: 'medium' });
@@ -1306,26 +1313,56 @@ test('workflow recipes use the dispatch pin and normalized catalog marker for Co
     route: { model: TERRA.slug, effort: 'medium' },
     runsLabel: TERRA.label,
     agent: {
-      model: agentsync.DISPATCH_MODEL_ID,
-      promptPrefix: '[sidequest-route model=gpt-5.6-terra effort=medium]\n\n',
+      // SQ-300: the PUBLISHED id, pinned in the per-(model, effort) executor
+      // definition's `model:` frontmatter. Not the virtual DISPATCH_MODEL_ID,
+      // and no marker prefix: `effort:` frontmatter carries the other half.
+      model: TERRA.id,
+      promptPrefix: '',
     },
-    effortCarrier: 'marker',
+    effortCarrier: 'frontmatter',
     warnings: [],
   });
 });
 
+test('the marker opt-out restores the virtual pin and marker prefix for Codex routes', () => {
+  seedCatalog([TERRA]);
+  const store = require('../lib/store.js');
+  configure(store, 'workflow-codex-marker', { model: TERRA.slug, effort: 'medium' });
+  const category = Object.assign(store.getCategory('workflow-codex-marker'), { project: 'recipe-project' });
+
+  const previous = process.env.SIDEQUEST_DISPATCH_EFFORT_CARRIER;
+  process.env.SIDEQUEST_DISPATCH_EFFORT_CARRIER = 'marker';
+  try {
+    const recipe = agentsync.workflowRecipe(category, store.resolveCategoryRoute(category));
+    // A relay older than SQ-299 resolves only the marker, so this carriage must
+    // keep working unchanged.
+    assert.equal(recipe.effortCarrier, 'marker');
+    assert.equal(recipe.agent.model, agentsync.DISPATCH_MODEL_ID);
+    assert.equal(recipe.agent.promptPrefix, '[sidequest-route model=gpt-5.6-terra effort=medium]\n\n');
+  } finally {
+    if (previous === undefined) delete process.env.SIDEQUEST_DISPATCH_EFFORT_CARRIER;
+    else process.env.SIDEQUEST_DISPATCH_EFFORT_CARRIER = previous;
+  }
+});
+
 // SQ-1004: a catalog.json left behind by a pre-3.x gateway still carries
-// claude-codex- ids. Deriving the marker from it must land on the same backend
-// id, or every dispatch on the board breaks until the catalog is rewritten.
-test('workflow recipes derive the same marker from a pre-rename catalog', () => {
+// claude-codex- ids. Deriving the pin from it must land on the id the gateway
+// actually publishes, or every dispatch on the board breaks on an unknown model
+// until the catalog is rewritten.
+test('workflow recipes pin the renamed published id from a pre-rename catalog', () => {
   seedCatalog([{ slug: TERRA.slug, id: 'claude-codex-gpt-5.6-terra[1m]', label: TERRA.label }]);
   const store = require('../lib/store.js');
   configure(store, 'workflow-legacy-codex', { model: TERRA.slug, effort: 'medium' });
   const category = Object.assign(store.getCategory('workflow-legacy-codex'), { project: 'recipe-project' });
 
   const recipe = agentsync.workflowRecipe(category, store.resolveCategoryRoute(category));
-  assert.equal(recipe.agent.model, agentsync.DISPATCH_MODEL_ID);
-  assert.equal(recipe.agent.promptPrefix, '[sidequest-route model=gpt-5.6-terra effort=medium]\n\n');
+  // The stale `codex-` infix is dropped; everything else, `[1m]` included, is kept.
+  assert.equal(recipe.agent.model, 'claude-gpt-5.6-terra[1m]');
+  assert.equal(recipe.agent.promptPrefix, '');
+  // The definition name tracks the renamed id, so it never carries `codex-twice`.
+  const exec = store.resolveExec(TERRA.slug, 'medium');
+  assert.equal(exec.pinToken, 'gpt-5-6-terra-1m');
+  assert.equal(exec.agent, 'sidequest-exec-codex-gpt-5-6-terra-1m-medium');
 });
 
 test('workflow recipes use the Claude runtime alias without a prompt prefix', () => {
@@ -1383,7 +1420,7 @@ test('routeMarker rejects ids and efforts outside the gateway grammar', () => {
 
 test('renderTicketBriefing rejects an empty or multi-line nonce', () => {
   seedCatalog([TERRA]);
-  const ticket = { ref: 'SQ-334', title: 't', model: TERRA.slug, effort: 'high', dispatchExecutor: 'sidequest-exec-codex-gpt-5-6-terra-high', category: {} };
+  const ticket = { ref: 'SQ-334', title: 't', model: TERRA.slug, effort: 'high', dispatchExecutor: 'sidequest-exec-codex-gpt-5-6-terra-1m-high', category: {} };
   for (const nonce of [undefined, '', '  ', 'line1\nline2']) {
     assert.throws(() => agentsync.renderTicketBriefing(ticket, nonce), /nonce is required/);
   }
@@ -1452,6 +1489,181 @@ test('executor briefings render complete deterministic sections', () => {
   }, 'projection-token');
   assert.match(revised, /Story execution contract \(revision 10\)/);
   assert.notEqual(first, revised, 'a revised snapshot must produce a revised briefing');
+});
+
+// SQ-300: a published model id can only reach the wire through a definition's
+// `model:` frontmatter, so codex routes dispatch onto runtime per-(model, effort)
+// definitions instead of the virtual claude-codex-auto pin and the route marker.
+test('a pinned dispatch definition carries both halves in its frontmatter', () => {
+  const pin = { token: 'gpt-5-6-terra', effort: 'high', apiModel: TERRA.id, runsLabel: TERRA.label };
+  const frontmatter = parseExecutorFrontmatter(agentsync.renderPinnedDispatchAgent(pin));
+
+  assert.deepStrictEqual(frontmatter.name, ['sidequest-exec-codex-gpt-5-6-terra-high']);
+  // The published id, not the virtual pin: the Agent tool's model parameter is an
+  // alias enum that refuses a real id, so frontmatter is the only carriage.
+  assert.deepStrictEqual(frontmatter.model, [TERRA.id]);
+  // Claude Code emits this as output_config.effort, which the relay honours.
+  assert.deepStrictEqual(frontmatter.effort, ['high']);
+  assert.notStrictEqual(frontmatter.model![0], agentsync.DISPATCH_MODEL_ID);
+});
+
+test('a pinned dispatch definition is offered at every effort, max included', () => {
+  // The closest precedent, createNativeAgent, caps effort below max. A pinned
+  // executor must not, or a max-effort route would silently run lower.
+  for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    const frontmatter = parseExecutorFrontmatter(agentsync.renderPinnedDispatchAgent({ token: 'gpt-5-6-terra', effort, apiModel: TERRA.id, runsLabel: TERRA.label }));
+    assert.deepStrictEqual(frontmatter.effort, [effort]);
+  }
+});
+
+test('a pinned dispatch definition carries the full ticket protocol and forbids a marker', () => {
+  const body = agentsync.renderPinnedDispatchAgent({ token: 'gpt-5-6-terra', effort: 'high', apiModel: TERRA.id, runsLabel: TERRA.label });
+  // Not a minimal stub: the same protocol the bundled executors carry.
+  assert.match(body, /Claim first/);
+  assert.match(body, /mcp__plugin_sidequest_board__claim/);
+  assert.match(body, /\[sidequest:verify-complete\]/);
+  assert.match(body, /Never hand a command to the user/);
+  // A marker would take precedence over the pinned effort (SQ-299), so the
+  // definition must tell the executor never to write one, and must not model one.
+  assert.match(body, /never write, quote, or echo a marker-shaped line/);
+  assert.match(body, /Agent `model` parameter omitted/);
+  assert.doesNotMatch(body, /\[sidequest-route model=/);
+});
+
+test('a pinned read-only twin keeps the pin and loses the write tools', () => {
+  const pin = { token: 'gpt-5-6-terra', effort: 'medium', apiModel: TERRA.id, runsLabel: TERRA.label };
+  const frontmatter = parseExecutorFrontmatter(agentsync.renderReadOnlyPinnedDispatchAgent(pin));
+  assert.deepStrictEqual(frontmatter.name, ['sidequest-exec-codex-readonly-gpt-5-6-terra-medium']);
+  assert.deepStrictEqual(frontmatter.model, [TERRA.id]);
+  assert.deepStrictEqual(frontmatter.effort, ['medium']);
+  for (const denied of ['Edit', 'Write', 'NotebookEdit']) {
+    assert.ok(frontmatter.disallowedTools!.includes(denied), `${denied} must be denied`);
+  }
+});
+
+test('each pin contributes a write-capable executor and its read-only twin', () => {
+  const sources = agentsync.dispatchPinSources([
+    { token: 'gpt-5-6-terra', effort: 'high', apiModel: TERRA.id, runsLabel: TERRA.label },
+    { token: 'gpt-5-6-sol', effort: 'low', apiModel: SOL.id, runsLabel: SOL.label },
+  ]);
+  assert.deepStrictEqual([...sources.keys()].sort(), [
+    'sidequest-exec-codex-gpt-5-6-sol-low.md',
+    'sidequest-exec-codex-gpt-5-6-terra-high.md',
+    'sidequest-exec-codex-readonly-gpt-5-6-sol-low.md',
+    'sidequest-exec-codex-readonly-gpt-5-6-terra-high.md',
+  ]);
+});
+
+test('a pin whose published id yields no name-safe token is skipped, not guessed', () => {
+  const sources = agentsync.dispatchPinSources([
+    { token: '', effort: 'high', apiModel: 'claude-???[1m]', runsLabel: 'Broken' },
+    { token: 'gpt-5-6-terra', effort: 'nonsense', apiModel: TERRA.id, runsLabel: TERRA.label },
+    { token: 'gpt-5-6-terra', effort: 'high', apiModel: TERRA.id, runsLabel: TERRA.label },
+  ]);
+  assert.deepStrictEqual([...sources.keys()].sort(), [
+    'sidequest-exec-codex-gpt-5-6-terra-high.md',
+    'sidequest-exec-codex-readonly-gpt-5-6-terra-high.md',
+  ]);
+});
+
+// NOVA and VEGA are deliberately models no shipped default category routes to,
+// so the only codex pins in this test are the ones it configures. Seeding TERRA
+// here would also pin whatever the default taxonomy routes to TERRA, and the
+// counts would track the shipped defaults rather than the behavior under test.
+const NOVA = { slug: 'codex-gpt-9-9-nova', id: 'claude-gpt-9.9-nova[1m]', label: 'GPT-9.9 Nova' };
+const VEGA = { slug: 'codex-gpt-9-9-vega', id: 'claude-gpt-9.9-vega[1m]', label: 'GPT-9.9 Vega' };
+
+test('configured codex routes register their pins and retire the ones they drop', () => {
+  seedCatalog([NOVA, VEGA]);
+  const dir = tmpDir();
+  const store = require('../lib/store.js');
+  configure(store, 'pins-nova', { model: NOVA.slug, effort: 'high' });
+
+  const first = agentsync.syncExecAgentsIfChanged(null, { dir });
+  assert.equal(first.pins.written, 2, 'the pin and its read-only twin');
+  assert.ok(!first.skipped);
+  assert.deepStrictEqual(readDir(dir), [
+    'sidequest-exec-codex-gpt-9-9-nova-1m-high.md',
+    'sidequest-exec-codex-readonly-gpt-9-9-nova-1m-high.md',
+  ]);
+
+  // Unchanged configuration must not rewrite the files: a needless mtime bump
+  // re-triggers Claude Code's agent watcher on every session start.
+  const second = agentsync.syncExecAgentsIfChanged(null, { dir });
+  assert.equal(second.pins.written, 0);
+  assert.equal(second.pins.unchanged, 2);
+  assert.ok(second.skipped);
+
+  // Repointing the route retires the pin it no longer needs.
+  configure(store, 'pins-nova', { model: VEGA.slug, effort: 'low' });
+  const third = agentsync.syncExecAgentsIfChanged(null, { dir });
+  assert.equal(third.pins.written, 2);
+  assert.equal(third.removed, 2, 'the superseded pin and its twin');
+  assert.deepStrictEqual(readDir(dir), [
+    'sidequest-exec-codex-gpt-9-9-vega-1m-low.md',
+    'sidequest-exec-codex-readonly-gpt-9-9-vega-1m-low.md',
+  ]);
+});
+
+test('a user-authored definition in the pin namespace is never overwritten or retired', () => {
+  seedCatalog([NOVA]);
+  const dir = tmpDir();
+  const store = require('../lib/store.js');
+  configure(store, 'pins-user-authored', { model: NOVA.slug, effort: 'high' });
+
+  const mine = path.join(dir, 'sidequest-exec-codex-gpt-9-9-nova-1m-high.md');
+  const authored = '---\nname: sidequest-exec-codex-gpt-9-9-nova-1m-high\n---\nMine.\n';
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(mine, authored);
+  agentsync.syncExecAgentsIfChanged(null, { dir });
+  assert.equal(fs.readFileSync(mine, 'utf8'), authored);
+
+  // And it survives the retirement pass once the route stops wanting it.
+  configure(store, 'pins-user-authored', { model: NOVA.slug, effort: 'low' });
+  agentsync.syncExecAgentsIfChanged(null, { dir });
+  assert.equal(fs.readFileSync(mine, 'utf8'), authored, 'a definition without the generated marker is not ours to delete');
+});
+
+test('the marker opt-out registers no pins at all', () => {
+  seedCatalog([TERRA]);
+  const dir = tmpDir();
+  const store = require('../lib/store.js');
+  configure(store, 'pins-marker', { model: TERRA.slug, effort: 'high' });
+
+  const previous = process.env.SIDEQUEST_DISPATCH_EFFORT_CARRIER;
+  process.env.SIDEQUEST_DISPATCH_EFFORT_CARRIER = 'marker';
+  try {
+    const result = agentsync.syncExecAgentsIfChanged(null, { dir });
+    assert.equal(result.pins.written, 0);
+    assert.deepStrictEqual(readDir(dir), []);
+  } finally {
+    if (previous === undefined) delete process.env.SIDEQUEST_DISPATCH_EFFORT_CARRIER;
+    else process.env.SIDEQUEST_DISPATCH_EFFORT_CARRIER = previous;
+  }
+});
+
+test('ensureDispatchPin writes a ticket override outside the configured taxonomy', () => {
+  seedCatalog([NOVA, VEGA]);
+  const dir = tmpDir();
+  const store = require('../lib/store.js');
+  configure(store, 'pins-override', { model: NOVA.slug, effort: 'high' });
+  agentsync.syncExecAgentsIfChanged(null, { dir });
+  assert.ok(!readDir(dir).includes('sidequest-exec-codex-gpt-9-9-vega-1m-max.md'), 'no category wants this route');
+
+  // A ticket-level route no configured category resolves: agentsync-time
+  // registration cannot have anticipated it, so dispatch preparation must.
+  const written = agentsync.ensureDispatchPin({ model: VEGA.slug, effort: 'max' }, { dir });
+  assert.equal(written.written, 2);
+  assert.ok(readDir(dir).includes('sidequest-exec-codex-gpt-9-9-vega-1m-max.md'));
+  assert.ok(readDir(dir).includes('sidequest-exec-codex-readonly-gpt-9-9-vega-1m-max.md'));
+
+  // Idempotent: the hot path neither writes nor waits for the agent watcher.
+  const again = agentsync.ensureDispatchPin({ model: VEGA.slug, effort: 'max' }, { dir });
+  assert.equal(again.written, 0);
+  assert.equal(again.unchanged, 2);
+
+  // A Claude route has nothing to pin.
+  assert.equal(agentsync.ensureDispatchPin({ model: 'sonnet', effort: 'high' }, { dir }).written, 0);
 });
 
 export {};

@@ -2,7 +2,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { dispatchLaunchName, isReadOnlyExecutor, stableClaudeName, stableDispatchName, stableReadOnlyClaudeName, stableReadOnlyDispatchName } = require("./exec-names.js");
+const { dispatchLaunchName, isReadOnlyExecutor, stableClaudeName, stableDispatchName, stableReadOnlyClaudeName, stableReadOnlyDispatchName, stablePinnedDispatchName, stableReadOnlyPinnedDispatchName, dispatchPinToken } = require("./exec-names.js");
 const crypto = require("crypto");
 const { execFileSync, spawnSync } = require("child_process");
 const db = require("./db.js");
@@ -441,6 +441,9 @@ const {
   resolvedDispatchRoute,
   dispatchModelFor,
   dispatchRouteState,
+  dispatchEffortCarrier,
+  setDispatchEffortCarrier,
+  configuredDispatchPins,
   execFromBackend,
   resolveExec,
   resolveReportedExec,
@@ -533,6 +536,11 @@ const {
   residentCache,
   stableClaudeName,
   stableDispatchName,
+  stableReadOnlyClaudeName,
+  stableReadOnlyDispatchName,
+  stablePinnedDispatchName,
+  stableReadOnlyPinnedDispatchName,
+  dispatchPinToken,
   transaction,
   cloneCached,
   dispatchState
@@ -1660,6 +1668,7 @@ function stableExecutorName(ticket, artifactMode = false) {
   const resolved = resolveExec(ticket.model, ticket.effort);
   if (!resolved || !resolved.agent) throw new Error(`no stable executor for ${ticket.model} at ${ticket.effort}.`);
   if (artifactMode || sharedTreeArtifactMode(ticket) || !dispatchReadOnly(ticket)) return resolved.agent;
+  if (resolved.readOnlyAgent) return resolved.readOnlyAgent;
   return resolved.backend === "codex" ? stableReadOnlyDispatchName(ticket.effort) : stableReadOnlyClaudeName(ticket.effort);
 }
 const DIRECT_REASON_MIN_LENGTH = 20;
@@ -3262,6 +3271,9 @@ module.exports = {
   classifyModelFilter,
   getRoutingFallback,
   setRoutingFallback,
+  dispatchEffortCarrier,
+  setDispatchEffortCarrier,
+  configuredDispatchPins,
   mutateRoutingPolicy,
   routingProfileSettings,
   listRoutingProfiles,

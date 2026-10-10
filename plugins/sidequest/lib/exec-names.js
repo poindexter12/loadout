@@ -20,12 +20,14 @@ var exec_names_exports = {};
 __export(exec_names_exports, {
   AGENT_NAME_MAX_LENGTH: () => AGENT_NAME_MAX_LENGTH,
   CLAUDE_PREFIX: () => CLAUDE_PREFIX,
+  CODEX_PIN_PREFIX: () => CODEX_PIN_PREFIX,
   DIAGNOSTIC_PROBE_NAME: () => DIAGNOSTIC_PROBE_NAME,
   DISPATCH_NAME: () => DISPATCH_NAME,
   DISPATCH_PREFIX: () => DISPATCH_PREFIX,
   EFFORTS: () => EFFORTS,
   LEGACY_TICKET_PREFIX: () => LEGACY_TICKET_PREFIX,
   READ_ONLY_CLAUDE_PREFIX: () => READ_ONLY_CLAUDE_PREFIX,
+  READ_ONLY_CODEX_PIN_PREFIX: () => READ_ONLY_CODEX_PIN_PREFIX,
   READ_ONLY_DISPATCH_NAME: () => READ_ONLY_DISPATCH_NAME,
   READ_ONLY_DISPATCH_PREFIX: () => READ_ONLY_DISPATCH_PREFIX,
   TICKET_PREFIX: () => TICKET_PREFIX,
@@ -33,13 +35,16 @@ __export(exec_names_exports, {
   canonicalExecutorName: () => canonicalExecutorName,
   classify: () => classify,
   dispatchLaunchName: () => dispatchLaunchName,
+  dispatchPinToken: () => dispatchPinToken,
   isEffort: () => isEffort,
   isReadOnlyExecutor: () => isReadOnlyExecutor,
   refSlug: () => refSlug,
   stableClaudeName: () => stableClaudeName,
   stableDispatchName: () => stableDispatchName,
+  stablePinnedDispatchName: () => stablePinnedDispatchName,
   stableReadOnlyClaudeName: () => stableReadOnlyClaudeName,
   stableReadOnlyDispatchName: () => stableReadOnlyDispatchName,
+  stableReadOnlyPinnedDispatchName: () => stableReadOnlyPinnedDispatchName,
   titleSlug: () => titleSlug
 });
 module.exports = __toCommonJS(exec_names_exports);
@@ -48,6 +53,8 @@ const CLAUDE_PREFIX = "sidequest-exec-";
 const DISPATCH_PREFIX = "sidequest-exec-dispatch-";
 const READ_ONLY_CLAUDE_PREFIX = "sidequest-exec-readonly-";
 const READ_ONLY_DISPATCH_PREFIX = "sidequest-exec-dispatch-readonly-";
+const CODEX_PIN_PREFIX = "sidequest-exec-codex-";
+const READ_ONLY_CODEX_PIN_PREFIX = "sidequest-exec-codex-readonly-";
 const TICKET_PREFIX = "sidequest-sq-";
 const LEGACY_TICKET_PREFIX = "sidequest-ticket-";
 const DIAGNOSTIC_PROBE_NAME = "sidequest-diagnostic-probe";
@@ -147,6 +154,32 @@ function stableReadOnlyClaudeName(effort) {
 function stableReadOnlyDispatchName(_effort) {
   return READ_ONLY_DISPATCH_NAME;
 }
+const PIN_TOKEN_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+function assertPinToken(token) {
+  const safe = String(token == null ? "" : token);
+  if (!PIN_TOKEN_RE.test(safe)) throw new Error(`dispatch pin token is not name-safe: ${token}`);
+  if (safe === "readonly" || safe.startsWith("readonly-")) throw new Error(`dispatch pin token collides with the read-only namespace: ${token}`);
+  return safe;
+}
+function dispatchPinToken(apiModel) {
+  return String(apiModel == null ? "" : apiModel).toLowerCase().replace(/^claude-(?:codex-)?/, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+function stablePinnedDispatchName(token, effort) {
+  if (!isEffort(effort)) throw new Error(`dispatch pin effort is invalid: ${effort}`);
+  return `${CODEX_PIN_PREFIX}${assertPinToken(token)}-${effort}`;
+}
+function stableReadOnlyPinnedDispatchName(token, effort) {
+  if (!isEffort(effort)) throw new Error(`dispatch pin effort is invalid: ${effort}`);
+  return `${READ_ONLY_CODEX_PIN_PREFIX}${assertPinToken(token)}-${effort}`;
+}
+function pinClassification(remainder, kind) {
+  const split = remainder.lastIndexOf("-");
+  if (split <= 0) return { kind: "ticket", effort: null };
+  const effort = remainder.slice(split + 1);
+  const token = remainder.slice(0, split);
+  if (!isEffort(effort) || !PIN_TOKEN_RE.test(token)) return { kind: "ticket", effort: null };
+  return { kind, effort };
+}
 const BUNDLED_AGENT_NAMES = /* @__PURE__ */ new Set([
   DISPATCH_NAME,
   READ_ONLY_DISPATCH_NAME,
@@ -174,6 +207,12 @@ function classify(value) {
   if (name === READ_ONLY_DISPATCH_NAME) return { kind: "read_only_codex_dispatch", effort: null };
   if (name === DISPATCH_NAME) return { kind: "codex_dispatch", effort: null };
   if (name === DIAGNOSTIC_PROBE_NAME) return { kind: "unknown", effort: null };
+  if (name.startsWith(READ_ONLY_CODEX_PIN_PREFIX)) {
+    return pinClassification(name.slice(READ_ONLY_CODEX_PIN_PREFIX.length), "read_only_codex_dispatch");
+  }
+  if (name.startsWith(CODEX_PIN_PREFIX)) {
+    return pinClassification(name.slice(CODEX_PIN_PREFIX.length), "codex_dispatch");
+  }
   if (name.startsWith(READ_ONLY_DISPATCH_PREFIX)) {
     const effort = name.slice(READ_ONLY_DISPATCH_PREFIX.length);
     if (isEffort(effort)) return { kind: "read_only_codex_dispatch", effort };
@@ -202,12 +241,14 @@ function classify(value) {
 0 && (module.exports = {
   AGENT_NAME_MAX_LENGTH,
   CLAUDE_PREFIX,
+  CODEX_PIN_PREFIX,
   DIAGNOSTIC_PROBE_NAME,
   DISPATCH_NAME,
   DISPATCH_PREFIX,
   EFFORTS,
   LEGACY_TICKET_PREFIX,
   READ_ONLY_CLAUDE_PREFIX,
+  READ_ONLY_CODEX_PIN_PREFIX,
   READ_ONLY_DISPATCH_NAME,
   READ_ONLY_DISPATCH_PREFIX,
   TICKET_PREFIX,
@@ -215,12 +256,15 @@ function classify(value) {
   canonicalExecutorName,
   classify,
   dispatchLaunchName,
+  dispatchPinToken,
   isEffort,
   isReadOnlyExecutor,
   refSlug,
   stableClaudeName,
   stableDispatchName,
+  stablePinnedDispatchName,
   stableReadOnlyClaudeName,
   stableReadOnlyDispatchName,
+  stableReadOnlyPinnedDispatchName,
   titleSlug
 });
