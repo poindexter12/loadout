@@ -215,8 +215,73 @@ export function foreignReleaseFragmentScopePaths(files: unknown, ticketRef: unkn
   });
 }
 
-export function foreignReleaseFragmentRefusalMessage(operation: string, ticketRef: unknown, fragments: readonly string[]): string {
-  return `${operation}: refused ${ticketRef}; only ${ticketReleaseFragment(ticketRef)} is implicitly writable, except a deleted fragment from a related review-rejected candidate. Other release fragments: ${fragments.join(', ')}.`;
+export function releaseFragmentOwner(fragment: unknown): string | null {
+  const value = typeof fragment === 'string' ? fragment.trim().replace(/\\/g, '/') : '';
+  const match = /^\.release\/unreleased\/([A-Za-z0-9][A-Za-z0-9_-]*)\.md$/.exec(value);
+  return match ? (match[1] ?? null) : null;
+}
+
+type ReviewedSource = { submission?: { review?: { outcome?: unknown } | null } | null } | null | undefined;
+
+export type ForeignReleaseFragmentDiagnosis = {
+  implicitDeletions: string[];
+  unlinkedRejected: string[];
+};
+
+// The commit gate admits the deletion of a release fragment owned by a `related`
+// review-rejected candidate, and nothing else does. Classifying the refused
+// fragments is what lets the refusal say which of the three cases a caller is in
+// instead of naming an exception it cannot reach (SQ-304).
+export function foreignReleaseFragmentDiagnosis(
+  fragments: readonly string[],
+  relatedRejectedFragments: readonly string[],
+  lookupTicket: (ref: string) => ReviewedSource,
+): ForeignReleaseFragmentDiagnosis {
+  const related = new Set(relatedRejectedFragments.map((fragment) => scopeKey(fragment)));
+  const implicitDeletions: string[] = [];
+  const unlinkedRejected: string[] = [];
+  for (const fragment of fragments) {
+    if (related.has(scopeKey(fragment))) {
+      implicitDeletions.push(fragment);
+      continue;
+    }
+    const owner = releaseFragmentOwner(fragment);
+    if (!owner) continue;
+    let source: ReviewedSource = null;
+    try {
+      source = lookupTicket(owner);
+    } catch (_) {
+      source = null;
+    }
+    if (source?.submission?.review?.outcome === 'rejected') unlinkedRejected.push(fragment);
+  }
+  return { implicitDeletions, unlinkedRejected };
+}
+
+export function foreignReleaseFragmentRefusalMessage(
+  operation: string,
+  ticketRef: unknown,
+  fragments: readonly string[],
+  diagnosis: Partial<ForeignReleaseFragmentDiagnosis> = {},
+): string {
+  const implicitDeletions = diagnosis.implicitDeletions || [];
+  const unlinkedRejected = diagnosis.unlinkedRejected || [];
+  const implicit = implicitDeletions.length
+    ? ` Only the deletion of ${implicitDeletions.join(', ')} is admitted, implicitly at commit and without any scope grant: delete the file instead of declaring, requesting, or editing it.`
+    : '';
+  const linkCommands = unlinkedRejected
+    .map((fragment) => `\`sidequest link ${ticketRef} related ${releaseFragmentOwner(fragment)}\``)
+    .join(' and ');
+  const unlinked = unlinkedRejected.length
+    ? ` ${unlinkedRejected.join(', ')} belongs to a review-rejected candidate that is not linked to ${ticketRef}, so nothing about it is implicit yet: a control-plane identity must run ${linkCommands} (MCP \`link\` with verb \`related\`), after which deleting the fragment needs no scope grant.`
+    : '';
+  const remaining = fragments.filter((fragment) => (
+    !implicitDeletions.includes(fragment) && !unlinkedRejected.includes(fragment)
+  ));
+  const foreign = remaining.length
+    ? ` ${remaining.join(', ')} belongs to another ticket: a foreign fragment becomes deletable only once its candidate is review-rejected and its ticket is linked to ${ticketRef} with \`related\`.`
+    : '';
+  return `${operation}: refused ${ticketRef}; only ${ticketReleaseFragment(ticketRef)} is implicitly writable. Other release fragments: ${fragments.join(', ')}.${implicit}${unlinked}${foreign}`;
 }
 
 export function ticketCommitScope(effectiveFiles: unknown, declaredFiles: unknown, ticketRef: unknown): string[] {

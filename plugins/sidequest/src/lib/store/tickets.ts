@@ -369,6 +369,44 @@ function externalOutputAllowed(context?: any) {
   return getCategory(context?.category, { project: context?.slug })?.readonly === true;
 }
 
+// Fragments whose owning ticket is linked `related` to this one and whose candidate a
+// bound review rejected. The commit gate admits their deletion implicitly; the scope
+// gates refuse them, so the refusal has to name the relation they turn on (SQ-304).
+function relatedRejectedReleaseFragments(ticket?: any, lookup?: any) {
+  const links = Array.isArray(ticket?.links) ? ticket.links : [];
+  return links.flatMap((link: any) => {
+    if (link?.type !== 'related') return [];
+    const source = lookup(link.ref);
+    if (source?.submission?.review?.outcome !== 'rejected') return [];
+    const fragment = commitScope.ticketReleaseFragment(source.ref);
+    return fragment ? [fragment] : [];
+  });
+}
+
+// The lookup only runs on the refusal path, so the ordinary declaration path never
+// pays for reading sibling tickets.
+function foreignReleaseFragmentRefusal(operation?: any, slug?: any, ticketRef?: any, fragments?: any, ticket?: any) {
+  const refused = Array.isArray(fragments) ? fragments : [];
+  const lookup = (ref?: any) => {
+    if (slug == null || ref == null) return null;
+    try {
+      return getTicket(slug, ref);
+    } catch (_) {
+      return null;
+    }
+  };
+  return commitScope.foreignReleaseFragmentRefusalMessage(
+    operation,
+    ticketRef,
+    refused,
+    commitScope.foreignReleaseFragmentDiagnosis(
+      refused,
+      relatedRejectedReleaseFragments(ticket || lookup(ticketRef), lookup),
+      lookup,
+    ),
+  );
+}
+
 function boundedFiles(files?: any, context?: any) {
   const declaredFiles = boundedList(
     normalizeFiles(files),
@@ -382,7 +420,12 @@ function boundedFiles(files?: any, context?: any) {
   }
   const foreignReleaseFragments = commitScope.foreignReleaseFragmentScopePaths(declaredFiles, context?.ticketRef);
   if (foreignReleaseFragments.length) {
-    throw new Error(commitScope.foreignReleaseFragmentRefusalMessage(context?.operation || 'declared file scope', context?.ticketRef, foreignReleaseFragments));
+    throw new Error(foreignReleaseFragmentRefusal(
+      context?.operation || 'declared file scope',
+      context?.slug,
+      context?.ticketRef,
+      foreignReleaseFragments,
+    ));
   }
   return declaredFiles;
 }
@@ -744,7 +787,7 @@ function requestScope(slug?: any, idOrRef?: any, by?: any, files?: any, opts?: a
       !isForeignReleaseFragmentScope(file) && !isVerificationEvidencePath(file, evidenceDirectory, t.ref)
     ));
     const foreignReleaseFragmentMessage = foreignReleaseFragments.length
-      ? commitScope.foreignReleaseFragmentRefusalMessage('scopeRequest', t.ref, foreignReleaseFragments)
+      ? foreignReleaseFragmentRefusal('scopeRequest', slug, t.ref, foreignReleaseFragments, t)
       : '';
     const scopeExpansionRefusalMessage = additions.length
       ? `Scope expansion refused: ${refused.join(', ')}.`

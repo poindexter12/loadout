@@ -18,8 +18,10 @@ interface ScopeResult {
   unscopedPaths: string[];
 }
 
-process.env.SIDEQUEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-commit-scope-home-'));
+const SIDEQUEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-commit-scope-home-'));
+process.env.SIDEQUEST_HOME = SIDEQUEST_HOME;
 const store = require('../lib/store.js') as any;
+const db = require('../lib/db.js') as any;
 const lifecycleTools = require('../lib/mcp-lifecycle.js').tools as Array<{ name: string; handler(args: Record<string, unknown>): any }>;
 const ticketTools = require('../lib/mcp-tickets.js').tools as Array<{ name: string; handler(args: Record<string, unknown>): any }>;
 
@@ -49,7 +51,18 @@ const commitScope = require('../lib/commit-scope.js') as {
   validateStoredSubmissionRange(cwd: string, submission: unknown): RangeResult;
   scopedWorkPending(cwd: string, files: unknown, opts?: unknown): any;
   ticketCommitScope(effectiveFiles: unknown, declaredFiles: unknown, ticketRef: unknown): string[];
-  foreignReleaseFragmentRefusalMessage(operation: string, ticketRef: unknown, fragments: readonly string[]): string;
+  releaseFragmentOwner(fragment: unknown): string | null;
+  foreignReleaseFragmentDiagnosis(
+    fragments: readonly string[],
+    relatedRejectedFragments: readonly string[],
+    lookupTicket: (ref: string) => any,
+  ): { implicitDeletions: string[]; unlinkedRejected: string[] };
+  foreignReleaseFragmentRefusalMessage(
+    operation: string,
+    ticketRef: unknown,
+    fragments: readonly string[],
+    diagnosis?: Partial<{ implicitDeletions: readonly string[]; unlinkedRejected: readonly string[] }>,
+  ): string;
   headCommit(cwd: string): string | null;
   preserveCommitRef(cwd: string, commit: string, gitRef: string): { ok: boolean; reason?: string; commit?: string; gitRef?: string };
 };
@@ -1003,5 +1016,123 @@ test('scopeRequest and commit refuse a foreign release fragment with the same ru
   assert.equal(
     committed.message,
     commitScope.foreignReleaseFragmentRefusalMessage('commit', ticket.ref, [foreignFragment]),
+  );
+});
+
+// SQ-304: the refusal used to promise "except a deleted fragment from a related
+// review-rejected candidate" at every gate while only the commit gate implemented it,
+// and nothing named the `related` link the exception actually turns on.
+test('foreign release fragment refusals classify each fragment and name the link the exception needs', () => {
+  const sources: Record<string, any> = {
+    'SQ-linked': { ref: 'SQ-linked', submission: { review: { outcome: 'rejected' } } },
+    'SQ-rejected': { ref: 'SQ-rejected', submission: { review: { outcome: 'rejected' } } },
+    'SQ-clean': { ref: 'SQ-clean', submission: { review: { outcome: 'accepted' } } },
+  };
+  const fragments = [
+    '.release/unreleased/SQ-linked.md',
+    '.release/unreleased/SQ-rejected.md',
+    '.release/unreleased/SQ-clean.md',
+  ];
+  const diagnosis = commitScope.foreignReleaseFragmentDiagnosis(
+    fragments,
+    ['.release/unreleased/SQ-linked.md'],
+    (ref: string) => sources[ref] || null,
+  );
+  assert.deepEqual(diagnosis.implicitDeletions, ['.release/unreleased/SQ-linked.md']);
+  assert.deepEqual(diagnosis.unlinkedRejected, ['.release/unreleased/SQ-rejected.md']);
+
+  const message = commitScope.foreignReleaseFragmentRefusalMessage('scopeRequest', 'SQ-304', fragments, diagnosis);
+  assert.ok(
+    message.includes('Only the deletion of .release/unreleased/SQ-linked.md is admitted, implicitly at commit and without any scope grant'),
+    message,
+  );
+  assert.ok(message.includes('`sidequest link SQ-304 related SQ-rejected`'), message);
+  assert.ok(message.includes('.release/unreleased/SQ-clean.md belongs to another ticket'), message);
+  assert.equal(
+    message.includes('except a deleted fragment from a related review-rejected candidate'),
+    false,
+    'the refusal no longer promises an exception without saying which relation reaches it',
+  );
+
+  assert.equal(commitScope.releaseFragmentOwner('.release/unreleased/SQ-7.md'), 'SQ-7');
+  assert.equal(commitScope.releaseFragmentOwner('.release\\unreleased\\SQ-7.md'), 'SQ-7');
+  assert.equal(commitScope.releaseFragmentOwner('.release/unreleased'), null);
+  assert.equal(commitScope.releaseFragmentOwner('docs/RUN.md'), null);
+});
+
+test('the scope gates refuse a related review-rejected fragment but send the repair to the commit gate', () => {
+  const root = repo();
+  const slug = store.ensureProject(root, 'repair fragment relation').slug;
+  const rejectedSource = (title: string) => {
+    const created = store.createTicket(slug, {
+      title,
+      files: ['README.md'],
+      complexity: 1,
+      complexityWhy: 'The scope gates must read the review outcome off the owning ticket.',
+    });
+    const ticket = store.getTicket(slug, created.ref);
+    ticket.submission = { commit: 'a'.repeat(40), review: { outcome: 'rejected' } };
+    db.putRow(db.openDb(SIDEQUEST_HOME), 'tickets', {
+      id: ticket.id,
+      project: slug,
+      ref: ticket.ref,
+      status: ticket.status,
+      archived: ticket.archived ? 1 : 0,
+      ord: ticket.order,
+      claim_by: ticket.claim?.by || null,
+      data: ticket,
+    });
+    return ticket;
+  };
+  const linked = rejectedSource('rejected candidate the repair is linked to');
+  const unlinked = rejectedSource('rejected candidate the repair never linked');
+  const repair = store.createTicket(slug, {
+    title: 'repair the rejected candidate',
+    files: ['README.md'],
+    complexity: 1,
+    complexityWhy: 'The repair must learn where the rejected fragment deletion is admitted.',
+  });
+  assert.equal(store.linkTickets(slug, repair.ref, 'related', linked.ref).ok, true);
+  const by = 'repair-fragment-relation-worker';
+  assert.equal(
+    store.claimTicket(slug, repair.ref, by, { direct: true, reason: 'The repair fixture claims the ticket directly.' }).ok,
+    true,
+  );
+
+  const linkedFragment = `.release/unreleased/${linked.ref}.md`;
+  const scopeRequested = lifecycleHandler('scopeRequest')({ project: root, ref: repair.ref, by, files: [linkedFragment] });
+  assert.equal(scopeRequested.state, 'refused');
+  assert.ok(
+    scopeRequested.message.includes(`Only the deletion of ${linkedFragment} is admitted, implicitly at commit and without any scope grant`),
+    scopeRequested.message,
+  );
+
+  assert.throws(
+    () => ticketHandler('update')({ project: root, ref: repair.ref, files: ['README.md', linkedFragment] }),
+    (error: Error) => error.message.includes(`Only the deletion of ${linkedFragment} is admitted`),
+  );
+  assert.deepEqual(store.getTicket(slug, repair.ref).files, ['README.md'], 'the refused update leaves the declaration intact');
+
+  const unlinkedFragment = `.release/unreleased/${unlinked.ref}.md`;
+  const unlinkedRequest = lifecycleHandler('scopeRequest')({ project: root, ref: repair.ref, by, files: [unlinkedFragment] });
+  assert.equal(unlinkedRequest.state, 'refused');
+  assert.ok(
+    unlinkedRequest.message.includes(`\`sidequest link ${repair.ref} related ${unlinked.ref}\``),
+    unlinkedRequest.message,
+  );
+
+  // The commit gate is the route the refusal points at, so prove it really admits the deletion.
+  fs.mkdirSync(path.join(root, '.release', 'unreleased'), { recursive: true });
+  fs.writeFileSync(path.join(root, linkedFragment), 'rejected release fragment\n');
+  git(root, ['add', linkedFragment]);
+  git(root, ['commit', '-m', 'rejected release fragment']);
+  fs.writeFileSync(path.join(root, 'README.md'), 'repaired\n');
+  fs.unlinkSync(path.join(root, linkedFragment));
+  const committed = lifecycleHandler('commit')({ project: root, ref: repair.ref, by, message: 'drop the rejected fragment', worktree: root });
+  assert.ok(committed.commit, committed.message);
+  assert.equal(
+    commitScope.commitPaths(root, committed.commit).includes(linkedFragment),
+    true,
+    'the deletion rode the commit scope implicitly',
   );
 });

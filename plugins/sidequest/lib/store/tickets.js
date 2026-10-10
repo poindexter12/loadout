@@ -364,6 +364,37 @@ function createTickets(dependencies) {
     if (typeof context?.readonlyOverride === "boolean") return context.readonlyOverride;
     return getCategory(context?.category, { project: context?.slug })?.readonly === true;
   }
+  function relatedRejectedReleaseFragments(ticket, lookup) {
+    const links = Array.isArray(ticket?.links) ? ticket.links : [];
+    return links.flatMap((link) => {
+      if (link?.type !== "related") return [];
+      const source = lookup(link.ref);
+      if (source?.submission?.review?.outcome !== "rejected") return [];
+      const fragment = commitScope.ticketReleaseFragment(source.ref);
+      return fragment ? [fragment] : [];
+    });
+  }
+  function foreignReleaseFragmentRefusal(operation, slug, ticketRef, fragments, ticket) {
+    const refused = Array.isArray(fragments) ? fragments : [];
+    const lookup = (ref) => {
+      if (slug == null || ref == null) return null;
+      try {
+        return getTicket(slug, ref);
+      } catch (_) {
+        return null;
+      }
+    };
+    return commitScope.foreignReleaseFragmentRefusalMessage(
+      operation,
+      ticketRef,
+      refused,
+      commitScope.foreignReleaseFragmentDiagnosis(
+        refused,
+        relatedRejectedReleaseFragments(ticket || lookup(ticketRef), lookup),
+        lookup
+      )
+    );
+  }
   function boundedFiles(files, context) {
     const declaredFiles = boundedList(
       normalizeFiles(files),
@@ -377,7 +408,12 @@ function createTickets(dependencies) {
     }
     const foreignReleaseFragments = commitScope.foreignReleaseFragmentScopePaths(declaredFiles, context?.ticketRef);
     if (foreignReleaseFragments.length) {
-      throw new Error(commitScope.foreignReleaseFragmentRefusalMessage(context?.operation || "declared file scope", context?.ticketRef, foreignReleaseFragments));
+      throw new Error(foreignReleaseFragmentRefusal(
+        context?.operation || "declared file scope",
+        context?.slug,
+        context?.ticketRef,
+        foreignReleaseFragments
+      ));
     }
     return declaredFiles;
   }
@@ -675,7 +711,7 @@ function createTickets(dependencies) {
       const undeclared = !normalizeFiles(t.files).length ? ` This ticket declares no files, so nothing outside board policy can be in scope. The orchestrator has to declare them (\`sidequest update ${t.ref} --file <path>\`) and redispatch.` : "";
       const refusedEvidencePaths = refused.filter((file) => isVerificationEvidencePath(file, evidenceDirectory, t.ref));
       const refusedOutsideDeclaredFiles = refused.filter((file) => !isForeignReleaseFragmentScope(file) && !isVerificationEvidencePath(file, evidenceDirectory, t.ref));
-      const foreignReleaseFragmentMessage = foreignReleaseFragments.length ? commitScope.foreignReleaseFragmentRefusalMessage("scopeRequest", t.ref, foreignReleaseFragments) : "";
+      const foreignReleaseFragmentMessage = foreignReleaseFragments.length ? foreignReleaseFragmentRefusal("scopeRequest", slug, t.ref, foreignReleaseFragments, t) : "";
       const scopeExpansionRefusalMessage = additions.length ? `Scope expansion refused: ${refused.join(", ")}.` : "";
       const refusalMessage = [foreignReleaseFragmentMessage, scopeExpansionRefusalMessage].filter(Boolean).join(" ");
       const body = refused.length ? `${refusalMessage}${approved.length ? ` Auto-approved ${policy}: ${approved.join(", ")}.` : ""}${undeclared}${declaredScopeGuidance(t, refusedOutsideDeclaredFiles)}${verificationEvidenceGuidance(evidenceDirectory, refusedEvidencePaths)} Commit in-scope work, then release with kind "handback" and name the refused paths.` : `Auto-approved ${policy}: ${approved.join(", ")}.`;

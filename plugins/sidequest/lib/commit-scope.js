@@ -30,6 +30,7 @@ var commit_scope_exports = {};
 __export(commit_scope_exports, {
   commitPaths: () => commitPaths,
   commitScoped: () => commitScoped,
+  foreignReleaseFragmentDiagnosis: () => foreignReleaseFragmentDiagnosis,
   foreignReleaseFragmentPaths: () => foreignReleaseFragmentPaths,
   foreignReleaseFragmentRefusalMessage: () => foreignReleaseFragmentRefusalMessage,
   foreignReleaseFragmentScopePaths: () => foreignReleaseFragmentScopePaths,
@@ -38,6 +39,7 @@ __export(commit_scope_exports, {
   linkedWorktree: () => linkedWorktree,
   preserveCommitRef: () => preserveCommitRef,
   rangePaths: () => rangePaths,
+  releaseFragmentOwner: () => releaseFragmentOwner,
   repoRoot: () => repoRoot,
   scopedPaths: () => import_scope_match2.scopedPaths,
   scopedWorkPending: () => scopedWorkPending,
@@ -231,8 +233,41 @@ function foreignReleaseFragmentScopePaths(files, ticketRef) {
     return coversReleaseDirectory || foreignFragment;
   });
 }
-function foreignReleaseFragmentRefusalMessage(operation, ticketRef, fragments) {
-  return `${operation}: refused ${ticketRef}; only ${ticketReleaseFragment(ticketRef)} is implicitly writable, except a deleted fragment from a related review-rejected candidate. Other release fragments: ${fragments.join(", ")}.`;
+function releaseFragmentOwner(fragment) {
+  const value = typeof fragment === "string" ? fragment.trim().replace(/\\/g, "/") : "";
+  const match = /^\.release\/unreleased\/([A-Za-z0-9][A-Za-z0-9_-]*)\.md$/.exec(value);
+  return match ? match[1] ?? null : null;
+}
+function foreignReleaseFragmentDiagnosis(fragments, relatedRejectedFragments, lookupTicket) {
+  const related = new Set(relatedRejectedFragments.map((fragment) => (0, import_scope_match.scopeKey)(fragment)));
+  const implicitDeletions = [];
+  const unlinkedRejected = [];
+  for (const fragment of fragments) {
+    if (related.has((0, import_scope_match.scopeKey)(fragment))) {
+      implicitDeletions.push(fragment);
+      continue;
+    }
+    const owner = releaseFragmentOwner(fragment);
+    if (!owner) continue;
+    let source = null;
+    try {
+      source = lookupTicket(owner);
+    } catch (_) {
+      source = null;
+    }
+    if (source?.submission?.review?.outcome === "rejected") unlinkedRejected.push(fragment);
+  }
+  return { implicitDeletions, unlinkedRejected };
+}
+function foreignReleaseFragmentRefusalMessage(operation, ticketRef, fragments, diagnosis = {}) {
+  const implicitDeletions = diagnosis.implicitDeletions || [];
+  const unlinkedRejected = diagnosis.unlinkedRejected || [];
+  const implicit = implicitDeletions.length ? ` Only the deletion of ${implicitDeletions.join(", ")} is admitted, implicitly at commit and without any scope grant: delete the file instead of declaring, requesting, or editing it.` : "";
+  const linkCommands = unlinkedRejected.map((fragment) => `\`sidequest link ${ticketRef} related ${releaseFragmentOwner(fragment)}\``).join(" and ");
+  const unlinked = unlinkedRejected.length ? ` ${unlinkedRejected.join(", ")} belongs to a review-rejected candidate that is not linked to ${ticketRef}, so nothing about it is implicit yet: a control-plane identity must run ${linkCommands} (MCP \`link\` with verb \`related\`), after which deleting the fragment needs no scope grant.` : "";
+  const remaining = fragments.filter((fragment) => !implicitDeletions.includes(fragment) && !unlinkedRejected.includes(fragment));
+  const foreign = remaining.length ? ` ${remaining.join(", ")} belongs to another ticket: a foreign fragment becomes deletable only once its candidate is review-rejected and its ticket is linked to ${ticketRef} with \`related\`.` : "";
+  return `${operation}: refused ${ticketRef}; only ${ticketReleaseFragment(ticketRef)} is implicitly writable. Other release fragments: ${fragments.join(", ")}.${implicit}${unlinked}${foreign}`;
 }
 function ticketCommitScope(effectiveFiles, declaredFiles, ticketRef) {
   const scope = Array.isArray(effectiveFiles) ? effectiveFiles.slice() : [];
@@ -672,6 +707,7 @@ function commitScoped(cwd, message, files) {
 0 && (module.exports = {
   commitPaths,
   commitScoped,
+  foreignReleaseFragmentDiagnosis,
   foreignReleaseFragmentPaths,
   foreignReleaseFragmentRefusalMessage,
   foreignReleaseFragmentScopePaths,
@@ -680,6 +716,7 @@ function commitScoped(cwd, message, files) {
   linkedWorktree,
   preserveCommitRef,
   rangePaths,
+  releaseFragmentOwner,
   repoRoot,
   scopedPaths,
   scopedWorkPending,
