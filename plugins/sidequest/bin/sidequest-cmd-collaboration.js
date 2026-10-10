@@ -15,6 +15,7 @@ const execNames = require("../lib/exec-names");
 const { claimRefusalMessage } = require("../lib/refusal-guidance");
 const { assertSidequestInstall, assertDispatchTransport } = require("../lib/dispatch-preflight");
 const { fail, resolveProject, workerId, controlPlaneIdentity, sessionId, bodyFromOpts } = require("./sidequest-cmd-shared");
+const { authorityCommentAuthorMessage, authorityCommentMarkers } = require("../lib/kernel/verification.js");
 const { modelMark, PRIORITY_MARK } = require("./sidequest-cmd-tickets");
 const { validateModelFilter } = require("./sidequest-cmd-execution");
 async function cmdSweepClaims(opts) {
@@ -262,6 +263,10 @@ async function cmdComment(opts, positional) {
   const body = await bodyFromOpts(acceptedMessage ? Object.assign({}, opts, { body: opts.message }) : opts, "comment");
   if (!body || !String(body).trim()) fail('comment: -m/--body or --body-file is required, e.g. sidequest comment SQ-3 -m "note"');
   const { slug, meta } = await resolveProject(opts);
+  const authorityMarkers = authorityCommentMarkers(body);
+  if (authorityMarkers.length && !String(opts.by || "").trim()) {
+    fail(`comment: ${authorityCommentAuthorMessage(authorityMarkers)} On the CLI that is --by "<identity>".`);
+  }
   const by = controlPlaneIdentity(opts);
   const res = store.addComment(slug, idOrRef, { by, body, source: opts.source || "cli" });
   if (opts.json) {
@@ -273,11 +278,15 @@ async function cmdComment(opts, positional) {
     console.log(`✓ » comment added to ${res.ticket.ref} by "${by}"  — ${meta.name}`);
     if (acceptedMessage) console.log("  accepted message as body");
     if (res.advisory) console.log(`  advisory: ${res.advisory}`);
+    if (res.captureWaiver) {
+      console.log(`  capture waiver ${res.captureWaiver.binds ? "binds" : "does NOT bind"}: ${res.captureWaiver.note}`);
+    }
   } else {
     process.exitCode = 1;
     const messages = {
       not_found: `no ticket "${idOrRef}" in ${meta.name}.`,
       empty: "comment body cannot be empty.",
+      authority_comment_author: res.message,
       too_long: `comment body is ${res.length} chars, over the ${res.max}-char cap — trim it, or put long-form content in the ticket's plan document (the MCP \`plan\` verb) and point to it here (nothing was stored).`,
       busy: `${idOrRef} is locked right now — retry in a moment.`
     };

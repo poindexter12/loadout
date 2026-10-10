@@ -361,10 +361,13 @@ test('SQ-179: an orchestrator capture waiver admits a load-only failed capture; 
     assert.match(refused.message, /do not hand-edit refs\/sidequest/);
     assert.ok(refused.message.includes(`[sidequest:capture-waiver] capture=${captureId} signature=failed_suite:exit-1 authority=<who>`), refused.message);
 
-    store.addComment(slug, t.ref, { by, body: waiverLine('failed_suite:exit-1') });
-    const selfWaived = await submit();
-    assert.strictEqual(selfWaived.reason, 'verification_capture_required');
-    assert.match(selfWaived.message, /waiver by load-only-capture-worker \(the claim holder or submitter cannot waive its own capture\)/);
+    // SQ-306: the claim holder's own waiver no longer reaches the thread at all. Before this it was
+    // recorded, read as authoritative, and only discarded at submit.
+    const selfAuthored = store.addComment(slug, t.ref, { by, body: waiverLine('failed_suite:exit-1') });
+    assert.strictEqual(selfAuthored.ok, false);
+    assert.strictEqual(selfAuthored.reason, 'authority_comment_author');
+    assert.match(selfAuthored.message, /forbidden from waiving its own capture/);
+    assert.ok(!(store.getTicket(slug, t.ref).comments || []).some((comment: any) => comment.body.includes('[sidequest:capture-waiver]')), 'no waiver is stored');
 
     store.addComment(slug, t.ref, { by: 'orchestrator', body: waiverLine('timeout') });
     const misSigned = await submit();
@@ -406,6 +409,11 @@ test('SQ-179: capture waivers bind only a timeout or failed_suite capture of the
     assert.strictEqual(refused.diagnostic.code, 'verification_capture_required', id);
     assert.match(refused.diagnostic.message, new RegExp(`capture ${id} waiver by orchestrator \\(not a timeout or failed_suite capture of this candidate, command, and dispatch attempt\\)`));
   }
+  // The write path refuses a waiver authored by the claim holder, but it cannot know who will
+  // submit, so the submit gate still has to reject a waiver authored by the submitter.
+  const bySubmitter = verdict(`[sidequest:capture-waiver] capture=timed-out signature=timeout authority=joe; ${reason}`, 'worker');
+  assert.strictEqual(bySubmitter.diagnostic.code, 'verification_capture_required');
+  assert.match(bySubmitter.diagnostic.message, /waiver by worker \(the claim holder or submitter cannot waive its own capture\)/);
   const malformed = verdict('[sidequest:capture-waiver] capture=timed-out signature=timeout authority=joe; too short');
   assert.strictEqual(malformed.diagnostic.code, 'verification_capture_required');
   assert.match(malformed.diagnostic.message, /Ignored capture waivers: malformed waiver by orchestrator/);
@@ -420,6 +428,69 @@ test('SQ-179: capture waivers bind only a timeout or failed_suite capture of the
 
   const passed = commandVerificationResult(requirement, 'npm test', [...captures, capture('green', 'passed', { exitCode: 0 })], 'SQ-9', candidate, 'n1', { comments: [{ by: 'orchestrator', body: `[sidequest:capture-waiver] capture=timed-out signature=timeout authority=joe; ${reason}` }] });
   assert.strictEqual(passed.result.status, 'passed', 'a passing capture still wins over a waiver');
+});
+
+test('SQ-306: captureWaiverBinding reports author eligibility, capture identity, and candidate currency at post time', () => {
+  const { captureWaiverBinding } = require('../src/lib/kernel/verification.ts');
+  const candidate = { source: 'git', value: 'a'.repeat(40) };
+  const captures = [
+    { id: 'timed-out', ticket: 'SQ-9', command: 'npm test', status: 'timeout', candidate, dispatchNonce: 'n1', completedAt: '2026-10-09T00:00:00.000Z' },
+    { id: 'no-run', ticket: 'SQ-9', command: 'npm test', status: 'could_not_run', exitCode: 2, candidate, dispatchNonce: 'n1', completedAt: '2026-10-09T00:00:00.000Z' },
+    { id: 'old-attempt', ticket: 'SQ-9', command: 'npm test', status: 'timeout', candidate, dispatchNonce: 'n0', completedAt: '2026-10-09T00:00:00.000Z' },
+  ];
+  const reason = 'capture budget timeout at load 14 on ten cores while other suites ran';
+  const bind = (body: string, by = 'orchestrator', pinnedCandidate = candidate.value) => captureWaiverBinding({
+    comment: { by, body },
+    captures,
+    claimHolder: 'worker',
+    dispatchNonce: 'n1',
+    pinnedCandidate,
+  });
+
+  assert.strictEqual(bind('Plain handoff comment, no marker.'), null, 'a comment with no marker has no binding to report');
+
+  const binds = bind(`[sidequest:capture-waiver] capture=timed-out signature=timeout authority=joe; ${reason}`);
+  assert.deepStrictEqual({ ...binds }, {
+    capture: 'timed-out',
+    author: 'orchestrator',
+    authorEligible: true,
+    captureKnown: true,
+    candidate: candidate.value,
+    candidateMatchesPinned: true,
+    binds: true,
+    note: binds.note,
+  });
+  assert.match(binds.note, /^This waiver binds capture timed-out \(timeout\) of candidate a{40}\./);
+
+  const selfAuthored = bind(`[sidequest:capture-waiver] capture=timed-out signature=timeout authority=joe; ${reason}`, 'worker');
+  assert.strictEqual(selfAuthored.authorEligible, false);
+  assert.strictEqual(selfAuthored.binds, false);
+  assert.match(selfAuthored.note, /its recorded author worker holds the claim/);
+
+  const superseded = bind(`[sidequest:capture-waiver] capture=timed-out signature=timeout authority=joe; ${reason}`, 'orchestrator', 'b'.repeat(40));
+  assert.strictEqual(superseded.candidateMatchesPinned, false);
+  assert.strictEqual(superseded.binds, false);
+  assert.match(superseded.note, /checked candidate a{40}, and the live pinned candidate is b{40}/);
+
+  const unknownStatus = bind(`[sidequest:capture-waiver] capture=no-run signature=could_not_run:exit-2 authority=joe; ${reason}`);
+  assert.strictEqual(unknownStatus.captureKnown, false);
+  assert.match(unknownStatus.note, /capture no-run is could_not_run, and only a timeout or failed_suite capture can be waived/);
+
+  const otherAttempt = bind(`[sidequest:capture-waiver] capture=old-attempt signature=timeout authority=joe; ${reason}`);
+  assert.strictEqual(otherAttempt.captureKnown, false);
+  assert.match(otherAttempt.note, /belongs to an earlier dispatch attempt, not n1/);
+
+  const unrecorded = bind(`[sidequest:capture-waiver] capture=missing signature=timeout authority=joe; ${reason}`);
+  assert.strictEqual(unrecorded.captureKnown, false);
+  assert.match(unrecorded.note, /capture missing is not recorded on this ticket/);
+
+  const misSigned = bind(`[sidequest:capture-waiver] capture=timed-out signature=failed_suite:exit-1 authority=joe; ${reason}`);
+  assert.strictEqual(misSigned.captureKnown, false);
+  assert.match(misSigned.note, /signature failed_suite:exit-1 does not match the recorded timeout/);
+
+  const malformed = bind('[sidequest:capture-waiver] capture=timed-out signature=timeout authority=joe; too short');
+  assert.strictEqual(malformed.binds, false);
+  assert.match(malformed.note, /This waiver cannot bind: malformed waiver by orchestrator/);
 });
 
 test('capture accepts a live verify amendment and still rejects unrelated commands', async () => {

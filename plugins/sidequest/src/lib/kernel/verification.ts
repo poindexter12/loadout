@@ -194,6 +194,26 @@ export function captureFailureSignature(capture: Readonly<{ status: string; exit
   return capture.exitCode == null ? String(capture.status) : `${capture.status}:exit-${capture.exitCode}`;
 }
 
+// SQ-306: the markers whose effect the board decides from the RECORDED AUTHOR of the comment
+// carrying them, not from anything in the body. On SQ-299 an orchestrator posted a capture waiver
+// with no `by`; the comment write defaulted the author to the live claim holder, the `authority=`
+// field in the body changed nothing, and submit discarded the waiver as self-authored. A comment
+// that decides something its default author is forbidden from deciding must never get a default
+// author, so every write path refuses one of these without an explicit `by`.
+export const AUTHORITY_COMMENT_MARKERS: readonly string[] = Object.freeze([CAPTURE_WAIVER_MARKER]);
+
+export function authorityCommentMarkers(body?: unknown): readonly string[] {
+  const lines = String(body || '').split(/\r?\n/).map((line) => line.trim().toLowerCase());
+  return Object.freeze(AUTHORITY_COMMENT_MARKERS.filter(
+    (marker) => lines.some((line) => line.startsWith(marker.toLowerCase())),
+  ));
+}
+
+export function authorityCommentAuthorMessage(markers: readonly string[]): string {
+  const named = (markers.length ? markers : AUTHORITY_COMMENT_MARKERS).join(' / ');
+  return `A ${named} comment is judged by its recorded author, and a comment posted without "by" is attributed to whoever holds the claim — who is forbidden from waiving its own capture. Nothing was recorded. Repost it with by:"<your control-plane identity>", the same identity integrate, verdict and done require; the "authority=" field inside the body never overrides the recorded author.`;
+}
+
 export function captureWaiverMarkers(comments: readonly CaptureWaiverComment[] = []) {
   const markers: CaptureWaiverMarker[] = [];
   const malformed: string[] = [];
@@ -214,6 +234,88 @@ export function captureWaiverMarkers(comments: readonly CaptureWaiverComment[] =
   return { markers, malformed };
 }
 
+// SQ-306: a waiver used to be recorded, sit visibly in the thread, and then be discarded at the
+// executor's next submit with no write-time signal at all. By then an amendment had been made on
+// the assumption it was in force, costing a second full-suite capture and a second waiver. This is
+// the same judgement the submit gate makes, run at post time so the poster learns it immediately:
+// is the author eligible, is the capture a waivable one recorded under that id for this attempt,
+// and does the capture's candidate still match the live pinned candidate.
+export type CaptureWaiverBindingInput = Readonly<{
+  comment: CaptureWaiverComment;
+  captures?: readonly CompletedVerificationCapture[];
+  claimHolder?: unknown;
+  dispatchNonce?: unknown;
+  pinnedCandidate?: unknown;
+}>;
+
+export type CaptureWaiverBinding = Readonly<{
+  capture: string | null;
+  author: string | null;
+  authorEligible: boolean;
+  captureKnown: boolean;
+  candidate: string | null;
+  candidateMatchesPinned: boolean | null;
+  binds: boolean;
+  note: string;
+}>;
+
+export function captureWaiverBinding(input: CaptureWaiverBindingInput): CaptureWaiverBinding | null {
+  const { markers, malformed } = captureWaiverMarkers([input.comment]);
+  if (!markers.length) {
+    if (!malformed.length) return null;
+    return Object.freeze({
+      capture: null,
+      author: String(input.comment?.by || '').trim() || null,
+      authorEligible: false,
+      captureKnown: false,
+      candidate: null,
+      candidateMatchesPinned: null,
+      binds: false,
+      note: `This waiver cannot bind: ${malformed[malformed.length - 1]}. Nothing waives the capture gate until a well-formed line is posted.`,
+    });
+  }
+  const marker = markers[markers.length - 1]!;
+  const claimHolder = String(input.claimHolder || '').trim();
+  const nonce = String(input.dispatchNonce || '').trim();
+  const pinned = String(input.pinnedCandidate || '').trim().toLowerCase();
+  const recorded = (input.captures || []).find((capture) => capture && capture.id === marker.captureId) || null;
+  const candidate = String(recorded?.candidate?.value || '').trim().toLowerCase() || null;
+  const authorEligible = Boolean(marker.by) && marker.by !== claimHolder;
+  const waivableStatus = Boolean(recorded) && LOAD_ONLY_CAPTURE_STATUSES.includes(recorded!.status);
+  const sameAttempt = Boolean(recorded) && (!nonce || String(recorded!.dispatchNonce || '') === nonce);
+  const signatureMatches = Boolean(recorded) && marker.signature === captureFailureSignature(recorded!);
+  const captureKnown = waivableStatus && sameAttempt && signatureMatches;
+  const candidateMatchesPinned = !candidate || !pinned ? null : candidate === pinned;
+
+  const problems: string[] = [];
+  if (!authorEligible) {
+    problems.push(marker.by
+      ? `its recorded author ${marker.by} holds the claim, and the claim holder or submitter cannot waive its own capture`
+      : 'it has no recorded author');
+  }
+  if (!recorded) problems.push(`capture ${marker.captureId} is not recorded on this ticket`);
+  else if (!waivableStatus) problems.push(`capture ${marker.captureId} is ${recorded.status}, and only a ${LOAD_ONLY_CAPTURE_STATUSES.join(' or ')} capture can be waived`);
+  else if (!sameAttempt) problems.push(`capture ${marker.captureId} belongs to an earlier dispatch attempt, not ${nonce}`);
+  else if (!signatureMatches) problems.push(`signature ${marker.signature} does not match the recorded ${captureFailureSignature(recorded)}`);
+  if (candidateMatchesPinned === false) problems.push(`capture ${marker.captureId} checked candidate ${candidate}, and the live pinned candidate is ${pinned}`);
+
+  const binds = problems.length === 0;
+  const note = binds
+    ? `This waiver binds capture ${marker.captureId} (${captureFailureSignature(recorded!)}) of candidate ${candidate || '<unrecorded>'}. It stops binding the moment that candidate changes, so an amended or re-created commit needs a fresh passing capture or a fresh waiver.`
+    : `This waiver cannot bind as posted: ${problems.join('; ')}. It is recorded as thread evidence, and submit will refuse the capture gate until each of those is fixed.`;
+
+  return Object.freeze({
+    capture: marker.captureId,
+    author: marker.by || null,
+    authorEligible,
+    captureKnown,
+    candidate,
+    candidateMatchesPinned,
+    binds,
+    note,
+  });
+}
+
 function captureWaiverGuidance(ticket: string, eligible: readonly CompletedVerificationCapture[], rejected: readonly string[]): string {
   const latest = eligible[eligible.length - 1];
   const capture = latest ? latest.id : '<id>';
@@ -223,6 +325,7 @@ function captureWaiverGuidance(ticket: string, eligible: readonly CompletedVerif
     ` Keep the claim, comment the capture id, failure signature, and log evidence, and ask the orchestrator to post "${CAPTURE_WAIVER_MARKER} capture=${capture} signature=${signature} authority=<who>; <reason and evidence>" on ${ticket}, then resubmit this same candidate.`,
     latest ? ` The latest waivable capture is ${capture} (${signature}).` : ' No timeout or failed_suite capture of this candidate, command, and dispatch attempt is recorded yet, so there is nothing to waive.',
     ' A waiver binds one timeout or failed_suite capture of this candidate, command, and dispatch attempt; the claim holder or submitter cannot author it; integration verification still runs.',
+    ' The orchestrator must pass by:"<its own identity>" on that comment call: an executor subagent shares its orchestrator\'s session, so a waiver posted without "by" is recorded as the claim holder and is refused at write time, and the "authority=" field in the body never overrides the recorded author. The comment ack reports whether the waiver binds, which capture it names, and whether that capture\'s candidate is still the live one.',
     rejected.length ? ` Ignored capture waivers: ${rejected.join('; ')}.` : '',
   ].join('');
 }

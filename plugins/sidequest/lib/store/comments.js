@@ -1,4 +1,5 @@
 "use strict";
+const { authorityCommentAuthorMessage, authorityCommentMarkers, captureWaiverBinding } = require("../kernel/verification.js");
 function createComments(dependencies) {
   const {
     crypto,
@@ -68,6 +69,37 @@ function createComments(dependencies) {
     if (!ticket?.claim?.by || !hasNegativeControlMarker(fields?.body)) return null;
     return Array.isArray(ticket.comments) ? ticket.comments.find((comment) => comment.by === fields.by && comment.body === fields.body) || null : null;
   }
+  function authorityCommentRefusal(ticket, fields) {
+    const markers = authorityCommentMarkers(fields?.body);
+    if (!markers.length) return null;
+    const claimOwner = String(ticket?.claim?.by || "").trim();
+    const author = String(fields?.by || "").trim();
+    if (!claimOwner || author !== claimOwner) return null;
+    return { ok: false, reason: "authority_comment_author", message: authorityCommentAuthorMessage(markers) };
+  }
+  function liveCandidate(ticket) {
+    const submitted = String(ticket?.submission?.commit || "").trim().toLowerCase();
+    if (submitted && !ticket?.submission?.integratedAt) return submitted;
+    const nonce = String(ticket?.dispatchNonce || "").trim();
+    const captures = Array.isArray(ticket?.verificationCaptures) ? ticket.verificationCaptures : [];
+    for (let index = captures.length - 1; index >= 0; index -= 1) {
+      const capture = captures[index];
+      if (nonce && String(capture?.dispatchNonce || "") !== nonce) continue;
+      const value = String(capture?.candidate?.value || "").trim().toLowerCase();
+      if (value) return value;
+    }
+    return "";
+  }
+  function captureWaiverAck(ticket, comment) {
+    const binding = captureWaiverBinding({
+      comment,
+      captures: Array.isArray(ticket?.verificationCaptures) ? ticket.verificationCaptures : [],
+      claimHolder: ticket?.claim?.by,
+      dispatchNonce: ticket?.dispatchNonce,
+      pinnedCandidate: liveCandidate(ticket)
+    });
+    return binding ? { captureWaiver: binding } : null;
+  }
   function addComment(slug, idOrRef, fields) {
     const prepared = prepareComment(fields);
     if (!prepared.ok) return prepared;
@@ -77,6 +109,8 @@ function createComments(dependencies) {
       const t = getTicket(slug, found.id);
       if (!t) return { ok: false, reason: "not_found" };
       const attributed = claimedMarkerComment(prepared, t);
+      const authority = authorityCommentRefusal(t, attributed);
+      if (authority) return Object.assign({ ticket: t }, authority);
       const duplicate = duplicateClaimMarker(t, attributed);
       if (duplicate) return { ok: true, ticket: t, comment: duplicate, duplicate: true };
       const verification = verificationCompletionCheck(slug, t, attributed);
@@ -91,7 +125,13 @@ function createComments(dependencies) {
       t.updatedAt = comment.at;
       putTicket(slug, t);
       queueEventNotification(slug, t, t.lastEventType, t.lastEventSource, { commentBody: comment.body });
-      return { ok: true, ticket: t, comment, ...attributed.advisory ? { advisory: attributed.advisory } : {} };
+      return {
+        ok: true,
+        ticket: t,
+        comment,
+        ...attributed.advisory ? { advisory: attributed.advisory } : {},
+        ...captureWaiverAck(t, comment)
+      };
     });
   }
   function linkTypePair(verb) {

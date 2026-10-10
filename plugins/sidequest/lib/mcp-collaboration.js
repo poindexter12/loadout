@@ -62,6 +62,7 @@ const {
   state
 } = require("./mcp-shared");
 const { sidequestMutationFreshness } = require("./plugin-freshness");
+const { authorityCommentAuthorMessage, authorityCommentMarkers } = require("./kernel/verification.js");
 const tools = [
   {
     name: "supersede_submission",
@@ -105,10 +106,10 @@ const tools = [
   },
   {
     name: "comment",
-    description: "Add a durable handoff comment (decisions, constraints, risks, evidence); not progress narration.",
+    description: "Add a durable handoff comment (decisions, constraints, risks, evidence); not progress narration. Omitting by attributes the comment to the live claim holder when the caller shares that claim's session, which an executor subagent always does, so pass by explicitly whenever you are posting as the orchestrator. A comment the board judges by its author (a [sidequest:capture-waiver]) requires by and is refused without it; its ack reports whether the waiver can bind.",
     inputSchema: {
       type: "object",
-      properties: { ref: { type: "string" }, project: PROJECT_PROP, body: { type: "string" }, by: { type: "string" } },
+      properties: { ref: { type: "string" }, project: PROJECT_PROP, body: { type: "string" }, by: { type: "string", description: "The posting identity. Required for an authority marker such as [sidequest:capture-waiver], which is refused without it because the board judges the marker by its recorded author. Otherwise it defaults to the claim holder when you share its runtime session, which an executor subagent of your session does, so pass it explicitly whenever you are not the claim holder." } },
       required: ["ref", "body"]
     },
     handler(args) {
@@ -116,7 +117,19 @@ const tools = [
       const ticket = store.getTicket(slug, args.ref);
       const sessionId = sessionOf(args);
       const claimSessionId = ticket?.claim?.runtime?.sessionId;
-      const by = args.by || (sessionId && claimSessionId === sessionId ? ticket.claim.by : controlPlaneIdentity(null, sessionId));
+      const explicitBy = String(args.by || "").trim();
+      const authorityMarkers = authorityCommentMarkers(args.body);
+      if (authorityMarkers.length && !explicitBy) {
+        return mutationAck(slug, {
+          ok: false,
+          ticket,
+          reason: "authority_comment_author",
+          message: authorityCommentAuthorMessage(authorityMarkers),
+          retryable: true
+        }, null);
+      }
+      const claimAttributed = !explicitBy && !!sessionId && claimSessionId === sessionId && !!ticket?.claim?.by;
+      const by = explicitBy || (claimAttributed ? ticket.claim.by : controlPlaneIdentity(null, sessionId));
       const res = store.addComment(slug, args.ref, {
         body: args.body,
         by,
@@ -126,7 +139,16 @@ const tools = [
         actor: by,
         operation: "comment"
       });
-      return mutationAck(slug, res, res.ok ? { commentId: res.comment.id, at: res.comment.at } : null);
+      return mutationAck(slug, res, res.ok ? {
+        commentId: res.comment.id,
+        at: res.comment.at,
+        // SQ-306: a waiver never binds in silence. The orchestrator learns at post time whether
+        // the author is eligible, the capture id is known, and the candidate is the live pinned
+        // one, instead of discovering it at the executor's next submit. Ordinary comments keep
+        // the lean ack: an authority marker posted without `by` is refused above, so a
+        // claim-holder attribution here is the executor's own and carries no decision.
+        ...res.captureWaiver ? { captureWaiver: res.captureWaiver } : {}
+      } : null);
     }
   },
   {
