@@ -1535,6 +1535,10 @@
           "type": "string",
           "description": "Proof."
         },
+        "recoveryTaskId": {
+          "type": "string",
+          "description": "Failed host task id; a match retires that attempt now."
+        },
         "claimHolder": {
           "type": "string"
         },

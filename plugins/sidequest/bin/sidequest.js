@@ -62,7 +62,7 @@ const COMMAND_FLAGS = {
   ready: ["model", "category", "brief"],
   archive: ["done"],
   unarchive: [],
-  dispatch: ["shared-tree", "allow-repeat-failure", "allow-unscoped", "session", "unverified-transport", "recovery-evidence"],
+  dispatch: ["shared-tree", "allow-repeat-failure", "allow-unscoped", "session", "unverified-transport", "recovery-evidence", "recovery-task-id"],
   briefing: ["token-file"],
   temp: ["root"],
   "cleanup-temp": ["root"],
@@ -284,7 +284,7 @@ const HELP_COMMANDS = {
   ready: "sidequest ready [--model <model>] [--category <id>] [--json] [--brief]",
   archive: "sidequest archive [<id|SQ-n>] [--done]",
   unarchive: "sidequest unarchive <id|SQ-n>",
-  dispatch: 'sidequest dispatch <SQ-n> [--shared-tree] [--allow-repeat-failure] [--allow-unscoped] [--project <path-or-slug>] [--session id] [--unverified-transport] [--recovery-evidence "<observed failure evidence>"]',
+  dispatch: 'sidequest dispatch <SQ-n> [--shared-tree] [--allow-repeat-failure] [--allow-unscoped] [--project <path-or-slug>] [--session id] [--unverified-transport] [--recovery-evidence "<observed failure evidence>" [--recovery-task-id <failed host task id>]]',
   briefing: "sidequest briefing <SQ-n> --token-file <path> [--project <path-or-slug>]",
   "native-agent": 'sidequest native-agent <SQ-n> [--prompt "task"] [--shared-tree] [--json] [--unverified-transport]',
   temp: "sidequest temp cleanup [--root <path>] [--json]",
@@ -418,7 +418,7 @@ Complexity is legacy input. Category routing chooses the concrete model and effo
   Ticket model and effort are resolved from its category. Use category add/edit to change routing policy.
 
 Native Agent dispatch (routed work stays in this conversation):
-  sidequest dispatch <SQ-n> [--shared-tree] [--allow-repeat-failure] [--allow-unscoped] [--project <path-or-slug>] [--session id] [--unverified-transport] [--recovery-evidence "<observed failure evidence>"]  prepare a token-gated dispatch: declared-file tickets use worktrees by default; shared-tree dispatch requires the spawning runtime to already be rooted in the declared checkout; executors with a live claim cannot dispatch child work; --recovery-evidence retires an attempt no runtime will finish, either one that never bound a runtime, claim, or checkpoint, or one bound and unclaimed past the claim-idle backstop, records that evidence on the failed attempt, and prepares one fresh identity
+  sidequest dispatch <SQ-n> [--shared-tree] [--allow-repeat-failure] [--allow-unscoped] [--project <path-or-slug>] [--session id] [--unverified-transport] [--recovery-evidence "<observed failure evidence>" [--recovery-task-id <failed host task id>]]  prepare a token-gated dispatch: declared-file tickets use worktrees by default; shared-tree dispatch requires the spawning runtime to already be rooted in the declared checkout; executors with a live claim cannot dispatch child work; --recovery-evidence retires an attempt no runtime will finish, either one that never bound a runtime, claim, or checkpoint, or one bound and unclaimed past the claim-idle backstop, records that evidence on the failed attempt, and prepares one fresh identity; --recovery-task-id carries the failed task id from a host task-failure notification, and when it matches that unclaimed attempt's own bound runtime the evidence applies at once instead of waiting out the backstop
   sidequest briefing <SQ-n> --token-file <path> [--project <path-or-slug>]  print the current token-gated executor briefing
   sidequest native-agent <SQ-n> [--prompt "task"] [--shared-tree] [--json] [--unverified-transport]  return an already-registered native Agent spawn spec + bounded prompt; CLI transport refuses unless --unverified-transport
   sidequest native-agent cleanup --name <name>        clean up any legacy temporary native Agent definition

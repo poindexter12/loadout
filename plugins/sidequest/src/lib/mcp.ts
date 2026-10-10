@@ -272,6 +272,7 @@ const MCP_SCHEMA_PROPERTY_DESCRIPTIONS: Record<string, Record<string, string>> =
   dispatch: {
     sharedTree: 'Tree.',
     recoveryEvidence: 'Proof.',
+    recoveryTaskId: 'Failed host task id; a match retires that attempt now.',
     worktree: 'Checkout.',
   },
   integrate: { deliveryInteractionCommit: 'Reviewed descendant, submitted paths only.' },

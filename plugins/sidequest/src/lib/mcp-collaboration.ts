@@ -301,6 +301,7 @@ const tools: ToolDefinition[] = [
         allowUnscoped: { type: 'boolean', description: 'Explicitly allow a write ticket with no declared file scope.' },
         integrationBranch: { type: 'string' },
         recoveryEvidence: { type: 'string', description: 'Observed failure evidence. With claimHolder, executor, and worktree, recover that live isolated claim without releasing it.' },
+        recoveryTaskId: { type: 'string', description: 'The failed task id from a host task-failure notification. When it matches the bound runtime of the unclaimed attempt being retired, recoveryEvidence applies at once instead of waiting out the claim-idle backstop.' },
         claimHolder: { type: 'string', description: 'The exact by identity holding the live claim being recovered.' },
         worktree: { type: 'string', description: 'The resumed executor\'s linked worktree path for live-claim recovery.' },
         full: { type: 'boolean', description: 'Include token, executor, warnings, and recovery details.' },
@@ -331,6 +332,7 @@ const tools: ToolDefinition[] = [
           allowUnscoped: args.allowUnscoped === true,
           integrationBranch: args.integrationBranch,
           recoveryEvidence: args.recoveryEvidence,
+          recoveryTaskId: args.recoveryTaskId,
           ...(freshness.skew ? { dispatchSkew: freshness.skew } : {}),
           // Reaching this handler is itself proof the board MCP is connected
           // in this session (SQ-1017); CLI transport carries no such proof.

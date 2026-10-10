@@ -1085,6 +1085,77 @@ test('SQ-2206: a bound launch that never claimed becomes retirable on evidence p
   }
 });
 
+// SQ-302: an executor whose model request fails at the API dies before its first turn, so SubagentStop never
+// fires and the claim-idle backstop is the only exit. That stranded a bound dispatch for a full hour with
+// nothing left to wait for, while the host had already reported the task failed. The failed task id is the same
+// identity SubagentStart bound, so matching it is terminal proof, not a guess.
+test('SQ-302: a host task-failure id for this attempt\'s own bound runtime retires it inside the backstop', () => {
+  const ticket = addRouted('pre-claim api failure');
+  const sessionId = 'session-host-task-failure';
+  const prepared = store.prepareDispatch(slug, ticket.ref, { sharedTree: true, sessionId });
+  assert.equal(store.recordDispatchLaunch(slug, ticket.ref, {
+    token: prepared.token, executor: prepared.ticket.dispatchExecutor, sessionId, agentName: 'host-task-failure-agent',
+  }).ok, true);
+  assert.equal(store.bindDispatchAgent(sessionId, prepared.ticket.dispatchExecutor, 'host-task-failure-id', 'host-task-failure-agent').ok, true);
+
+  const evidence = 'Host task-notification status=failed: HTTP 404 model_not_found before the first tool call.';
+
+  // Evidence alone still waits out the backstop, and evidence about some other launch is refused as such.
+  assert.throws(
+    () => store.prepareDispatch(slug, ticket.ref, { sharedTree: true, sessionId: `${sessionId}-no-id`, recoveryEvidence: evidence }),
+    /becomes retirable on evidence in .* unless its terminal hook fires first/,
+  );
+  assert.throws(
+    () => store.prepareDispatch(slug, ticket.ref, {
+      sharedTree: true, sessionId: `${sessionId}-wrong-id`, recoveryEvidence: evidence, recoveryTaskId: 'some-other-task-id',
+    }),
+    /recoveryTaskId passed names no runtime this attempt ever bound, so it is evidence about some other launch/,
+  );
+
+  const replacement = store.prepareDispatch(slug, ticket.ref, {
+    sharedTree: true,
+    sessionId: `${sessionId}-replacement`,
+    recoveryEvidence: evidence,
+    recoveryTaskId: 'host-task-failure-id',
+  });
+  const retired = replacement.ticket.dispatch.attempts.at(-1);
+  assert.equal(retired.failureShape, 'host_task_failure_superseded');
+  assert.equal(retired.recoveryEvidence, evidence);
+  assert.equal(retired.recoveryTaskId, 'host-task-failure-id');
+  assert.ok(retired.boundAt, 'the retired attempt is preserved as the bound one it was');
+  assert.notEqual(replacement.token, prepared.token);
+  assert.equal(replacement.ticket.dispatch.outcome, 'prepared');
+
+  // The same stranded shape used to pulse as "no active claim or death record", which reads like a ticket
+  // nobody ever dispatched. Asserted on a second ticket because the one above is now retired.
+  const pulsed = addRouted('stranded bound launch pulses as bound');
+  const pulsedSession = 'session-host-task-failure-pulse';
+  const pulsedPrepared = store.prepareDispatch(slug, pulsed.ref, { sharedTree: true, sessionId: pulsedSession });
+  assert.equal(store.recordDispatchLaunch(slug, pulsed.ref, {
+    token: pulsedPrepared.token, executor: pulsedPrepared.ticket.dispatchExecutor, sessionId: pulsedSession, agentName: 'pulsed-agent',
+  }).ok, true);
+  assert.equal(store.bindDispatchAgent(pulsedSession, pulsedPrepared.ticket.dispatchExecutor, 'pulsed-task-id', 'pulsed-agent').ok, true);
+  const stranded = store.pulsePayload(slug, pulsed.ref);
+  assert.match(stranded.livenessEvidence, /bound a runtime that has not claimed yet and is still inside the claim-idle backstop/);
+  assert.match(stranded.livenessEvidence, /retire it now with recoveryTaskId/);
+
+  // A task id is evidence a runtime is gone, never authority over one that is working: the claim outranks it.
+  const claimed = addRouted('host task failure never beats a claim');
+  const claimedSession = 'session-host-task-failure-claimed';
+  const claimedPrepared = store.prepareDispatch(slug, claimed.ref, { sharedTree: true, sessionId: claimedSession });
+  assert.equal(store.recordDispatchLaunch(slug, claimed.ref, {
+    token: claimedPrepared.token, executor: claimedPrepared.ticket.dispatchExecutor, sessionId: claimedSession, agentName: 'claimed-task-agent',
+  }).ok, true);
+  assert.equal(store.bindDispatchAgent(claimedSession, claimedPrepared.ticket.dispatchExecutor, 'claimed-task-id', 'claimed-task-agent').ok, true);
+  assert.equal(store.claimTicket(slug, claimed.ref, 'host-task-failure-executor', {
+    token: claimedPrepared.token, executor: claimedPrepared.ticket.dispatchExecutor, sessionId: claimedSession,
+  }).ok, true);
+  assert.throws(
+    () => store.prepareDispatch(slug, claimed.ref, { sharedTree: true, recoveryEvidence: evidence, recoveryTaskId: 'claimed-task-id' }),
+    /cannot be superseded on recovery evidence because its dispatch is claimed by host-task-failure-executor/,
+  );
+});
+
 test('SQ-2136: a prepared dispatch that never launched is retirable on evidence, and the refusal names the real blocker', () => {
   const ticket = addRouted('prepared unbound retirement');
   const first = store.prepareDispatch(slug, ticket.ref, { sharedTree: true, sessionId: 'session-prepared-unbound' });

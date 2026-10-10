@@ -198,18 +198,26 @@ atomic: each subagent claims a different ticket, and any race just sends the los
   then release before replacing it. A dispatch failure needs verbatim ticket evidence and user-visible
   escalation; never pull substantial work inline by default. Other `SendMessage` calls
   carry new information such as a scope change or unblock, never a "wake up" poke.
-- **Retire an attempt no runtime will finish.** Two shapes qualify. When `pulse` reports the dispatch
+- **Retire an attempt no runtime will finish.** Three shapes qualify. When `pulse` reports the dispatch
   `prepared` or `launched` with no bound runtime identity, no claim, and no checkpoint, there is nothing to
   wait for: the spawn never started or never bound. And when it reports `stalled` with "bound a runtime that
   never claimed, past the claim-idle backstop", that runtime is gone: a claim is a bound executor's FIRST
   action, and its stop hook never fired, so nothing else will ever retire the attempt. Retire either in one
   call with `sidequest dispatch <ref> --recovery-evidence "<observed failure evidence>"` (MCP
-  `recoveryEvidence`). A tokened claim refused as `prepared_compatibility_stale` is already terminal: that
-  refusal retires its own stale attempt, so the executor stops without claiming and the orchestrator dispatches
-  a fresh token. That records the evidence on the failed attempt, keeps it in `dispatch.attempts` as
-  history, and prepares exactly one fresh identity. It refuses while a bound attempt is still inside the
-  backstop, and once the attempt is checkpointed or terminal; the refusal names which of those it
-  found and, for a bound one, how long is left. A claimed executor that is provably dead goes through claim
+  `recoveryEvidence`). The third shape does not wait for the backstop at all: when the host reports a
+  task-failure notification for the bound-and-unclaimed attempt's OWN task, add
+  `--recovery-task-id <failed task id>` (MCP `recoveryTaskId`) and it retires immediately. An executor whose
+  model request fails at the API dies before its first turn, so `SubagentStop` never fires and that
+  notification is the only terminal fact that will ever exist; the id it carries is the same runtime identity
+  `SubagentStart` bound, so the board matches it rather than taking your word for it, and refuses an id
+  belonging to some other launch. Without that id the ticket sits for the whole backstop with nothing left to
+  wait for. Any of the three records the evidence on the failed attempt, keeps it in `dispatch.attempts` as
+  history, and prepares exactly one fresh identity. Retirement refuses while a bound attempt is still inside
+  the backstop without a matching task id, and once the attempt is checkpointed or terminal; the refusal names
+  which of those it found and, for a bound one, how long is left. A tokened claim refused as
+  `prepared_compatibility_stale` needs none of this: it is already terminal, because that refusal retires its
+  own stale attempt, so the executor stops without claiming and the orchestrator just dispatches a fresh
+  token. A claimed executor that is provably dead goes through claim
   release or `groomClose --recoveryEvidence`. The exception is a live claimed executor that resumed into its
   original linked checkout but lost only the board binding: it uses `dispatch` with `recoveryEvidence`,
   `claimHolder`, and `worktree`; the board verifies the stored executor and restores that same identity without releasing.
