@@ -200,6 +200,22 @@ function rejectedRelatedReleaseFragments(slug: string, ticket: any): string[] {
   });
 }
 
+// Keeps the commit refusal honest about which of the three cases a foreign fragment is
+// in: already implicitly deletable, deletable once a `related` link exists, or owned by
+// a ticket whose candidate no review rejected (SQ-304).
+function foreignReleaseFragmentRefusal(operation: string, slug: string, ticket: any, fragments: string[]): string {
+  return commitScope.foreignReleaseFragmentRefusalMessage(
+    operation,
+    ticket.ref,
+    fragments,
+    commitScope.foreignReleaseFragmentDiagnosis(
+      fragments,
+      rejectedRelatedReleaseFragments(slug, ticket),
+      (ref: string) => store.getTicket(slug, ref),
+    ),
+  );
+}
+
 function ticketCommitScope(slug: string, ticket: any): string[] {
   return [...new Set([
     ...commitScope.ticketCommitScope(store.executionScope(slug, ticket), ticket.files, ticket.ref),
@@ -416,8 +432,12 @@ function collectGitSubmissionFacts(options: any) {
   const duplicate = range?.ok
     ? ticket.dispatch?.sharedTree === true
       ? approvedBoundaries.find((boundary: { ref: string; commit: string }) => range.commits.includes(boundary.commit)) || null
+      // A review-rejected candidate is parked, never integrated, and a repair is expected
+      // to branch from it and carry its range forward — supersede_submission already
+      // requires the repair's delivery to cover every original path. Counting it as a
+      // duplicate source forced an undocumented squash, so it is excluded here (SQ-304).
       : store.submissionsPayload(slug).tickets
-        .filter((entry: any) => entry.ref !== ticket.ref)
+        .filter((entry: any) => entry.ref !== ticket.ref && entry.submission?.review?.outcome !== 'rejected')
         .find((entry: any) => (Array.isArray(entry.submission.commits) && entry.submission.commits.length ? entry.submission.commits : [entry.submission.commit]).some((entryCommit: any) => range.commits.includes(entryCommit)))
     : null;
   return {
@@ -840,7 +860,7 @@ const tools: ToolDefinition[] = [
           ok: false,
           ticket,
           reason: 'outside_scope',
-          message: commitScope.foreignReleaseFragmentRefusalMessage('commit', ticket.ref, foreignFragments),
+          message: foreignReleaseFragmentRefusal('commit', slug, ticket, foreignFragments),
         });
       }
       const result = commitScope.commitScoped(root, message, scope);
@@ -1213,4 +1233,4 @@ const tools: ToolDefinition[] = [
   },
 ];
 
-module.exports = { tools, missingReleaseFragment, missingReleaseFragmentMessage, submissionRangeFailureMessage, collectGitSubmissionFacts, rejectedRelatedReleaseFragments };
+module.exports = { tools, missingReleaseFragment, missingReleaseFragmentMessage, submissionRangeFailureMessage, collectGitSubmissionFacts, rejectedRelatedReleaseFragments, foreignReleaseFragmentRefusal };

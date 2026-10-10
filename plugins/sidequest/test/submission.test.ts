@@ -1106,7 +1106,10 @@ test('CLI commit admits a related review-rejected fragment transfer and refuses 
   fs.unlinkSync(path.join(root, unrelatedFragment));
   const refused = runAtRoot(['commit', blocked.ref, '--by', blockedBy, '--message', 'remove unrelated release fragment']);
   assert.equal(refused.status, 1);
-  assert.match(refused.stderr + refused.stdout, /except a deleted fragment from a related review-rejected candidate/);
+  // SQ-304: the refusal must say what makes a foreign fragment deletable rather than
+  // naming an exception the caller has no way to reach.
+  assert.match(refused.stderr + refused.stdout, new RegExp(`\\.release/unreleased/${unrelated.ref}\\.md belongs to another ticket: a foreign fragment becomes deletable only once its candidate is review-rejected and its ticket is linked to ${blocked.ref} with`));
+  assert.doesNotMatch(refused.stderr + refused.stdout, /except a deleted fragment from a related review-rejected candidate/);
   assert.match(refused.stderr + refused.stdout, new RegExp(`Other release fragments: \\.release/unreleased/${unrelated.ref}\\.md`));
 });
 
@@ -2889,8 +2892,8 @@ test('SQ-2399: shared-tree siblings select submitted boundaries while isolated c
     git(['fetch', 'origin']);
   });
 
-  function dispatchTicket(title: string, file: string, worker: string, sessionId: string, sharedTree: boolean) {
-    const ticket = addTicket(title, { files: [file], category: 'submission.fixture' });
+  function dispatchTicket(title: string, file: string | string[], worker: string, sessionId: string, sharedTree: boolean) {
+    const ticket = addTicket(title, { files: Array.isArray(file) ? file : [file], category: 'submission.fixture' });
     const prepared = store.prepareDispatch(slug, ticket.ref, { sessionId, sharedTree });
     assert.strictEqual(store.claimTicket(slug, ticket.ref, worker, {
       token: prepared.token,
@@ -2977,6 +2980,43 @@ test('SQ-2399: shared-tree siblings select submitted boundaries while isolated c
   assert.strictEqual(duplicateRefused.reason, 'duplicate_submission');
   assert.match(duplicateRefused.message, new RegExp(duplicateFirstCommit));
   assert.match(duplicateRefused.message, new RegExp(`--base ${duplicateFirstCommit}`));
+
+  // SQ-304: a review-rejected candidate is parked, never integrated, and a repair is
+  // expected to branch from it and carry its range forward, so it must not count as the
+  // duplicate source that forces an undocumented squash.
+  cleanBranch();
+  fs.mkdirSync(path.join(PROJECT_DIR, 'lib'), { recursive: true });
+  const rejectedCandidate = dispatchTicket('rejected candidate', 'lib/rejected-candidate.js', 'rejected-candidate-worker', 'rejected-candidate', false);
+  const repairOfRejected = dispatchTicket('repair of rejected candidate', ['lib/rejected-candidate.js', 'lib/rejected-repair.js'], 'rejected-repair-worker', 'rejected-repair', false);
+  fs.writeFileSync(path.join(PROJECT_DIR, 'lib', 'rejected-candidate.js'), 'rejected\n');
+  git(['add', 'lib/rejected-candidate.js']);
+  git(['commit', '-m', 'rejected candidate']);
+  const rejectedCandidateCommit = git(['rev-parse', 'HEAD']);
+  assert.strictEqual((await submitTicket(rejectedCandidate, 'rejected-candidate-worker', rejectedCandidateCommit)).ok, true);
+  fs.writeFileSync(path.join(PROJECT_DIR, 'lib', 'rejected-repair.js'), 'repair\n');
+  git(['add', 'lib/rejected-repair.js']);
+  git(['commit', '-m', 'repair of rejected candidate']);
+  const repairCommit = git(['rev-parse', 'HEAD']);
+  // Negative control: while the candidate carries no rejection, the same range is still
+  // a duplicate, so the exclusion below is what admits the repair.
+  const notYetRejected = await submitTicket(repairOfRejected, 'rejected-repair-worker', repairCommit, dispatchBase);
+  assert.strictEqual(notYetRejected.ok, false);
+  assert.strictEqual(notYetRejected.reason, 'duplicate_submission');
+  assert.match(notYetRejected.message, new RegExp(rejectedCandidate.ref));
+  const rejectedTicket = store.getTicket(slug, rejectedCandidate.ref);
+  rejectedTicket.submission.review = { outcome: 'rejected' };
+  db.putRow(db.openDb(SIDEQUEST_HOME), 'tickets', {
+    id: rejectedTicket.id, project: slug, ref: rejectedTicket.ref, status: rejectedTicket.status,
+    archived: rejectedTicket.archived ? 1 : 0, ord: rejectedTicket.order,
+    claim_by: rejectedTicket.claim?.by || null, data: rejectedTicket,
+  });
+  const repairSubmitted = await submitTicket(repairOfRejected, 'rejected-repair-worker', repairCommit, dispatchBase);
+  assert.strictEqual(repairSubmitted.ok, true, repairSubmitted.message);
+  assert.deepStrictEqual(
+    store.getTicket(slug, repairOfRejected.ref).submission.changedPaths.slice().sort(),
+    ['lib/rejected-candidate.js', 'lib/rejected-repair.js'],
+    'the repair carries the rejected candidate range forward without a squash',
+  );
 
   cleanBranch();
   fs.mkdirSync(path.join(PROJECT_DIR, 'lib'), { recursive: true });

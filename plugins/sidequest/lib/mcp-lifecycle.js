@@ -159,6 +159,18 @@ function rejectedRelatedReleaseFragments(slug, ticket) {
     return fragment ? [fragment] : [];
   });
 }
+function foreignReleaseFragmentRefusal(operation, slug, ticket, fragments) {
+  return commitScope.foreignReleaseFragmentRefusalMessage(
+    operation,
+    ticket.ref,
+    fragments,
+    commitScope.foreignReleaseFragmentDiagnosis(
+      fragments,
+      rejectedRelatedReleaseFragments(slug, ticket),
+      (ref) => store.getTicket(slug, ref)
+    )
+  );
+}
 function ticketCommitScope(slug, ticket) {
   return [.../* @__PURE__ */ new Set([
     ...commitScope.ticketCommitScope(store.executionScope(slug, ticket), ticket.files, ticket.ref),
@@ -329,7 +341,7 @@ function collectGitSubmissionFacts(options) {
     const missingFragment = missingReleaseFragment(root, ticket.ref, scopedRange.paths || range.changedPaths);
     if (missingFragment) requirements.push({ code: "missing_release_fragment", message: missingReleaseFragmentMessage(ticket.ref, missingFragment.fragmentPath, missingFragment.plugins), retryable: true });
   }
-  const duplicate = range?.ok ? ticket.dispatch?.sharedTree === true ? approvedBoundaries.find((boundary) => range.commits.includes(boundary.commit)) || null : store.submissionsPayload(slug).tickets.filter((entry) => entry.ref !== ticket.ref).find((entry) => (Array.isArray(entry.submission.commits) && entry.submission.commits.length ? entry.submission.commits : [entry.submission.commit]).some((entryCommit) => range.commits.includes(entryCommit))) : null;
+  const duplicate = range?.ok ? ticket.dispatch?.sharedTree === true ? approvedBoundaries.find((boundary) => range.commits.includes(boundary.commit)) || null : store.submissionsPayload(slug).tickets.filter((entry) => entry.ref !== ticket.ref && entry.submission?.review?.outcome !== "rejected").find((entry) => (Array.isArray(entry.submission.commits) && entry.submission.commits.length ? entry.submission.commits : [entry.submission.commit]).some((entryCommit) => range.commits.includes(entryCommit))) : null;
   return {
     target,
     range,
@@ -735,7 +747,7 @@ const tools = [
           ok: false,
           ticket,
           reason: "outside_scope",
-          message: commitScope.foreignReleaseFragmentRefusalMessage("commit", ticket.ref, foreignFragments)
+          message: foreignReleaseFragmentRefusal("commit", slug, ticket, foreignFragments)
         });
       }
       const result = commitScope.commitScoped(root, message, scope);
@@ -1083,4 +1095,4 @@ const tools = [
     }
   }
 ];
-module.exports = { tools, missingReleaseFragment, missingReleaseFragmentMessage, submissionRangeFailureMessage, collectGitSubmissionFacts, rejectedRelatedReleaseFragments };
+module.exports = { tools, missingReleaseFragment, missingReleaseFragmentMessage, submissionRangeFailureMessage, collectGitSubmissionFacts, rejectedRelatedReleaseFragments, foreignReleaseFragmentRefusal };

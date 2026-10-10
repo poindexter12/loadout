@@ -70,6 +70,25 @@ usually want `apply` or `replay`; use `merge` where the repository's release flo
 
 If a repair ticket deliberately delivers an earlier parked submission, do not replay the obsolete range. Use MCP `supersede_submission` with the earlier ref, the later integrated repair ref, concise closure evidence, and `reviewedReplacements` for every original path whose delivered content intentionally differs. The control plane requires the repair's recorded delivery to include every original changed path, preserves the earlier submission and its lineage under `supersededBy`, marks it done, and removes its pending-submission warning. A missing path, an unintegrated repair, or unreviewed divergent content leaves the original submission parked.
 
+### Filing a repair for a review-rejected candidate
+
+A rejected candidate is parked, not integrated, so the repair is expected to branch from it and carry
+its range forward. The duplicate-submission gate skips a review-rejected source, which means no
+squash is needed — but the repair only submits cleanly when the orchestrator files it with all three
+of these, before dispatch:
+
+1. **Branch the repair from the rejected candidate**: `refs/sidequest/<rejected ref>` is the base.
+2. **Declare the union of both changed-path sets**: submit validates every path the whole range
+   touches against the repair's declared files, so the repair must declare its own paths *and* the
+   rejected candidate's changed paths. Declaring only what the repair edits refuses with
+   `outside_scope` naming the inherited paths.
+3. **Link the repair `related` to the rejected source**: `sidequest link <repair> related <rejected>`
+   (MCP `link`, verb `related`). That link is what lets the executor delete
+   `.release/unreleased/<rejected ref>.md`: its deletion then rides the commit and submit scope
+   implicitly, and no `update` or `scopeRequest` may declare it — the scope gates refuse any foreign
+   release fragment, with or without the link. Without the link, the commit gate refuses the deletion
+   too, and the repair lands a duplicate release entry.
+
 ## Local-only repositories
 
 `board-config --integration-mode local` records ranges against local `main`; `auto` chooses that mode when
@@ -187,7 +206,9 @@ is recorded against the already-done ticket; it must not be described as remotel
   returned an unbound candidate to its producer without a review rejection, and the candidate must
   be dropped before the ticket can restart. Record the delivery refusal. A review-bound candidate
   rejects both routes; retain its oracle, then repair through a fresh ticket and supersede it only
-  after the reviewed repair integrates.
+  after the reviewed repair integrates. File that repair as **Filing a repair for a review-rejected
+  candidate** above requires: branched from the rejected candidate, declaring the union of both
+  changed-path sets, and linked `related` to the rejected source.
 
 ## Backup refs
 

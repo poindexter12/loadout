@@ -11,7 +11,7 @@ const worktrees = require('../lib/worktrees');
 const tempCleanup = require('../lib/temp-cleanup');
 const execNames = require('../lib/exec-names');
 const { claimRefusalMessage } = require('../lib/refusal-guidance');
-const { collectGitSubmissionFacts, rejectedRelatedReleaseFragments } = require('../lib/mcp-lifecycle');
+const { collectGitSubmissionFacts, rejectedRelatedReleaseFragments, foreignReleaseFragmentRefusal } = require('../lib/mcp-lifecycle');
 const { sourceRevisionBaseline } = require('../lib/source-revision-capability');
 const { assertSidequestInstall, assertDispatchTransport } = require('../lib/dispatch-preflight');
 
@@ -374,7 +374,7 @@ async function cmdCommit(opts: any, positional: any) {
   ])];
   const foreignFragments = commitScope.foreignReleaseFragmentPaths(process.cwd(), ticket.ref, rejectedRelatedReleaseFragments(slug, ticket));
   if (foreignFragments.length) {
-    fail(`commit: refused ${ticket.ref}; only ${commitScope.ticketReleaseFragment(ticket.ref)} is implicitly writable, except a deleted fragment from a related review-rejected candidate. Other release fragments: ${foreignFragments.join(', ')}.`);
+    fail(foreignReleaseFragmentRefusal('commit', slug, ticket, foreignFragments));
   }
   const result = commitScope.commitScoped(process.cwd(), opts.message, scope);
   if (!result.ok) {

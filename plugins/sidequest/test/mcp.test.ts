@@ -2685,6 +2685,9 @@ test('MCP submit requires release fragments for marketplace plugin changes', asy
   assert.equal(foreignCommit.ok, false);
   assert.equal(foreignCommit.reason, 'outside_scope');
   assert.match(foreignCommit.message, new RegExp(`only \\.release/unreleased/${foreign.ref}\\.md is implicitly writable`));
+  // SQ-304: a fragment whose candidate no review rejected gets the condition spelled out
+  // rather than a bare exception it cannot reach.
+  assert.match(foreignCommit.message, new RegExp(`\\.release/unreleased/SQ-other\\.md belongs to another ticket: a foreign fragment becomes deletable only once its candidate is review-rejected and its ticket is linked to ${foreign.ref} with`));
 });
 
 test('MCP repair submission transfers a related rejected candidate fragment to its shipping ticket', async () => {
@@ -2721,6 +2724,28 @@ test('MCP repair submission transfers a related rejected candidate fragment to i
   const rejectedReview = store.getTicket(project, review.ref);
   rejectedReview.reviewTarget.outcome = 'rejected';
   persistTicket(project, rejectedReview);
+
+  // SQ-304: the reproduction had no `related` link, so the commit gate refused the
+  // deletion too while the refusal named an exception it would not reach. It must now
+  // print the exact link a control-plane identity has to add.
+  const unlinkedRepair = store.createTicket(project, {
+    title: 'unlinked repair of rejected candidate', files: ['plugins/fixture-plugin'], complexity: 3,
+    labels: ['direct-ok'], complexityWhy: 'fixture for a repair filed without the related link',
+  });
+  const unlinkedBy = 'unlinked-repair-worker';
+  assert.equal((await callTool('claim', {
+    project, ref: unlinkedRepair.ref, by: unlinkedBy, direct: true,
+    reason: 'The unlinked repair fixture requires a local direct claim.',
+  })).ok, true);
+  fs.writeFileSync(path.join(worktree, 'plugins', 'fixture-plugin', 'index.js'), 'unlinked repair attempt\n');
+  fs.unlinkSync(path.join(worktree, sourceFragment));
+  const unlinkedRefused = await callTool('commit', {
+    project, ref: unlinkedRepair.ref, by: unlinkedBy, message: 'delete the rejected fragment without a link', worktree,
+  });
+  assert.equal(unlinkedRefused.ok, false);
+  assert.equal(unlinkedRefused.reason, 'outside_scope');
+  assert.match(unlinkedRefused.message, new RegExp(`\`sidequest link ${unlinkedRepair.ref} related ${source.ref}\``));
+  gitAt(worktree, ['checkout', '--', sourceFragment, 'plugins/fixture-plugin/index.js']);
 
   const repair = store.createTicket(project, {
     title: 'repair rejected plugin candidate', files: ['plugins/fixture-plugin'], complexity: 3,
