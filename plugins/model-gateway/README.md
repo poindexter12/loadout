@@ -19,7 +19,7 @@ Reload the plugin, then start the Model Gateway skill:
 
 > Set up Model Gateway for me.
 
-The skill runs `setup`, which installs and starts the local gateway, checks your login, writes the current project's `.claude/settings.local.json`, and confirms the project wiring. If setup asks for login, complete the browser sign-in, then let Claude run `setup` again to finish the wiring and confirmation. The bundled `env --write-user` command enables machine-wide wiring, while `env --write-project` wires one project.
+The skill runs `setup`, which installs and starts the local gateway, checks your login, writes the current project's `.claude/settings.local.json`, and confirms the project wiring. If that project already sets `ANTHROPIC_BASE_URL` to something other than Anthropic or this gateway, setup leaves it alone and prints a notice; run `env --write-project` to override it deliberately. If setup asks for login, complete the browser sign-in, then let Claude run `setup` again to finish the wiring and confirmation. The bundled `env --write-user` command enables machine-wide wiring, while `env --write-project` wires one project.
 
 After the project wiring is confirmed, fully restart the Claude Code process for that same project. A plugin reload alone does not reload the model picker or settings from the new process. Select a gateway model only after that restart.
 
