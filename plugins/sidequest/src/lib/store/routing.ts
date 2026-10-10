@@ -19,6 +19,11 @@ function createRouting(dependencies: any) {
     residentCache,
     stableClaudeName,
     stableDispatchName,
+    stableReadOnlyClaudeName,
+    stableReadOnlyDispatchName,
+    stablePinnedDispatchName,
+    stableReadOnlyPinnedDispatchName,
+    dispatchPinToken,
     transaction,
     cloneCached,
     dispatchState,
@@ -149,24 +154,169 @@ function dispatchModelFor(id?: any) {
   return String(id || '').replace(/^claude-(?:codex-)?/, '').replace(/\[1m\]$/, '');
 }
 
+// The id to pin in `model:` frontmatter. Same normalization SQ-1004 applied to
+// the marker, for the same reason: a catalog.json left by a pre-3.x gateway
+// still carries `claude-codex-` ids, and pinning one names a model the gateway
+// no longer publishes, so every dispatch would fail on an unknown model until
+// the catalog is rewritten. Only that stale infix is touched — the rest of the
+// id, `[1m]` included, is preserved, because nothing else about it is derivable.
+function publishedModelFor(id?: any) {
+  return String(id || '').replace(/^claude-codex-/, 'claude-');
+}
+
+// How a codex dispatch carries its reasoning effort to the relay (SQ-300).
+//
+//   'frontmatter' (default) -- a runtime per-(model, effort) definition pins the
+//   PUBLISHED model id in `model:` and the effort in `effort:`. Claude Code emits
+//   the latter as `output_config.effort` on the request body, which model-gateway
+//   >=0.53.0 honours on a marker-free published-id route. No route marker is
+//   emitted at all, so no gateway-specific grammar is involved.
+//
+//   'marker' -- the legacy carriage: both halves ride a
+//   `[sidequest-route model=... effort=...]` line in the briefing, resolved
+//   against the virtual claude-codex-auto pin on the two collapsed executors.
+//
+// The opt-out is explicit and NEVER auto-detected: relay capability is not
+// visible in the discovery catalog, so there is nothing honest to sniff. It is a
+// property of the installed relay rather than of a board, so it lives as one
+// home-level setting beside the routing fallback (SIDEQUEST_HOME), not per
+// project: one local gateway serves every project on the machine, and
+// resolveExec has no project in hand.
+const EFFORT_CARRIERS = Object.freeze(['frontmatter', 'marker']);
+const EFFORT_CARRIER_DEFAULT = 'frontmatter';
+const EFFORT_CARRIER_KEY = 'dispatch-effort-carrier';
+
+function normalizeEffortCarrier(value?: any) {
+  const normalized = String(value == null ? '' : value).trim().toLowerCase();
+  return EFFORT_CARRIERS.includes(normalized) ? normalized : null;
+}
+
+function dispatchEffortCarrier() {
+  const override = normalizeEffortCarrier(process.env.SIDEQUEST_DISPATCH_EFFORT_CARRIER);
+  if (override) return override;
+  const cache = residentCache();
+  if (cache.dispatchEffortCarrier === undefined) {
+    let stored: any = null;
+    try {
+      const row = readGlobal(EFFORT_CARRIER_KEY, null);
+      stored = normalizeEffortCarrier(row && typeof row === 'object' ? row.carrier : row);
+    } catch (_) {
+      stored = null;
+    }
+    cache.dispatchEffortCarrier = stored || EFFORT_CARRIER_DEFAULT;
+  }
+  return cache.dispatchEffortCarrier;
+}
+
+function setDispatchEffortCarrier(carrier?: any) {
+  const normalized = normalizeEffortCarrier(carrier);
+  if (!normalized) throw new Error(`Dispatch effort carrier must be one of: ${EFFORT_CARRIERS.join(', ')}.`);
+  return mutateRoutingPolicy({ allProjects: true }, (handle?: any) => {
+    db.putRow(handle, 'globals', { key: EFFORT_CARRIER_KEY, data: { carrier: normalized } });
+    return normalized;
+  }).result;
+}
+
 // The marker rides along so the spawn gate can compare like with like: the
-// briefing embeds exec.dispatchModel (gateway form), never the board slug.
+// briefing embeds exec.dispatchModel (gateway form), never the board slug. Under
+// frontmatter carriage no marker is emitted, so none is recorded either — the
+// hook reads its absence as "this spawn must carry zero markers".
 function dispatchRouteState(model?: any, effort?: any, exec?: any) {
+  const carriesMarker = Boolean(exec && exec.dispatchModel && exec.effortCarrier !== 'frontmatter');
   return {
     model,
     effort,
-    ...(exec && exec.dispatchModel ? { marker: exec.dispatchModel } : {}),
+    ...(carriesMarker ? { marker: exec.dispatchModel } : {}),
   };
+}
+
+// Resolve the pinned definition names for a codex backend, or null when the
+// published id yields no name-safe token (then the collapsed marker executors
+// stay in play rather than dispatching onto a name nothing can register).
+function pinnedDispatchNames(apiModel?: any, effort?: any) {
+  const pinnedModel = publishedModelFor(apiModel);
+  const token = dispatchPinToken(pinnedModel);
+  if (!token) return null;
+  try {
+    return {
+      token,
+      pinnedModel,
+      agent: stablePinnedDispatchName(token, effort),
+      readOnlyAgent: stableReadOnlyPinnedDispatchName(token, effort),
+    };
+  } catch (_) {
+    return null;
+  }
 }
 
 function execFromBackend(backend?: any, effort?: any) {
   if (backend.backend === 'codex') {
     const resolvedEffort = effort || HAIKU_BACKEND_EFFORT;
-    return { agent: stableDispatchName(resolvedEffort), effort: resolvedEffort, model: null, spawnId: backend.id, dispatchModel: dispatchModelFor(backend.id), backend: 'codex', source: backend.source, slug: backend.slug, runsModel: backend.slug, apiModel: backend.id, runsLabel: backend.label || backend.slug, dispatch: 'native-agent' };
+    const pinned = dispatchEffortCarrier() === 'frontmatter' ? pinnedDispatchNames(backend.id, resolvedEffort) : null;
+    return {
+      agent: pinned ? pinned.agent : stableDispatchName(resolvedEffort),
+      readOnlyAgent: pinned ? pinned.readOnlyAgent : stableReadOnlyDispatchName(resolvedEffort),
+      effortCarrier: pinned ? 'frontmatter' : 'marker',
+      pinToken: pinned ? pinned.token : null,
+      pinnedModel: pinned ? pinned.pinnedModel : null,
+      effort: resolvedEffort,
+      model: null,
+      spawnId: backend.id,
+      dispatchModel: dispatchModelFor(backend.id),
+      backend: 'codex',
+      source: backend.source,
+      slug: backend.slug,
+      runsModel: backend.slug,
+      apiModel: backend.id,
+      runsLabel: backend.label || backend.slug,
+      dispatch: 'native-agent',
+    };
   }
   const runtime = backend.slug;
   const agent = effort ? stableClaudeName(effort) : null;
-  return { agent, model: runtime, spawnId: runtime, backend: 'claude', slug: runtime, runsModel: runtime, apiModel: runtime, runsLabel: backend.label || CLAUDE_RUNTIME_LABELS[runtime], dispatch: 'native-agent' };
+  return { agent, readOnlyAgent: effort ? stableReadOnlyClaudeName(effort) : null, effortCarrier: 'none', pinToken: null, pinnedModel: null, model: runtime, spawnId: runtime, backend: 'claude', slug: runtime, runsModel: runtime, apiModel: runtime, runsLabel: backend.label || CLAUDE_RUNTIME_LABELS[runtime], dispatch: 'native-agent' };
+}
+
+/**
+ * The per-(model, effort) codex pins the configured taxonomy actually needs, so
+ * agentsync can register them BEFORE any dispatch in the session rather than
+ * relying on same-session visibility of a definition written at spawn time. The
+ * configured routes only, never the whole discovered catalog: a ticket-level
+ * override outside this set is covered by the write-if-absent path at dispatch
+ * preparation.
+ */
+function configuredDispatchPins(opts?: any) {
+  if (dispatchEffortCarrier() !== 'frontmatter') return [];
+  // `undefined` is the ambient taxonomy (the home-level default set), which is
+  // what resolves when no project is registered yet. It is probed alongside every
+  // registered project, not instead of them: a route configured only at home
+  // level still needs its pin on disk.
+  let projects: any[] = [undefined];
+  if (opts && opts.project) projects = [opts.project];
+  else {
+    try { projects = projects.concat(listProjects() || []); } catch (_) { /* the ambient pass still stands */ }
+  }
+  const pins = new Map<string, any>();
+  for (const project of projects) {
+    const projectPath = project && (project.path || project.root || project);
+    let categories: any[] = [];
+    try { categories = getCategories(projectPath ? { project: projectPath } : {}) || []; } catch (_) { continue; }
+    for (const category of categories) {
+      let resolved: any = null;
+      try { resolved = resolveCategoryRoute(category); } catch (_) { continue; }
+      const exec = resolved && resolved.exec;
+      if (!exec || exec.backend !== 'codex' || !exec.pinToken || !exec.effort) continue;
+      pins.set(`${exec.pinToken}:${exec.effort}`, {
+        token: exec.pinToken,
+        effort: exec.effort,
+        apiModel: exec.pinnedModel,
+        runsLabel: exec.runsLabel,
+        agent: exec.agent,
+        readOnlyAgent: exec.readOnlyAgent,
+      });
+    }
+  }
+  return Array.from(pins.values());
 }
 
 function resolveExec(model?: any, effort?: any) {
@@ -1321,6 +1471,11 @@ function applyDerivedRouting(t?: any, opts?: any) {
     resolvedDispatchRoute,
     dispatchModelFor,
     dispatchRouteState,
+    EFFORT_CARRIERS,
+    EFFORT_CARRIER_DEFAULT,
+    dispatchEffortCarrier,
+    setDispatchEffortCarrier,
+    configuredDispatchPins,
     execFromBackend,
     resolveExec,
     resolveReportedExec,

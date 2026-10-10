@@ -155,3 +155,87 @@ test('isEffort and the prefixes are exported for consumers', () => {
   assert.strictEqual(CLAUDE_PREFIX, 'sidequest-exec-');
   assert.strictEqual(DISPATCH_PREFIX, 'sidequest-exec-dispatch-');
 });
+
+// SQ-300: per-(model, effort) definitions that pin the published id.
+const {
+  CODEX_PIN_PREFIX,
+  READ_ONLY_CODEX_PIN_PREFIX,
+  dispatchPinToken,
+  stablePinnedDispatchName,
+  stableReadOnlyPinnedDispatchName,
+} = require('../lib/exec-names.js') as any;
+
+test('pin tokens are derived from the published model id', () => {
+  assert.strictEqual(dispatchPinToken('claude-gpt-5.6-terra[1m]'), 'gpt-5-6-terra-1m');
+  // A pre-rename catalog id normalizes to the same token, so a stale catalog and
+  // a current one never register two definitions for one route.
+  assert.strictEqual(dispatchPinToken('claude-codex-gpt-5.6-terra[1m]'), 'gpt-5-6-terra-1m');
+  assert.strictEqual(dispatchPinToken('claude-gemini-3.6-flash'), 'gemini-3-6-flash');
+  assert.strictEqual(dispatchPinToken(''), '');
+  assert.strictEqual(dispatchPinToken(null), '');
+  assert.strictEqual(dispatchPinToken('!!!'), '');
+});
+
+test('a context-window suffix keeps two published ids on separate pins', () => {
+  // The token names a FILE, so it has to stay injective over published ids. A
+  // gateway that publishes a plain id and its [1m] twin routes them to two
+  // definitions; folding the suffix away would let whichever synced last answer
+  // for both, dispatching the wrong context window with no visible symptom.
+  const plain = dispatchPinToken('claude-gpt-5.6-terra');
+  const long = dispatchPinToken('claude-gpt-5.6-terra[1m]');
+  assert.strictEqual(plain, 'gpt-5-6-terra');
+  assert.strictEqual(long, 'gpt-5-6-terra-1m');
+  assert.notStrictEqual(plain, long);
+  assert.notStrictEqual(
+    stablePinnedDispatchName(plain, 'high'),
+    stablePinnedDispatchName(long, 'high'),
+  );
+  // Any other bracketed window normalizes the same way, not just [1m].
+  assert.strictEqual(dispatchPinToken('claude-gpt-5.6-terra[200k]'), 'gpt-5-6-terra-200k');
+});
+
+test('pinned dispatch names round-trip through classify', () => {
+  const name = stablePinnedDispatchName('gpt-5-6-terra', 'high');
+  assert.strictEqual(name, 'sidequest-exec-codex-gpt-5-6-terra-high');
+  assert.ok(name.startsWith(CODEX_PIN_PREFIX));
+  assert.deepStrictEqual(classify(name), { kind: 'codex_dispatch', effort: 'high' });
+
+  const readOnly = stableReadOnlyPinnedDispatchName('gpt-5-6-terra', 'high');
+  assert.strictEqual(readOnly, 'sidequest-exec-codex-readonly-gpt-5-6-terra-high');
+  assert.ok(readOnly.startsWith(READ_ONLY_CODEX_PIN_PREFIX));
+  assert.deepStrictEqual(classify(readOnly), { kind: 'read_only_codex_dispatch', effort: 'high' });
+
+  for (const effort of EFFORTS) {
+    assert.deepStrictEqual(classify(stablePinnedDispatchName('gpt-5-6-sol', effort)), { kind: 'codex_dispatch', effort });
+    assert.deepStrictEqual(classify(stableReadOnlyPinnedDispatchName('gpt-5-6-sol', effort)), { kind: 'read_only_codex_dispatch', effort });
+  }
+});
+
+test('pinned dispatch names stay inside the native Agent name constraints', () => {
+  for (const effort of EFFORTS) {
+    for (const name of [stablePinnedDispatchName('gpt-5-6-terra', effort), stableReadOnlyPinnedDispatchName('gpt-5-6-terra', effort)]) {
+      assert.ok(NATIVE_AGENT_NAME_RE.test(name), `${name} is not a legal Agent name`);
+      assert.ok(name.length <= AGENT_NAME_MAX_LENGTH, `${name} exceeds ${AGENT_NAME_MAX_LENGTH}`);
+    }
+  }
+});
+
+test('pinned dispatch names reject tokens that would forge a name or a namespace', () => {
+  // A token carrying a separator or an invalid effort would produce a name that
+  // classify cannot take apart, and the gate would deny every spawn onto it.
+  for (const token of ['', 'has space', 'Upper', 'trailing-', 'dot.dot', 'slash/slash', null, undefined]) {
+    assert.throws(() => stablePinnedDispatchName(token, 'high'), /not name-safe/, `accepted ${String(token)}`);
+  }
+  // `readonly` as a write-capable token would land inside the read-only
+  // namespace, so a write-capable executor would classify as read-only.
+  assert.throws(() => stablePinnedDispatchName('readonly', 'high'), /read-only namespace/);
+  assert.throws(() => stablePinnedDispatchName('readonly-gpt', 'high'), /read-only namespace/);
+  assert.throws(() => stablePinnedDispatchName('gpt-5-6-terra', 'extreme'), /effort is invalid/);
+});
+
+test('a pinned name missing its effort is not mistaken for a live executor', () => {
+  // Without a trailing effort the definition cannot carry the other half, so it
+  // is not a pin; classify must not hand it a codex_dispatch kind.
+  assert.deepStrictEqual(classify('sidequest-exec-codex-gpt-5-6-terra'), { kind: 'ticket', effort: null });
+  assert.deepStrictEqual(classify('sidequest-exec-codex-gpt-5-6-terra-extreme'), { kind: 'ticket', effort: null });
+});

@@ -36,11 +36,13 @@ test('model vocabulary contains Claude runtimes and discovered concrete models',
 test('resolveExec is keyed directly by concrete model and effort', () => {
   seedCatalog([{ slug: 'codex-gpt-test', id: 'claude-test', label: 'GPT Test' }]);
   assert.deepEqual(store.resolveExec('opus', 'high'), {
-    agent: 'sidequest-exec-high', model: 'opus', spawnId: 'opus', backend: 'claude', slug: 'opus',
+    agent: 'sidequest-exec-high', readOnlyAgent: 'sidequest-exec-readonly-high', effortCarrier: 'none',
+    pinToken: null, pinnedModel: null,
+    model: 'opus', spawnId: 'opus', backend: 'claude', slug: 'opus',
     runsModel: 'opus', apiModel: 'opus', runsLabel: 'Claude Opus 5', dispatch: 'native-agent',
   });
   const codex = store.resolveExec('codex-gpt-test', 'xhigh');
-  assert.equal(codex.agent, 'sidequest-exec-dispatch');
+  assert.equal(codex.agent, 'sidequest-exec-codex-test-xhigh');
   assert.equal(codex.model, null);
   assert.equal(codex.spawnId, 'claude-test');
   assert.equal(codex.dispatchModel, 'test');

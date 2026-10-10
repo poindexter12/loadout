@@ -3897,15 +3897,15 @@ test('dispatch returns a stable executor, one spawn prompt, and a token', async 
   const instant = await callTool('dispatch', { allowUnscoped: true, ref: addedInstant.ref, session: 'mcp-dispatch-session', full: true });
   assert.equal(instant.mode, 'instant');
   assert.deepEqual(instant.exec, {
-    agent: 'sidequest-exec-dispatch', model: null, backend: 'codex',
+    agent: 'sidequest-exec-codex-gpt-5-6-terra-high', model: null, backend: 'codex',
     runsModel: 'codex-gpt-5-6-terra', apiModel: 'claude-gpt-5.6-terra',
     runsLabel: 'Terra', dispatch: 'native-agent',
   });
-  assert.equal(instant.agent, 'sidequest-exec-dispatch');
+  assert.equal(instant.agent, 'sidequest-exec-codex-gpt-5-6-terra-high');
   assert.equal(instant.spawn.description, 'Terra, high · instant dispatch');
   assert.equal(instant.spawn.name, `${addedInstant.ref.toLowerCase()}-instant-dispatch-terra-high`);
   assert.equal(instant.spawn.model, undefined);
-  assert.equal(instant.spawn.subagent_type, `sidequest:${instant.agent}`);
+  assert.equal(instant.spawn.subagent_type, instant.agent);
   assert.equal(instant.tokenPrefix, instant.token.slice(0, 12));
   assert.equal(Object.hasOwn(instant, 'briefing'), false);
   assert.ok(Buffer.byteLength(instant.spawn.prompt) < 1200, `dispatch stub is ${Buffer.byteLength(instant.spawn.prompt)} bytes`);
@@ -3913,7 +3913,11 @@ test('dispatch returns a stable executor, one spawn prompt, and a token', async 
   assert.ok(instant.spawn.prompt.includes(DISPATCH_DESCRIPTION));
   assert.ok(instant.spawn.prompt.includes(`briefing ${addedInstant.ref} --token-file "${store.getTicket(slug, addedInstant.ref).dispatch.tokenFile}"`));
   assert.match(instant.spawn.prompt, /FIRST action:/);
-  assert.match(instant.spawn.prompt, /\[sidequest-route model=gpt-5\.6-terra effort=high\]/);
+  // SQ-300: the route rides the pinned executor definition's own frontmatter
+  // (asserted in agentsync.test.ts), so the prompt carries NO route marker — the
+  // spawn gate refuses one under this carriage because it would override the
+  // pinned effort. The pin name asserted above is what names the route here.
+  assert.doesNotMatch(instant.spawn.prompt, /\[sidequest-route/);
   assert.doesNotMatch(instant.spawn.prompt, /## This ticket/);
   assert.doesNotMatch(instant.spawn.prompt, /You are a sidequest ticket executor/);
   assert.doesNotMatch(instant.spawn.prompt, /^---$/m);
@@ -3954,7 +3958,7 @@ test('dispatch returns a stable executor, one spawn prompt, and a token', async 
   store.setCategory({ id: 'dispatch-readonly-codex', name: 'Dispatch Readonly Codex', readonly: true, route: { model: 'codex-gpt-5-6-terra', effort: 'high' } });
   const readonlyTicket = await callTool('add', { title: 'friendly readonly dispatch', description: DISPATCH_DESCRIPTION, category: 'dispatch-readonly-codex' });
   const readonlyDispatch = await callTool('dispatch', { allowUnscoped: true, ref: readonlyTicket.ref, full: true });
-  assert.equal(readonlyDispatch.spawn.subagent_type, 'sidequest:sidequest-exec-dispatch-readonly');
+  assert.equal(readonlyDispatch.spawn.subagent_type, 'sidequest-exec-codex-readonly-gpt-5-6-terra-high');
   assert.equal(readonlyDispatch.spawn.description, 'Terra, high · friendly readonly dispatch');
   assert.doesNotMatch(readonlyDispatch.spawn.description, /\[sidequest-route/);
 });
@@ -4116,7 +4120,7 @@ test('native_agent carries ticket anchors and verify command through its stable 
     const native = await callHandler('native_agent', { ref: added.ref, prompt: 'Implement exactly this ticket.' });
     assert.strictEqual(native.fallback, true);
     assert.strictEqual(native.file, null);
-    assert.strictEqual(native.spawn.subagent_type, 'sidequest:sidequest-exec-dispatch');
+    assert.strictEqual(native.spawn.subagent_type, 'sidequest-exec-codex-gpt-5-6-terra-high');
     assert.strictEqual(native.spawn.description, 'Terra, high · prompt context');
     assert.strictEqual(native.spawn.name, `${added.ref.toLowerCase()}-prompt-context-terra-high`);
     assert.strictEqual(native.spawn.model, undefined);
@@ -4156,7 +4160,7 @@ test('native_agent applies explicit ticket route override refusals before spawni
 
     const native = await callHandler('native_agent', { ref: sameProvider.ref, prompt: 'Implement the ticket.' });
     assert.equal(native.effort, 'high');
-    assert.equal(native.spawn.subagent_type, 'sidequest:sidequest-exec-dispatch');
+    assert.equal(native.spawn.subagent_type, 'sidequest-exec-codex-gpt-5-6-sol-high');
   } finally {
     clearCatalog();
   }
@@ -5224,10 +5228,10 @@ test('route_recipe resolves a live route and makes category errors explicit', as
     const recipe = await callTool('route_recipe', { category: 'recipe-codex' });
     assert.deepEqual(recipe.route, { model: 'codex-terra', effort: 'high' });
     assert.deepEqual(recipe.agent, {
-      model: agentsync.DISPATCH_MODEL_ID,
-      promptPrefix: '[sidequest-route model=gpt-5.6-terra effort=high]\n\n',
+      model: 'claude-gpt-5.6-terra[1m]',
+      promptPrefix: '',
     });
-    assert.equal(recipe.effortCarrier, 'marker');
+    assert.equal(recipe.effortCarrier, 'frontmatter');
     assert.deepEqual(recipe.warnings, []);
 
     store.setCategory({ id: 'recipe-disabled', name: 'Recipe Disabled', route: { model: 'sonnet', effort: 'high' }, enabled: false });
@@ -5341,7 +5345,7 @@ test('claim guard refusal names the Codex-backed executor for a concrete route',
     const res = await callTool('claim', { ref: added.ref, by: 'mcp-w-guard', effort: wrong });
     assert.strictEqual(res.ok, false);
     assert.strictEqual(res.reason, 'effort_mismatch');
-    assert.match(res.message, /spawn sidequest-exec-dispatch./);
+    assert.match(res.message, /spawn sidequest-exec-codex-gpt-5-6-terra-1m-high./);
   } finally {
     clearCatalog();
   }
