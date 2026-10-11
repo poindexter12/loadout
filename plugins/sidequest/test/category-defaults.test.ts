@@ -4,10 +4,19 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const { DEFAULT_CATEGORIES, ROUTING_PROFILE_SEED_REVISION, STARTER_ROUTING_PROFILES, starterRoutingProfilesFor } = require('../lib/category-defaults.js') as {
+const {
+  DEFAULT_CATEGORIES,
+  ROUTING_PROFILE_SEED_REVISION,
+  STARTER_GATEWAY_MODEL_SLUGS,
+  STARTER_ROUTING_PROFILES,
+  starterGatewayCapabilitiesFor,
+  starterRoutingProfilesFor,
+} = require('../lib/category-defaults.js') as {
   DEFAULT_CATEGORIES: unknown;
   ROUTING_PROFILE_SEED_REVISION: number;
+  STARTER_GATEWAY_MODEL_SLUGS: string[];
   STARTER_ROUTING_PROFILES: Array<{ id: string; categories: any[] }>;
+  starterGatewayCapabilitiesFor(slugs: Iterable<string>): Array<{ slug: string; provider: string }>;
   starterRoutingProfilesFor(models: Array<{ slug: string; provider: string }>): Array<{ id: string; categories: any[] }>;
 };
 const snapshotPath = path.join(__dirname, 'fixtures', 'category-defaults.json');
@@ -31,6 +40,27 @@ test('starter profile routes use only exact ready gateway capabilities', () => {
     model: 'sonnet', effort: 'high',
   });
 });
+// SQ-321. The seed refresh feeds the gateway slugs its own stored rows already pin back through this
+// helper, so losing live readiness cannot drop a stored Codex route. It must accept only slugs the
+// starter tables actually name, and must tag them with the provider starterRoutingProfilesFor filters on,
+// or a stored route the tables never issued would start seeding itself.
+test('pinned starter gateway slugs round-trip as capabilities that keep their route', () => {
+  assert.deepEqual(starterGatewayCapabilitiesFor(['codex-gpt-5-6-terra', 'codex-gpt-5-6-terra']), [
+    { slug: 'codex-gpt-5-6-terra', provider: 'codex' },
+  ]);
+  assert.deepEqual(starterGatewayCapabilitiesFor(['sonnet', 'opus', 'codex-not-in-the-tables']), []);
+  assert.deepEqual(
+    starterGatewayCapabilitiesFor(STARTER_GATEWAY_MODEL_SLUGS).map((model) => model.slug).sort(),
+    [...STARTER_GATEWAY_MODEL_SLUGS].sort(),
+  );
+
+  const codingFromPins = starterRoutingProfilesFor(starterGatewayCapabilitiesFor(['codex-gpt-5-6-terra']))
+    .find((profile) => profile.id === 'coding')!;
+  assert.deepEqual(codingFromPins.categories.find((category) => category.id === 'coding.normal')!.route, {
+    model: 'codex-gpt-5-6-terra', effort: 'high',
+  });
+});
+
 test('hard coding excludes stakes alone from classification', () => {
   const hard = (DEFAULT_CATEGORIES as any[]).find((category) => category.id === 'coding.hard');
   assert.match(hard.description, /do not make a ticket hard/);

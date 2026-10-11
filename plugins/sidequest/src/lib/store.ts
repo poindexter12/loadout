@@ -42,7 +42,7 @@ const {
   sourceRevision,
   sourceRevisionAdapterFacts: resolveSourceRevisionAdapterFacts,
 } = sourceRevisionCapability;
-const { DEFAULT_CATEGORIES, ROUTING_PROFILE_SEED_REVISION, starterRoutingProfilesFor } = require('./category-defaults.js');
+const { DEFAULT_CATEGORIES, ROUTING_PROFILE_SEED_REVISION, starterGatewayCapabilitiesFor, starterRoutingProfilesFor } = require('./category-defaults.js');
 const commitScope = require('./commit-scope.js');
 const { commitPaths } = commitScope;
 const { preferredWorktreeIntegrationTarget, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, reclaimUnclaimedDispatchWorktree } = require('./worktrees.js');
@@ -1302,14 +1302,45 @@ const {
 let refreshingRoutingProfileSeeds = false;
 const routingProfileSeedStates = new Map<string, string>();
 
-function installedProviderSeedProfiles() {
-  return starterRoutingProfilesFor(discoverExternalModels()
-    .filter((model: any) => providerReadiness(model.provider)?.ready === true));
+// Gateway slugs the seed profiles' own stored rows already pin. See starterGatewayCapabilitiesFor
+// (category-defaults.ts) for why they count as installed whatever live readiness says right now: without
+// them a readiness dip rewrites every Codex seed route to its default Claude route, and a dispatch in that
+// window runs Sonnet as the configured route, with nothing anywhere saying a substitution happened (SQ-321).
+function pinnedSeedGatewayModelSlugs(handle?: any): string[] {
+  const slugs: string[] = [];
+  // Through lib/db's read helpers like the rest of the open path, so a hook's lock budget governs them.
+  for (const row of db.selectRows(handle, `
+    SELECT entries.data AS data
+    FROM routing_profile_entries entries
+    JOIN routing_profiles profiles ON profiles.id = entries.profile_id
+    WHERE profiles.source = 'seed' AND profiles.seed_revision IS NOT NULL
+  `)) {
+    let category: any;
+    try { category = JSON.parse((row as any).data); } catch (_: any) { continue; }
+    if (!category || typeof category !== 'object') continue;
+    for (const key of ['route', 'fallback']) {
+      const model = category[key] && category[key].model;
+      if (typeof model === 'string' && model.trim()) slugs.push(model.trim().toLowerCase());
+    }
+  }
+  return slugs;
+}
+
+function installedProviderSeedProfiles(handle?: any) {
+  const capabilities = new Map<string, any>();
+  for (const model of discoverExternalModels()) {
+    if (providerReadiness(model.provider)?.ready !== true) continue;
+    capabilities.set(model.slug, model);
+  }
+  for (const model of starterGatewayCapabilitiesFor(pinnedSeedGatewayModelSlugs(handle))) {
+    if (!capabilities.has(model.slug)) capabilities.set(model.slug, model);
+  }
+  return starterRoutingProfilesFor([...capabilities.values()]);
 }
 
 function refreshRoutingProfileSeeds(handle?: any) {
   const pending: any[] = [];
-  for (const seed of installedProviderSeedProfiles()) {
+  for (const seed of installedProviderSeedProfiles(handle)) {
     // Through lib/db's read helpers, like every read on the open path, so a hook's lock budget governs them.
     const profile: any = db.selectRow(handle, `
       SELECT id, seed_revision FROM routing_profiles WHERE source = 'seed' AND seed_key = ?

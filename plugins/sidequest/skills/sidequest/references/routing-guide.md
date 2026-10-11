@@ -39,6 +39,13 @@ then the global routing fallback, then hardwired Sonnet/high. A missing model ca
 degraded route and warning. The dispatcher does nothing special for that warning: it trusts the `exec`
 object from the fresh `list` or `ready` read.
 
+That chain never crosses providers. A fallback whose provider differs from the configured route's is
+refused with a warning rather than taken, so a Codex category never degrades to a Claude model: it keeps
+its configured route, resolves `exec` null, and dispatch refuses with the provider's readiness message.
+Stored routes are held through a readiness dip too — a gateway restart or a catalog Sidequest cannot
+refresh makes the model unlistable without repointing the category — so a Codex route reading as Claude
+in `list` means somebody changed the route, not that the gateway is down.
+
 The `exec` projection names the exact executor and concrete model. Claude routes expose `exec.model`; Codex
 routes expose a backend-specific `exec.agent` with `exec.model` null, so spawn that exact agent with the
 `model` parameter omitted. Inject the category contract verbatim alongside the ticket contract. Never

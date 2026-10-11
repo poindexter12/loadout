@@ -246,7 +246,13 @@ test('DETACH provenance remains visible and CLI, MCP, and REST agree on effectiv
   assert.equal(config.overrides.items.find((entry: any) => entry.id === 'coding.easy').baseProfileId, 'coding');
 });
 
-test('provider capability changes migrate only untouched seeds and preserve prepared Gateway dispatches', () => {
+// SQ-321. A readiness dip must not repoint the shared seed. The refresh used to recompute the seed from
+// live readiness on every store open, so a gateway restart or a catalog that aged past CATALOG_STALE_MS
+// rewrote every Codex seed route to its default Claude route. A dispatch in that window then resolved
+// source "route" = sonnet/high: no fallback was taken, so it carried no fallbackReason and no warning, and
+// the Claude-for-Codex refusal in resolveCategoryRoute was unreachable. Readiness returning rewrote the
+// rows back, which is how the machine-wide `coding` profile reached revision 3140.
+test('a readiness dip leaves seeded Gateway routes pinned and refuses dispatch loudly', () => {
   const seededBoard = store.ensureProject(path.join(HOME, 'capability-seed-board'), 'Capability seed board').slug;
   const overrideBoard = store.ensureProject(path.join(HOME, 'capability-override-board'), 'Capability override board').slug;
   assert.deepEqual(store.getCategory('coding.normal', { project: seededBoard }).route, {
@@ -263,6 +269,7 @@ test('provider capability changes migrate only untouched seeds and preserve prep
   const prepared = store.prepareDispatch(seededBoard, ticket.ref, { allowUnscoped: true, sessionId: 'provider-capability' });
   assert.equal(prepared.ticket.dispatch.route.model, 'codex-gpt-5-6-terra');
   assert.equal(prepared.ticket.dispatch.route.effort, 'high');
+  const revisionBeforeDip = store.getRoutingProfile('coding').revision;
 
   fs.writeFileSync(path.join(DISCOVERY, 'model-gateway', 'catalog.json'), JSON.stringify({
     schemaVersion: 3,
@@ -273,17 +280,82 @@ test('provider capability changes migrate only untouched seeds and preserve prep
   }));
 
   assert.deepEqual(store.getCategory('coding.normal', { project: seededBoard }).route, {
+    model: 'codex-gpt-5-6-terra', effort: 'high',
+  });
+  // The whole point: no row was rewritten, so the shared profile does not flap a revision per readiness flip.
+  assert.equal(store.getRoutingProfile('coding').revision, revisionBeforeDip);
+  // A category whose seed route needs a slug the catalog has never published keeps its default Claude
+  // route. That is the genuine default rather than a substitution, so it must not be pinned by the dip.
+  assert.deepEqual(store.getCategory('codebase-exploration', { project: seededBoard }).route, {
     model: 'sonnet', effort: 'high',
   });
   assert.deepEqual(store.getCategory('coding.normal', { project: overrideBoard }).route, {
     model: 'codex-gpt-5-6-terra', effort: 'high',
   });
+  // Model listing still follows live readiness; only the stored seed route is held.
   assert.ok(!store.modelsPayload({ project: seededBoard }).models.includes('codex-gpt-5-6-terra'));
   const pinned = store.getTicket(seededBoard, ticket.ref);
   assert.equal(pinned.dispatch.route.model, 'codex-gpt-5-6-terra');
   assert.equal(pinned.dispatch.route.effort, 'high');
   assert.equal(pinned.dispatch.outcome, 'prepared');
-  assert.ok(pinned.dispatch.policyChangedAt);
+  // The flap also drove refreshPreparedDispatches on every flip, stamping a routing-policy change over
+  // prepared attempts whose policy had not changed at all. That is the "the board rows it read were
+  // rewritten" refusal a dispatch hit after three plans went stale in a row.
+  assert.equal(pinned.dispatch.policyChangedAt, undefined);
+  assert.equal(pinned.dispatchNonce, prepared.ticket.dispatchNonce);
+});
+
+// Readiness now decides at dispatch, where providerDispatchRefusal states the reason, instead of being
+// baked into the row. On the base this dispatch SUCCEEDED and returned Claude Sonnet for a Codex
+// category, with fallbackReason unset because no fallback had been taken.
+test('SQ-321: a readiness dip refuses a Codex dispatch instead of silently running Sonnet', () => {
+  const seededBoard = store.ensureProject(path.join(HOME, 'capability-seed-board'), 'Capability seed board').slug;
+  fs.writeFileSync(path.join(DISCOVERY, 'model-gateway', 'catalog.json'), JSON.stringify({
+    schemaVersion: 3,
+    updatedAt: new Date().toISOString(),
+    source: 'model-gateway',
+    codexReadiness: { ready: false, state: 'proxy-down', message: 'Codex is unavailable.' },
+    models: [{ slug: 'codex-gpt-5-6-terra', id: 'claude-gpt-5.6-terra[1m]', label: 'GPT-5.6 Terra' }],
+  }));
+  const duringDip = store.createTicket(seededBoard, {
+    title: 'Dispatch attempted while Codex readiness is down',
+    category: 'coding.normal',
+    description: 'A readiness dip must refuse this dispatch rather than quietly running Claude Sonnet.',
+  });
+  assert.throws(
+    () => store.prepareDispatch(seededBoard, duringDip.ref, { allowUnscoped: true, sessionId: 'readiness-dip' }),
+    /Codex is unavailable\./,
+  );
+  assert.equal(store.getTicket(seededBoard, duringDip.ref).dispatchNonce, null);
+});
+
+// The hold is one-directional: losing readiness never drops a stored Gateway route, but a slug the
+// gateway publishes for the first time must still be adopted, or an install that first opened its board
+// without model-gateway would keep Claude routes for ever.
+test('SQ-321: a newly published Gateway slug is still adopted into the seed', () => {
+  const seededBoard = store.ensureProject(path.join(HOME, 'capability-seed-board'), 'Capability seed board').slug;
+  const revisionBefore = store.getRoutingProfile('coding').revision;
+  fs.writeFileSync(path.join(DISCOVERY, 'model-gateway', 'catalog.json'), JSON.stringify({
+    schemaVersion: 3,
+    updatedAt: new Date().toISOString(),
+    source: 'model-gateway',
+    codexReadiness: { ready: true, state: 'ready', message: 'Codex readiness confirms the local gateway is ready.' },
+    models: [
+      { slug: 'codex-gpt-5-6-sol', id: 'claude-gpt-5.6-sol[1m]', label: 'GPT-5.6 Sol' },
+      { slug: 'codex-gpt-5-6-terra', id: 'claude-gpt-5.6-terra[1m]', label: 'GPT-5.6 Terra' },
+      { slug: 'codex-gpt-5-6-luna', id: 'claude-gpt-5.6-luna[1m]', label: 'GPT-5.6 Luna' },
+    ],
+  }));
+  assert.deepEqual(store.getCategory('codebase-exploration', { project: seededBoard }).route, {
+    model: 'codex-gpt-5-6-luna', effort: 'high',
+  });
+  assert.deepEqual(store.getCategory('coding.normal', { project: seededBoard }).route, {
+    model: 'codex-gpt-5-6-terra', effort: 'high',
+  });
+  // Adopting the new slug is one rewrite, not one per store open.
+  assert.equal(store.getRoutingProfile('coding').revision, revisionBefore + 1);
+  assert.equal(store.getCategory('coding.normal', { project: seededBoard }).route.model, 'codex-gpt-5-6-terra');
+  assert.equal(store.getRoutingProfile('coding').revision, revisionBefore + 1);
 });
 
 // SQ-2196. The routing-profile seed refresh runs from database(), which any code inside an open transaction

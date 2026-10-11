@@ -21,7 +21,9 @@ __export(category_defaults_exports, {
   DEFAULT_CATEGORIES: () => DEFAULT_CATEGORIES,
   ROUTING_PROFILE_SEED_REVISION: () => ROUTING_PROFILE_SEED_REVISION,
   STARTER_GATEWAY_MODEL_SLUGS: () => STARTER_GATEWAY_MODEL_SLUGS,
+  STARTER_GATEWAY_PROVIDER: () => STARTER_GATEWAY_PROVIDER,
   STARTER_ROUTING_PROFILES: () => STARTER_ROUTING_PROFILES,
+  starterGatewayCapabilitiesFor: () => starterGatewayCapabilitiesFor,
   starterRoutingProfilesFor: () => starterRoutingProfilesFor
 });
 module.exports = __toCommonJS(category_defaults_exports);
@@ -374,11 +376,16 @@ const GATEWAY_FALLBACK_BY_PROFILE_CATEGORY = {
     "visual-evaluation": { model: "codex-gpt-5-6-terra", effort: "medium" }
   }
 };
+const STARTER_GATEWAY_PROVIDER = "codex";
 const STARTER_GATEWAY_MODEL_SLUGS = Array.from(new Set(
   [GATEWAY_ROUTE_BY_PROFILE_CATEGORY, GATEWAY_FALLBACK_BY_PROFILE_CATEGORY].flatMap((profiles) => Object.values(profiles)).flatMap((categories) => Object.values(categories)).map((route) => route.model)
 )).sort();
+function starterGatewayCapabilitiesFor(slugs) {
+  const starter = new Set(STARTER_GATEWAY_MODEL_SLUGS);
+  return Array.from(new Set(slugs)).filter((slug) => starter.has(slug)).map((slug) => ({ slug, provider: STARTER_GATEWAY_PROVIDER }));
+}
 function starterRoutingProfilesFor(models) {
-  const availableGatewayModels = new Set(models.filter((model) => model.provider === "codex").map((model) => model.slug));
+  const availableGatewayModels = new Set(models.filter((model) => model.provider === STARTER_GATEWAY_PROVIDER).map((model) => model.slug));
   return STARTER_ROUTING_PROFILES.map((profile) => ({
     ...profile,
     categories: profile.categories.map((category) => {
@@ -397,6 +404,8 @@ function starterRoutingProfilesFor(models) {
   DEFAULT_CATEGORIES,
   ROUTING_PROFILE_SEED_REVISION,
   STARTER_GATEWAY_MODEL_SLUGS,
+  STARTER_GATEWAY_PROVIDER,
   STARTER_ROUTING_PROFILES,
+  starterGatewayCapabilitiesFor,
   starterRoutingProfilesFor
 });
