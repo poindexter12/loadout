@@ -28,6 +28,33 @@ Codex/Grok rows disappear from `/model`; an explicit id such as `/model claude-g
 Gateway wiring changes apply to new Claude Code sessions, so restart affected sessions. It continues after
 individual failures and prints the failing commands.
 
+## graphify, when it is already installed
+
+graphify is codebase-mapper's optional structural layer and the one piece of Loadout's
+dependency surface that is not node: it is a Python `uv tool`, the PyPI distribution
+`graphifyy` (two y's) providing a `graphify` executable. Quartermaster owns its lifecycle,
+so this updater keeps it current.
+
+It is strictly opt-in, and the updater holds that line in one direction only:
+
+- **Already installed** (`uv tool list` names it, or names a tool providing the `graphify`
+  executable): the updater runs `uv tool upgrade <distribution>` and surfaces its output the
+  way it surfaces the Model Gateway updater's. It upgrades the distribution name uv actually
+  recorded, so an upstream rename does not leave it chasing a package that no longer exists.
+- **Not installed**: the updater says `graphify: not installed (opt-in)` and does nothing
+  else. **It never installs graphify.** That choice belongs to `/quartermaster:setup`, which
+  offers it alongside codebase-mapper.
+- **`uv` itself missing**: the updater reports that it cannot tell, points at
+  https://docs.astral.sh/uv/getting-started/installation/, and moves on. It never installs `uv`.
+
+`--check` reports the installed version and does not upgrade. `--dry-run` prints the upgrade
+command without running it. A failed upgrade is reported with its output and counted as a
+failure, and the rest of the update continues, like every other step.
+
+For the installed version, whether the project is in graph mode, and whether the CLI surfaces
+the mapper depends on still exist, use `/quartermaster:loadout-doctor` instead: this skill
+changes things, the doctor only reads.
+
 ## Gateway rename migration
 
 If the updater finds the retired `codex-gateway` install, it stops before refreshing plugins, running setup, or changing wiring. Close every Claude Code session using Codex. From a terminal, run the updater's deferred migration command from the installed Quartermaster plugin:

@@ -148,12 +148,120 @@ test('dry-run scopes the update plan to Loadout and does not enumerate third-par
   });
 
   assert.equal(result.ok, true);
-  assert.equal(calls.length, 0);
+  // Dry-run performs no mutating command. It does make one read-only call: `uv tool list`,
+  // to decide whether it would upgrade graphify, so the printed plan reflects reality
+  // instead of promising an upgrade of a tool that is not installed.
+  assert.deepEqual(calls.map((command) => [command.command, ...command.args].join(' ')), ['uv tool list']);
   assert.match(lines.join('\n'), /marketplace.*update.*loadout/);
   assert.doesNotMatch(lines.join('\n'), /another-marketplace|managed-marketplace|other@another-marketplace/);
   assert.match(lines.join('\n'), /Other marketplaces are managed by Claude Code auto-update — not touched\./);
   assert.ok(lines.some((line) => line.includes(`sidequest@loadout (project, ${registry.plugins['sidequest@loadout'][1].projectPath})`)));
   assert.match(lines.join('\n'), /model-gateway update/);
+}));
+
+// --- graphify, wired into the update run (SQ-313) ---
+
+/** Answers the Loadout commands with ok, and `uv` from the given handler. */
+function uvAwareRun(calls, uv) {
+  return (command) => {
+    calls.push([command.command, ...command.args].join(' '));
+    if (command.command === 'uv') return uv(command);
+    return { ok: true };
+  };
+}
+
+const UV_LIST_WITH_GRAPHIFY = { ok: true, output: 'graphifyy v0.8.38\n- graphify\n- graphify-mcp\n' };
+
+test('an update upgrades graphify when it is already installed', () => withRegistry(registry, (registryFile) => {
+  const calls = [];
+  const lines = [];
+  const result = runUpdate({
+    registryFile,
+    env: { CLAUDE_CONFIG_DIR: ISOLATED_CONFIG_DIR },
+    options: { claude: 'claude', dryRun: false, check: false },
+    run: uvAwareRun(calls, (command) => (command.args[1] === 'list'
+      ? UV_LIST_WITH_GRAPHIFY
+      : { ok: true, output: 'Updated graphifyy v0.8.38 -> v0.9.0' })),
+    report: (line) => lines.push(line),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.graphify.status, 'upgraded');
+  assert.ok(calls.includes('uv tool upgrade graphifyy'), 'upgrades the graphifyy distribution');
+  // The upgrade's own output is surfaced in the report, like the gateway updater's.
+  assert.match(lines.join('\n'), /Updated graphifyy v0\.8\.38 -> v0\.9\.0/);
+}));
+
+test('an update never installs graphify when it is absent', () => withRegistry(registry, (registryFile) => {
+  const calls = [];
+  const lines = [];
+  const result = runUpdate({
+    registryFile,
+    env: { CLAUDE_CONFIG_DIR: ISOLATED_CONFIG_DIR },
+    options: { claude: 'claude', dryRun: false, check: false },
+    run: uvAwareRun(calls, () => ({ ok: true, output: 'ansible-core v2.21.0\n- ansible\n' })),
+    report: (line) => lines.push(line),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.graphify.status, 'absent');
+  assert.ok(!calls.some((call) => call.includes('tool install')), 'an opt-in tool is never installed by the updater');
+  assert.ok(!calls.some((call) => call.includes('tool upgrade')));
+  assert.match(lines.join('\n'), /graphify: not installed \(opt-in\)/);
+}));
+
+test('a failed graphify upgrade is counted and the rest of the update still finishes', () => withRegistry(registry, (registryFile) => {
+  const calls = [];
+  const lines = [];
+  const result = runUpdate({
+    registryFile,
+    env: { CLAUDE_CONFIG_DIR: ISOLATED_CONFIG_DIR },
+    options: { claude: 'claude', dryRun: false, check: false },
+    run: uvAwareRun(calls, (command) => (command.args[1] === 'list'
+      ? UV_LIST_WITH_GRAPHIFY
+      : { ok: false, output: 'error: resolution failed', error: 'exit 1' })),
+    report: (line) => lines.push(line),
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.failures, ['graphify upgrade (graphifyy)']);
+  const text = lines.join('\n');
+  assert.match(text, /Completed with 1 failure\(s\): graphify upgrade \(graphifyy\)/);
+  // The steps after graphify still ran, so one upstream failure does not abort the update.
+  assert.match(text, /Reload required/);
+}));
+
+test('check mode reports the installed graphify version without upgrading it', () => withRegistry(registry, (registryFile) => {
+  const calls = [];
+  const lines = [];
+  const result = runUpdate({
+    registryFile,
+    options: { claude: 'claude', dryRun: false, check: true },
+    run: uvAwareRun(calls, (command) => (command.args[1] === 'list' ? UV_LIST_WITH_GRAPHIFY : { ok: true, output: 'graphify 0.8.38' })),
+    report: (line) => lines.push(line),
+  });
+
+  assert.equal(result.graphify.status, 'checked');
+  assert.equal(result.graphify.version, '0.8.38');
+  assert.match(lines.join('\n'), /graphify: installed 0\.8\.38 as uv tool graphifyy/);
+  assert.ok(!calls.some((call) => call.includes('tool upgrade')), '--check must not upgrade graphify');
+}));
+
+test('dry-run prints the graphify upgrade command without running it', () => withRegistry(registry, (registryFile) => {
+  const calls = [];
+  const lines = [];
+  const result = runUpdate({
+    registryFile,
+    env: { CLAUDE_CONFIG_DIR: ISOLATED_CONFIG_DIR },
+    options: { claude: 'claude', dryRun: true, check: false },
+    run: uvAwareRun(calls, () => UV_LIST_WITH_GRAPHIFY),
+    report: (line) => lines.push(line),
+  });
+
+  assert.equal(result.graphify.status, 'dry-run');
+  assert.match(lines.join('\n'), /"uv" "tool" "upgrade" "graphifyy"/);
+  // Both detection calls are read-only; no `uv tool upgrade` is issued.
+  assert.deepEqual(calls, ['uv tool list', 'graphify --version'], 'dry-run only detects, never upgrades');
 }));
 
 test('update and check modes touch only Loadout installs', () => withRegistry(registry, (registryFile) => {
@@ -184,8 +292,11 @@ test('update and check modes touch only Loadout installs', () => withRegistry(re
     report: (line) => lines.push(line),
   });
 
-  assert.equal(checkCalls.length, 1);
+  // Check mode runs the gateway doctor and the read-only `uv tool list` graphify probe, and
+  // nothing that changes state.
+  assert.equal(checkCalls.length, 2);
   assert.equal(checkCalls[0].args.at(-1), 'doctor');
+  assert.equal([checkCalls[1].command, ...checkCalls[1].args].join(' '), 'uv tool list');
   assert.equal(checkCalls[0].args.join(' ').includes('another-marketplace'), false);
   assert.match(lines.join('\n'), /Other marketplaces are managed by Claude Code auto-update — not touched\./);
 }));
