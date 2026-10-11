@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const graphMode = require('./graph-mode');
 const migrationLock = require('./migration-lock');
 
 const MAP_DIR_PARTS = ['.claude', '.codebase-info'];
@@ -60,11 +61,20 @@ function stateStatus(state, documents) {
     return { migratable: true, stale: false };
   }
 
+  // US-7 decision 4: a manifest that declares structure: "graphify" covers narrative documents
+  // only. The three retired structural documents are then outside the manifest's remit, so their
+  // absence from `documents`/`hashes` — or from disk while an older manifest still lists them — is
+  // expected, not drift. Without the field this set is empty and the comparison is unchanged.
+  const retired = new Set(graphMode.stateDeclaresGraphStructure(state) ? graphMode.RETIRED_DOCUMENTS : []);
+
   let stale = false;
-  const expected = new Set(state.documents.filter(safeDocumentPath));
-  const actual = new Set(documents.filter((entry) => entry.relative !== INDEX_NAME).map((entry) => entry.relative));
+  const expected = new Set(state.documents.filter(safeDocumentPath).filter((name) => !retired.has(name)));
+  const actual = new Set(documents
+    .filter((entry) => entry.relative !== INDEX_NAME && !retired.has(entry.relative))
+    .map((entry) => entry.relative));
   if (expected.size !== actual.size || [...expected].some((name) => !actual.has(name))) stale = true;
   for (const entry of documents) {
+    if (retired.has(entry.relative) && !Object.prototype.hasOwnProperty.call(state.hashes, entry.relative)) continue;
     if (state.hashes[entry.relative] !== entry.hash) stale = true;
   }
   return { migratable: false, stale };

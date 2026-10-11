@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const graphMode = require('./lib/graph-mode');
 const mapDocuments = require('./lib/map-documents');
 const ledger = require('./lib/session-ledger');
 
@@ -34,7 +35,17 @@ function projectDir(data) {
   return process.env.CLAUDE_PROJECT_DIR || (typeof data.cwd === 'string' ? data.cwd : '') || process.cwd();
 }
 
-function context(map, source, forSubagent) {
+// US-7 decisions 2 and 3: in graph mode graphify owns structure, so tell the agent to query the
+// graph instead of reading map documents for it. Not in graph mode this contributes nothing and the
+// injected context is byte-identical to before. Subagents may query the graph but must never
+// refresh it: the post-commit hook or the main session owns that, same reason as the map itself.
+function graphParagraph(forSubagent) {
+  return 'This project is in graph mode: the structure of the code (modules, entry points, the file tree, who calls whom) lives in graphify-out/, not in the map documents. Answer structural questions by running `graphify query "<question>"`, `graphify explain "<node>"` or `graphify path "<from>" "<to>"` rather than by reading map documents. The narrative documents in .claude/.codebase-info/ remain the source for conventions, patterns and onboarding.' +
+    (forSubagent ? ' NEVER run `graphify ... --update`: the post-commit hook or the main session refreshes the graph.' : '') +
+    '\n\n';
+}
+
+function context(map, source, forSubagent, inGraphMode) {
   const manifestNote = map.state.future
     ? '\nThis map uses a newer schema. Preserve its files and update the plugin before changing its metadata.\n'
     : map.state.stale
@@ -51,6 +62,7 @@ function context(map, source, forSubagent) {
   return '<CODEBASE_MAP>\n' +
     'This repository has a maintained codebase map in .claude/.codebase-info/.\n\n' +
     'Before anything else in your first reply, and before starting the task, output exactly one acknowledgment line: "Codebase map: read <doc(s)>" after actually reading only relevant map document(s) from .claude/.codebase-info/, or "Codebase map: no read needed - <reason>" if the request needs no codebase knowledge. This is mandatory; do not silently skip it. Never re-read a document already read this session unless this hook names it as changed.\n\n' +
+    (inGraphMode ? graphParagraph(forSubagent) : '') +
     maintenance +
     '</CODEBASE_MAP>\n\n' +
     '=== CODEBASE MAP RE-GROUNDED AFTER SESSIONSTART (' + source + ') ===\n\n' +
@@ -324,10 +336,11 @@ function main() {
   mapDocuments.migrateLegacyMap(root);
   const map = mapDocuments.loadMap(root);
   if (!map || !map.index) return;
+  const inGraphMode = graphMode.isGraphMode(root);
 
   if (source === 'startup' || source === 'clear') {
     ledger.mark(root, data.session_id, map.documents, true);
-    output(eventName, context(map, source, eventName === 'SubagentStart'));
+    output(eventName, context(map, source, eventName === 'SubagentStart', inGraphMode));
     return;
   }
 
@@ -338,7 +351,7 @@ function main() {
       output(eventName, '[codebase-mapper] history retained across a replacement compaction; the codebase map is already in the transcript.');
       return;
     }
-    output(eventName, context(map, source, eventName === 'SubagentStart'));
+    output(eventName, context(map, source, eventName === 'SubagentStart', inGraphMode));
     return;
   }
 
