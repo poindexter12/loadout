@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { claudeDir, pluginsDir } = require('../lib/paths.js');
+const { graphifyUpgradeStep } = require('./graphify.js');
 
 const GATEWAY_MARKETPLACE = 'loadout';
 const OBSERVABILITY_PLUGIN = 'observability@loadout';
@@ -637,6 +638,13 @@ function runUpdate({ env = process.env, registryFile = registryPath(env), home =
     report('Gateway wiring is handled by the stable model-gateway updater.');
   }
 
+  // graphify is the opt-in structural layer codebase-mapper can use. Upgrade it only when
+  // it is already installed: setup owns the decision to install it, and an updater that
+  // silently installed a Python tool nobody asked for would not be opt-in. A failure here
+  // is reported and carried, like every other step.
+  const graphify = graphifyUpgradeStep({ options, run, report, execute });
+  failures.push(...graphify.failures);
+
   const healedStatuslines = options.check ? [] : healStaleStatuslines(instances, { env, dryRun: options.dryRun });
   if (healedStatuslines.length > 0) {
     report(`Healed ${healedStatuslines.length} stale managed status-line shim setting(s).`);
@@ -645,7 +653,7 @@ function runUpdate({ env = process.env, registryFile = registryPath(env), home =
   for (const line of reloadAdvice(instances)) report(line);
   if (failures.length > 0) report(`\nCompleted with ${failures.length} failure(s): ${failures.join(', ')}`);
   else report('\nCompleted successfully.');
-  return { ok: failures.length === 0, instances, staleInstances, registryGc, failures, healedGatewayWiring, healedStatuslines };
+  return { ok: failures.length === 0, instances, staleInstances, registryGc, failures, graphify, healedGatewayWiring, healedStatuslines };
 }
 
 function main() {
@@ -681,6 +689,10 @@ module.exports = {
   GATEWAY_MARKETPLACE,
   LEGACY_GATEWAY_PLUGIN,
   MODEL_GATEWAY_PLUGIN,
+  commandText,
+  // Exported so bin/graphify.js's upgrade step runs the same reporting and failure
+  // handling as every other updater step instead of a second copy of it.
+  execute,
   gatewayCommand,
   gatewayUpdateCommand,
   installGatewayUpdateLauncher,

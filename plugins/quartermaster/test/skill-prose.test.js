@@ -182,3 +182,45 @@ test('unseeded fallback offers reuse with the same two approval boundaries, with
   assert.equal(fs.existsSync(f.env.QUARTERMASTER_STATE_DIR), false);
   assert.equal(fs.existsSync(path.join(f.project, '.claude')), false);
 });
+
+test('graphify prose keeps the opt-in gate and the two names the obvious guess gets wrong (SQ-313)', () => {
+  const setup = readSkill('setup');
+  const update = readSkill('update-loadout');
+  const doctor = readSkill('loadout-doctor');
+  const { GRAPHIFY_FLOOR_VERSION, GRAPHIFY_PACKAGE, REQUIRED_CLI_SURFACES } = require('../bin/graphify.js');
+
+  // Setup gates on uv and never installs either tool silently.
+  assert.match(setup, /check `uv` first/);
+  assert.match(setup, /uv tool install graphifyy/);
+  assert.match(setup, /Never install `uv`\s+yourself, and never install graphify without the user's yes/);
+  assert.match(setup, /docs\.astral\.sh\/uv\/getting-started\/installation/);
+  assert.match(setup, /plugin:graphify/, 'the choice is recorded like every other workspace piece');
+  // Offered only alongside codebase-mapper, as its optional layer.
+  assert.ok(setup.indexOf('offer **graphify**') > setup.indexOf('`codebase-mapper` keeps a set of small docs'));
+
+  // The updater upgrades but never installs.
+  assert.match(update, /never installs graphify/);
+  assert.match(update, /never installs `uv`/);
+  assert.match(update, /`--check` reports the installed version and does not upgrade/);
+  assert.match(update, /`--dry-run` prints the upgrade\s+command without running it/);
+
+  // The doctor is read-only and names the floor and every pinned surface, so the prose
+  // cannot drift from the enum in bin/graphify.js.
+  assert.match(doctor, /read-only/);
+  assert.match(doctor, /not installed \(opt-in\)/);
+  assert.match(doctor, /graphify-out\/GRAPH_REPORT\.md/);
+  assert.match(doctor, /graphify hook status/);
+  assert.ok(doctor.includes(GRAPHIFY_FLOOR_VERSION), `doctor prose names the ${GRAPHIFY_FLOOR_VERSION} floor`);
+  for (const { surface } of REQUIRED_CLI_SURFACES) {
+    assert.ok(doctor.includes(surface), `doctor prose names the pinned ${surface} surface`);
+  }
+
+  // The distribution name is the one mistake that makes an install fail outright, so every
+  // skill that names a package names this one, and none of them says `install graphify`.
+  for (const [file, text] of [['setup', setup], ['update-loadout', update], ['loadout-doctor', doctor]]) {
+    if (/uv tool (install|upgrade)/.test(text)) {
+      assert.ok(text.includes(GRAPHIFY_PACKAGE), `${file} names the ${GRAPHIFY_PACKAGE} distribution`);
+    }
+    assert.doesNotMatch(text, /uv tool install graphify\b(?!y)/, `${file} must not print an install of the nonexistent graphify package`);
+  }
+});

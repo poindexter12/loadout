@@ -29,6 +29,43 @@ healthy until one of those actions is complete.
 
 When `staleProcesses` has rows, report each PID, start time, and stale worktree path. They are read-only findings: do not kill any process from the doctor.
 
+## graphify, codebase-mapper's optional structural layer
+
+graphify is an opt-in Python `uv tool`, so it is absent on most machines and that is not a
+fault. These rows are read-only: they report, and never install, upgrade, or build a graph.
+
+```sh
+node "${CLAUDE_PLUGIN_ROOT}/bin/graphify.js" doctor --project "${CLAUDE_PROJECT_DIR}"
+```
+
+It prints one row per finding and exits non-zero **only** when the pinned CLI surface
+contract is broken. Report the rows as given:
+
+- **Installed version**, or `not installed (opt-in)`. An absent graphify is a one-line
+  observation; do not offer to install it here. `/quartermaster:setup` owns that offer, and
+  only alongside codebase-mapper.
+- **Graph mode**, detected from whether `graphify-out/GRAPH_REPORT.md` exists at the project
+  root. `off` means the mapper is running without the graph, which is a supported state.
+- **`graphify hook status`**, verbatim, for whether the git hook that keeps the graph fresh
+  is installed in this repo.
+- **The CLI surface probe**: that `graphify --help` still offers the five surfaces
+  codebase-mapper invokes (`query`, `explain`, `path`, `hook status`, and update), and that
+  the version clears the `0.8.38` floor. Either spelling of the update surface satisfies it:
+  `--help` documents `update <path>`, while `graphify <root> --update` is an accepted
+  undocumented alias.
+
+A failed probe is the one finding here that matters more than it looks. graphify is upstream
+software on its own cadence, and the mapper's skills call it from inside subagents where a
+renamed flag surfaces as an empty or confusing answer rather than an error. This probe exists
+so that rename fails loudly, in one place, where someone is already looking. On a failure,
+report the named surface, say that the mapper's graph mode is affected, and offer either
+pinning graphify to a known-good version or updating the pinned surfaces in the plugin's
+`bin/graphify.js`. Do not call graphify healthy because `hook status` or a version row looked
+fine; the probe is the surface check.
+
+If the probe could not run at all, say the surfaces are **unverified**. That is not the same
+as healthy.
+
 ## Observability, when that plugin is installed
 
 Telemetry lives in the separate Observability plugin. Its files are under a different plugin root, so resolve

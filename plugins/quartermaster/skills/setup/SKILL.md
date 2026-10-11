@@ -76,6 +76,27 @@ One visible plan, then per-item approval. Draw from three sources, in this order
     so Claude begins oriented instead of re-exploring the tree every time. It refreshes itself
     from the diff as the code changes. Worth it for any real codebase; pointless for an empty
     scaffold until there is code to map.
+
+    When the user takes `codebase-mapper`, offer **graphify** as its optional structural layer,
+    and only then. graphify extracts a queryable graph of the code into `graphify-out/`, which
+    lets the mapper answer "what calls this" and "what breaks if I change this" by traversing
+    real edges instead of re-reading files. The mapper works fully without it, so this is a
+    second, separate yes. Two things make it unlike every other piece here:
+
+    - It is a Python `uv tool`, the first non-node runtime any Loadout plugin leans on. So
+      **check `uv` first**: `command -v uv`. If `uv` is there, install with
+      `uv tool install graphifyy` (the PyPI distribution is `graphifyy` with two y's; it
+      installs an executable called `graphify`). If `uv` is absent, say so plainly, point at
+      https://docs.astral.sh/uv/getting-started/installation/, and stop. **Never install `uv`
+      yourself, and never install graphify without the user's yes** — a workspace setup that
+      silently puts a Python toolchain on someone's machine is not opt-in.
+    - It is upstream software on its own release cadence. Quartermaster owns its lifecycle:
+      `/quartermaster:update-loadout` upgrades it when present, and
+      `/quartermaster:loadout-doctor` probes that the CLI surfaces the mapper depends on still
+      exist. Mention both so the user knows where it is maintained from.
+
+    Record the answer either way, as an applied or rejected decision with the fingerprint
+    `plugin:graphify` (step 7). A recorded "no" is what stops the next round offering it again.
   - `live-rules` adds timing to the project rules Claude Code already reads from `.claude/rules/`. It owns no storage, so those files stay the only copy and a project that later removes the plugin keeps every rule. What it adds is re-saying: native loads a rule once per session, and live-rules injects it again when its content changes mid-session, so an edited convention takes effect on the next prompt or relevant edit with no restart. It also fires keyword-scoped rules on a matching prompt, which native has no trigger for. Unchanged rules do not repeat on every prompt or edit. That is the difference from CLAUDE.md, which is always in context whether or not it is relevant. Worth it anywhere the user has conventions they keep having to repeat, or keeps editing rules mid-session.
   - `sidequest` is the delegation system, not just a ticket tracker, and the routing and
     executor half is where the value is. Tickets are the input; what it does with them is
