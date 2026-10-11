@@ -24,6 +24,8 @@ From the project directory, run:
 
 Setup reads the project, mines recent session history across your projects, asks a few setup questions, and proposes a plan covering Loadout plugins, stack plugins, starter rules, and permission entries. You approve each item before it installs or writes anything.
 
+One item in that plan is not a plugin. If you take `codebase-mapper`, setup also offers **graphify**, its optional structural layer, as a separate second yes. graphify is a Python `uv tool` (the PyPI distribution is `graphifyy`, with two y's, and it installs an executable called `graphify`), which makes it the first non-node dependency any Loadout plugin leans on. So setup checks for `uv` first, installs with `uv tool install graphifyy` when it is present, and when `uv` is absent says so and points at [uv's install guide](https://docs.astral.sh/uv/getting-started/installation/) rather than installing a Python toolchain for you. It never installs `uv` itself and never installs graphify without your yes. Declining is recorded, so later rounds do not keep asking. See [graph mode](../codebase-mapper/#graph-mode) for what it changes about the map.
+
 Starter rules teach agents to trace actual behavior and reuse project code, native platform features, the standard library, and installed dependencies before adding tools. They keep changes scoped, without automatic cleanup or arbitrary function/class size quotas. Focused checks supplement project-required tests and release gates; they do not replace them. An assigned integration owner can split verification responsibilities, while solo work retains all required verification. Security, trust-boundary, data-loss, and accessibility safeguards still apply.
 
 Existing workspace rules are preserved. Updating Quartermaster changes its templates, not rules already seeded into your project; any refresh needs an approved diff.
@@ -52,7 +54,18 @@ The requested updater reads Claude Code's installed-plugin registry and updates 
 
 Freshness hooks are advisory. They report cached availability and loaded-version mismatches, and they point to `/quartermaster:update-loadout`; they do not install, restart, or replace the requested updater. Marketplace auto-update is optional and must be enabled for the Loadout marketplace in Claude Code. An open session still needs `/reload-plugins` after plugin code changes. Restart Claude Code when process-level gateway wiring or model discovery changed.
 
+graphify, being upstream software on its own release cadence, has its lifecycle here too. When `uv` already reports it installed, the updater runs `uv tool upgrade` against the distribution name uv actually recorded and surfaces the output the way it surfaces the Model Gateway updater's. When it is not installed, the updater reports `graphify: not installed (opt-in)` and stops there. It never installs graphify; that offer belongs to `/quartermaster:setup`.
+
 The health check is read-only. It identifies stale installs, dead `enabledPlugins` entries, and Model Gateway startup-check results when that plugin is present. It also reports managed Observability storage limits without running a repair. Run the updater when you want installs changed.
+
+For graphify the doctor adds four read-only rows, and an absent graphify is a one-line observation rather than a fault:
+
+- the installed version, or `not installed (opt-in)`;
+- whether graph mode is on, from whether `graphify-out/GRAPH_REPORT.md` exists at the project root (`off` is a supported state, meaning the mapper is running without the graph);
+- `graphify hook status` verbatim, for whether the git hook that keeps the graph fresh is installed in this repo;
+- a CLI surface probe, checking that the surfaces Codebase Mapper actually invokes (`query`, `explain`, `path`, `hook status`, and update) are still offered and that the version clears the pinned floor.
+
+That last row is the one worth reading closely. The mapper calls graphify from inside subagents, where a renamed flag would show up as an empty or confusing answer instead of an error, so the probe exists to make an upstream rename fail loudly in one place. A failing probe is the doctor's only non-zero exit for graphify, and it points at pinning graphify to a known-good version or updating the pinned surfaces in the plugin. A probe that could not run at all reports the surfaces as unverified, which is not the same as healthy.
 
 ## The in-the-moment loop
 
