@@ -46,10 +46,16 @@ test('graph mode hands structural freshness to graphify and refreshes at most on
   // Hook installed: the report must be no older than the last commit before moving on.
   assert.match(updateSkill, /git log -1 --format=%ct/);
   assert.match(updateSkill, /date -r graphify-out\/GRAPH_REPORT\.md \+%s/);
-  // No hook: one bounded refresh, in the documented spelling, with the alias named once.
+  // No hook: one bounded refresh, in the documented spelling only.
   assert.match(updateSkill, /graphify update \./);
   assert.match(updateSkill, /re-extracts only the files that changed/);
   assert.match(updateSkill, /Run it once\. Do not loop/);
+  // SQ-313 probed graphify 0.8.38: `graphify <root> --update` works but is undocumented, so the
+  // skill must never teach it. The subagent prohibition keeps the `graphify ... --update` ellipsis
+  // form, which is lane A's hook wording and forbids rather than instructs.
+  for (const alias of [/graphify \. --update/, /graphify <root> --update/, /graphify <path> --update/]) {
+    assert.doesNotMatch(updateSkill, alias, `the undocumented alias ${alias} must not appear`);
+  }
   // A missing CLI is not this skill's problem to solve.
   assert.match(updateSkill, /offering the install belongs to\s+Quartermaster/);
 });

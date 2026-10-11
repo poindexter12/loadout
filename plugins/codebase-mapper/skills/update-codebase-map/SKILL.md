@@ -86,14 +86,15 @@ nothing structural left to do. `graph behind HEAD` means a commit landed without
 is cheap:
 
 ```bash
-graphify update .      # documented form; `graphify . --update` is an undocumented alias that also works
+graphify update .
 ```
 
 Run it once. Do not loop, and do not force a full rebuild. If the `graphify` CLI is not on `PATH`,
 say so in one line and continue with the narrative half only : offering the install belongs to
 Quartermaster, not to this skill.
 
-**If you are a subagent, do neither.** NEVER run `graphify ... --update`, and never update the map:
+**If you are a subagent, do neither.** NEVER run `graphify ... --update` or `graphify update`, and
+never update the map:
 the post-commit hook or the main session refreshes the graph, and the main session refreshes the map
 once after all parallel work integrates. Querying is fine : `graphify query`, `graphify explain` and
 `graphify path` are read-only. Report staleness in your final report instead.
