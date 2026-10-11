@@ -24,9 +24,9 @@ mechanism; leave `CLAUDE.md` alone. Your job is just to write the docs in `.clau
 ├── INDEX.md                # Navigation hub + how-to-use; the hook injects this at session start
 ├── architecture.md         # System overview, components, boundaries, data flow
 ├── tech-landscape.md       # Languages, frameworks, runtimes, infra, source-of-truth files
-├── directory-structure.md  # Annotated folder tree
-├── entry-points.md         # Where execution starts (routes, CLIs, jobs, main files)
-├── modules.md              # Key modules/packages: purpose, deps, exports
+├── directory-structure.md  # Annotated folder tree                      (classic mode only)
+├── entry-points.md         # Where execution starts (routes, CLIs, jobs) (classic mode only)
+├── modules.md              # Key modules/packages: purpose, deps, exports (classic mode only)
 ├── communication.md        # APIs, events, queues, external integrations   (if applicable)
 ├── database.md             # Schema, relationships, migrations              (if applicable)
 ├── dependencies.md         # Categorized packages                           (if applicable)
@@ -44,6 +44,9 @@ not cover. Two directions:
 - **Omit what does not apply.** Skip `database.md` if there's no datastore, `docker.md` if there are
   no containers, `dependencies.md` if there's no dependency manifest, and so on. A tiny project might
   only need `INDEX.md`, `architecture.md`, `tech-landscape.md`, and `onboarding.md`.
+- **Skip what graphify owns.** In graph mode (Step 0b) the three documents marked *classic mode only*
+  are not written at all: the graph is the structural answer, and a hand-written copy of it would only
+  go stale. See **Graph mode** in Step 0b for the full list of what changes.
 - **Add what the project actually warrants.** If a major aspect deserves its own doc and none of the
   standard names fit, create one (e.g. `ml-pipeline.md` for a training/inference flow, `cli-reference.md`
   for a tool with many subcommands, `realtime.md` for a websocket/event core, `iac.md` for substantial
@@ -80,6 +83,60 @@ Then branch:
 Also check today's actual date (it's provided in the session context, or run `date`) so the
 "Last Updated" stamps are real, not placeholders.
 
+### Step 0b : Check for graphify (decide who owns structure)
+
+`graphify` turns a repo into a queryable knowledge graph. Where it has already built one, it owns the
+structural half of the map and this skill stops hand-writing it. Two cheap checks:
+
+- `command -v graphify` : is the CLI installed?
+- `graphify-out/GRAPH_REPORT.md` at the project root : has a graph already been built here? That file,
+  and only that file, puts a project in **graph mode**. The plugin's hooks read the same path
+  (`hooks/lib/graph-mode.js`), so the skill and the hooks can never disagree.
+
+| `graphify` CLI | `graphify-out/GRAPH_REPORT.md` | Path |
+|----------------|--------------------------------|------|
+| present | exists  | **Graph mode.** Apply the rules below. |
+| present | missing | Offer the first build. Accepted → graph mode; declined → classic mode. |
+| absent  | —       | **Classic mode.** Say once: `graphify is not installed; quartermaster setup can install it.` Then map exactly as this skill always has. |
+
+Graph mode is **opt-in**. It is never a prerequisite and it is never assumed: with no CLI and no report
+this skill behaves exactly as it did before, and a complete map is still the result.
+
+#### Offering the first build
+
+Ask first; never build a graph unprompted, and state the cost honestly:
+
+- The structural pass over **code** is AST only : deterministic, free, and fast.
+- The semantic pass over **docs, papers and images** runs on *this session's LLM*, so a repo with a
+  large `docs/` tree costs real tokens. A code-only corpus skips that pass entirely and costs nothing.
+
+If the user accepts, run the build through graphify's own route: its `graphify` skill when this session
+has one, otherwise `graphify extract .` headless against its own backend. Then offer
+`graphify hook install` once, and say what it buys: a post-commit/post-checkout rebuild that is
+deterministic and uses **no LLM**, which is what keeps structure fresh afterwards. `graphify hook status`
+reports whether it is already installed, and is safe to run read-only.
+
+**Never run `graphify claude install`.** It writes a graphify section into `CLAUDE.md` plus its own
+PreToolUse hook. This skill's "never touch `CLAUDE.md`" rule covers that command explicitly: this
+plugin's SessionStart hook is already the loading mechanism, and nothing here may add, edit, or remove
+anything in `CLAUDE.md`.
+
+#### Graph mode : what changes
+
+| Step | In graph mode |
+|------|---------------|
+| Step 2 (directory structure) | Do not write `directory-structure.md`. Read enough of the tree to orient yourself, nothing more. |
+| Step 3 (entry points) | Do not write `entry-points.md`. Ask the graph instead. |
+| Step 4 (key flows) | Trace flows with `graphify query` and `graphify path` rather than walking the tree by hand. |
+| Step 5 (dependencies) | **Unchanged.** `dependencies.md` comes from package manifests, not from the AST. |
+| Step 7 (write the docs) | Do not write `modules.md`. Every other warranted document is written as normal. |
+| Step 8 (record state) | Record `structure: "graphify"` and add the `graphify-out/` ignore rules. |
+
+Everything else stays LLM-authored: `architecture.md`, `tech-landscape.md`, `patterns.md`,
+`coding-style.md`, `onboarding.md`, and the rest are judgement, not structure, and a graph cannot write
+them. The split is the whole point: **structure questions go to the graph, convention questions go to
+these docs.**
+
 ### Optional Sidequest handoff for an existing project
 
 Use this handoff only when a small or medium initial map or a larger remap benefits from a bounded
@@ -104,8 +161,15 @@ Record the starting `HEAD` (or `null` outside Git) and the initial working-tree 
 `.claude/.codebase-info/` in the ticket. Its deliverable is warranted atomic docs, a compact linked
 `INDEX.md`, and a final `.map-state.json` with exact document hashes. Tell the writer to inspect the
 current shared tree; skip generated, vendor, and secret material; verify every cited path; never touch
-`CLAUDE.md`; and never invoke `map-codebase` again or create nested mapping tickets. Include this
-lifecycle marker verbatim:
+`CLAUDE.md`; and never invoke `map-codebase` again or create nested mapping tickets.
+
+In graph mode, the ticket instructions must carry the graph-mode rules from Step 0b: the writer does
+not write `directory-structure.md`, `entry-points.md`, or `modules.md`; it uses
+`graphify query|explain|path` as its structural input; and its final `.map-state.json` carries
+`structure: "graphify"`. The writer never builds or refreshes a graph, never runs `graphify hook install`,
+and never runs `graphify claude install`.
+
+Include this lifecycle marker verbatim:
 
 ```text
 Shared-tree artifact mode: leave the generated map as working-tree output; verify, comment, and close with done. Do not commit, submit, push, or edit source.
@@ -157,10 +221,16 @@ or a recursive list, skipping the noise dirs above). Identify the organizing pri
 - **Hexagonal/clean**: `domain/`, `application/`, `infrastructure/`
 - **Monorepo**: `packages/*`, `apps/*`, workspaces
 
+**In graph mode:** do not write `directory-structure.md`. You still need the organizing principle for
+`architecture.md`, so skim the top level and stop there; the graph holds the rest.
+
 ### Step 3 : Find the entry points
 
 Where does execution begin? Web routes, API routers, CLI command handlers, background workers/cron,
 serverless handlers, library public exports, app `main`/bootstrap files, build/start scripts.
+
+**In graph mode:** do not write `entry-points.md`. Ask the graph when you need one:
+`graphify query "where does execution start"`.
 
 ### Step 4 : Trace the key flows
 
@@ -169,11 +239,27 @@ external effects. Example: `POST /api/users` → `UserController.store()` → `U
 `users` table → `WelcomeEmail`. Note shared utilities and cross-cutting concerns (auth, logging,
 validation, error handling).
 
+**In graph mode:** let the graph do the tracing and use its answers as input for the narrative docs,
+rather than walking the tree by hand:
+
+```bash
+graphify query "how does a user request reach the database"   # BFS over the graph; --budget N caps output
+graphify path "UserController" "users"                        # shortest path between two nodes
+graphify explain "UserService"                                # one node and its neighbors
+```
+
+Read the answers, verify the paths they cite still exist, then write the flow into `architecture.md` in
+your own words. Do not paste graph output into a document: the graph is already the durable copy, and a
+transcription of it is the stale duplicate graph mode exists to remove.
+
 ### Step 5 : Catalog dependencies
 
 From the manifest(s), categorize: **Core** (framework/runtime), **Data** (DB/ORM/cache),
 **External** (API clients, third-party services), **Dev** (test/lint/build). Capture only what aids
 understanding : don't transcribe the entire lockfile.
+
+This step is the same in both modes. `dependencies.md` is read out of package manifests, not out of the
+AST, so graphify does not replace it.
 
 ### Step 6 : Capture patterns & conventions
 
@@ -197,6 +283,11 @@ paths, tables/diagrams where they help). For each document:
   summarize the project in a few lines and link out to the detailed docs, which Claude reads on
   demand. Include the short "How to use / How to maintain this map" section from the template.
 
+**In graph mode:** do not write `modules.md`, and leave the three retired documents out of `INDEX.md`'s
+document table. Add the template's short **Structure** section to `INDEX.md` instead: it points at the
+graph and at `graphify query|explain|path`, so a session that needs structure knows where to go without
+reading a document that no longer exists.
+
 ### Step 8 : Record state
 
 Run the bundled state writer after every map document is final:
@@ -209,14 +300,42 @@ It records the current date, the full `HEAD` SHA (or `null` outside git), every 
 and hashes of the final bytes. It atomically replaces `.map-state.json` last so a hook can only see
 old hashes or a safely detectable stale manifest.
 
+**In graph mode**, the manifest also has to say so. The writer discovers documents from disk, so the
+three retired documents are already absent from `documents` and `hashes` — you never wrote them — but
+it knows nothing about graph mode, so add the field yourself immediately afterwards:
+
+```bash
+node -e "const f='.claude/.codebase-info/.map-state.json',fs=require('node:fs'),s=JSON.parse(fs.readFileSync(f,'utf8'));s.structure='graphify';fs.writeFileSync(f,JSON.stringify(s,null,2)+'\n')"
+```
+
+`structure: "graphify"` is what tells the hooks this manifest covers narrative documents only, so the
+absence of `modules.md`, `entry-points.md`, and `directory-structure.md` reads as the design rather than
+as drift. Narrative drift is still reported exactly as before. The writer rewrites the whole file, so
+re-add the field after **every** later run of it in a graph-mode project.
+
 Outside shared-tree artifact mode, commit the map unless the user explicitly says not to commit. A map
 that only exists in one working tree helps nobody else and goes stale silently, and the manifest is what
 makes staleness detectable, so the commit must include **every generated doc AND `.map-state.json`**.
 Before staging, check the repo's ignore rules: a broad `.claude/*` ignore swallows the map and makes
 `git add` warn, which reads as "this is local-only" when it is not. If
 `git check-ignore .claude/.codebase-info/INDEX.md` matches, add the negations
-(`!.claude/.codebase-info/`, `!.claude/.codebase-info/**`) to `.gitignore` in the same commit. Commit
-the map as its own commit when allowed. If the user explicitly says not to commit, leave the verified
+(`!.claude/.codebase-info/`, `!.claude/.codebase-info/**`) to `.gitignore` in the same commit.
+
+**In graph mode**, settle `graphify-out/` in that same pass. Two files travel with the repo and the
+rest stays local:
+
+```gitignore
+/graphify-out/*
+!/graphify-out/GRAPH_REPORT.md
+!/graphify-out/graph.json
+```
+
+`GRAPH_REPORT.md` and `graph.json` are exactly what `graphify query|explain|path` read, so a clone
+without them has no graph to ask. The generated html, the extraction cache, and the manifest are large,
+fully rebuildable, and churn on every commit, so they stay untracked. Do not commit the graph outputs
+without these rules in place.
+
+Commit the map as its own commit when allowed. If the user explicitly says not to commit, leave the verified
 map and `.map-state.json` in the working tree, say plainly that they still need review or committing,
 and tell them the plugin's hook will surface the map automatically from now on.
 
@@ -231,6 +350,9 @@ A brand-new or empty project has little to map yet : so seed the map with *inten
    (chosen/intended stack), `directory-structure.md` (planned layout), and `onboarding.md`. Mark it
    clearly as a greenfield seed that will grow.
 4. Do Step 8 (write state). From here, `update-codebase-map` fills in the rest as real code lands.
+
+Greenfield is classic mode: there is no code to extract yet, so do not offer a graph build and do write
+`directory-structure.md` as the planned layout. Offer the build later, once real code exists.
 
 ## Large codebases
 
@@ -255,7 +377,12 @@ For hundreds or thousands of source files, do not try to read everything seriall
 - **Concrete, not abstract.** Real file paths, real command names, real table/route names.
 - **Atomic + linked.** One concern per file; cross-reference rather than duplicate.
 - **Never touch `CLAUDE.md`.** The plugin's hook handles loading. Do not add, edit, or remove
-  anything in `CLAUDE.md` (or `CLAUDE.local.md`).
+  anything in `CLAUDE.md` (or `CLAUDE.local.md`). This includes running any tool that edits it for you:
+  **never run `graphify claude install`**, which writes a graphify section into `CLAUDE.md` plus a
+  competing PreToolUse hook. `graphify hook install` (git hooks only) is the one install this skill offers.
+- **Structure questions go to the graph, convention questions go to these docs.** In graph mode, never
+  re-create `modules.md`, `entry-points.md`, or `directory-structure.md`: a hand-written copy of the
+  graph is a second source of truth that goes stale the first time anyone moves a file.
 - **Respect ignore rules.** Never document `node_modules/`, `vendor/`, build output, or secrets.
 - **Don't leak secrets.** Note that config exists and where, never actual credential values.
 
@@ -265,9 +392,17 @@ For hundreds or thousands of source files, do not try to read everything seriall
 - [ ] `INDEX.md` is compact, links every created doc, and includes the how-to-use/maintain section
 - [ ] Every doc has a real `Last Updated` date and verified file paths
 - [ ] `.map-state.json` written with date, HEAD SHA (or null), and the document list
-- [ ] `CLAUDE.md` left untouched
+- [ ] `CLAUDE.md` left untouched, and `graphify claude install` never run
 - [ ] Map committed, all docs plus `.map-state.json`, with `.gitignore` negations added if a
       `.claude/*` rule was swallowing it (or the user told plainly it still needs committing)
+
+In graph mode, additionally:
+
+- [ ] `directory-structure.md`, `entry-points.md`, and `modules.md` not written
+- [ ] `INDEX.md` carries the **Structure** section pointing at the graph and its three commands
+- [ ] `.map-state.json` records `structure: "graphify"`
+- [ ] `.gitignore` has `/graphify-out/*` with `!/graphify-out/GRAPH_REPORT.md` and
+      `!/graphify-out/graph.json` negated before the graph outputs are committed
 
 ## References
 
