@@ -360,6 +360,11 @@ const GATEWAY_FALLBACK_BY_PROFILE_CATEGORY: Readonly<Record<string, Readonly<Rec
   },
 };
 
+// Every slug the two tables above name is a model-gateway Codex slug. Naming the provider once keeps the
+// filter in starterRoutingProfilesFor and the capability rows starterGatewayCapabilitiesFor builds from
+// drifting apart, which would silently stop the seed honouring its own tables.
+export const STARTER_GATEWAY_PROVIDER = 'codex';
+
 export const STARTER_GATEWAY_MODEL_SLUGS = Array.from(new Set(
   [GATEWAY_ROUTE_BY_PROFILE_CATEGORY, GATEWAY_FALLBACK_BY_PROFILE_CATEGORY]
     .flatMap((profiles) => Object.values(profiles))
@@ -367,9 +372,29 @@ export const STARTER_GATEWAY_MODEL_SLUGS = Array.from(new Set(
     .map((route) => route.model),
 )).sort();
 
+// SQ-321. starterRoutingProfilesFor honours a gateway route only while the slug is in the models list it
+// is handed, and the seed refresh derived that list from LIVE provider readiness on every store open. Any
+// readiness dip — a gateway restart, a catalog that aged past CATALOG_STALE_MS, a failed readiness read —
+// therefore recomputed the shared seed WITHOUT the Codex slugs, and the refresh rewrote the rows to the
+// categories' default Claude routes. A dispatch landing in that window resolved source "route" = sonnet,
+// so it carried no fallbackReason and no warning and the Claude-for-Codex refusal never ran. Readiness
+// returning rewrote the rows back, which is why the machine-wide `coding` profile reached revision 3140.
+//
+// The fix is to make the gateway half of the seed one-directional: the refresh feeds the slugs its own
+// stored rows already pin back in as capabilities, so a route can still be GAINED when the gateway first
+// publishes a model, but never LOST because readiness is momentarily unreadable. A pinned route whose
+// model really is gone then refuses loudly at dispatch (providerDispatchRefusal), which is where readiness
+// belongs, instead of quietly becoming Sonnet.
+export function starterGatewayCapabilitiesFor(slugs: Iterable<string>): GatewayModelCapability[] {
+  const starter = new Set<string>(STARTER_GATEWAY_MODEL_SLUGS);
+  return Array.from(new Set(slugs))
+    .filter((slug) => starter.has(slug))
+    .map((slug) => ({ slug, provider: STARTER_GATEWAY_PROVIDER }));
+}
+
 export function starterRoutingProfilesFor(models: readonly GatewayModelCapability[]) {
   const availableGatewayModels = new Set(models
-    .filter((model) => model.provider === 'codex')
+    .filter((model) => model.provider === STARTER_GATEWAY_PROVIDER)
     .map((model) => model.slug));
   return STARTER_ROUTING_PROFILES.map((profile) => ({
     ...profile,

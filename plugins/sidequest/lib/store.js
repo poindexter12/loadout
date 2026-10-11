@@ -14,7 +14,7 @@ const {
   sourceRevision,
   sourceRevisionAdapterFacts: resolveSourceRevisionAdapterFacts
 } = sourceRevisionCapability;
-const { DEFAULT_CATEGORIES, ROUTING_PROFILE_SEED_REVISION, starterRoutingProfilesFor } = require("./category-defaults.js");
+const { DEFAULT_CATEGORIES, ROUTING_PROFILE_SEED_REVISION, starterGatewayCapabilitiesFor, starterRoutingProfilesFor } = require("./category-defaults.js");
 const commitScope = require("./commit-scope.js");
 const { commitPaths } = commitScope;
 const { preferredWorktreeIntegrationTarget, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, reclaimUnclaimedDispatchWorktree } = require("./worktrees.js");
@@ -1324,12 +1324,42 @@ const {
 });
 let refreshingRoutingProfileSeeds = false;
 const routingProfileSeedStates = /* @__PURE__ */ new Map();
-function installedProviderSeedProfiles() {
-  return starterRoutingProfilesFor(discoverExternalModels().filter((model) => providerReadiness(model.provider)?.ready === true));
+function pinnedSeedGatewayModelSlugs(handle) {
+  const slugs = [];
+  for (const row of db.selectRows(handle, `
+    SELECT entries.data AS data
+    FROM routing_profile_entries entries
+    JOIN routing_profiles profiles ON profiles.id = entries.profile_id
+    WHERE profiles.source = 'seed' AND profiles.seed_revision IS NOT NULL
+  `)) {
+    let category;
+    try {
+      category = JSON.parse(row.data);
+    } catch (_) {
+      continue;
+    }
+    if (!category || typeof category !== "object") continue;
+    for (const key of ["route", "fallback"]) {
+      const model = category[key] && category[key].model;
+      if (typeof model === "string" && model.trim()) slugs.push(model.trim().toLowerCase());
+    }
+  }
+  return slugs;
+}
+function installedProviderSeedProfiles(handle) {
+  const capabilities = /* @__PURE__ */ new Map();
+  for (const model of discoverExternalModels()) {
+    if (providerReadiness(model.provider)?.ready !== true) continue;
+    capabilities.set(model.slug, model);
+  }
+  for (const model of starterGatewayCapabilitiesFor(pinnedSeedGatewayModelSlugs(handle))) {
+    if (!capabilities.has(model.slug)) capabilities.set(model.slug, model);
+  }
+  return starterRoutingProfilesFor([...capabilities.values()]);
 }
 function refreshRoutingProfileSeeds(handle) {
   const pending = [];
-  for (const seed of installedProviderSeedProfiles()) {
+  for (const seed of installedProviderSeedProfiles(handle)) {
     const profile = db.selectRow(handle, `
       SELECT id, seed_revision FROM routing_profiles WHERE source = 'seed' AND seed_key = ?
     `, [seed.id]);

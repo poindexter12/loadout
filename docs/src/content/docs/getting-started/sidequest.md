@@ -120,6 +120,8 @@ Routing can send a ticket to a non-Claude model, and Sidequest finds those model
 
 If a routing profile offers fewer models than you expect, ask Claude to check model readiness. It will say which source answered, so you can tell "Model Gateway reports its backend as down" apart from "the endpoint never answered".
 
+A model going unready does not repoint your routes. A gateway restart, or a catalog Sidequest cannot refresh, makes a model temporarily unlistable, but a category already routed to it stays routed to it: a dispatch in that window is refused with the readiness message rather than quietly handed to a Claude model. A profile only gains a non-Claude route, never loses one, so once the gateway publishes a model the route sticks until you change it. Restart the gateway and retry, or edit the category if you want it to run on Claude.
+
 ## Keep GitHub issues aligned
 
 Link a GitHub issue to its execution ticket when that issue should follow the delivery lifecycle. Agents use the `issue_link` MCP tool; the CLI equivalent is:
