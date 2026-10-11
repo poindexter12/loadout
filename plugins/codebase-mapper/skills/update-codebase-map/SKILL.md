@@ -23,10 +23,22 @@ refreshing state. This process does not wait for a separate user approval.
 
 ### Step 1 : Load current state
 
-Read `.claude/.codebase-info/.map-state.json` to get `gitCommit`, `mappedAt`, and the list of
-existing `documents`. Skim `INDEX.md` to recall what's already covered. (If `.map-state.json` is
-missing : e.g. a map from an older version : fall back to the `mappedAt` date in `INDEX.md`, and
+Read `.claude/.codebase-info/.map-state.json` to get `gitCommit`, `mappedAt`, `structure`, and the
+list of existing `documents`. Skim `INDEX.md` to recall what's already covered. (If `.map-state.json`
+is missing : e.g. a map from an older version : fall back to the `mappedAt` date in `INDEX.md`, and
 plan to write a fresh `.map-state.json` at the end.)
+
+`structure` decides what this map is responsible for:
+
+- **`structure: "graphify"` → graph mode.** graphify owns the structure of the code and this map
+  carries narrative documents only. `modules.md`, `entry-points.md` and `directory-structure.md` are
+  retired: they are not on disk, not in `documents`, and never in `hashes`. Freshness is split in
+  two : graphify keeps the graph current, this skill keeps the narrative current.
+- **No `structure`, but `graphify-out/GRAPH_REPORT.md` exists → convert first.** This map was
+  written before the graph and still carries its own structural documents. See
+  "Converting an existing map to graph mode" below, then continue in graph mode.
+- **No `structure` and no `graphify-out/GRAPH_REPORT.md` → classic mode, nothing to decide.** The map
+  carries structure itself and this skill behaves exactly as it always has.
 
 ### Step 2 : Detect what changed
 
@@ -44,6 +56,65 @@ find . -type f -newer .claude/.codebase-info/INDEX.md \
   -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/vendor/*' \
   -not -path '*/dist/*' -not -path '*/build/*' -not -path '*/target/*' -not -path '*/.venv/*'
 ```
+
+In classic mode, go straight to Step 2a with that diff. In graph mode, split it first.
+
+#### Step 2 in graph mode : the graph takes the structural half
+
+Changed code files *are* structure. Do not re-read them to re-derive modules, routes or the folder
+tree : that is the graph's job, and it does it deterministically without a model. Hand that half over
+first, then assess only what is left.
+
+**1. Ask whether the deterministic refresh is already installed.**
+
+```bash
+graphify hook status
+```
+
+**2. Hook installed → confirm the report is no older than the last commit, then move on.**
+
+```bash
+test "$(git log -1 --format=%ct)" -le "$(date -r graphify-out/GRAPH_REPORT.md +%s)" \
+  && echo "graph fresh" || echo "graph behind HEAD"
+```
+
+`graph fresh` means the post-commit hook already re-extracted everything that changed, so there is
+nothing structural left to do. `graph behind HEAD` means a commit landed without the hook running (a
+`--no-verify` commit, a rebase, or a hook installed after that commit), so refresh once as below.
+
+**3. No hook → refresh the graph once yourself.** It re-extracts only the files that changed, so it
+is cheap:
+
+```bash
+graphify update .
+```
+
+Run it once. Do not loop, and do not force a full rebuild. If the `graphify` CLI is not on `PATH`,
+say so in one line and continue with the narrative half only : offering the install belongs to
+Quartermaster, not to this skill.
+
+**If you are a subagent, do neither.** NEVER run `graphify ... --update` or `graphify update`, and
+never update the map:
+the post-commit hook or the main session refreshes the graph, and the main session refreshes the map
+once after all parallel work integrates. Querying is fine : `graphify query`, `graphify explain` and
+`graphify path` are read-only. Report staleness in your final report instead.
+
+**4. Then assess narrative impact only.** "What modules are there now?" is answered by
+`graphify query`, so the only question left for you is whether the *story* changed:
+
+- Did a **convention** change (naming, error handling, config layout, test layout)? →
+  `coding-style.md`, `patterns.md`
+- Did a **pattern** change : a new recurring approach, a retired one? → `patterns.md`
+- Did an **architectural boundary** move : a new subsystem, a split service, a first datastore or
+  queue? → `architecture.md`, `communication.md`, `database.md`
+- Did the **story of an entry point** change : not the list of routes or commands, but what the
+  important flow now does end to end? → `architecture.md`, `onboarding.md`
+- Did an **onboarding step** change (setup, build, run, test commands)? → `onboarding.md`
+- Did a **dependency manifest** change? → `dependencies.md`, maybe `tech-landscape.md`
+
+A purely structural change : a file moved, a module renamed, a route added that introduces no new
+convention or flow : is a no-op for this map in graph mode. Say so and stop; the graph already
+carries it.
 
 ### Step 2a : Decide whether to hand off
 
@@ -77,11 +148,13 @@ permits one bounded documentation-artifact write while keeping project source re
   the user: `Artifact write carve-out: write only .claude/.codebase-info/**; all project source is read-only.`
 
 The handoff ticket records the stored `gitCommit`, current `HEAD`, initial dirty-source status outside
-`.claude/.codebase-info/`, and the current map document list. Its writer diffs from stored state through
-the visible working tree, reassesses the warranted docs, preserves intentional manual map edits, touches
-only affected docs, and replaces `.map-state.json` last. It must inspect the shared tree, verify every
-cited path, skip generated/vendor/secret material, never touch `CLAUDE.md`, and never invoke
-`map-codebase` or create nested mapping tickets. Include this lifecycle marker verbatim:
+`.claude/.codebase-info/`, the current map document list, and the map's `structure` mode. Its writer diffs
+from stored state through the visible working tree, reassesses the warranted docs, preserves intentional
+manual map edits, touches only affected docs, and replaces `.map-state.json` last. It must inspect the
+shared tree, verify every cited path, skip generated/vendor/secret material, never touch
+`CLAUDE.md`, and never invoke `map-codebase` or create nested mapping tickets. In graph mode it must
+also leave structure to the graph and keep `structure: "graphify"` in the state it writes. Include this
+lifecycle marker verbatim:
 
 ```text
 Shared-tree artifact mode: leave the generated map as working-tree output; verify, comment, and close with done. Do not commit, submit, push, or edit source.
@@ -149,6 +222,13 @@ Then map the remaining changes onto the existing documents:
 | Setup steps or common processes | `onboarding.md` |
 | Project name/description, or any doc added/removed | `INDEX.md` |
 
+**In graph mode, drop the three retired rows.** `directory-structure.md`, `modules.md` and
+`entry-points.md` are not part of this map, so a folder rename, a new module or a new route routes to
+the graph, not to a document : and **never recreate a retired document** to hold them. Those changes
+still reach the map when they change the story, through the narrative questions in Step 2: a new
+top-level boundary belongs in `architecture.md`, a changed important flow in `architecture.md` or
+`onboarding.md`. Every other row applies unchanged, `dependencies.md` included.
+
 Prioritize structural changes (new/removed entry points, components, infra, data model) over cosmetic
 ones. Skip pure internal refactors that don't change any documented interface, layout, or convention.
 
@@ -179,6 +259,17 @@ git repo), hashes the final bytes, and atomically replaces `.map-state.json` las
 interrupted write can leave hashes stale; that is safe because hooks hash live files and treat the
 manifest only as a consistency check.
 
+**In graph mode, keep the `structure` field.** The writer rebuilds the manifest from the documents on
+disk and does not carry `structure` over, so re-apply it immediately after:
+
+```bash
+node -e "const fs=require('node:fs'),f='.claude/.codebase-info/.map-state.json',s=JSON.parse(fs.readFileSync(f,'utf8'));s.structure='graphify';fs.writeFileSync(f,JSON.stringify(s,null,2)+'\n')"
+```
+
+Because the retired documents are not on disk, the rebuilt `documents` and `hashes` never mention them,
+and `structure: "graphify"` is what tells the hook that absence is deliberate. Without the field the
+hook reports the map stale on every session.
+
 Then summarize for the user: which docs you updated, created, or removed, and why. Outside shared-tree
 artifact mode, commit the refreshed map unless the user explicitly says not to commit, and include
 **`.map-state.json` alongside the edited docs**. An uncommitted manifest means every other checkout
@@ -189,6 +280,46 @@ does not mean the map is local-only. If the user explicitly says not to commit, 
 changes and `.map-state.json` in the working tree and say plainly that they still need review or
 committing.
 
+## Converting an existing map to graph mode
+
+`graphify-out/GRAPH_REPORT.md` exists but `.map-state.json` has no `structure` field: this map predates
+the graph and still carries its own structural documents, which now duplicate it and will drift from it.
+Convert the map once, then refresh as normal.
+
+Announce it in one line, for example: `This map still carries its own structure docs and the project now
+has a graph; converting the map to graph mode once.` Then do it without waiting for a reply. It is a
+one-time step for this map : afterwards Step 1 reads `structure: "graphify"` and this section never
+applies again. Do not convert silently, do not convert a project with no graph report, and
+do not convert twice.
+
+**1. Rescue the narrative, then delete the three documents.** These docs sometimes carry a sentence the
+graph cannot answer : why a boundary exists, which module to start reading in. Move that sentence into
+`architecture.md`, `patterns.md` or `onboarding.md` first. Do not move lists of modules, routes or
+folders; the graph has those.
+
+```bash
+git rm .claude/.codebase-info/modules.md .claude/.codebase-info/entry-points.md .claude/.codebase-info/directory-structure.md
+```
+
+(Plain `rm` if they are untracked.) Only these three : every other document stays LLM-authored,
+`dependencies.md` included.
+
+**2. Rewrite `INDEX.md`'s structure section** to match the graph-mode `INDEX.md` the `map-codebase`
+skill writes (`../map-codebase/references/document-templates.md`): drop the three rows from the
+Documents table and send structural questions to the graph instead : `graphify-out/GRAPH_REPORT.md`
+for the overview, `graphify query`, `graphify explain` and `graphify path` for specifics. The hook
+injects `INDEX.md` at the start of every session, so this is the line that stops the next session
+hunting for a `modules.md` that no longer exists.
+
+**3. Rehash state with the field set.** Deleting the files is what drops them from `documents` and
+`hashes`; the field is what tells the hook the absence is deliberate. Run both commands from Step 5:
+`write-map-state.js`, then the one-liner that re-applies `structure: "graphify"`.
+
+**4. Commit the conversion as one commit** : the three deletions, the rewritten `INDEX.md`, and
+`.map-state.json` together, so no other checkout ever sees a half-converted map.
+
+Then, if code also changed since the last map, run Steps 2 to 5 as normal : now in graph mode.
+
 ## Guidelines
 
 - **Surgical, not sweeping.** Targeted edits keep diffs reviewable and history meaningful.
@@ -196,18 +327,24 @@ committing.
   gone.
 - **No churn for churn's sake.** If nothing meaningful changed, say so and leave the map and state
   untouched.
+- **In graph mode, never re-derive structure by hand.** Modules, entry points and the file tree come
+  from the graph. Your half is conventions, patterns, boundaries, flows and onboarding.
 - **Never touch `CLAUDE.md`.** The plugin's hook handles loading; the map lives entirely in
   `.claude/.codebase-info/`. Leave `CLAUDE.md` (and `CLAUDE.local.md`) alone.
 
 ## Success criteria
 
+- [ ] `structure` read from `.map-state.json`, and the mode (graph or classic) stated
 - [ ] Changes since the last map detected (via stored commit, or mtime fallback)
+- [ ] Graph mode: `graphify hook status` checked; the graph confirmed no older than the last commit, or
+      refreshed exactly once; no structural document recreated
 - [ ] Warranted doc set re-assessed: docs added for aspects that appeared (e.g. Docker, a datastore),
       docs pruned for aspects that vanished
 - [ ] Only affected documents edited; new areas documented; removed areas pruned
 - [ ] `INDEX.md` reflects any added/removed docs
 - [ ] `Last Updated` dates current on every touched doc
 - [ ] `CLAUDE.md` left untouched
-- [ ] `.map-state.json` rewritten with today's date, current commit, and document list
+- [ ] `.map-state.json` rewritten with today's date, current commit, and document list : plus
+      `structure: "graphify"` re-applied in graph mode
 - [ ] Map changes committed including `.map-state.json` (or the user told plainly they still need
       committing)
