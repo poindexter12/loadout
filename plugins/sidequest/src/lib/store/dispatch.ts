@@ -1696,7 +1696,16 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
     if (noDeclaredFileScope && opts.allowUnscoped !== true) {
       throw new Error(`prepare dispatch: ${t.ref} has no declared file scope for write work. Add files, or pass allowUnscoped:true to explicitly accept that the executor can block on its first write and end without a submission.`);
     }
-    const fallbackReason = !current?.recovery && resolvedPolicy?.fallbackReason || null;
+    // A substitution has to name ITSELF AND its cause. resolveCategoryRoute records why
+    // each rejected candidate was unusable in `warnings`, but prepareDispatch was the end
+    // of the line for those strings: only `fallbackReason` reaches the dispatch result, so
+    // the orchestrator saw a different model with no statement of what was wrong with the
+    // configured one, which reads as the route itself having changed (SQ-316).
+    const substituted = !current?.recovery && resolvedPolicy?.fallbackReason || null;
+    const substitutionCause = substituted && Array.isArray(resolvedPolicy?.warnings)
+      ? resolvedPolicy.warnings.map((warning: any) => String(warning || '').trim()).filter(Boolean)
+      : [];
+    const fallbackReason = substituted ? [substituted, ...substitutionCause].join(' ') : null;
     const recovery = current && current.recovery && activeDispatchRoute(t) ? current.recovery : null;
     const attempts = current && Array.isArray(current.attempts) ? current.attempts.slice() : [];
     const supersededTokens = current && Array.isArray(current.supersededTokens) ? current.supersededTokens.slice() : [];

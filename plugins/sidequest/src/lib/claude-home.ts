@@ -15,6 +15,19 @@ export function resolveClaudeHome(explicit?: string | null): string {
     || path.join(os.homedir(), '.claude');
 }
 
+// The user-scope agent directory Claude Code actually LOADS: `<claude home>/agents`.
+// SIDEQUEST_AGENTS_DIR stays the explicit operator and test override. SIDEQUEST_HOME is
+// deliberately NOT consulted here: it is board state (database, tokens, worktrees), while
+// Claude Code's user-scope agent loader reads only `<CLAUDE_CONFIG_DIR>/agents`. Resolving
+// agent definitions from SIDEQUEST_HOME wrote every Codex dispatch pin to a directory the
+// loader never reads, so each Codex-routed dispatch failed with "Agent type ... not found"
+// on exactly the documented multi-account setup that sets SIDEQUEST_HOME (SQ-316).
+export function resolveClaudeAgentsDir(explicit?: string | null): string {
+  const override = String(process.env.SIDEQUEST_AGENTS_DIR || '').trim();
+  if (override) return path.resolve(override);
+  return path.join(resolveClaudeHome(explicit), 'agents');
+}
+
 // The central Sidequest store (board database, dispatch tokens, launcher, executor
 // worktrees). Resolution order: SIDEQUEST_HOME, then <CLAUDE_CONFIG_DIR>/sidequest,
 // then ~/.claude/sidequest. A multi-account machine often keeps ~/.claude as a

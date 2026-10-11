@@ -23,6 +23,11 @@ const { spawnSync, execFileSync } = require('child_process');
 
 const SIDEQUEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-mcp-test-'));
 process.env.SIDEQUEST_HOME = SIDEQUEST_HOME;
+// Agent definitions are written to the directory Claude Code's loader reads, which
+// resolves to the developer's real `<CLAUDE_CONFIG_DIR>/agents` unless pinned (SQ-316).
+// Several dispatch tests below route to a Codex model and so register a pin; without
+// this they would deposit generated executors in the real tree.
+process.env.SIDEQUEST_AGENTS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-mcp-agents-'));
 // Per-process fixture root. A fixed path under the OS temp directory is shared
 // with every other suite run on this machine and with the real `sidequest temp
 // cleanup` sweep, either of which deletes this repo mid-run and takes the two
@@ -6003,6 +6008,46 @@ test('MCP add, update, and route_recipe carry a one-ticket route override', asyn
   const recipe = await callTool('route_recipe', { project: PROJ, category, ticket: added.ref });
   assert.deepEqual(recipe.route, { model: 'opus', effort: 'high' });
   assert.deepEqual(recipe.ticket, { ref: added.ref, route: { model: 'opus', effort: 'high' } });
+});
+
+// SQ-316: a dispatch that registers the first pin for its route must write it where
+// Claude Code's agent loader reads AND say so, because the definition is newer than
+// the session's agent snapshot and a spawn against it fails until the session reloads.
+test('a freshly registered Codex pin lands in the Claude agent directory and is named in the dispatch result', async () => {
+  // The suite's own Claude home, pinned by the install fixture at import: relocating
+  // it would move `plugins/installed_plugins.json` too and the dispatch preflight
+  // would refuse before any pin was written. Only the agents-dir override is lifted,
+  // which is the assertion that the unpinned resolution follows the Claude home and
+  // not the SIDEQUEST_HOME board tree.
+  const claudeHome = String(process.env.SIDEQUEST_CLAUDE_HOME);
+  assert.ok(claudeHome && claudeHome !== 'undefined', 'the install fixture pins a Claude home');
+  const previous = { agentsDir: process.env.SIDEQUEST_AGENTS_DIR };
+  delete process.env.SIDEQUEST_AGENTS_DIR;
+  try {
+    seedCatalog([{ slug: 'codex-gpt-5-6-luna', id: 'claude-gpt-5.6-luna', label: 'Luna' }]);
+    store.setCategory({ id: 'pin-notice-codex', name: 'Pin Notice Codex', route: { model: 'codex-gpt-5-6-luna', effort: 'high' } });
+    const added = await callTool('add', { title: 'pin notice dispatch', description: DISPATCH_DESCRIPTION, category: 'pin-notice-codex' });
+    const dispatched = await callTool('dispatch', { allowUnscoped: true, ref: added.ref, full: true });
+
+    const agentsDir = path.join(claudeHome, 'agents');
+    assert.equal(dispatched.spawn.subagent_type, dispatched.agent);
+    assert.ok(fs.existsSync(path.join(agentsDir, `${dispatched.agent}.md`)), `the spawned executor must exist in ${agentsDir}`);
+    assert.ok(!fs.existsSync(path.join(SIDEQUEST_HOME, 'agents')), 'the board home holds no agent definitions');
+
+    const notice = (dispatched.warnings || []).find((warning: string) => warning.includes('Codex pin'));
+    assert.ok(notice, `expected a pin notice, got ${JSON.stringify(dispatched.warnings)}`);
+    assert.ok(notice.includes(agentsDir), 'the notice names the directory it wrote to');
+    assert.match(notice, /SIDEQUEST_AGENTS_DIR/);
+    assert.match(notice, /reload-plugins/);
+
+    // Second dispatch of the same route: the pin is unchanged, so no notice.
+    const again = await callTool('add', { title: 'pin notice repeat', description: DISPATCH_DESCRIPTION, category: 'pin-notice-codex' });
+    const repeat = await callTool('dispatch', { allowUnscoped: true, ref: again.ref, full: true });
+    assert.equal((repeat.warnings || []).find((warning: string) => warning.includes('Codex pin')), undefined);
+  } finally {
+    if (previous.agentsDir === undefined) delete process.env.SIDEQUEST_AGENTS_DIR;
+    else process.env.SIDEQUEST_AGENTS_DIR = previous.agentsDir;
+  }
 });
 
 export {};

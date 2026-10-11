@@ -32,6 +32,8 @@ const STABLE_EXECUTORS = [
   ]),
 ].sort();
 
+// Mirrors agentsync's MARKER: only a file carrying it is Sidequest-owned and sweepable.
+const MARKER = '<!-- generated-by: sidequest-agentsync gen2 -->';
 function tmpDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'sq-agentsync-test-')); }
 function git(dir: string, args: string[]) { return spawnSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true }); }
 function readDir(dir?: any) { return fs.readdirSync(dir).filter((file: string) => file.endsWith('.md')).sort(); }
@@ -1664,6 +1666,99 @@ test('ensureDispatchPin writes a ticket override outside the configured taxonomy
 
   // A Claude route has nothing to pin.
   assert.equal(agentsync.ensureDispatchPin({ model: 'sonnet', effort: 'high' }, { dir }).written, 0);
+});
+
+// SQ-316: the pin directory must be one Claude Code's agent loader reads. It reads
+// `<CLAUDE_CONFIG_DIR>/agents`; SIDEQUEST_HOME is board state (database, tokens,
+// worktrees) and is never scanned for agents, so a pin written there is unspawnable.
+// SIDEQUEST_HOME is left exactly as the suite set it, so the board the store reads
+// does not move under the test: only the agent-directory resolution is varied.
+function withAgentDirs(run: (dirs: { claudeAgents: string; legacyAgents: string }) => void) {
+  const previous = {
+    claude: process.env.CLAUDE_CONFIG_DIR,
+    sidequestClaude: process.env.SIDEQUEST_CLAUDE_HOME,
+    agents: process.env.SIDEQUEST_AGENTS_DIR,
+  };
+  const claudeHome = tmpDir();
+  process.env.CLAUDE_CONFIG_DIR = claudeHome;
+  delete process.env.SIDEQUEST_CLAUDE_HOME;
+  delete process.env.SIDEQUEST_AGENTS_DIR;
+  try {
+    run({
+      claudeAgents: path.join(claudeHome, 'agents'),
+      legacyAgents: path.join(String(process.env.SIDEQUEST_HOME), 'agents'),
+    });
+  } finally {
+    for (const [key, value] of [['CLAUDE_CONFIG_DIR', previous.claude], ['SIDEQUEST_CLAUDE_HOME', previous.sidequestClaude], ['SIDEQUEST_AGENTS_DIR', previous.agents]] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+// The bootstrap pins SIDEQUEST_AGENTS_DIR at a tmpdir precisely because the unpinned
+// resolution is the developer's real tree, and a suite that dispatches a Codex route
+// registers a pin. A regression here writes generated executors into a live install.
+test('the test bootstrap keeps generated agents out of the real Claude home', () => {
+  const { resolveClaudeAgentsDir, resolveClaudeHome } = require('../lib/claude-home.js');
+  const resolved = resolveClaudeAgentsDir();
+  assert.equal(resolved, process.env.SIDEQUEST_AGENTS_DIR);
+  assert.ok(resolved.startsWith(fs.realpathSync(os.tmpdir())) || resolved.startsWith(os.tmpdir()), `${resolved} must be a temporary directory`);
+
+  // Lifting the pin is what the real runtime does, and it must then resolve INTO a
+  // Claude home — the assertion that the bootstrap is suppressing a real write.
+  const pinned = process.env.SIDEQUEST_AGENTS_DIR;
+  delete process.env.SIDEQUEST_AGENTS_DIR;
+  try {
+    const unpinned = resolveClaudeAgentsDir();
+    assert.equal(unpinned, path.join(resolveClaudeHome(), 'agents'));
+    assert.notEqual(unpinned, resolved);
+    assert.ok(!unpinned.startsWith(String(process.env.SIDEQUEST_HOME)), 'SIDEQUEST_HOME is never an agent directory');
+  } finally {
+    if (pinned === undefined) delete process.env.SIDEQUEST_AGENTS_DIR;
+    else process.env.SIDEQUEST_AGENTS_DIR = pinned;
+  }
+});
+
+test('dispatch pins land in the Claude agent directory, never in the SIDEQUEST_HOME tree', () => {
+  seedCatalog([NOVA, VEGA]);
+  withAgentDirs(({ claudeAgents, legacyAgents }) => {
+    const written = agentsync.ensureDispatchPin({ model: VEGA.slug, effort: 'max' });
+    assert.equal(written.written, 2);
+    assert.equal(written.dir, claudeAgents);
+    assert.ok(readDir(claudeAgents).includes('sidequest-exec-codex-gpt-9-9-vega-1m-max.md'));
+    // The board home must be left untouched: writing here is what made every
+    // Codex-routed dispatch unspawnable whenever SIDEQUEST_HOME was set.
+    assert.ok(!fs.existsSync(legacyAgents), 'SIDEQUEST_HOME is board state and holds no agent definitions');
+
+    // SIDEQUEST_AGENTS_DIR stays the explicit operator override.
+    const override = tmpDir();
+    process.env.SIDEQUEST_AGENTS_DIR = override;
+    const pinned = agentsync.ensureDispatchPin({ model: VEGA.slug, effort: 'xhigh' });
+    assert.equal(pinned.dir, override);
+    assert.equal(pinned.written, 2);
+  });
+});
+
+test('a pin left in the legacy SIDEQUEST_HOME directory is swept, not kept alive', () => {
+  seedCatalog([NOVA, VEGA]);
+  const store = require('../lib/store.js');
+  configure(store, 'pins-legacy-sweep', { model: VEGA.slug, effort: 'max' });
+  withAgentDirs(({ claudeAgents, legacyAgents }) => {
+    // What a session on 5.8.0 or earlier wrote where the loader never looks.
+    fs.mkdirSync(legacyAgents, { recursive: true });
+    const stranded = path.join(legacyAgents, 'sidequest-exec-codex-gpt-9-9-vega-1m-max.md');
+    fs.writeFileSync(stranded, `---\nname: sidequest-exec-codex-gpt-9-9-vega-1m-max\n---\n${MARKER}\n`);
+
+    const result = agentsync.syncExecAgentsIfChanged(null, {});
+
+    // The live pin is written to the loader's directory, and the identically named
+    // stranded copy is retired rather than protected by the keep set.
+    assert.ok(readDir(claudeAgents).includes('sidequest-exec-codex-gpt-9-9-vega-1m-max.md'));
+    assert.ok(!fs.existsSync(stranded), 'the legacy copy must not survive the sweep');
+    assert.ok(result.removed >= 1);
+    fs.rmSync(legacyAgents, { recursive: true, force: true });
+  });
 });
 
 export {};

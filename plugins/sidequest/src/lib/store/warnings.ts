@@ -1423,6 +1423,15 @@ function dispatchWarnings(ticket?: any, slug?: any) {
   if (pythonIoEncoding?.written) {
     warnings.push(`Dispatch update: wrote PYTHONIOENCODING=utf-8 to ${pythonIoEncoding.settingsPath}. Claude Code reads project settings env at session start, so it applies from the next session.`);
   }
+  // Stamped by agentsync's renderDispatchStub when THIS dispatch was the first to need
+  // the route's pin, so the definition is newer than the session's agent snapshot. Before
+  // SQ-316 the write was silent and the orchestrator learned about it from a failed spawn.
+  // The directory is named because it is the one thing that makes an unloadable pin
+  // diagnosable without reading the source.
+  const dispatchPin = dispatchState(ticket)?.dispatchPin;
+  if (dispatchPin?.written) {
+    warnings.push(`Dispatch update: registered this route's Codex pin in ${dispatchPin.dir}. Claude Code loads user-scope agents only from <CLAUDE_CONFIG_DIR>/agents (override: SIDEQUEST_AGENTS_DIR) and never from a SIDEQUEST_HOME tree. Run /reload-plugins before spawning if Agent reports the executor type is not found.`);
+  }
   const dispatchSkew = dispatchState(ticket)?.dispatchSkew;
   if (dispatchSkew?.loadedVersion && dispatchSkew?.installedVersion) {
     warnings.push(`Sidequest dispatch skew: loaded ${dispatchSkew.loadedVersion}, installed ${dispatchSkew.installedVersion}. Claim self-heal bridges this compatible skew; run /reload-plugins or restart Claude Code before the next dispatch. Schema changes and loaded versions before 4.48.1 still refuse.`);

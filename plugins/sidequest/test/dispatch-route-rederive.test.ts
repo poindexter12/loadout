@@ -109,7 +109,13 @@ test('same-provider fallback is prepared with its reason and re-derives when the
   // pin holds the model and effort, so there is nothing for a prompt to repeat.
   assert.deepEqual(degraded.ticket.dispatch.route, { model: 'codex-gpt-fallback', effort: 'medium' });
   assert.equal(degraded.ticket.dispatch.route.marker, undefined, 'a pinned route publishes no marker');
-  assert.equal(degraded.ticket.dispatch.fallbackReason, 'category fallback replaced unavailable codex-gpt-recovered.');
+  // The substitution states its CAUSE, not just that it happened: a result that
+  // reports a different model without saying what was wrong with the configured one
+  // reads as the route itself having changed (SQ-316).
+  assert.equal(
+    degraded.ticket.dispatch.fallbackReason,
+    'category fallback replaced unavailable codex-gpt-recovered. Category "dispatch.rederive" route model "codex-gpt-recovered" isn\'t currently available.',
+  );
 
   writeCatalog([{
     slug: 'codex-gpt-fallback',

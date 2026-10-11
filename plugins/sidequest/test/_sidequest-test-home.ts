@@ -12,6 +12,16 @@ Object.assign(process.env, {
 });
 process.env.SIDEQUEST_HOME = sidequestTestHome;
 
+// Agent definitions (the Codex dispatch pins and temporary native executors) are
+// written to the directory Claude Code's agent loader reads, which resolves to the
+// developer's real `<CLAUDE_CONFIG_DIR>/agents` when nothing pins it (SQ-316). Any
+// suite that dispatches a Codex-routed ticket registers a pin, so without this every
+// such run would deposit generated executors in the real tree. Before SQ-316 the
+// target followed SIDEQUEST_HOME and was disposable by construction; now it has to be
+// pinned explicitly. Keep this ahead of any suite-local override.
+const sidequestTestAgentsHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-test-agents-'));
+process.env.SIDEQUEST_AGENTS_DIR = sidequestTestAgentsHome;
+
 // Discovery reads GET /v1/models off the effective ANTHROPIC_BASE_URL (SQ-298).
 // A developer or CI box with a live gateway wired into its shell would otherwise
 // inject that machine's real external models into every discovery expectation,
@@ -21,9 +31,11 @@ delete process.env.ANTHROPIC_BASE_URL;
 
 process.once('exit', () => {
   try {
-    fs.rmSync(sidequestTestHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+    for (const dir of [sidequestTestHome, sidequestTestAgentsHome]) {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+    }
   } catch {
-    const cleanup = spawn(process.execPath, ['-e', `require('node:fs').rmSync(${JSON.stringify(sidequestTestHome)}, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })`], {
+    const cleanup = spawn(process.execPath, ['-e', `for (const dir of ${JSON.stringify([sidequestTestHome, sidequestTestAgentsHome])}) require('node:fs').rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })`], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,

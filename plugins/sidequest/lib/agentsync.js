@@ -3,7 +3,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { execFileSync } = require("node:child_process");
-const { resolveClaudeHome } = require("./claude-home.js");
+const { resolveClaudeHome, resolveClaudeAgentsDir } = require("./claude-home.js");
 const { stableClaudeName, stableDispatchName, stableReadOnlyClaudeName, stableReadOnlyDispatchName, stablePinnedDispatchName, stableReadOnlyPinnedDispatchName, dispatchPinToken, DIAGNOSTIC_PROBE_NAME, bundledAgentType } = require("./exec-names.js");
 const { createWorktreeLease, worktreeResumeDecision } = require("./kernel/worktree.js");
 const crypto = require("crypto");
@@ -32,6 +32,13 @@ function defaultAgentsDir() {
   const home = process.env.SIDEQUEST_HOME;
   if (home && String(home).trim()) return path.join(path.resolve(String(home).trim()), "agents");
   return path.join(resolveClaudeHome(), "agents");
+}
+function dispatchPinsDir() {
+  return resolveClaudeAgentsDir();
+}
+function agentDirsForCleanup() {
+  const dirs = [dispatchPinsDir(), defaultAgentsDir()];
+  return dirs.filter((dir, index) => dirs.indexOf(dir) === index);
 }
 const DISPATCH_MODEL_ID = "claude-codex-auto";
 const ROUTE_MODEL_RE = /^[a-z0-9][a-z0-9.-]{0,63}$/;
@@ -252,7 +259,7 @@ function writeGeneratedAgents(dir, wanted) {
   return { written, unchanged };
 }
 function syncDispatchPins(opts) {
-  const dir = opts?.dir || defaultAgentsDir();
+  const dir = opts?.dir || dispatchPinsDir();
   const wanted = configuredDispatchPinSources(opts);
   const { written, unchanged } = writeGeneratedAgents(dir, wanted);
   let removed = 0;
@@ -281,7 +288,7 @@ function syncDispatchPins(opts) {
   return { written, removed, unchanged };
 }
 function ensureDispatchPin(ticket, opts) {
-  const empty = { written: 0, removed: 0, unchanged: 0 };
+  const empty = { written: 0, removed: 0, unchanged: 0, dir: null };
   let resolved = null;
   try {
     resolved = store.resolveExec(ticket?.model, ticket?.effort);
@@ -289,7 +296,7 @@ function ensureDispatchPin(ticket, opts) {
     return empty;
   }
   if (!resolved || resolved.backend !== "codex" || resolved.effortCarrier !== "frontmatter" || !resolved.pinToken) return empty;
-  const dir = opts?.dir || defaultAgentsDir();
+  const dir = opts?.dir || dispatchPinsDir();
   const wanted = dispatchPinSources([{
     token: resolved.pinToken,
     effort: resolved.effort,
@@ -298,7 +305,7 @@ function ensureDispatchPin(ticket, opts) {
   }], opts?.readOnlyDeniedTools);
   const { written, unchanged } = writeGeneratedAgents(dir, wanted);
   if (written) waitForNativeAgentReload(opts?.waitMs);
-  return { written, removed: 0, unchanged };
+  return { written, removed: 0, unchanged, dir };
 }
 function implementationExecutorSources() {
   const sources = /* @__PURE__ */ new Map();
@@ -340,7 +347,7 @@ function temporaryAgentFile(name, dir) {
   if (!String(name || "").startsWith(TEMP_PREFIX)) {
     throw new Error("temporary agent name must use a Sidequest temporary prefix.");
   }
-  return path.join(dir || defaultAgentsDir(), `${name}.md`);
+  return path.join(dir || dispatchPinsDir(), `${name}.md`);
 }
 function nativeAgentSource(spec) {
   const tools = Array.isArray(spec.tools) && spec.tools.length ? spec.tools : ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "SendMessage"];
@@ -1058,7 +1065,10 @@ function renderDispatchStub(ticket, projectPath) {
   if (!tokenFile) throw new Error("Dispatch token file path is required.");
   const marker = ticketRouteMarker(ticket);
   try {
-    ensureDispatchPin(ticket);
+    const pin = ensureDispatchPin(ticket);
+    if (pin.written && ticket && ticket.dispatch) {
+      ticket.dispatch.dispatchPin = { written: pin.written, dir: pin.dir };
+    }
   } catch (_) {
   }
   const command = [
@@ -1107,7 +1117,7 @@ function createNativeAgent(spec, opts) {
       cleanup: { name: name2, sessionId: spec.sessionId || null }
     };
   }
-  const dir = opts.dir || defaultAgentsDir();
+  const dir = opts.dir || dispatchPinsDir();
   fs.mkdirSync(dir, { recursive: true });
   const runtime = spec.runtime != null ? spec.runtime : spec.runsModel;
   const explicitNonce = spec.nonce != null ? spec.nonce : null;
@@ -1140,40 +1150,42 @@ function createNativeAgent(spec, opts) {
 }
 function cleanupNativeAgents(opts) {
   opts = opts || {};
-  const dir = opts.dir || defaultAgentsDir();
+  const dirs = opts.dir ? [opts.dir] : agentDirsForCleanup();
   const name = opts.name ? String(opts.name) : null;
   const sessionId = opts.sessionId == null ? null : String(opts.sessionId);
   let removed = 0;
-  let files = [];
-  try {
-    files = fs.readdirSync(dir).filter((f) => (f.startsWith(TEMP_PREFIX) || f.startsWith(TICKET_PREFIX)) && f.endsWith(".md"));
-  } catch (_) {
-    return { removed };
-  }
-  for (const fileName of files) {
-    if (name && fileName !== `${name}.md`) continue;
-    const file = path.join(dir, fileName);
-    let source = "";
+  for (const dir of dirs) {
+    let files = [];
     try {
-      source = fs.readFileSync(file, "utf8");
+      files = fs.readdirSync(dir).filter((f) => (f.startsWith(TEMP_PREFIX) || f.startsWith(TICKET_PREFIX)) && f.endsWith(".md"));
     } catch (_) {
       continue;
     }
-    if (!source.includes(TEMP_MARKER)) continue;
-    if (sessionId && !source.includes(`<!-- sidequest-native-session: ${sessionId} -->`)) continue;
-    if (opts.staleBefore != null) {
-      let stat;
+    for (const fileName of files) {
+      if (name && fileName !== `${name}.md`) continue;
+      const file = path.join(dir, fileName);
+      let source = "";
       try {
-        stat = fs.statSync(file);
+        source = fs.readFileSync(file, "utf8");
       } catch (_) {
         continue;
       }
-      if (stat.mtimeMs >= Number(opts.staleBefore)) continue;
-    }
-    try {
-      fs.unlinkSync(file);
-      removed++;
-    } catch (_) {
+      if (!source.includes(TEMP_MARKER)) continue;
+      if (sessionId && !source.includes(`<!-- sidequest-native-session: ${sessionId} -->`)) continue;
+      if (opts.staleBefore != null) {
+        let stat;
+        try {
+          stat = fs.statSync(file);
+        } catch (_) {
+          continue;
+        }
+        if (stat.mtimeMs >= Number(opts.staleBefore)) continue;
+      }
+      try {
+        fs.unlinkSync(file);
+        removed++;
+      } catch (_) {
+      }
     }
   }
   return { removed };
@@ -1236,14 +1248,17 @@ function migrateExecAgents(_prefs, opts) {
 }
 function syncExecAgentsIfChanged(_prefs, opts) {
   const pins = configuredDispatchPinSources(opts);
-  const result = migrateExecAgents(_prefs, Object.assign({}, opts, { keep: pins.keys() }));
-  const dir = opts?.dir || defaultAgentsDir();
+  const dir = opts?.dir || dispatchPinsDir();
+  const result = migrateExecAgents(_prefs, Object.assign({}, opts, { dir, keep: [...pins.keys()] }));
+  const legacyDir = opts?.dir ? null : agentDirsForCleanup().find((candidate) => candidate !== dir) || null;
+  const legacy = legacyDir ? migrateExecAgents(_prefs, Object.assign({}, opts, { dir: legacyDir })) : { written: 0, removed: 0, unchanged: 0 };
   const pinWrite = writeGeneratedAgents(dir, pins);
   const pinSync = Object.assign({}, pinWrite, { removed: 0 });
   return Object.assign({}, result, {
     written: result.written + pinWrite.written,
-    unchanged: result.unchanged + pinWrite.unchanged,
-    skipped: result.removed === 0 && pinWrite.written === 0,
+    removed: result.removed + legacy.removed,
+    unchanged: result.unchanged + legacy.unchanged + pinWrite.unchanged,
+    skipped: result.removed === 0 && legacy.removed === 0 && pinWrite.written === 0,
     pins: pinSync,
     installHash: stableInstallHash(EXECUTOR_SKILLS, opts?.readOnlyDeniedTools)
   });
@@ -1354,5 +1369,6 @@ module.exports = {
   migrateExecAgents,
   stableInstallHash,
   EXECUTOR_CONTRADICTION_RULE,
-  defaultAgentsDir
+  defaultAgentsDir,
+  dispatchPinsDir
 };
