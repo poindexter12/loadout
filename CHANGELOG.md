@@ -8,6 +8,17 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v4.11.0 (2026-10-11)
+
+### sidequest 5.8.0 → 5.8.1
+
+#### Fixes
+
+- sidequest: write Codex dispatch pins where Claude Code loads agents, not under SIDEQUEST_HOME (SQ-316)
+  Runtime agent definitions (the per-(model, effort) Codex dispatch pins and temporary native executors) are written to `<CLAUDE_CONFIG_DIR>/agents` instead of `$SIDEQUEST_HOME/agents`. Claude Code's user-scope agent loader reads only the former, so with `SIDEQUEST_HOME` set, which is the documented multi-account setup, every Codex-routed dispatch returned a `subagent_type` whose definition the loader never saw and the spawn failed with `Agent type '...' not found`. `SIDEQUEST_AGENTS_DIR` remains the explicit override; `SIDEQUEST_HOME` is board state and is no longer consulted for agent definitions. Pins stranded in the old directory by an earlier release are swept on the next sync, so no manual cleanup or symlink stopgap is needed.
+
+  A dispatch that registers the first pin for its route now carries a `Dispatch update:` warning naming the directory it wrote to, `SIDEQUEST_AGENTS_DIR`, and `/reload-plugins`, because a fresh definition is newer than the session's agent snapshot. A fallback substitution also states its cause: the candidate-rejection reasons `resolveCategoryRoute` records are appended to `fallbackReason`, which previously reported only that a fallback had happened.
+
 ## v4.10.0 (2026-10-10)
 
 ### codebase-mapper 2.16.1 → 2.17.0
