@@ -90,7 +90,13 @@ the exact executor and spawn object a fresh `dispatch <ref>` returned.
     gives a marker precedence over `output_config.effort`, so a stray line would silently override
     the pinned effort. The spawn gate denies a marker on this path. These definitions are written at
     runtime, because external models are discovered at runtime, so they are user-scoped and NOT
-    namespaced `sidequest:`.
+    namespaced `sidequest:`. They are written to `<CLAUDE_CONFIG_DIR>/agents` (overridable with
+    `SIDEQUEST_AGENTS_DIR`), the only user-scope directory Claude Code's agent loader reads, and
+    never under `SIDEQUEST_HOME`, which holds board state alone. When a dispatch registers the first
+    pin for a route, its result carries a `Dispatch update:` warning naming that directory, because
+    the definition is then newer than the session's agent snapshot: if `Agent` answers
+    `Agent type '<executor>' not found`, run `/reload-plugins` and spawn again rather than rerouting
+    the ticket.
   - `effortCarrier: "marker"` — the legacy carriage for a model-gateway older than 0.53.0, selected
     by `SIDEQUEST_DISPATCH_EFFORT_CARRIER=marker`. The effort-collapsed `sidequest-exec-dispatch`
     (or `sidequest-exec-dispatch-readonly`) pins the virtual `claude-codex-auto`, and the REAL model

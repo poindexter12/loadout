@@ -88,7 +88,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('node:child_process');
-const { resolveClaudeHome } = require('./claude-home.js');
+const { resolveClaudeHome, resolveClaudeAgentsDir } = require('./claude-home.js');
 const { stableClaudeName, stableDispatchName, stableReadOnlyClaudeName, stableReadOnlyDispatchName, stablePinnedDispatchName, stableReadOnlyPinnedDispatchName, dispatchPinToken, DIAGNOSTIC_PROBE_NAME, bundledAgentType } = require('./exec-names.js');
 const { createWorktreeLease, worktreeResumeDecision } = require('./kernel/worktree.js');
 const crypto = require('crypto');
@@ -125,16 +125,34 @@ const EXEC_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const EXECUTOR_CHECKPOINT_TOOL_ROUNDS = 100;
 const EXECUTOR_CONTRADICTION_RULE = 'Executor contradiction rule: An anchor is orientation, not a contract. When an anchor names the wrong file, locate the file the work actually needs. If that file is inside declared scope, correct the anchor in your handback and continue. Stop and report a contradiction only when the needed file is outside declared scope or the ticket premise is false. Scope limits writes, never reads: reading any worktree path is allowed. Before reporting, check it and include the checked path or target and result. An existing out-of-scope path or declared output is context, not a contradiction. After evidence of absence, do not redesign the ticket, reject the base, or invent a substitute.';
 
-// Earlier releases generated stable executors in this directory. The migration
-// scans it without creating it, removing only Sidequest-owned generated files.
-// SIDEQUEST_AGENTS_DIR keeps that cleanup testable and gives an explicit recovery
-// target when an administrator keeps an alternate Claude agent directory.
+// CLEANUP TARGET ONLY. Earlier releases generated stable executors — and, up to
+// 5.8.0, every Codex dispatch pin — in this directory, which follows SIDEQUEST_HOME.
+// The migration sweep below keeps reading it so those files are still retired, but
+// nothing is written here any more: Claude Code never loads agents from a
+// SIDEQUEST_HOME tree, so a definition written here is undiscoverable (SQ-316).
+// Writers use dispatchPinsDir() instead.
 function defaultAgentsDir() {
   const explicit = process.env.SIDEQUEST_AGENTS_DIR;
   if (explicit && String(explicit).trim()) return path.resolve(String(explicit).trim());
   const home = process.env.SIDEQUEST_HOME;
   if (home && String(home).trim()) return path.join(path.resolve(String(home).trim()), 'agents');
   return path.join(resolveClaudeHome(), 'agents');
+}
+
+// WRITE TARGET for every agent definition Sidequest registers at runtime (the
+// per-(model, effort) Codex dispatch pins and temporary native executors). It must be
+// a directory Claude Code's agent loader reads, which is `<claude home>/agents` and
+// never `$SIDEQUEST_HOME/agents`; see resolveClaudeAgentsDir (SQ-316).
+function dispatchPinsDir() {
+  return resolveClaudeAgentsDir();
+}
+
+// Both resolvers, deduped, newest-first: the directory runtime definitions are written
+// to, then the legacy SIDEQUEST_HOME one when it differs. Cleanup paths walk both so a
+// pre-SQ-316 session's leftovers are still retired.
+function agentDirsForCleanup(): string[] {
+  const dirs = [dispatchPinsDir(), defaultAgentsDir()];
+  return dirs.filter((dir, index) => dirs.indexOf(dir) === index);
 }
 
 // The virtual model id the codex-gateway shim (>=0.9.0) resolves per request
@@ -423,7 +441,7 @@ function writeGeneratedAgents(dir: string, wanted: Map<string, string>): { writt
  * dispatch rather than racing the agent watcher.
  */
 function syncDispatchPins(opts?: SyncOptions & { project?: any }): SyncResult {
-  const dir = opts?.dir || defaultAgentsDir();
+  const dir = opts?.dir || dispatchPinsDir();
   const wanted = configuredDispatchPinSources(opts);
   const { written, unchanged } = writeGeneratedAgents(dir, wanted);
   let removed = 0;
@@ -451,12 +469,12 @@ function syncDispatchPins(opts?: SyncOptions & { project?: any }): SyncResult {
  * watcher only when it actually wrote something, so the common hot path (the pin
  * already registered at SessionStart) costs nothing.
  */
-function ensureDispatchPin(ticket?: any, opts?: SyncOptions): SyncResult {
-  const empty = { written: 0, removed: 0, unchanged: 0 };
+function ensureDispatchPin(ticket?: any, opts?: SyncOptions): SyncResult & { dir: string | null } {
+  const empty = { written: 0, removed: 0, unchanged: 0, dir: null };
   let resolved: any = null;
   try { resolved = store.resolveExec(ticket?.model, ticket?.effort); } catch (_) { return empty; }
   if (!resolved || resolved.backend !== 'codex' || resolved.effortCarrier !== 'frontmatter' || !resolved.pinToken) return empty;
-  const dir = opts?.dir || defaultAgentsDir();
+  const dir = opts?.dir || dispatchPinsDir();
   const wanted = dispatchPinSources([{
     token: resolved.pinToken,
     effort: resolved.effort,
@@ -465,7 +483,7 @@ function ensureDispatchPin(ticket?: any, opts?: SyncOptions): SyncResult {
   }], opts?.readOnlyDeniedTools);
   const { written, unchanged } = writeGeneratedAgents(dir, wanted);
   if (written) waitForNativeAgentReload((opts as any)?.waitMs);
-  return { written, removed: 0, unchanged };
+  return { written, removed: 0, unchanged, dir };
 }
 
 function implementationExecutorSources(): Map<string, string> {
@@ -529,7 +547,7 @@ function temporaryAgentFile(name?: any, dir?: any) {
   if (!String(name || '').startsWith(TEMP_PREFIX)) {
     throw new Error('temporary agent name must use a Sidequest temporary prefix.');
   }
-  return path.join(dir || defaultAgentsDir(), `${name}.md`);
+  return path.join(dir || dispatchPinsDir(), `${name}.md`);
 }
 
 function nativeAgentSource(spec?: any) {
@@ -1368,7 +1386,16 @@ function renderDispatchStub(ticket?: any, projectPath?: any) {
   // Write the pinned definition if this route's pin is not already registered.
   // Content-compared, so the common case (registered at agentsync time) neither
   // writes nor waits. A ticket-level route override lands here and nowhere else.
-  try { ensureDispatchPin(ticket); } catch (_) { /* best effort: the spawn gate still reports a missing executor */ }
+  // A freshly written pin is stamped on the in-memory dispatch state so the dispatch
+  // result can name it: before SQ-316 a first-of-its-route pin was registered with no
+  // hint reaching the orchestrator, which then spawned against a definition the
+  // session had not loaded yet. Not persisted — the reload need is session-local.
+  try {
+    const pin = ensureDispatchPin(ticket);
+    if (pin.written && ticket && ticket.dispatch) {
+      ticket.dispatch.dispatchPin = { written: pin.written, dir: pin.dir };
+    }
+  } catch (_) { /* best effort: the spawn gate still reports a missing executor */ }
   const command = [
     'node',
     quotedShellArgument(ensureDispatchLauncher()),
@@ -1429,7 +1456,7 @@ function createNativeAgent(spec?: any, opts?: any) {
       cleanup: { name, sessionId: spec.sessionId || null },
     };
   }
-  const dir = opts.dir || defaultAgentsDir();
+  const dir = opts.dir || dispatchPinsDir();
   fs.mkdirSync(dir, { recursive: true });
   // The runtime label (resolveExec's runsModel, which is the catalog slug for a
   // Codex tier or the Claude alias for a Claude tier) is what makes the name
@@ -1468,27 +1495,32 @@ function createNativeAgent(spec?: any, opts?: any) {
   };
 }
 
+// Sweeps the write target AND the legacy SIDEQUEST_HOME directory, because a session
+// on a pre-SQ-316 release wrote its temporary definitions there and nothing else
+// retires them. An explicit opts.dir still pins exactly one directory (test seam).
 function cleanupNativeAgents(opts?: any) {
   opts = opts || {};
-  const dir = opts.dir || defaultAgentsDir();
+  const dirs = opts.dir ? [opts.dir] : agentDirsForCleanup();
   const name = opts.name ? String(opts.name) : null;
   const sessionId = opts.sessionId == null ? null : String(opts.sessionId);
   let removed = 0;
-  let files = [];
-  try { files = fs.readdirSync(dir).filter((f: string) => (f.startsWith(TEMP_PREFIX) || f.startsWith(TICKET_PREFIX)) && f.endsWith('.md')); } catch (_) { return { removed }; }
-  for (const fileName of files) {
-    if (name && fileName !== `${name}.md`) continue;
-    const file = path.join(dir, fileName);
-    let source = '';
-    try { source = fs.readFileSync(file, 'utf8'); } catch (_) { continue; }
-    if (!source.includes(TEMP_MARKER)) continue;
-    if (sessionId && !source.includes(`<!-- sidequest-native-session: ${sessionId} -->`)) continue;
-    if (opts.staleBefore != null) {
-      let stat;
-      try { stat = fs.statSync(file); } catch (_) { continue; }
-      if (stat.mtimeMs >= Number(opts.staleBefore)) continue;
+  for (const dir of dirs) {
+    let files = [];
+    try { files = fs.readdirSync(dir).filter((f: string) => (f.startsWith(TEMP_PREFIX) || f.startsWith(TICKET_PREFIX)) && f.endsWith('.md')); } catch (_) { continue; }
+    for (const fileName of files) {
+      if (name && fileName !== `${name}.md`) continue;
+      const file = path.join(dir, fileName);
+      let source = '';
+      try { source = fs.readFileSync(file, 'utf8'); } catch (_) { continue; }
+      if (!source.includes(TEMP_MARKER)) continue;
+      if (sessionId && !source.includes(`<!-- sidequest-native-session: ${sessionId} -->`)) continue;
+      if (opts.staleBefore != null) {
+        let stat;
+        try { stat = fs.statSync(file); } catch (_) { continue; }
+        if (stat.mtimeMs >= Number(opts.staleBefore)) continue;
+      }
+      try { fs.unlinkSync(file); removed++; } catch (_) { /* best effort */ }
     }
-    try { fs.unlinkSync(file); removed++; } catch (_) { /* best effort */ }
   }
   return { removed };
 }
@@ -1566,17 +1598,27 @@ function migrateExecAgents(_prefs?: any, opts?: SyncOptions & { keep?: Iterable<
 
 function syncExecAgentsIfChanged(_prefs?: any, opts?: SyncOptions & { project?: any }): FastSyncResult {
   // Resolve the wanted pins first so the migration below leaves them alone, then
-  // write them. Both halves share one directory, so ordering is the only thing
-  // keeping a live pin from being deleted and immediately rewritten.
+  // write them. Sweep and write share one directory whenever SIDEQUEST_HOME is
+  // unset, so ordering is the only thing keeping a live pin from being deleted and
+  // immediately rewritten.
   const pins = configuredDispatchPinSources(opts);
-  const result = migrateExecAgents(_prefs, Object.assign({}, opts, { keep: pins.keys() }));
-  const dir = opts?.dir || defaultAgentsDir();
+  const dir = opts?.dir || dispatchPinsDir();
+  const result = migrateExecAgents(_prefs, Object.assign({}, opts, { dir, keep: [...pins.keys()] }));
+  // The SIDEQUEST_HOME-rooted directory is swept WITHOUT the keep set, and only when
+  // it is a different directory. An identically named pin there is not the live one:
+  // it is the copy releases up to 5.8.0 wrote where Claude Code's agent loader never
+  // looks, and keeping it would strand it there forever (SQ-316).
+  const legacyDir = opts?.dir ? null : agentDirsForCleanup().find((candidate) => candidate !== dir) || null;
+  const legacy = legacyDir
+    ? migrateExecAgents(_prefs, Object.assign({}, opts, { dir: legacyDir }))
+    : { written: 0, removed: 0, unchanged: 0 };
   const pinWrite = writeGeneratedAgents(dir, pins);
   const pinSync = Object.assign({}, pinWrite, { removed: 0 });
   return Object.assign({}, result, {
     written: result.written + pinWrite.written,
-    unchanged: result.unchanged + pinWrite.unchanged,
-    skipped: result.removed === 0 && pinWrite.written === 0,
+    removed: result.removed + legacy.removed,
+    unchanged: result.unchanged + legacy.unchanged + pinWrite.unchanged,
+    skipped: result.removed === 0 && legacy.removed === 0 && pinWrite.written === 0,
     pins: pinSync,
     installHash: stableInstallHash(EXECUTOR_SKILLS, opts?.readOnlyDeniedTools),
   });
@@ -1694,4 +1736,5 @@ module.exports = {
   stableInstallHash,
   EXECUTOR_CONTRADICTION_RULE,
   defaultAgentsDir,
+  dispatchPinsDir,
 };

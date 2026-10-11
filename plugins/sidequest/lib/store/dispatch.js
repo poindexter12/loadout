@@ -1385,7 +1385,9 @@ function createDispatch(dependencies) {
       if (noDeclaredFileScope && opts.allowUnscoped !== true) {
         throw new Error(`prepare dispatch: ${t.ref} has no declared file scope for write work. Add files, or pass allowUnscoped:true to explicitly accept that the executor can block on its first write and end without a submission.`);
       }
-      const fallbackReason = !current?.recovery && resolvedPolicy?.fallbackReason || null;
+      const substituted = !current?.recovery && resolvedPolicy?.fallbackReason || null;
+      const substitutionCause = substituted && Array.isArray(resolvedPolicy?.warnings) ? resolvedPolicy.warnings.map((warning) => String(warning || "").trim()).filter(Boolean) : [];
+      const fallbackReason = substituted ? [substituted, ...substitutionCause].join(" ") : null;
       const recovery = current && current.recovery && activeDispatchRoute(t) ? current.recovery : null;
       const attempts = current && Array.isArray(current.attempts) ? current.attempts.slice() : [];
       const supersededTokens = current && Array.isArray(current.supersededTokens) ? current.supersededTokens.slice() : [];

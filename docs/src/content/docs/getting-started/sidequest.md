@@ -142,7 +142,7 @@ SessionStart runs the audit in report-only mode with a short background budget. 
 
 **Claude reports an older loaded Sidequest after an upgrade.** Reload plugins or start a new session to pick up the current connection and packaged executor roster. Unknown versions, schema changes, and incompatible older loaded versions refuse dispatch until reload.
 
-**Claude says an executor is missing.** Update Sidequest, reload plugins in the affected session, and ask Claude to dispatch again. Do not create replacement agents or disable the dispatch guard.
+**Claude says an executor is missing.** Update Sidequest, reload plugins in the affected session, and ask Claude to dispatch again. Do not create replacement agents or disable the dispatch guard. Executors for an external model are registered when that model is first routed, because which external models exist is only known once the gateway reports them, and a session that was already running has not loaded the new one yet. Claude is told when a dispatch registered one, so it can reload before it spawns. These definitions go in your Claude Code agent directory, the same place your own agents live; a separate Sidequest storage location, if you have set one, holds board state only and is never read for them.
 
 **A ticket will not dispatch.** Ask Claude to diagnose the ticket. Common causes are an incomplete work description, a blocked dependency, or an unavailable configured route. Claude reports the specific recovery instead of silently changing the work's route.
 
