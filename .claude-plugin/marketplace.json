@@ -4,7 +4,7 @@
     "name": "poindexter12"
   },
   "description": "Loadout: a kit of Claude Code plugins. Independently maintained fork of the Eigenwise Toolshed; original work by Eigenwise.",
-  "version": "4.9.0",
+  "version": "4.10.0",
   "plugins": [
     {
       "name": "observability",
@@ -79,7 +79,7 @@
       "name": "codebase-mapper",
       "source": "./plugins/codebase-mapper",
       "description": "A self-maintaining codebase map: atomic docs Claude loads at the start of each session and keeps in sync as the code changes. Any stack; greenfield or existing.",
-      "version": "2.16.1",
+      "version": "2.17.0",
       "author": {
         "name": "poindexter12"
       },
@@ -102,7 +102,7 @@
       "name": "quartermaster",
       "source": "./plugins/quartermaster",
       "description": "Set up a project from your existing Claude Code habits, keep Loadout installs healthy, and find missing capabilities after real work accumulates. Local scripts reduce session history to a bounded summary before the active model sees it; setup, resupply, updates, and config changes happen only with your approval.",
-      "version": "0.9.0",
+      "version": "0.10.0",
       "author": {
         "name": "poindexter12"
       },

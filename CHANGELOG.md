@@ -8,6 +8,43 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v4.10.0 (2026-10-10)
+
+### codebase-mapper 2.16.1 → 2.17.0
+
+#### Features
+
+- codebase-mapper hook: detect graph mode and point agents at graphify for structure (SQ-310) [`5f0c3ca`](https://github.com/poindexter12/loadout/commit/5f0c3ca9799a9dd66f2463b551f270b71074b7a2)
+  Hooks detect graphify-out/GRAPH_REPORT.md and, in graph mode only, send structural questions to graphify query/explain/path while the narrative docs stay the source for conventions, patterns and onboarding. Subagents are also forbidden to run graphify --update. A .map-state.json declaring structure: "graphify" covers narrative docs only, so the retired modules/entry-points/directory-structure docs no longer read as stale. Projects without a graph report are unaffected, byte for byte.
+- map-codebase: build a codebase map in graph mode, with graphify owning structure (SQ-311)
+  The map-codebase skill can now build a map in graph mode. It detects the `graphify` CLI and an existing `graphify-out/GRAPH_REPORT.md`, and when the CLI is there with no graph yet it offers the first build with the cost stated honestly: the AST pass over code is deterministic and free, while the semantic pass over docs, papers and images runs on the session's LLM, so a large `docs/` tree costs real tokens and a code-only repo costs nothing. It then offers `graphify hook install` for the deterministic post-commit rebuild, and names `graphify update .` as the manual fallback if that hook is declined. `graphify claude install` is forbidden by name, under the existing never-touch-CLAUDE.md rule.
+
+  In graph mode the skill stops writing `modules.md`, `entry-points.md` and `directory-structure.md`, traces key flows with `graphify query`, `path` and `explain` instead of walking the tree by hand, records `structure: "graphify"` in `.map-state.json`, and ignores `graphify-out/` except for the tracked `GRAPH_REPORT.md` and `graph.json`. `dependencies.md` is unaffected, since it comes from package manifests. The INDEX template gains a compact Structure section pointing at the graph and its three commands: structure questions go to the graph, convention questions go to the docs. Without the CLI nothing changes; graph mode is opt-in and the mapper works exactly as before.
+- update-codebase-map: graph-mode freshness split and one-time conversion of an existing map (SQ-312) [`b9b1769`](https://github.com/poindexter12/loadout/commit/b9b1769836b4b9fe131fcb3a1a84572395f834fc)
+  Refreshing a map in graph mode no longer asks the model to re-derive structure. Changed code files belong to graphify: the skill checks `graphify hook status`, confirms `graphify-out/GRAPH_REPORT.md` is no older than the last commit when the post-commit hook is installed, and otherwise runs `graphify update .` exactly once. The model then assesses narrative impact only, so a refactor that moves files without changing a convention, a pattern, an architectural boundary, an entry point's story or an onboarding step is a no-op. The three retired structural documents stay out of the rebuilt `documents` list and hash manifest, and subagents still never refresh the graph or the map.
+
+  A new "Converting an existing map to graph mode" section handles a map built before the graph existed: when a graph report is present but `.map-state.json` has no `structure`, the skill offers one announced conversion that rescues any narrative sentences worth keeping, removes `modules.md`, `entry-points.md` and `directory-structure.md`, rewrites the INDEX structure section to point at graphify, and rehashes with `structure: "graphify"`. Classic maps with no graph report behave exactly as before.
+
+#### Fixes
+
+- codebase-mapper: --structure graphify on write-map-state and the hook names the documented refresh form (SQ-317) [`cda9bc8`](https://github.com/poindexter12/loadout/commit/cda9bc8ed407a51a0f73996702bc0f5d4ccb66a4)
+  Recording a graph-mode map was two commands: the bundled state writer, then a `node -e` one-liner that put `structure: "graphify"` back, because the writer rebuilt the state object from scratch and dropped the field. `scripts/write-map-state.js` now accepts `--structure graphify`, so both map skills record the mode in the one command they already run. `graphify` is the only accepted value: a typo exits non-zero with the value quoted and leaves the manifest untouched, rather than writing a manifest no hook recognizes.
+
+  Without the flag the writer now preserves whatever `structure` the manifest on disk already declared, including a value a newer plugin wrote, so a plain refresh can no longer demote a graph-mode map back to classic and make a session report the retired structural documents as drift.
+
+  The SubagentStart context line forbade only `graphify ... --update`, the undocumented alias. It now names the documented `graphify update <root>` first and still forbids the alias, because both spellings work at graphify 0.8.38 and a subagent must run neither; the update-codebase-map subagent rule repeats that wording verbatim.
+
+### quartermaster 0.9.0 → 0.10.0
+
+#### Features
+
+- Own graphify as an opt-in install, upgrade, and surface probe (SQ-313)
+  graphify is codebase-mapper's optional structural layer, and the first non-node runtime any Loadout plugin leans on: a Python `uv tool`. Quartermaster now owns its whole lifecycle while keeping it strictly opt-in. `/quartermaster:setup` offers it only when the user takes codebase-mapper, checks for `uv` first and stops at a pointer to uv's installer when it is absent, and records the answer either way under the `plugin:graphify` fingerprint, so a "no" is not re-asked. `/quartermaster:update-loadout` upgrades it when `uv tool list` already names it and never installs it otherwise, surfacing the upgrade's output like the Model Gateway updater's; `--check` reports the installed version, `--dry-run` prints the command, and a failed upgrade is counted while the rest of the update finishes. `/quartermaster:loadout-doctor` adds read-only rows for the installed version, whether the project is in graph mode, and `graphify hook status`.
+
+  The row that earns its place is the CLI surface probe. graphify is upstream software on its own cadence, and the mapper calls it from inside subagents, where a renamed flag surfaces as an empty or confusing answer rather than an error. The probe asserts against `graphify --help` that the five surfaces the mapper invokes still exist and that the version clears the `0.8.38` floor, and the doctor exits non-zero when they do not, so a rename fails loudly in one place instead of silently inside a skill.
+
+  Two names are worth stating because the obvious guess is wrong both times. The PyPI distribution is `graphifyy`, with two y's, and it installs an executable called `graphify`; `graphify` is not a PyPI project at all, so installing that name fails. And the update surface `--help` documents is `update <path>`, while the `graphify <root> --update` form is an accepted but undocumented alias, so the probe takes either spelling rather than failing a healthy install. Detection matches either the `graphifyy` distribution or any uv tool providing the `graphify` executable, and the upgrade targets the distribution name uv actually recorded, so an upstream rename does not leave the updater chasing a package that no longer exists.
+
 ## v4.9.0 (2026-10-10)
 
 ### model-gateway 0.53.0 → 0.54.0
