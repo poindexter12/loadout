@@ -134,7 +134,7 @@ anything in `CLAUDE.md`.
 | Step 4 (key flows) | Trace flows with `graphify query` and `graphify path` rather than walking the tree by hand. |
 | Step 5 (dependencies) | **Unchanged.** `dependencies.md` comes from package manifests, not from the AST. |
 | Step 7 (write the docs) | Do not write `modules.md`. Every other warranted document is written as normal. |
-| Step 8 (record state) | Record `structure: "graphify"` and add the `graphify-out/` ignore rules. |
+| Step 8 (record state) | Run the state writer with `--structure graphify`, so it records `structure: "graphify"`, and add the `graphify-out/` ignore rules. |
 
 Everything else stays LLM-authored: `architecture.md`, `tech-landscape.md`, `patterns.md`,
 `coding-style.md`, `onboarding.md`, and the rest are judgement, not structure, and a graph cannot write
@@ -306,16 +306,18 @@ old hashes or a safely detectable stale manifest.
 
 **In graph mode**, the manifest also has to say so. The writer discovers documents from disk, so the
 three retired documents are already absent from `documents` and `hashes` — you never wrote them — but
-it knows nothing about graph mode, so add the field yourself immediately afterwards:
+graph mode is a declaration, so pass it on the same command instead:
 
 ```bash
-node -e "const f='.claude/.codebase-info/.map-state.json',fs=require('node:fs'),s=JSON.parse(fs.readFileSync(f,'utf8'));s.structure='graphify';fs.writeFileSync(f,JSON.stringify(s,null,2)+'\n')"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/write-map-state.js" --project . --structure graphify
 ```
 
 `structure: "graphify"` is what tells the hooks this manifest covers narrative documents only, so the
 absence of `modules.md`, `entry-points.md`, and `directory-structure.md` reads as the design rather than
-as drift. Narrative drift is still reported exactly as before. The writer rewrites the whole file, so
-re-add the field after **every** later run of it in a graph-mode project.
+as drift. Narrative drift is still reported exactly as before. The writer **preserves** the field on
+later runs without the flag, so a plain refresh cannot demote a graph-mode map, but pass
+`--structure graphify` whenever you build one. `graphify` is the only value it accepts: anything else
+fails loudly and writes nothing.
 
 Outside shared-tree artifact mode, commit the map unless the user explicitly says not to commit. A map
 that only exists in one working tree helps nobody else and goes stale silently, and the manifest is what
@@ -404,7 +406,7 @@ In graph mode, additionally:
 
 - [ ] `directory-structure.md`, `entry-points.md`, and `modules.md` not written
 - [ ] `INDEX.md` carries the **Structure** section pointing at the graph and its three commands
-- [ ] `.map-state.json` records `structure: "graphify"`
+- [ ] `.map-state.json` written with `--structure graphify`, so it records `structure: "graphify"`
 - [ ] `.gitignore` has `/graphify-out/*` with `!/graphify-out/GRAPH_REPORT.md` and
       `!/graphify-out/graph.json` negated before the graph outputs are committed
 

@@ -93,9 +93,9 @@ Run it once. Do not loop, and do not force a full rebuild. If the `graphify` CLI
 say so in one line and continue with the narrative half only : offering the install belongs to
 Quartermaster, not to this skill.
 
-**If you are a subagent, do neither.** NEVER run `graphify ... --update` or `graphify update`, and
-never update the map:
-the post-commit hook or the main session refreshes the graph, and the main session refreshes the map
+**If you are a subagent, do neither.** NEVER run `graphify update <root>` or its undocumented alias
+`graphify ... --update`, and never update the map: the post-commit hook or the main session refreshes
+the graph, and the main session refreshes the map
 once after all parallel work integrates. Querying is fine : `graphify query`, `graphify explain` and
 `graphify path` are read-only. Report staleness in your final report instead.
 
@@ -259,16 +259,19 @@ git repo), hashes the final bytes, and atomically replaces `.map-state.json` las
 interrupted write can leave hashes stale; that is safe because hooks hash live files and treat the
 manifest only as a consistency check.
 
-**In graph mode, keep the `structure` field.** The writer rebuilds the manifest from the documents on
-disk and does not carry `structure` over, so re-apply it immediately after:
+**In graph mode, declare it on the same command.** Pass `--structure graphify` and the writer records
+the field itself, in one step:
 
 ```bash
-node -e "const fs=require('node:fs'),f='.claude/.codebase-info/.map-state.json',s=JSON.parse(fs.readFileSync(f,'utf8'));s.structure='graphify';fs.writeFileSync(f,JSON.stringify(s,null,2)+'\n')"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/write-map-state.js" --project . --structure graphify
 ```
 
 Because the retired documents are not on disk, the rebuilt `documents` and `hashes` never mention them,
 and `structure: "graphify"` is what tells the hook that absence is deliberate. Without the field the
-hook reports the map stale on every session.
+hook reports the map stale on every session. The writer also **preserves** an existing `structure`, so
+a plain run without the flag cannot demote a graph-mode map back to classic; pass the flag anyway, so
+the mode is declared rather than inherited. `graphify` is the only value it accepts: anything else
+fails loudly and writes nothing.
 
 Then summarize for the user: which docs you updated, created, or removed, and why. Outside shared-tree
 artifact mode, commit the refreshed map unless the user explicitly says not to commit, and include
@@ -312,8 +315,12 @@ injects `INDEX.md` at the start of every session, so this is the line that stops
 hunting for a `modules.md` that no longer exists.
 
 **3. Rehash state with the field set.** Deleting the files is what drops them from `documents` and
-`hashes`; the field is what tells the hook the absence is deliberate. Run both commands from Step 5:
-`write-map-state.js`, then the one-liner that re-applies `structure: "graphify"`.
+`hashes`; the field is what tells the hook the absence is deliberate. Run the Step 5 command with the
+flag, which does both at once:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/write-map-state.js" --project . --structure graphify
+```
 
 **4. Commit the conversion as one commit** : the three deletions, the rewritten `INDEX.md`, and
 `.map-state.json` together, so no other checkout ever sees a half-converted map.
@@ -344,7 +351,7 @@ Then, if code also changed since the last map, run Steps 2 to 5 as normal : now 
 - [ ] `INDEX.md` reflects any added/removed docs
 - [ ] `Last Updated` dates current on every touched doc
 - [ ] `CLAUDE.md` left untouched
-- [ ] `.map-state.json` rewritten with today's date, current commit, and document list : plus
-      `structure: "graphify"` re-applied in graph mode
+- [ ] `.map-state.json` rewritten with today's date, current commit, and document list : in graph mode
+      written with `--structure graphify`, so it records `structure: "graphify"`
 - [ ] Map changes committed including `.map-state.json` (or the user told plainly they still need
       committing)

@@ -125,7 +125,9 @@ test('a subagent in graph mode keeps the never-update rule and is also forbidden
   assert.match(context, /NEVER update the codebase map/);
   assert.match(context, /main session refreshes the map once/);
   assert.match(context, /This project is in graph mode/);
-  assert.match(context, /NEVER run `graphify \.\.\. --update`/);
+  // SQ-317: the documented refresh is named first, and the undocumented alias SQ-313 found is still
+  // forbidden by name, because both spellings work at graphify 0.8.38 and a subagent must run neither.
+  assert.match(context, /NEVER run `graphify update <root>` or its undocumented alias `graphify \.\.\. --update`/);
   assert.match(context, /post-commit hook or the main session refreshes the graph/);
   assert.doesNotMatch(context, /Running \/codebase-mapper:update-codebase-map/);
   assert.match(context, /Codebase map: read <doc\(s\)>/);

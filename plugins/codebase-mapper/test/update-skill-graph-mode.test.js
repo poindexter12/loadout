@@ -51,8 +51,9 @@ test('graph mode hands structural freshness to graphify and refreshes at most on
   assert.match(updateSkill, /re-extracts only the files that changed/);
   assert.match(updateSkill, /Run it once\. Do not loop/);
   // SQ-313 probed graphify 0.8.38: `graphify <root> --update` works but is undocumented, so the
-  // skill must never teach it. The subagent prohibition keeps the `graphify ... --update` ellipsis
-  // form, which is lane A's hook wording and forbids rather than instructs.
+  // skill must never teach it as a refresh. The subagent prohibition (SQ-317) names the documented
+  // `graphify update <root>` first and then the `graphify ... --update` ellipsis form, which is lane
+  // A's hook wording and forbids rather than instructs.
   for (const alias of [/graphify \. --update/, /graphify <root> --update/, /graphify <path> --update/]) {
     assert.doesNotMatch(updateSkill, alias, `the undocumented alias ${alias} must not appear`);
   }
@@ -79,9 +80,12 @@ test('the retired structural documents leave the graph-mode doc set and the mani
 });
 
 test('the subagent rule repeats the hook wording verbatim and still bans map updates', () => {
-  const forbidden = /NEVER run `graphify \.\.\. --update`/;
+  // SQ-317: one string, in the hook and in the skill, naming the documented refresh first and the
+  // undocumented alias second. Both spellings work at 0.8.38, so both are forbidden.
+  const forbidden = /NEVER run `graphify update <root>` or its undocumented alias `graphify \.\.\. --update`/;
   assert.match(hookSource, forbidden, 'lane A hook text is the source of this wording');
-  assert.match(updateSkill, forbidden, 'the skill must forbid the same thing in the same words');
+  // The skill wraps its prose, so compare on normalized whitespace rather than byte-for-byte lines.
+  assert.match(updateSkill.replace(/\s+/g, ' '), forbidden, 'the skill must forbid the same thing in the same words');
   assert.match(updateSkill, /If you are a subagent/);
   assert.match(updateSkill, /the main session refreshes the map\s+once/);
 });
@@ -112,28 +116,48 @@ test('classic mode is unchanged when structure is unset and no graph report exis
   assert.match(updateSkill, /\*\*Never touch `CLAUDE\.md`\.\*\*/);
 });
 
-test('the bundled state writer drops structure, which is why the skill re-applies it', () => {
-  // Pins the premise of the skill's extra step. If write-map-state.js is ever taught to carry
-  // `structure` over, this fails and the skill's re-apply step should go with it.
+test('the bundled state writer sets and preserves structure, which is why the skill is one step', () => {
+  // SQ-317 replaces the old premise (the writer dropped `structure`, so the skill re-applied it with
+  // a node -e one-liner). The writer now takes `--structure graphify` and, without the flag, carries
+  // an existing field over, so Step 5 is a single command and no plain refresh can demote the map.
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codebase-mapper-update-skill-'));
   const mapDirectory = path.join(directory, '.claude', '.codebase-info');
+  const statePath = path.join(mapDirectory, '.map-state.json');
+  const readState = () => JSON.parse(fs.readFileSync(statePath, 'utf8'));
   fs.mkdirSync(mapDirectory, { recursive: true });
   fs.writeFileSync(path.join(mapDirectory, 'INDEX.md'), '# Example map\n');
   fs.writeFileSync(path.join(mapDirectory, 'architecture.md'), '# Architecture\n');
   fs.writeFileSync(
-    path.join(mapDirectory, '.map-state.json'),
+    statePath,
     JSON.stringify({ schemaVersion: 1, structure: graphMode.GRAPH_STRUCTURE, documents: ['architecture.md'], hashes: {} }, null, 2) + '\n',
   );
 
+  // A plain refresh of a graph-mode map keeps the declaration.
   childProcess.execFileSync(process.execPath, [stateWriterScript, '--project', directory], { encoding: 'utf8' });
-  const state = JSON.parse(fs.readFileSync(path.join(mapDirectory, '.map-state.json'), 'utf8'));
-  assert.ok(!Object.prototype.hasOwnProperty.call(state, 'structure'));
-  assert.deepStrictEqual(state.documents, ['architecture.md']);
+  const preserved = readState();
+  assert.strictEqual(preserved.structure, graphMode.GRAPH_STRUCTURE);
+  assert.strictEqual(graphMode.stateDeclaresGraphStructure(preserved), true);
+  assert.deepStrictEqual(preserved.documents, ['architecture.md']);
   for (const document of graphMode.RETIRED_DOCUMENTS) {
-    assert.ok(!Object.prototype.hasOwnProperty.call(state.hashes, document));
+    assert.ok(!Object.prototype.hasOwnProperty.call(preserved.hashes, document));
   }
 
-  assert.match(updateSkill, /does not carry `structure` over, so re-apply it immediately after/);
-  assert.match(updateSkill, /s\.structure='graphify'/);
+  // Step 5's graph-mode command declares the mode outright, on a map that never carried it.
+  fs.rmSync(statePath, { force: true });
+  const output = childProcess.execFileSync(
+    process.execPath,
+    [stateWriterScript, '--project', directory, '--structure', graphMode.GRAPH_STRUCTURE],
+    { encoding: 'utf8' },
+  );
+  assert.match(output, new RegExp(`Structure: ${graphMode.GRAPH_STRUCTURE}\\.`));
+  assert.strictEqual(graphMode.stateDeclaresGraphStructure(readState()), true);
+
+  // The skill teaches the single command, and no longer teaches the retired one-liner.
+  assert.match(updateSkill, /--project \. --structure graphify/);
+  assert.match(updateSkill, /Pass `--structure graphify` and the writer records\s+the field itself, in one step/);
+  assert.match(updateSkill, /preserves\*\* an existing `structure`/);
+  // The retired re-apply one-liner must be gone; the surviving `node -e` is the hash verifier.
+  assert.doesNotMatch(updateSkill, /s\.structure=/);
+  assert.doesNotMatch(updateSkill, /re-apply it immediately after/);
   fs.rmSync(directory, { recursive: true, force: true });
 });
