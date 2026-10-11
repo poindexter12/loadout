@@ -42,3 +42,12 @@ yarn-error.log*
 
 # live-rules: personal rules, not shared
 .claude/rules/*.local.md
+
+# graphify knowledge graph (codebase-mapper graph mode). The graph summary and
+# the graph itself travel with the repo, because `graphify query|explain|path`
+# read them and a clone must be able to answer structure questions without
+# rebuilding. Everything else graphify writes — graph.html, the extraction
+# cache, the manifest, memory/ — is local build output.
+/graphify-out/*
+!/graphify-out/GRAPH_REPORT.md
+!/graphify-out/graph.json
