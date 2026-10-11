@@ -11,6 +11,10 @@ sections that don't apply, add project-specific ones that do. Use the real curre
 This is the most important file: the plugin's hook injects it into context at the start of each session, so keep it
 **compact**. Summarize in a few lines and link out to the detailed docs (which are read on demand).
 
+The **Structure** section below is graph mode only: include it when `graphify-out/GRAPH_REPORT.md` exists,
+and then drop the three *classic mode only* rows from the document table, because those documents are not
+written in graph mode. In classic mode, omit the Structure section entirely and keep those rows.
+
 ~~~markdown
 # Codebase Map — [Project Name]
 
@@ -27,9 +31,9 @@ This is the most important file: the plugin's hook injects it into context at th
 |----------|---------------|
 | [architecture.md](./architecture.md) | System overview, components, boundaries, data flow |
 | [tech-landscape.md](./tech-landscape.md) | Languages, frameworks, infra, source-of-truth files |
-| [directory-structure.md](./directory-structure.md) | Annotated folder tree |
-| [entry-points.md](./entry-points.md) | Where execution starts |
-| [modules.md](./modules.md) | Key modules: purpose, deps, exports |
+| [directory-structure.md](./directory-structure.md) | Annotated folder tree (classic mode only) |
+| [entry-points.md](./entry-points.md) | Where execution starts (classic mode only) |
+| [modules.md](./modules.md) | Key modules: purpose, deps, exports (classic mode only) |
 | [communication.md](./communication.md) | APIs, events, integrations |
 | [database.md](./database.md) | Schema and relationships |
 | [dependencies.md](./dependencies.md) | Categorized packages |
@@ -39,6 +43,19 @@ This is the most important file: the plugin's hook injects it into context at th
 | [onboarding.md](./onboarding.md) | Quick start and common tasks |
 
 *(List only the documents that were actually created.)*
+
+## Structure
+
+Structure lives in the graph, not in these docs: `graphify-out/GRAPH_REPORT.md` (the summary) and
+`graphify-out/graph.json` (the graph itself).
+
+| Ask | Command |
+|-----|---------|
+| Where does X happen? | `graphify query "<question>"` |
+| What is X, and what touches it? | `graphify explain "<node>"` |
+| How does X reach Y? | `graphify path "<from>" "<to>"` |
+
+**Structure questions go to the graph, convention questions go to these docs.**
 
 ## How to use this map
 
@@ -111,6 +128,8 @@ points, APIs/events, or conventions, refresh the affected docs with the `update-
 
 ## directory-structure.md
 
+**Classic mode only.** In graph mode graphify owns this; do not write it.
+
 ~~~markdown
 # Directory Structure
 
@@ -134,6 +153,8 @@ project/
 
 ## entry-points.md
 
+**Classic mode only.** In graph mode, use `graphify query "where does execution start"` instead.
+
 ~~~markdown
 # Entry Points
 
@@ -152,6 +173,8 @@ project/
 ---
 
 ## modules.md
+
+**Classic mode only.** In graph mode, use `graphify explain "<module>"` instead.
 
 ~~~markdown
 # Key Modules
