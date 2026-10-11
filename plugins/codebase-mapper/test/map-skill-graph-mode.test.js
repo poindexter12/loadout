@@ -89,7 +89,11 @@ test('Step 4 traces flows through the graph instead of walking the tree by hand'
 
 test('Step 8 records the graph structure marker and the graphify-out commit policy', () => {
   assert.match(skill, new RegExp(`structure: "${literal(graphMode.GRAPH_STRUCTURE)}"`));
-  assert.match(skill, /re-add the field after \*\*every\*\* later run of it/);
+  // SQ-317: the writer takes the declaration and preserves it, so Step 8 is one command and there is
+  // no re-apply step to forget after a later refresh.
+  assert.match(skill, /\*\*preserves\*\* the field on\s+later runs without the flag/);
+  // The retired re-apply one-liner must be gone; the surviving `node -e` is the hash verifier.
+  assert.doesNotMatch(skill, /s\.structure=/);
 
   // US-7 decision 5 (baude precedent): report and graph tracked, everything else local.
   assert.match(skill, /^\/graphify-out\/\*$/m);
@@ -100,9 +104,11 @@ test('Step 8 records the graph structure marker and the graphify-out commit poli
   assert.match(skill, /!\.claude\/\.codebase-info\/\*\*/);
 });
 
-test("the Step 8 one-liner yields a manifest lane A reads as graphify-owned structure", () => {
-  const command = /^node -e "const f='\.claude\/\.codebase-info\/\.map-state\.json'.*$/m.exec(skill);
-  assert.ok(command, 'Step 8 must give an exact command for recording the structure field');
+test("the Step 8 graph-mode command yields a manifest lane A reads as graphify-owned structure", () => {
+  // SQ-317: Step 8 in graph mode is ONE command, the bundled writer plus `--structure graphify`.
+  // Extracted literally out of SKILL.md and executed, so the skill cannot drift from the writer.
+  const command = /^node "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/write-map-state\.js" --project \. --structure graphify$/m.exec(skill);
+  assert.ok(command, 'Step 8 must give an exact command that records the structure field');
 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codebase-mapper-map-skill-'));
   const mapDirectory = path.join(directory, '.claude', '.codebase-info');
@@ -110,13 +116,13 @@ test("the Step 8 one-liner yields a manifest lane A reads as graphify-owned stru
   // A map built in graph mode: narrative documents only, none of the retired three.
   fs.writeFileSync(path.join(mapDirectory, 'INDEX.md'), '# Codebase Map\n\n## Structure\n');
   fs.writeFileSync(path.join(mapDirectory, 'architecture.md'), '# Architecture\n\nOne.\n');
-  childProcess.execFileSync(process.execPath, [path.join(root, 'scripts', 'write-map-state.js'), '--project', directory], { encoding: 'utf8' });
 
   const readState = () => JSON.parse(fs.readFileSync(path.join(mapDirectory, documents.STATE_NAME), 'utf8'));
-  // The bundled writer knows nothing about graph mode: the field is the one-liner's work.
-  assert.strictEqual(graphMode.stateDeclaresGraphStructure(readState()), false);
-
-  childProcess.execSync(command[0], { cwd: directory, encoding: 'utf8' });
+  childProcess.execSync(command[0], {
+    cwd: directory,
+    encoding: 'utf8',
+    env: { ...process.env, CLAUDE_PLUGIN_ROOT: root },
+  });
 
   const state = readState();
   assert.strictEqual(state.structure, graphMode.GRAPH_STRUCTURE);
@@ -173,7 +179,9 @@ test('the Sidequest writer ticket carries the graph-mode rules', () => {
 test('graph mode additions reach the success criteria', () => {
   const criteria = skill.slice(skill.indexOf('## Success criteria'));
   assert.match(criteria, /In graph mode, additionally:/);
-  assert.match(criteria, new RegExp(`\`\\.map-state\\.json\` records \`structure: "${literal(graphMode.GRAPH_STRUCTURE)}"\``));
+  // SQ-317: the criterion is now the flag that produces the field, so both are named.
+  assert.match(criteria, new RegExp(`\`\\.map-state\\.json\` written with \`--structure ${literal(graphMode.GRAPH_STRUCTURE)}\``));
+  assert.match(criteria, new RegExp(`records \`structure: "${literal(graphMode.GRAPH_STRUCTURE)}"\``));
   assert.match(criteria, /`CLAUDE\.md` left untouched, and `graphify claude install` never run/);
   assert.match(criteria, /carries the \*\*Structure\*\* section/);
   for (const name of graphMode.RETIRED_DOCUMENTS) {

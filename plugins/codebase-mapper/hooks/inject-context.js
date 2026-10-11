@@ -41,7 +41,10 @@ function projectDir(data) {
 // refresh it: the post-commit hook or the main session owns that, same reason as the map itself.
 function graphParagraph(forSubagent) {
   return 'This project is in graph mode: the structure of the code (modules, entry points, the file tree, who calls whom) lives in graphify-out/, not in the map documents. Answer structural questions by running `graphify query "<question>"`, `graphify explain "<node>"` or `graphify path "<from>" "<to>"` rather than by reading map documents. The narrative documents in .claude/.codebase-info/ remain the source for conventions, patterns and onboarding.' +
-    (forSubagent ? ' NEVER run `graphify ... --update`: the post-commit hook or the main session refreshes the graph.' : '') +
+    // SQ-313 probed graphify 0.8.38: `graphify update <root>` is the documented refresh and
+    // `graphify <root> --update` is an undocumented alias that still works, so name the documented
+    // form first and forbid both spellings. A subagent must run neither.
+    (forSubagent ? ' NEVER run `graphify update <root>` or its undocumented alias `graphify ... --update`: the post-commit hook or the main session refreshes the graph.' : '') +
     '\n\n';
 }
 

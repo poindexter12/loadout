@@ -21,8 +21,17 @@ function fixtureProject() {
   return { projectDir, mapDir };
 }
 
-function writeState(projectDir) {
-  return childProcess.execFileSync(process.execPath, [writeMapState, '--project', projectDir], { encoding: 'utf8' });
+function writeState(projectDir, ...extraArgs) {
+  return childProcess.execFileSync(process.execPath, [writeMapState, '--project', projectDir, ...extraArgs], { encoding: 'utf8' });
+}
+
+function writeStateFailure(projectDir, ...extraArgs) {
+  const result = childProcess.spawnSync(process.execPath, [writeMapState, '--project', projectDir, ...extraArgs], { encoding: 'utf8' });
+  return { status: result.status, stderr: result.stderr, stdout: result.stdout };
+}
+
+function readState(mapDir) {
+  return JSON.parse(fs.readFileSync(path.join(mapDir, '.map-state.json'), 'utf8'));
 }
 
 function documentHash(mapDir, name) {
@@ -51,6 +60,60 @@ test('write-map-state discovers added and removed documents before atomically re
   assert.ok(!Object.hasOwn(secondState.hashes, 'obsolete.md'));
   assert.strictEqual(secondState.schemaVersion, 1);
   assert.strictEqual(secondState.tool, 'codebase-mapper');
+});
+
+// SQ-317: graph mode used to be a two-step (writer, then a node -e re-apply of `structure`) because
+// the writer rebuilt the state object and dropped the field. `--structure graphify` makes it one
+// step, and a plain run now carries an existing declaration over instead of silently demoting a
+// graph-mode map to classic.
+test('--structure graphify records the field, and a later plain run preserves it', () => {
+  const { projectDir, mapDir } = fixtureProject();
+
+  assert.match(writeState(projectDir, '--structure', 'graphify'), /Structure: graphify\./);
+  const declared = assertStateMatchesDocuments(mapDir);
+  assert.strictEqual(declared.structure, 'graphify');
+
+  // The refresh a later session runs has no flag, and must not demote the map.
+  writeState(projectDir);
+  assert.strictEqual(readState(mapDir).structure, 'graphify');
+
+  // An unknown value a newer plugin wrote survives an older writer too.
+  fs.writeFileSync(
+    path.join(mapDir, '.map-state.json'),
+    JSON.stringify({ ...readState(mapDir), structure: 'future-owner' }, null, 2) + '\n',
+  );
+  writeState(projectDir);
+  assert.strictEqual(readState(mapDir).structure, 'future-owner');
+});
+
+test('a classic map stays structure-free, and a corrupt manifest is not a blocker', () => {
+  const { projectDir, mapDir } = fixtureProject();
+
+  assert.doesNotMatch(writeState(projectDir), /Structure:/);
+  assert.ok(!Object.hasOwn(readState(mapDir), 'structure'));
+
+  // A non-string, non-object or unreadable prior field is ignored rather than copied through.
+  for (const prior of ['not json at all', JSON.stringify({ structure: 7 }), JSON.stringify(['graphify'])]) {
+    fs.writeFileSync(path.join(mapDir, '.map-state.json'), prior);
+    writeState(projectDir);
+    assert.ok(!Object.hasOwn(readState(mapDir), 'structure'), `prior manifest ${prior} must not set structure`);
+  }
+});
+
+test('--structure refuses any other value loudly and leaves the manifest untouched', () => {
+  const { projectDir, mapDir } = fixtureProject();
+  writeState(projectDir, '--structure', 'graphify');
+  const before = fs.readFileSync(path.join(mapDir, '.map-state.json'), 'utf8');
+
+  const typo = writeStateFailure(projectDir, '--structure', 'graphyfy');
+  assert.strictEqual(typo.status, 1);
+  assert.match(typo.stderr, /--structure accepts only "graphify", got "graphyfy"\./);
+
+  const missing = writeStateFailure(projectDir, '--structure');
+  assert.strictEqual(missing.status, 1);
+  assert.match(missing.stderr, /--structure needs a value \(only "graphify" is valid\)\./);
+
+  assert.strictEqual(fs.readFileSync(path.join(mapDir, '.map-state.json'), 'utf8'), before);
 });
 
 test('write-map-state records the current commit in a git project', () => {
