@@ -8,6 +8,46 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v4.9.0 (2026-10-10)
+
+### model-gateway 0.53.0 → 0.54.0
+
+#### Features
+
+- Leave a project pointed at another gateway alone instead of overwriting its ANTHROPIC_BASE_URL (SQ-307)
+  `setup` decided whether a project was already wired by asking whether its `ANTHROPIC_BASE_URL` was one of model-gateway's own URLs. A project pointing at a different local gateway, a relay, or a corporate proxy answered no, so setup read it as simply unwired and wrote its own URL, the static env block, and the alias pins straight over the top of `.claude/settings.local.json`. That broke the project and destroyed the only record of a choice the user had made deliberately, with no notice and nothing to undo it from.
+
+  Such a value is now left where it is. `setup`, `ensure`, and the automatic wiring paths all refuse through one guard inside `writeEnv`, so none of them can reach the write, and the refusal happens before the legacy settings migration that would otherwise shuffle gateway keys around inside a file meant to stay untouched. The notice names the file, the URL found in it, and `env --write-project` as the command that does replace it. `env --write-project` and `env --write-user` still overwrite on demand: they are the one path the user asks for by name, and the notice points at them.
+
+  A URL only counts as foreign when it is neither one of model-gateway's own nor an Anthropic endpoint, since Anthropic's host is what Claude Code uses with no setting at all and both are model-gateway's to replace. A value that will not parse as a URL is treated as foreign too, because guessing at a typo is how one becomes a silent overwrite. The check follows Claude Code's own settings precedence and answers only for the definition that actually wins, so a foreign value already shadowed by gateway wiring does not block anything. Removal is unaffected, as it only ever deletes keys this plugin owns.
+
+  Two pieces of advice that used to recommend the overwrite now say what it would cost first: the `pin` command explains that saved pins stay inactive while the project points elsewhere, and the SessionStart notice names the other endpoint rather than simply urging a rewire.
+
+#### Fixes
+
+- Reap the real gateway processes that gateway-process-isolation tests spawn, including when the harness is killed (SQ-266)
+  `gateway-process-isolation.test.js` spawned real supervisors and proxies into temp fixture homes and left them running: observed orphans held listening ports for up to eight days, three of them from fixture directories already deleted. The leaked children also inherited the test process's pipes, so the file never exited on its own and was killed by the runner's watchdog, which is why no teardown ran. Teardown now reaps by recorded pid, by any process whose command still names the fixture root, and by walking the test process's own descendants, and a detached reaper finishes the sweep if the harness is killed. Tests only; no shipped behavior changes.
+
+### sidequest 5.7.0 → 5.8.0
+
+#### Features
+
+- Dispatch external routes by their published model id instead of the virtual dispatch pin (SQ-300)
+  Codex dispatch no longer goes through the virtual `claude-codex-auto` pin and the `[sidequest-route model=... effort=...]` marker. A Codex route now gets its own executor definition, named for the route it carries (`sidequest-exec-codex-gpt-5-6-terra-1m-high`, and a `-readonly-` twin for a readonly category), whose frontmatter pins the published model id in `model:` and the route effort in `effort:`. The name keeps the published id's context window rather than folding it away, so a gateway publishing both `claude-gpt-5.6-terra` and `claude-gpt-5.6-terra[1m]` gets two definitions instead of two routes quietly sharing one. Claude Code sends that `effort:` as `output_config.effort`, which SQ-299 taught the gateway to honour on a published id, so both halves of the route are set before the spawn prompt is written and the prompt carries no marker at all. The orchestrator's instructions are unchanged where they matter: still pass `spawn.subagent_type` and `spawn.prompt` through exactly as dispatch returned them, and still omit the Agent `model` parameter so the pin applies. Passing an alias there was always wrong and is now the only way to lose the model.
+
+  The reason this is a definition and not a spawn parameter is that the Agent tool's `model` is an alias enum (`sonnet|opus|haiku|fable`) that rejects `claude-gpt-5.6-terra[1m]` as an input validation error before any relay sees it. A resolved id can only reach the wire through frontmatter. Because external models are discovered at runtime while the bundled executor ladder is fixed at build time, these definitions are written at runtime into the user scope, so unlike the Claude ladder the Codex set is not fixed: routing a category to a model and effort that has no pin yet writes the pair and retires whatever pair it superseded. The hook gates follow the same rule rather than a build-time list, and `sidequest-exec-` remains reserved, so a pinned name cannot be forged or hand-written to smuggle a model past the board.
+
+  The marker carriage is kept for a model-gateway older than 0.53.0, which resolves only the marker and would otherwise run every dispatch on the gateway's own default. `SIDEQUEST_DISPATCH_EFFORT_CARRIER=marker` restores the previous behaviour exactly: the effort-collapsed `sidequest-exec-dispatch` definitions, the virtual pin, and the one marker on the prompt. `route_recipe` reports which carriage is live as `effortCarrier`, which is the field to read before wiring a spawn by hand. Under the default carriage the spawn gate now denies a marker outright instead of letting it through, because the gateway gives a marker precedence over `output_config.effort` and a stray one would silently override the pinned effort.
+- Make the foreign release fragment refusal name the relation its exception needs, and stop counting a rejected candidate as a duplicate submission (SQ-304)
+  The refusal for a foreign release fragment promised "except a deleted fragment from a related review-rejected candidate" at every gate, while only the commit gate implemented it and nothing said which relation turned it on. It now classifies each refused fragment: a fragment already owned by a `related` review-rejected ticket is named as implicitly deletable at commit without any scope grant, a rejected candidate that is not yet linked prints the exact `link <repair> related <source>` a control-plane identity must run, and any other fragment is named as another ticket's. `submit` also no longer counts a review-rejected candidate as a duplicate source, so a repair branched from the rejected commit carries its range forward without an undocumented squash, and `publishing.md` now states the branch, union-scope, and `related`-link requirements for filing one.
+- Require an explicit author on an authority board comment and report at post time whether a capture waiver can bind (SQ-306)
+  A `comment` posted without `by` was attributed to the ticket's claim holder, so an orchestrator's
+  capture waiver was recorded as the executor's own and silently discarded at submit. An authority
+  marker such as `[sidequest:capture-waiver]` now requires an explicit author and is refused without
+  one, writing nothing, and a waiver's ack says whether its author is eligible, its capture is known,
+  and its candidate is still the live pinned one. An ordinary comment keeps the claim-holder fallback,
+  which is what lets an executor's `[sidequest:verify-complete]` marker be captured without `by`.
+
 ## v4.8.0 (2026-10-09)
 
 ### model-gateway 0.52.4 → 0.53.0
