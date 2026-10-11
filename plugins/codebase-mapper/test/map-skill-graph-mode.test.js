@@ -49,6 +49,14 @@ test('the first build is offered rather than assumed, with both halves of its co
   assert.match(skill, /`graphify hook install`/);
   assert.match(skill, /post-commit\/post-checkout rebuild that is\s*deterministic and uses \*\*no LLM\*\*/);
   assert.match(skill, /`graphify hook status`/);
+
+  // SQ-313 probed the live CLI: `graphify update <root>` is the documented refresh, and
+  // `graphify <root> --update` is an undocumented alias that must never reach skill text.
+  assert.match(skill, /the documented refresh, `graphify update \.`/);
+  assert.doesNotMatch(skill, /--update/);
+  // Likewise the uv distribution is `graphifyy` while the executable is `graphify`, so this skill
+  // names no install command at all and leaves the install to quartermaster.
+  assert.doesNotMatch(skill, /uv tool install/);
 });
 
 test('`graphify claude install` is forbidden by name, under the never-touch-CLAUDE.md rule', () => {

@@ -116,6 +116,10 @@ has one, otherwise `graphify extract .` headless against its own backend. Then o
 deterministic and uses **no LLM**, which is what keeps structure fresh afterwards. `graphify hook status`
 reports whether it is already installed, and is safe to run read-only.
 
+If the hook is declined, say what that costs: nothing refreshes the graph, so structure drifts until
+someone runs the documented refresh, `graphify update .`, by hand. That re-extracts code only and needs
+no LLM either.
+
 **Never run `graphify claude install`.** It writes a graphify section into `CLAUDE.md` plus its own
 PreToolUse hook. This skill's "never touch `CLAUDE.md`" rule covers that command explicitly: this
 plugin's SessionStart hook is already the loading mechanism, and nothing here may add, edit, or remove
