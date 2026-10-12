@@ -8,6 +8,17 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v4.12.0 (2026-10-11)
+
+### sidequest 5.8.1 → 5.8.2
+
+#### Fixes
+
+- sidequest: hold seeded Gateway routes through a readiness dip instead of rewriting them to Claude (SQ-321)
+  The routing-profile seed refresh recomputed its gateway routes from live provider readiness on every store open whose catalog fingerprint had moved, and that fingerprint moves on every catalog write and every five-minute freshness flip. Any readiness dip therefore rewrote the shared seed profile's Codex routes to the categories' default Claude routes, and a dispatch landing in that window resolved its configured route as Sonnet: no fallback had been taken, so there was no `fallbackReason`, no warning, and the refusal that stops a Claude fallback for a Codex route never ran. Readiness returning rewrote the rows back and superseded prepared dispatches, which is why a dispatch could be refused for having been planned three times against rows that kept being rewritten, and why the machine-wide `coding` profile had accumulated over three thousand revisions.
+
+  The gateway half of the seed is now one-directional: the refresh treats the gateway slugs its own stored rows already pin as installed, so a route is still adopted the first time the gateway publishes a model but is never dropped because readiness is momentarily unreadable. Readiness decides at dispatch instead, where it already refuses in words and names the gateway command to run. A category whose seed route needs a model the gateway has never published still carries its default Claude route, because that is the genuine default rather than a substitution.
+
 ## v4.11.0 (2026-10-11)
 
 ### sidequest 5.8.0 → 5.8.1
