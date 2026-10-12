@@ -194,7 +194,7 @@ const genuineControl = (assertion: string) => `[sidequest:negative-control] targ
 test('SQ-323: a changed bash test file does not turn quoted fixture data in a function body into required test names', () => {
   resetFixtureTree();
   // Mirrors iarx-com/github-terraform tests/verify.sh check_repo_survey_fail_closed:
-  // jq's test("<regex>") and quoted repo names are DATA inside a bash function,
+  // the jq regex filter and quoted repo names are DATA inside a bash function,
   // never test definitions. Written through fixtureTestDefinition so this
   // authoring line is not itself mistaken for a JS test(...) definition.
   const baseSuite = [
