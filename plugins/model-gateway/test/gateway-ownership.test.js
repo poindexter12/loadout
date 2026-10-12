@@ -218,6 +218,82 @@ test('live ephemeral listener PID discovery succeeds within the normal probe bud
   assert.equal(pid, process.pid);
 });
 
+const darwinNetstatTable = [
+  'Active Internet connections (including servers)',
+  'Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)          rxbytes      txbytes  rhiwat  shiwat          process:pid    state  options',
+  'tcp4       0      0  127.0.0.1.12345        *.*                    LISTEN               0            0  131072  131072      Google Chrome:7    00100 00000006',
+  'tcp4       0      0  127.0.0.1.1234         *.*                    LISTEN               0            0  131072  131072      node:42    00100 00000006',
+  'tcp4       0      0  127.0.0.1.1234         127.0.0.1.50000        ESTABLISHED       1024         2048  131072  131072      node:42    00102 00000008',
+  '',
+].join('\n');
+
+// SQ-161: on a loaded Mac a single lsof port query takes longer than the 2s
+// probe budget, so a live, plainly inspectable listener was reported as an
+// unconfirmed owner. darwin now asks netstat first, which answers in tens of
+// milliseconds, and lsof is only the fallback.
+test('darwin discovery confirms the owner through netstat without waiting on a slow lsof', async () => {
+  const darwin = isolatedSupervision({ platform: 'darwin' });
+  const calls = [];
+  const commandResult = async (command, args) => {
+    calls.push([command, ...args]);
+    if (command === 'netstat') return { status: 0, stdout: darwinNetstatTable, stderr: '' };
+    assert.fail(`lsof must not run when netstat already names the owner (${command} ${args.join(' ')})`);
+  };
+  const started = Date.now();
+  assert.equal(await darwin.processOwningPortAsync(1234, { commandResult, timeout: 2000 }), 42);
+  assert.ok(Date.now() - started < 1000, 'netstat path must not consume the probe budget');
+  assert.deepEqual(calls, [['netstat', '-anv', '-p', 'tcp']]);
+});
+
+test('darwin discovery matches the exact port and tolerates process names with spaces', async () => {
+  const darwin = isolatedSupervision({ platform: 'darwin' });
+  const commandResult = async (command) => command === 'netstat'
+    ? { status: 0, stdout: darwinNetstatTable, stderr: '' }
+    : { status: 1, stdout: '', stderr: '' };
+  assert.equal(await darwin.processOwningPortAsync(12345, { commandResult, timeout: 2000 }), 7);
+  assert.equal(await darwin.processOwningPortAsync(234, { commandResult, timeout: 2000 }), null);
+});
+
+test('darwin discovery falls back to lsof with the remaining budget when netstat has no row', async () => {
+  const darwin = isolatedSupervision({ platform: 'darwin' });
+  let clock = 1_000_000;
+  const now = () => clock;
+  const calls = [];
+  const commandResult = async (command, args, options) => {
+    calls.push({ command, timeout: options.timeout });
+    if (command === 'netstat') { clock += 300; return { status: 0, stdout: darwinNetstatTable, stderr: '' }; }
+    assert.equal(command, 'lsof');
+    return { status: 0, stdout: '99\n', stderr: '' };
+  };
+  assert.equal(await darwin.processOwningPortAsync(4321, { commandResult, timeout: 2000, now }), 99);
+  assert.deepEqual(calls.map((call) => call.command), ['netstat', 'lsof']);
+  assert.equal(calls[1].timeout, 1700, 'lsof gets what is left of the budget, not a fresh one');
+});
+
+test('darwin discovery still fails closed when netstat and lsof both overrun the budget', async () => {
+  const darwin = isolatedSupervision({ platform: 'darwin' });
+  let clock = 0;
+  const now = () => clock;
+  const commandResult = async (_command, _args, options) => { clock += options.timeout; return { timedOut: true }; };
+  assert.equal(await darwin.processOwningPortAsync(1234, { commandResult, timeout: 2000, now }), undefined);
+});
+
+test('darwin synchronous discovery prefers netstat and never spawns lsof when it names the owner', () => {
+  const spawned = [];
+  const darwin = isolatedSupervision({ platform: 'darwin', dependencies: {
+    'node:child_process': {
+      spawn: () => assert.fail('no async spawn expected'),
+      spawnSync: (command, args) => {
+        spawned.push(command);
+        if (command === 'netstat') return { status: 0, stdout: darwinNetstatTable, stderr: '' };
+        assert.fail(`unexpected ${command} ${args.join(' ')}`);
+      },
+    },
+  } });
+  assert.equal(darwin.processOwningPort(1234), 42);
+  assert.deepEqual(spawned, ['netstat']);
+});
+
 test('Windows discovery retains netstat/PowerShell output without detached children', async () => {
   const windows = isolatedSupervision({ platform: 'win32' });
   const commandResult = (command, args, options) => windows.commandResultAsync(command, args, {
