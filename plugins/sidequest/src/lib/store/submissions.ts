@@ -2584,6 +2584,28 @@ function sharedTreeDescendantPaths(slug: any, ticket: any, range: any, admittedS
   }
 }
 
+// `commandVerificationResult` reports a mismatch without naming the command it wanted, which
+// leaves an executor guessing at the one string it has to reproduce. Name it, JSON-quoted so
+// whitespace and nested quotes stay visible.
+//
+// The empty branch is a guard, not a reachable state: `commandVerificationResult` runs only
+// behind `if (requirement.command)` and takes `expectedEvidence` from that same value, so a
+// mismatch always carries a command today. It is kept because the requirement is untyped here,
+// and an empty expected command is precisely the case an executor could never act on.
+function withExpectedCommandDetail(verification: any) {
+  if (verification?.diagnostic?.code !== 'executor_verify_mismatch') return verification;
+  const expected = String(verification.expectedEvidence ?? '');
+  const detail = expected
+    ? ` Expected command: ${JSON.stringify(expected)}.`
+    : ` Expected command: "" -- the pinned requirement carries no command, so no captured evidence can match it.`
+      + ` Re-pin this ticket's verify with update({ref, verify}) before resubmitting.`;
+  return Object.assign({}, verification, {
+    diagnostic: Object.assign({}, verification.diagnostic, {
+      message: `${verification.diagnostic.message}${detail}`,
+    }),
+  });
+}
+
 function submissionVerificationResult(ticket: any, sourceRevision: any, verify: any, candidateCommit?: any, by?: any) {
   const requirement = pinnedVerificationRequirement(ticket);
   const evidence = String(verify || '').trim();
@@ -2649,7 +2671,7 @@ function submissionAdmissionDecision(slug: any, ticket: any, by: string, opts: a
     ? opts.admissionFacts
     : null;
   const sourceRevisionResolution = sourceRevisionFacts?.baseline || null;
-  const verification = submissionVerificationResult(ticket, sourceRevision, verify, opts.commit, by);
+  const verification = withExpectedCommandDetail(submissionVerificationResult(ticket, sourceRevision, verify, opts.commit, by));
   const completion = sourceRevision
     ? { ok: true }
     : completionTreeCheck(slug, ticket, { explicitNoOp: range?.noOp === true });

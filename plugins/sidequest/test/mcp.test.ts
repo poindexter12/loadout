@@ -2899,6 +2899,47 @@ test('MCP add reports every verify-command defect together', async () => {
   assert.match(refused.failures[1].message, /must start with a runnable command/);
 });
 
+test('MCP add and update refuse verifyKind: command with an empty verify', async () => {
+  // SQ-319: this pairing was accepted, and dispatch then silently pinned a DERIVED
+  // requirement (usually the whole plugin suite) that no submission could match against
+  // the ticket's own empty command. SQ-300 lost three hours to it.
+  for (const verify of [undefined, '', '   ']) {
+    const refused = await callTool('add', {
+      title: 'empty verify under kind command',
+      unclassified: true,
+      verifyKind: 'command',
+      ...(verify === undefined ? {} : { verify }),
+    });
+
+    assert.equal(refused.ok, false, `verify ${JSON.stringify(verify)} must be refused`);
+    assert.equal(refused.reason, 'invalid_verify');
+    // The refusal has to name the MCP field names the caller actually passed.
+    assert.match(refused.message, /verifyKind: command requires a runnable verify command/);
+    assert.match(refused.message, /verify is empty/);
+  }
+
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-mcp-empty-command-'));
+  // `npm run <script>` is only accepted as a verify command when the script exists.
+  fs.writeFileSync(
+    path.join(projectRoot, 'package.json'),
+    JSON.stringify({ name: 'sq319-mcp-fixture', scripts: { 'test:files': 'node --test' } }),
+  );
+  const project = store.ensureProject(projectRoot, 'empty command update').slug;
+  const ticket = store.createTicket(project, { title: 'ticket with a real command', executorVerify: 'npm run test:files test/mcp.test.ts' });
+
+  const clearing = await callTool('update', { project, ref: ticket.ref, verify: '' });
+  assert.equal(clearing.ok, false);
+  assert.equal(clearing.reason, 'invalid_verify');
+  assert.match(clearing.message, /verifyKind: command requires a runnable verify command/);
+  // Nothing may be written by a refused update.
+  assert.equal(store.getTicket(project, ticket.ref).executorVerify, 'npm run test:files test/mcp.test.ts');
+
+  // Filing a ticket before its verifier is known stays legal: the kind defaults to
+  // `command`, so only an explicit declaration is refused.
+  const filed = await callTool('add', { title: 'verify not decided yet', unclassified: true });
+  assert.equal(filed.ok, true);
+});
+
 test('MCP rejects incompatible attestation fields on add and update', async () => {
   const artifact = 'grafana://caller-controlled-artifact';
   const invalidAttestationCalls = [

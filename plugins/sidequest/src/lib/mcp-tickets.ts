@@ -59,6 +59,9 @@ const {
   snapshotContextRetrieval,
 } = require('./mcp-shared');
 const { verifyCaptureWrapperCommand } = require('./kernel/verification.js');
+// One copy of the empty-command refusal, shared with the store gate in store/tickets.js
+// so the MCP refusal and the store refusal can never drift apart.
+const { emptyVerifyCommandRefusal } = require('./store/tickets.js');
 
 function sameBasenameSiblingDetails(project: string, ticket: any, projectPath: string, tool: string) {
   const details = store.scopeConsumerWarningDetails(ticket, projectPath);
@@ -198,7 +201,13 @@ const tools: ToolDefinition[] = [
       if (!args.title || !String(args.title).trim()) throw new Error('add: title is required.');
       if (args.model != null || args.effort != null) throw new Error('add: model/effort are not set directly — use category or complexity + why.');
       const { slug, meta } = resolveProject(args.project);
-      const verifyFailures = store.verifyOracleErrors(args.verifyKind, args.verify, args.attestationArtifact);
+      // Only when the oracle itself is happy, so a caller who asked for a different kind is not
+      // also told to supply a command they never wanted.
+      const oracleFailures = store.verifyOracleErrors(args.verifyKind, args.verify, args.attestationArtifact);
+      const emptyCommandRefusal = oracleFailures.length
+        ? null
+        : emptyVerifyCommandRefusal(args.verifyKind, args.verify, { kind: 'verifyKind', verify: 'verify' });
+      const verifyFailures = emptyCommandRefusal ? [emptyCommandRefusal] : oracleFailures;
       if (verifyFailures.length) {
         return {
           ok: false,
@@ -307,11 +316,17 @@ const tools: ToolDefinition[] = [
       const existing = store.getTicket(slug, args.ref);
       if (!existing) throw new Error(`update: no ticket "${args.ref}" on ${meta.name}.`);
       if (args.verify !== undefined || args.verifyKind !== undefined || args.attestationArtifact !== undefined) {
-        const verifyFailures = store.verifyOracleErrors(
-          args.verifyKind === undefined ? existing.executorVerifyKind : args.verifyKind,
-          args.verify === undefined ? existing.executorVerify : args.verify,
+        const effectiveVerifyKind = args.verifyKind === undefined ? existing.executorVerifyKind : args.verifyKind;
+        const effectiveVerify = args.verify === undefined ? existing.executorVerify : args.verify;
+        const oracleFailures = store.verifyOracleErrors(
+          effectiveVerifyKind,
+          effectiveVerify,
           args.attestationArtifact === undefined ? existing.executorAttestationArtifact : args.attestationArtifact,
         );
+        const emptyCommandRefusal = oracleFailures.length
+          ? null
+          : emptyVerifyCommandRefusal(effectiveVerifyKind, effectiveVerify, { kind: 'verifyKind', verify: 'verify' });
+        const verifyFailures = emptyCommandRefusal ? [emptyCommandRefusal] : oracleFailures;
         if (verifyFailures.length) {
           return {
             ok: false,

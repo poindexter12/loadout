@@ -291,6 +291,16 @@ function createPulse(dependencies: any) {
     const died = dispatchDeath(dispatch);
     const liveness = livenessPulse(ticket, dispatch, claim, died);
     const warnings = [...storyContractDriftWarnings(ticket), ...storyDecisionLogWarnings(ticket, slug), ...scopeDriftWarnings(slug, ticket)];
+    // `compactPulse` keeps only four dispatch fields but passes `warnings` through, so a
+    // derived verify requirement is announced here too: the default (compact) read is where
+    // an orchestrator would otherwise assume the ticket's own verify is the executor's gate.
+    if (dispatch?.verificationDerivation?.command) {
+      warnings.push(
+        `verify requirement is DERIVED, not from the ticket (${dispatch.verificationDerivation.reason}); `
+        + `the executor must match ${JSON.stringify(dispatch.verificationDerivation.command)}. `
+        + `See dispatch.verificationDerivation; re-pin with update({ref, verify}).`,
+      );
+    }
     return {
       ref: ticket.ref,
       title: ticket.title,
@@ -325,6 +335,10 @@ function createPulse(dependencies: any) {
         outcome: dispatch.outcome || null,
         failureShape: dispatch.failureShape || null,
         localAheadWarning: dispatch.localAheadWarning || null,
+        // Present only when the pinned requirement was NOT taken from the ticket, so an
+        // orchestrator reading pulse sees the derived command rather than assuming the
+        // ticket's own verify is what the executor has to match.
+        verificationDerivation: dispatch.verificationDerivation || null,
       } : null,
       checkpoint: checkpointProjection(ticket),
       scope: scopePulse(slug, ticket),

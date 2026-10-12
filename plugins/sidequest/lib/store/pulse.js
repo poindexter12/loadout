@@ -253,6 +253,11 @@ function createPulse(dependencies) {
     const died = dispatchDeath(dispatch);
     const liveness = livenessPulse(ticket, dispatch, claim, died);
     const warnings = [...storyContractDriftWarnings(ticket), ...storyDecisionLogWarnings(ticket, slug), ...scopeDriftWarnings(slug, ticket)];
+    if (dispatch?.verificationDerivation?.command) {
+      warnings.push(
+        `verify requirement is DERIVED, not from the ticket (${dispatch.verificationDerivation.reason}); the executor must match ${JSON.stringify(dispatch.verificationDerivation.command)}. See dispatch.verificationDerivation; re-pin with update({ref, verify}).`
+      );
+    }
     return {
       ref: ticket.ref,
       title: ticket.title,
@@ -286,7 +291,11 @@ function createPulse(dependencies) {
         terminalSource: dispatch.terminalSource || null,
         outcome: dispatch.outcome || null,
         failureShape: dispatch.failureShape || null,
-        localAheadWarning: dispatch.localAheadWarning || null
+        localAheadWarning: dispatch.localAheadWarning || null,
+        // Present only when the pinned requirement was NOT taken from the ticket, so an
+        // orchestrator reading pulse sees the derived command rather than assuming the
+        // ticket's own verify is what the executor has to match.
+        verificationDerivation: dispatch.verificationDerivation || null
       } : null,
       checkpoint: checkpointProjection(ticket),
       scope: scopePulse(slug, ticket),

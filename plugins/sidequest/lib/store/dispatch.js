@@ -33,6 +33,23 @@ function preparedVerificationRequirement(ticket, projectPath) {
     suite
   });
 }
+function verificationDerivation(ticket, requirement) {
+  const recorded = String(ticket?.executorVerify || "").trim();
+  const command = String(requirement?.command || "").trim();
+  if (recorded || !command) return null;
+  const declaredKind = String(ticket?.executorVerifyKind || "").trim().toLowerCase();
+  return Object.freeze({
+    reason: "the ticket records no executorVerify of its own",
+    declaredKind: declaredKind || null,
+    kind: requirement.kind,
+    command,
+    ...requirement?.suite?.name ? { suite: requirement.suite.name } : {}
+  });
+}
+function verificationDerivationWarning(ref, derivation) {
+  if (!derivation) return null;
+  return `${String(ref || "this ticket")}: the executor verify requirement was DERIVED, not taken from the ticket, because ${derivation.reason}. Pinned ${derivation.kind} command: ${JSON.stringify(derivation.command)}${derivation.suite ? ` (named suite ${derivation.suite})` : ""}. The executor must run exactly this to submit; re-pin it with update({ref, verify}) if it is not the gate you intended.`;
+}
 function requirementsMatch(left, right) {
   return JSON.stringify(left || null) === JSON.stringify(right || null);
 }
@@ -45,6 +62,9 @@ function createDispatch(dependencies) {
     const nextRequirement = preparedVerificationRequirement(ticket, String(readMeta(slug)?.path || ""));
     if (requirementsMatch(previousRequirement, nextRequirement)) return null;
     state.verificationRequirement = nextRequirement;
+    const nextDerivation = verificationDerivation(ticket, nextRequirement);
+    if (nextDerivation) state.verificationDerivation = nextDerivation;
+    else delete state.verificationDerivation;
     const attempt = state.lifecycleAttempt || ticket.lifecycleAttempt;
     if (attempt) {
       const refreshedAttempt = Object.freeze({ ...attempt, verificationRequirement: nextRequirement });
@@ -1476,6 +1496,7 @@ function createDispatch(dependencies) {
       ) : null;
       delete t.storyContractDrift;
       const verificationRequirement2 = preparedVerificationRequirement(t, String(readMeta(slug)?.path || ""));
+      const derivedVerification = verificationDerivation(t, verificationRequirement2);
       const evidenceDirectory = ticketEvidenceDirectory(slug, t.ref, projectPath);
       fs.mkdirSync(evidenceDirectory, { recursive: true, mode: 448 });
       const baseCommit = reviewTargetState?.candidate.source === "git" ? reviewTargetState.candidate.value : integrationTargetState ? integrationTargetCommit(readMeta(slug)?.path || "", integrationTargetState) : commitScope.headCommit(readMeta(slug)?.path || "");
@@ -1493,6 +1514,7 @@ function createDispatch(dependencies) {
               verificationRequirement2
             ),
             verificationRequirement: verificationRequirement2,
+            ...derivedVerification ? { verificationDerivation: derivedVerification } : {},
             evidenceDirectory,
             sessionId: opts.sessionId ? String(opts.sessionId) : null,
             preparedBy: dispatchPreparationAttribution(opts),
@@ -1574,7 +1596,11 @@ function createDispatch(dependencies) {
           planStagedToken.publish();
           stampDispatchEvent(t, "dispatch", now);
           putTicket(slug, t);
-          const warnings = [localAheadWarning?.message, dirtyBaselineCapture?.warning].filter(Boolean);
+          const warnings = [
+            localAheadWarning?.message,
+            dirtyBaselineCapture?.warning,
+            verificationDerivationWarning(t.ref, derivedVerification)
+          ].filter(Boolean);
           return { ok: true, ticket: t, token: t.dispatchNonce, recovery, ...warnings.length ? { warnings } : {} };
         }
       };
