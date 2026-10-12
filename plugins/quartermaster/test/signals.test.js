@@ -144,6 +144,35 @@ test('denials are tallied per fingerprint, and finish() carries that map through
   assert.equal(tally.denialsByFingerprint['permission:Bash:git push'], 1);
 });
 
+test('only permission-rule denials are tallied against the fingerprint of a permission rule', async () => {
+  const blocked = assistantToolUse('Bash', { command: 'npm test -- --unit' });
+  const stopped = assistantToolUse('ToolSearch', { query: 'select:Read' });
+  const denialOf = (use, kind) => ({
+    type: 'user',
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: use.message.content[0].id, content: 'denied' }] },
+    toolUseResult: 'denied',
+    toolDenialKind: kind,
+    timestamp: '2026-08-01T10:02:00Z',
+  });
+  const signals = await collect([
+    blocked, denialOf(blocked, 'permission-rule'),
+    stopped, denialOf(stopped, 'interrupted'),
+    stopped, denialOf(stopped, 'user-rejected'),
+  ]);
+
+  assert.deepEqual(signals.sessions[0].denialsByFingerprint, {
+    'permission:ToolSearch': 2,
+    'permission:Bash:npm test': 1,
+  }, 'the total per fingerprint still counts every denial, whatever blocked the call');
+  assert.deepEqual(signals.sessions[0].permissionDenialsByFingerprint, {
+    'permission:Bash:npm test': 1,
+  }, 'interrupted and user-rejected calls must not be attributed to a permission rule');
+
+  const tally = tallyFromSignals(signals);
+  assert.equal(tally.permissionDenialsByFingerprint['permission:Bash:npm test'], 1);
+  assert.equal(tally.permissionDenialsByFingerprint['permission:ToolSearch'], undefined);
+});
+
 test('captures session purpose from title, opening ask, and area touched', async () => {
   const signals = await collect([
     { type: 'ai-title', aiTitle: 'Make the ingest pipeline reliable', sessionId: 'session-1' },

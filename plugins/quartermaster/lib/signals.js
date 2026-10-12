@@ -27,6 +27,11 @@ const CORRECTION_THEMES = [
   ['verification', /\b(?:tests?|verif(?:y|ied|ies)|check(?:s|ed)?|prov(?:e|ed|en)|run it)\b/],
 ];
 
+// The one denial kind a permission rule is answerable for. Every other kind on the same
+// fingerprint (`interrupted`, `user-rejected`, a routing interception) was somebody else's
+// decision, so it is tallied as a denial but never attributed to the rule.
+const PERMISSION_DENIAL_KIND = 'permission-rule';
+
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
 const SUBCOMMAND_EXECUTABLES = new Set([
   'git', 'gh', 'npm', 'pnpm', 'yarn', 'npx', 'cargo', 'docker', 'kubectl', 'claude',
@@ -126,7 +131,16 @@ function countsOf(map) {
 }
 
 function emptyTally() {
-  return { prompts: 0, toolCalls: 0, toolErrors: 0, denials: 0, denialsByFingerprint: {}, interrupts: 0, corrections: 0 };
+  return {
+    prompts: 0,
+    toolCalls: 0,
+    toolErrors: 0,
+    denials: 0,
+    denialsByFingerprint: {},
+    permissionDenialsByFingerprint: {},
+    interrupts: 0,
+    corrections: 0,
+  };
 }
 
 /**
@@ -219,7 +233,15 @@ function createSignalCollector() {
             totals.denials += 1;
             tally.denials += 1;
             const fingerprint = fingerprintFor(event.name, event.input);
-            if (fingerprint) tally.denialsByFingerprint[fingerprint] = (tally.denialsByFingerprint[fingerprint] ?? 0) + 1;
+            if (fingerprint) {
+              tally.denialsByFingerprint[fingerprint] = (tally.denialsByFingerprint[fingerprint] ?? 0) + 1;
+              // Kept apart from the total so a verdict about a permission rule can be drawn from
+              // the denials that rule actually caused, rather than from everything that happened
+              // to share its fingerprint.
+              if (event.denial === PERMISSION_DENIAL_KIND) {
+                tally.permissionDenialsByFingerprint[fingerprint] = (tally.permissionDenialsByFingerprint[fingerprint] ?? 0) + 1;
+              }
+            }
             bump(denialsByKind, event.denial, event.sessionId);
             bump(denialsByTool, event.name ?? 'unknown', event.sessionId);
             if (denialTargets.length < MAX_SAMPLES) {
@@ -276,6 +298,7 @@ function createSignalCollector() {
           toolErrors: tally.toolErrors,
           denials: tally.denials,
           denialsByFingerprint: tally.denialsByFingerprint,
+          permissionDenialsByFingerprint: tally.permissionDenialsByFingerprint,
           interrupts: tally.interrupts,
           corrections: tally.corrections,
           title: tally.title,
@@ -345,6 +368,9 @@ function tallyFromSignals(signals) {
     tally.denials += session.denials;
     for (const [fingerprint, count] of Object.entries(session.denialsByFingerprint ?? {})) {
       tally.denialsByFingerprint[fingerprint] = (tally.denialsByFingerprint[fingerprint] ?? 0) + count;
+    }
+    for (const [fingerprint, count] of Object.entries(session.permissionDenialsByFingerprint ?? {})) {
+      tally.permissionDenialsByFingerprint[fingerprint] = (tally.permissionDenialsByFingerprint[fingerprint] ?? 0) + count;
     }
     tally.interrupts += session.interrupts;
     tally.corrections += session.corrections;

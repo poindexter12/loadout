@@ -33,7 +33,22 @@ beforeEach(() => {
 });
 
 function tallyWith(overrides = {}) {
-  return { prompts: 5, toolCalls: 20, toolErrors: 0, denials: 0, denialsByFingerprint: {}, interrupts: 0, corrections: 0, ...overrides };
+  return {
+    prompts: 5,
+    toolCalls: 20,
+    toolErrors: 0,
+    denials: 0,
+    denialsByFingerprint: {},
+    permissionDenialsByFingerprint: {},
+    interrupts: 0,
+    corrections: 0,
+    ...overrides,
+  };
+}
+
+/** A tally of denials the permission system itself raised: counted in both maps, as signals.js records them. */
+function permissionDenials(counts) {
+  return { denials: Object.values(counts).reduce((total, count) => total + count, 0), denialsByFingerprint: { ...counts }, permissionDenialsByFingerprint: { ...counts } };
 }
 
 function alternateProjectSpelling(projectDir) {
@@ -160,7 +175,7 @@ test('decisions ledger separates applied from rejected fingerprints', () => {
 test('verifyDecisions reports improvement against the targeted signal', () => {
   const now = Date.now();
   for (let index = 0; index < 4; index += 1) {
-    recordSessionTally(PROJECT, `before-${index}`, tallyWith({ denials: 4, denialsByFingerprint: { 'permission:Bash:npm': 4 } }), environment, now - (10 - index) * DAY_MS);
+    recordSessionTally(PROJECT, `before-${index}`, tallyWith(permissionDenials({ 'permission:Bash:npm': 4 })), environment, now - (10 - index) * DAY_MS);
   }
   const decision = appendDecision(
     { projectDir: PROJECT, fingerprint: 'permission:Bash:npm', status: 'applied', title: 'allow npm', signal: 'denials' },
@@ -182,7 +197,7 @@ test('verifyDecisions matches decisions recorded through another path spelling',
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quartermaster-project-test-'));
   const alternateDir = alternateProjectSpelling(projectDir);
   for (let index = 0; index < 4; index += 1) {
-    recordSessionTally(projectDir, `before-${index}`, tallyWith({ denials: 4, denialsByFingerprint: { 'permission:Bash:npm': 4 } }), environment, now - (10 - index) * DAY_MS);
+    recordSessionTally(projectDir, `before-${index}`, tallyWith(permissionDenials({ 'permission:Bash:npm': 4 })), environment, now - (10 - index) * DAY_MS);
   }
   const decision = appendDecision(
     { projectDir: alternateDir, fingerprint: 'permission:Bash:npm', status: 'applied', title: 'allow npm', signal: 'denials' },
@@ -221,13 +236,54 @@ test('verifyDecisions never blames a permission rule for unrelated denial growth
     recordSessionTally(
       PROJECT,
       `after-${index}`,
-      tallyWith({ denials: 5, denialsByFingerprint: { 'permission:Bash:git push': 5 } }),
+      tallyWith(permissionDenials({ 'permission:Bash:git push': 5 })),
       environment,
       now - (4 - index) * DAY_MS,
     );
   }
   const result = verifyDecisions(PROJECT, environment).find((entry) => entry.id === decision.id);
   assert.equal(result.verdict, 'insufficient-data', 'the rule\'s own fingerprint saw zero denials on both sides');
+});
+
+test('verifyDecisions never blames a permission rule for denials of another kind on its own fingerprint', () => {
+  // Reproduces the observed defect: `permission:ToolSearch` graded "worse" on denials whose kind
+  // was `interrupted` — calls somebody stopped, not calls the rule blocked. Matching the
+  // fingerprint is not evidence; only a `permission-rule` denial is.
+  const now = Date.now();
+  const interrupted = (count) => ({ denials: count, denialsByFingerprint: { 'permission:ToolSearch': count }, permissionDenialsByFingerprint: {} });
+  for (let index = 0; index < 4; index += 1) {
+    recordSessionTally(PROJECT, `before-${index}`, tallyWith(interrupted(1)), environment, now - (10 - index) * DAY_MS);
+  }
+  const decision = appendDecision(
+    { projectDir: PROJECT, fingerprint: 'permission:ToolSearch', status: 'applied', title: 'allow ToolSearch', signal: 'denials' },
+    environment,
+    now - 5 * DAY_MS,
+  );
+  for (let index = 0; index < 4; index += 1) {
+    recordSessionTally(PROJECT, `after-${index}`, tallyWith(interrupted(5)), environment, now - (4 - index) * DAY_MS);
+  }
+  const result = verifyDecisions(PROJECT, environment).find((entry) => entry.id === decision.id);
+  assert.equal(result.verdict, 'insufficient-data', 'interrupted calls on the same fingerprint are not a permission rule failing');
+});
+
+test('verifyDecisions declines to judge a permission rule against sessions tallied before denial kind was recorded', () => {
+  // Sessions recorded before signals.js split the kinds hold a fingerprint count of mixed kinds.
+  // Reading it as zero would invent a clean "before" and grade every later denial a regression.
+  const now = Date.now();
+  const legacy = { prompts: 5, toolCalls: 20, toolErrors: 0, denials: 2, denialsByFingerprint: { 'permission:Bash:git status': 2 }, interrupts: 0, corrections: 0 };
+  for (let index = 0; index < 4; index += 1) {
+    recordSessionTally(PROJECT, `before-${index}`, legacy, environment, now - (10 - index) * DAY_MS);
+  }
+  const decision = appendDecision(
+    { projectDir: PROJECT, fingerprint: 'permission:Bash:git status', status: 'applied', title: 'allow git status', signal: 'denials' },
+    environment,
+    now - 5 * DAY_MS,
+  );
+  for (let index = 0; index < 4; index += 1) {
+    recordSessionTally(PROJECT, `after-${index}`, tallyWith(permissionDenials({ 'permission:Bash:git status': 3 })), environment, now - (4 - index) * DAY_MS);
+  }
+  const result = verifyDecisions(PROJECT, environment).find((entry) => entry.id === decision.id);
+  assert.equal(result.verdict, 'insufficient-data', 'a kind-blind session cannot be attributed to the rule either way');
 });
 
 test('verifyDecisions reports insufficient-data for a permission rule with no matching denials on either side', () => {
