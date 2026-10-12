@@ -3,6 +3,29 @@
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationRef } = require('../kernel/review-binding');
 const { classifyVerificationKind, verificationRequirement } = require('../kernel/verification.js');
 
+// `verifyCommandErrors` returns no error for an empty command, and
+// `classifyVerificationKind` keeps an explicitly declared `command` kind, so a
+// ticket could be stored with kind `command` and no command at all. Dispatch then
+// takes `verificationRequirement`'s `(!command && suite)` branch and silently pins a
+// DERIVED requirement -- usually the whole plugin suite -- which no submission can
+// match against the ticket's own (empty) command. Refuse that pairing at the source
+// instead, naming the field the caller passed. An OMITTED kind still defaults to
+// `command`, so only an explicit kind is refused here: a ticket filed before its
+// verify is known stays legal.
+function emptyVerifyCommandRefusal(
+  kind: any,
+  verify: any,
+  fields: { kind: string; verify: string },
+) {
+  if (String(kind ?? '').trim().toLowerCase() !== 'command') return null;
+  if (String(verify ?? '').trim()) return null;
+  return `${fields.kind}: command requires a runnable ${fields.verify} command, but ${fields.verify} is empty. `
+    + `Pass the command the executor must run, or declare a kind that needs no command `
+    + `(suite, manual, attestation, document, link, schema, review, custom). `
+    + `An empty command under kind command is replaced at dispatch by a derived requirement, `
+    + `which leaves the executor running a gate this ticket never asked for and no submission can match.`;
+}
+
 function createTickets(dependencies: any) {
   const {
     EXECUTOR_ANCHORS_MAX, EXECUTOR_VERIFY_MAX, acquireLock, assetPath, assetsDir, boardConfig,
@@ -208,6 +231,11 @@ function createTicket(slug?: any, fields?: any, reviewTarget?: any) {
   }
 
   requireVerifyOracle(fields.executorVerifyKind, fields.executorVerify, fields.executorAttestationArtifact);
+  const emptyVerifyRefusal = emptyVerifyCommandRefusal(fields.executorVerifyKind, fields.executorVerify, {
+    kind: 'executorVerifyKind',
+    verify: 'executorVerify',
+  });
+  if (emptyVerifyRefusal) throw new Error(emptyVerifyRefusal);
   const executorVerify = executorText(fields.executorVerify, EXECUTOR_VERIFY_MAX, 'executor verify command');
   const executorVerifyKind = normalizeVerifyOracleKind(fields.executorVerifyKind, executorVerify);
   const storyId = coerceStoryId(slug, fields.storyId);
@@ -1247,6 +1275,13 @@ function updateTicket(slug?: any, idOrRef?: any, patch?: any, reviewTarget?: any
     const nextVerify = patch.executorVerify === undefined ? t.executorVerify : patch.executorVerify;
     if (patch.executorVerify !== undefined || patch.executorVerifyKind !== undefined || patch.executorAttestationArtifact !== undefined) {
       requireVerifyOracle(nextVerifyKind, nextVerify, nextAttestationArtifact);
+      // The stored kind is always concrete, so this reads the EFFECTIVE pairing: clearing the
+      // command while the ticket stays on kind `command` is the same defect as filing it that way.
+      const emptyVerifyRefusal = emptyVerifyCommandRefusal(nextVerifyKind, nextVerify, {
+        kind: 'executorVerifyKind',
+        verify: 'executorVerify',
+      });
+      if (emptyVerifyRefusal) throw new Error(emptyVerifyRefusal);
       const executorVerify = executorText(nextVerify, EXECUTOR_VERIFY_MAX, 'executor verify command');
       const executorVerifyKind = normalizeVerifyOracleKind(nextVerifyKind, executorVerify);
       const executorAttestationArtifact = executorText(nextAttestationArtifact, EXECUTOR_VERIFY_MAX, 'executor attestation artifact');
@@ -1431,4 +1466,6 @@ function listActive(slug?: any) {
   return { DECLARED_FILES_MAX, CONTRACT_NAMES_MAX, LABELS_MAX, categoryReadOnly, readOnlyOverrideActive, dispatchReadOnly, submissionReviewRelation, createTicket, normalizeLabels, normalizeFiles, scopeExpansionFiles, scopeExpansionCommand, requestScope, migrateLegacyScopeRequest, overlappingScopePaths, scopesOverlap, normalizeContracts, contractCollisionReasons, contractMetadata, readyWaves, readyWaveDependencies, normalizeAssignee, updateTicket, deleteTicket, archiveTicket, unarchiveTicket, archiveAllDone, listArchived, listActive };
 }
 
-module.exports = { createTickets };
+// Exported so the MCP layer refuses the same pairing with its own field names
+// (verifyKind/verify) against one copy of the refusal text.
+module.exports = { createTickets, emptyVerifyCommandRefusal };

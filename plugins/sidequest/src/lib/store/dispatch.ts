@@ -44,6 +44,37 @@ function preparedVerificationRequirement(ticket: any, projectPath: string) {
   });
 }
 
+// A ticket that records no runnable verify of its own does not dispatch without a gate:
+// `verificationRequirement` falls through to a named suite (often the whole plugin suite).
+// That substitution used to be invisible, so an executor could spend hours on a gate its
+// ticket never asked for and still fail to match it. Record WHAT was derived and WHY, so
+// the dispatch result and pulse can name it and the orchestrator can re-pin instead.
+function verificationDerivation(ticket: any, requirement: any) {
+  const recorded = String(ticket?.executorVerify || '').trim();
+  const command = String(requirement?.command || '').trim();
+  // The ticket's own command was used, or nothing was derived to report.
+  if (recorded || !command) return null;
+  // The stored kind cannot tell an omitted kind from an explicit `command` -- both
+  // normalize to `command` -- so the reason states what IS known (no recorded command)
+  // and `declaredKind` carries the stored kind for anyone who needs it.
+  const declaredKind = String(ticket?.executorVerifyKind || '').trim().toLowerCase();
+  return Object.freeze({
+    reason: 'the ticket records no executorVerify of its own',
+    declaredKind: declaredKind || null,
+    kind: requirement.kind,
+    command,
+    ...(requirement?.suite?.name ? { suite: requirement.suite.name } : {}),
+  });
+}
+
+function verificationDerivationWarning(ref: any, derivation: any) {
+  if (!derivation) return null;
+  return `${String(ref || 'this ticket')}: the executor verify requirement was DERIVED, not taken from the ticket, because `
+    + `${derivation.reason}. Pinned ${derivation.kind} command: ${JSON.stringify(derivation.command)}`
+    + `${derivation.suite ? ` (named suite ${derivation.suite})` : ''}. `
+    + `The executor must run exactly this to submit; re-pin it with update({ref, verify}) if it is not the gate you intended.`;
+}
+
 function requirementsMatch(left: any, right: any) {
   return JSON.stringify(left || null) === JSON.stringify(right || null);
 }
@@ -58,6 +89,11 @@ function createDispatch(dependencies: any) {
     const nextRequirement = preparedVerificationRequirement(ticket, String(readMeta(slug)?.path || ''));
     if (requirementsMatch(previousRequirement, nextRequirement)) return null;
     state.verificationRequirement = nextRequirement;
+    // An amendment that pins a real command stops the requirement being derived, so the
+    // notice has to be cleared rather than left behind describing the superseded gate.
+    const nextDerivation = verificationDerivation(ticket, nextRequirement);
+    if (nextDerivation) state.verificationDerivation = nextDerivation;
+    else delete state.verificationDerivation;
     const attempt = state.lifecycleAttempt || ticket.lifecycleAttempt;
     if (attempt) {
       const refreshedAttempt = Object.freeze({ ...attempt, verificationRequirement: nextRequirement });
@@ -1833,6 +1869,7 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
       : null;
     delete t.storyContractDrift;
     const verificationRequirement = preparedVerificationRequirement(t, String(readMeta(slug)?.path || ''));
+    const derivedVerification = verificationDerivation(t, verificationRequirement);
     const evidenceDirectory = ticketEvidenceDirectory(slug, t.ref, projectPath);
     // Out of the lock because an empty directory is neither a token nor a dispatch row: one left
     // behind by a plan that was replanned or refused is inert, and the next attempt reuses it.
@@ -1866,6 +1903,7 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
             verificationRequirement,
           ),
           verificationRequirement,
+          ...(derivedVerification ? { verificationDerivation: derivedVerification } : {}),
           evidenceDirectory,
           sessionId: opts.sessionId ? String(opts.sessionId) : null,
           preparedBy: dispatchPreparationAttribution(opts),
@@ -1947,7 +1985,11 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
         planStagedToken.publish();
         stampDispatchEvent(t, 'dispatch', now);
         putTicket(slug, t);
-        const warnings = [localAheadWarning?.message, dirtyBaselineCapture?.warning].filter(Boolean);
+        const warnings = [
+          localAheadWarning?.message,
+          dirtyBaselineCapture?.warning,
+          verificationDerivationWarning(t.ref, derivedVerification),
+        ].filter(Boolean);
         return { ok: true, ticket: t, token: t.dispatchNonce, recovery, ...(warnings.length ? { warnings } : {}) };
       },
     };

@@ -1,6 +1,11 @@
 "use strict";
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationRef } = require("../kernel/review-binding");
 const { classifyVerificationKind, verificationRequirement } = require("../kernel/verification.js");
+function emptyVerifyCommandRefusal(kind, verify, fields) {
+  if (String(kind ?? "").trim().toLowerCase() !== "command") return null;
+  if (String(verify ?? "").trim()) return null;
+  return `${fields.kind}: command requires a runnable ${fields.verify} command, but ${fields.verify} is empty. Pass the command the executor must run, or declare a kind that needs no command (suite, manual, attestation, document, link, schema, review, custom). An empty command under kind command is replaced at dispatch by a derived requirement, which leaves the executor running a gate this ticket never asked for and no submission can match.`;
+}
 function createTickets(dependencies) {
   const {
     EXECUTOR_ANCHORS_MAX,
@@ -213,6 +218,11 @@ function createTickets(dependencies) {
       }
     }
     requireVerifyOracle(fields.executorVerifyKind, fields.executorVerify, fields.executorAttestationArtifact);
+    const emptyVerifyRefusal = emptyVerifyCommandRefusal(fields.executorVerifyKind, fields.executorVerify, {
+      kind: "executorVerifyKind",
+      verify: "executorVerify"
+    });
+    if (emptyVerifyRefusal) throw new Error(emptyVerifyRefusal);
     const executorVerify = executorText(fields.executorVerify, EXECUTOR_VERIFY_MAX, "executor verify command");
     const executorVerifyKind = normalizeVerifyOracleKind(fields.executorVerifyKind, executorVerify);
     const storyId = coerceStoryId(slug, fields.storyId);
@@ -1098,6 +1108,11 @@ function createTickets(dependencies) {
       const nextVerify = patch.executorVerify === void 0 ? t.executorVerify : patch.executorVerify;
       if (patch.executorVerify !== void 0 || patch.executorVerifyKind !== void 0 || patch.executorAttestationArtifact !== void 0) {
         requireVerifyOracle(nextVerifyKind, nextVerify, nextAttestationArtifact);
+        const emptyVerifyRefusal = emptyVerifyCommandRefusal(nextVerifyKind, nextVerify, {
+          kind: "executorVerifyKind",
+          verify: "executorVerify"
+        });
+        if (emptyVerifyRefusal) throw new Error(emptyVerifyRefusal);
         const executorVerify = executorText(nextVerify, EXECUTOR_VERIFY_MAX, "executor verify command");
         const executorVerifyKind = normalizeVerifyOracleKind(nextVerifyKind, executorVerify);
         const executorAttestationArtifact = executorText(nextAttestationArtifact, EXECUTOR_VERIFY_MAX, "executor attestation artifact");
@@ -1248,4 +1263,4 @@ function createTickets(dependencies) {
   }
   return { DECLARED_FILES_MAX, CONTRACT_NAMES_MAX, LABELS_MAX, categoryReadOnly, readOnlyOverrideActive, dispatchReadOnly, submissionReviewRelation, createTicket, normalizeLabels, normalizeFiles, scopeExpansionFiles, scopeExpansionCommand, requestScope, migrateLegacyScopeRequest, overlappingScopePaths, scopesOverlap, normalizeContracts, contractCollisionReasons, contractMetadata, readyWaves, readyWaveDependencies, normalizeAssignee, updateTicket, deleteTicket, archiveTicket, unarchiveTicket, archiveAllDone, listArchived, listActive };
 }
-module.exports = { createTickets };
+module.exports = { createTickets, emptyVerifyCommandRefusal };

@@ -600,6 +600,58 @@ test('repeated captures use the dispatch pin after a stale lifecycle mirror rewr
   }
 });
 
+test('a verify mismatch names the command the submission had to match', async () => {
+  // SQ-319: the mismatch refusal did not say what it wanted, so SQ-300's executor had no
+  // way to see which string it was failing to reproduce.
+  const command = 'node --version';
+  const expected = 'node -e "process.exit(0)"';
+  const t = addTicket('verify mismatch names the expected command', { executorVerify: command, files: ['lib'] });
+  const by = 'verify-mismatch-worker';
+  const base = git(['rev-parse', 'origin/main']);
+  assert.strictEqual(store.claimTicket(slug, t.ref, by, { direct: true, reason: 'The submission fixture requires a local direct claim.' }).ok, true);
+  const capture = await runVerifyCapture(command, PROJECT_DIR);
+  try {
+    assert.strictEqual(capture.status, 'passed');
+    assert.strictEqual(recordCapture({ project: PROJECT_DIR, ticket: t.ref }, capture, PROJECT_DIR).ok, true);
+    const candidate = createCandidateCommit('verify-mismatch.js', 'mismatch candidate\n');
+    pin(t, candidate);
+
+    // Re-pin the requirement under the executor, which is exactly the shape a ticket
+    // amended mid-dispatch (or filed before SQ-319's validation) presents at submit.
+    const repin = (pinned: string) => {
+      const ticket = store.getTicket(slug, t.ref);
+      ticket.lifecycleAttempt = {
+        ...ticket.lifecycleAttempt,
+        verificationRequirement: { ...ticket.lifecycleAttempt.verificationRequirement, command: pinned },
+      };
+      if (ticket.dispatch?.verificationRequirement) {
+        ticket.dispatch.verificationRequirement = { ...ticket.dispatch.verificationRequirement, command: pinned };
+      }
+      persist(ticket);
+    };
+
+    repin(expected);
+    const refused = await callMcp('submit', {
+      project: PROJECT_DIR,
+      ref: t.ref,
+      by,
+      commit: candidate,
+      base,
+      worktree: PROJECT_DIR,
+      verify: command,
+      body: 'The captured command is not the pinned one.',
+    });
+    assert.strictEqual(refused.ok, false);
+    assert.match(refused.message, /Expected command: "node -e \\"process\.exit\(0\)\\""/);
+    // The command the executor actually ran is still the thing being rejected, so the
+    // original sentence has to survive in front of the added detail.
+    assert.match(refused.message, /verification must match the declared executor verify command/);
+
+  } finally {
+    fs.rmSync(capture.logPath, { force: true });
+  }
+});
+
 test('MCP submit refuses a completed capture from before the submitted candidate', async () => {
   const command = 'node --version';
   const t = addTicket('stale declared capture', { executorVerify: command, files: ['lib'] });
