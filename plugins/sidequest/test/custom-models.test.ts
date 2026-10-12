@@ -39,7 +39,7 @@ test('resolveExec is keyed directly by concrete model and effort', () => {
     agent: 'sidequest-exec-high', readOnlyAgent: 'sidequest-exec-readonly-high', effortCarrier: 'none',
     pinToken: null, pinnedModel: null,
     model: 'opus', spawnId: 'opus', backend: 'claude', slug: 'opus',
-    runsModel: 'opus', apiModel: 'opus', runsLabel: 'Claude Opus 5', dispatch: 'native-agent',
+    runsModel: 'opus', apiModel: 'opus', runsLabel: 'Claude Opus', dispatch: 'native-agent',
   });
   const codex = store.resolveExec('codex-gpt-test', 'xhigh');
   assert.equal(codex.agent, 'sidequest-exec-codex-test-xhigh');
