@@ -40,12 +40,18 @@ silently dropped.
 
 ## Step 1 — Sweep
 
-Pull the full board and the recent project history in parallel:
+Pull the full board and the recent project history in parallel. `sidequest list --json` is **one
+page**, not a sweep: it returns `total`, `returned`, and `nextCursor`. Follow `nextCursor` until it is
+`null` for each list below, combine all pages, then assert that the combined ticket count equals the
+first page's `total`. A page with a non-null `nextCursor` means the sweep is partial, and any pass
+totals based on it are invalid.
 
 ```bash
-sidequest list --json                      # every open ticket, this project
-sidequest list --status doing --json       # claims in flight, with claim.by / claim.at
-sidequest list --archived --json           # already-archived, for duplicate-checking only
+# Repeat each command with --cursor <nextCursor> until nextCursor is null.
+# Preserve the first page's total and assert it equals the count across all collected pages.
+sidequest list --json                      # all active tickets, paged
+sidequest list --status doing --json       # claims in flight, paged; includes claim.by / claim.at
+sidequest list --archived --json           # archived tickets, paged; duplicate-checking only
 sidequest profile hygiene --json           # deterministic profile promotion, drift, and retirement proposals
 git log --oneline -30                      # what actually landed recently
 ```

@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 
 const skill = fs.readFileSync(path.join(__dirname, '..', 'skills', 'sidequest', 'SKILL.md'), 'utf8');
+const groomSkill = fs.readFileSync(path.join(__dirname, '..', 'skills', 'groom', 'SKILL.md'), 'utf8');
 
 // SKILL.md loads into the orchestrator (the priciest model) every session, so
 // its size is a budget like the hook byte budgets: detail belongs in
@@ -43,4 +44,10 @@ const skill = fs.readFileSync(path.join(__dirname, '..', 'skills', 'sidequest', 
 test('SKILL.md stays inside its session-load byte budget', () => {
   assert.ok(Buffer.byteLength(skill, 'utf8') <= 18900,
     `SKILL.md is ${Buffer.byteLength(skill, 'utf8')} bytes; budget is 18900 — move detail into references/`);
+});
+
+test('groom skill requires cursor paging before it reports sweep totals', () => {
+  assert.match(groomSkill, /Follow `nextCursor` until it is\s+`null`/);
+  assert.match(groomSkill, /combined ticket count equals the\s+first page's `total`/);
+  assert.match(groomSkill, /partial, and any pass\s+totals based on it are invalid/);
 });

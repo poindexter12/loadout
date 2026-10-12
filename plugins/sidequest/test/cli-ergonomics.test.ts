@@ -31,6 +31,22 @@ function isolatedEnv(): Record<string, string> {
   };
 }
 
+function activeTicketCount(env: Record<string, string>): number {
+  const previousHome = process.env.SIDEQUEST_HOME;
+  const previousProject = process.env.CLAUDE_PROJECT_DIR;
+  process.env.SIDEQUEST_HOME = env.SIDEQUEST_HOME;
+  process.env.CLAUDE_PROJECT_DIR = env.CLAUDE_PROJECT_DIR;
+  try {
+    const slug = store.ensureProject(env.CLAUDE_PROJECT_DIR).slug;
+    return store.listTickets(slug).filter((ticket: any) => !ticket.archived && ticket.status !== 'done').length;
+  } finally {
+    if (previousHome === undefined) delete process.env.SIDEQUEST_HOME;
+    else process.env.SIDEQUEST_HOME = previousHome;
+    if (previousProject === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = previousProject;
+  }
+}
+
 function runGit(project: string, arguments_: string[]): string {
   const result = spawnSync('git', arguments_, {
     cwd: project,
@@ -66,6 +82,37 @@ test('CLI command help stays focused on the requested command', () => {
     assert.match(result.stdout, new RegExp(flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     assert.doesNotMatch(result.stdout, /sidequest merge/);
   }
+});
+
+test('CLI JSON list makes a truncated page explicit and supports complete cursor paging', () => {
+  const env = isolatedEnv();
+  for (let index = 0; index < 41; index += 1) {
+    const added = run(['add', '--title', `paged ticket ${index}`, '--unclassified', '--json'], env);
+    assert.equal(added.status, 0, added.stderr);
+  }
+
+  const expected = activeTicketCount(env);
+  const refs: string[] = [];
+  let cursor: string | null = null;
+  let first = true;
+  do {
+    const args = ['list', '--json'];
+    if (cursor) args.push('--cursor', cursor);
+    const result = run(args, env);
+    assert.equal(result.status, 0, result.stderr);
+    const page = JSON.parse(result.stdout);
+    refs.push(...page.tickets.map((ticket: any) => ticket.ref));
+    if (first) {
+      assert.equal(page.total, expected, 'the first page reports the store count');
+      assert.equal(page.returned, 40, 'the default page is bounded');
+      assert.match(page.hint, /Showing 40 of 41 tickets; pass --cursor 40 to continue until nextCursor is null/i);
+      first = false;
+    }
+    cursor = page.nextCursor;
+  } while (cursor);
+
+  assert.equal(refs.length, expected, 'following every nextCursor enumerates the store count');
+  assert.equal(new Set(refs).size, expected, 'cursor pages do not duplicate tickets');
 });
 
 test('groom-close records a delivered commit through the shared store transition', () => {
