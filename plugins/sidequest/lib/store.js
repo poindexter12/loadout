@@ -807,11 +807,25 @@ function unescapeJsStringLiteral(raw) {
     return esc;
   });
 }
+const CALL_STYLE_TEST_EXTENSIONS = /* @__PURE__ */ new Set([".js", ".cjs", ".mjs", ".jsx", ".ts", ".cts", ".mts", ".tsx", ".dart"]);
+const PYTHON_TEST_EXTENSIONS = /* @__PURE__ */ new Set([".py"]);
+const CALL_STYLE_TEST_DEFINITION = /(?<![/)\]][a-z]*\.)\b(?:test|it|specify)(?:\.(?:only|skip|todo))?\s*\(\s*(['"`])((?:\\.|(?!\1).)*)\1/;
+const PYTHON_TEST_DEFINITION = /\bdef\s+(test_[A-Za-z0-9_]+)/;
+function testDefinitionName(line, extension) {
+  if (CALL_STYLE_TEST_EXTENSIONS.has(extension)) {
+    const match = line.match(CALL_STYLE_TEST_DEFINITION);
+    return match ? unescapeJsStringLiteral(match[2] ?? "") : "";
+  }
+  if (PYTHON_TEST_EXTENSIONS.has(extension)) return line.match(PYTHON_TEST_DEFINITION)?.[1] || "";
+  return "";
+}
 function changedTestNames(delta, changedPaths) {
   if (!delta?.workspace) return [];
   const names = /* @__PURE__ */ new Set();
   for (const file of changedPaths || []) {
     if (!isTestSidePath(file)) continue;
+    const extension = path.extname(String(file)).toLowerCase();
+    if (!CALL_STYLE_TEST_EXTENSIONS.has(extension) && !PYTHON_TEST_EXTENSIONS.has(extension)) continue;
     let source = "";
     let diff = "";
     try {
@@ -829,10 +843,8 @@ function changedTestNames(delta, changedPaths) {
       continue;
     }
     const definitions = source.split(/\r?\n/).map((line, index) => {
-      const stringMatch = line.match(/\b(?:test|it|specify)\s*\(\s*(['"`])((?:\\.|(?!\1).)*)\1/);
-      if (stringMatch) return { line: index + 1, name: unescapeJsStringLiteral(stringMatch[2] ?? "") };
-      const pyMatch = line.match(/\bdef\s+(test_[A-Za-z0-9_]+)/);
-      return pyMatch ? { line: index + 1, name: pyMatch[1] } : null;
+      const name = testDefinitionName(line, extension);
+      return name ? { line: index + 1, name } : null;
     }).filter(Boolean);
     try {
       execFileSync("git", ["cat-file", "-e", `${delta.workspace.base}:${file}`], {
@@ -860,9 +872,7 @@ function changedTestNames(delta, changedPaths) {
       }
       if (line.startsWith("+") && !line.startsWith("+++")) {
         changedInHunk = true;
-        const addedStringDefinition = line.match(/\b(?:test|it|specify)(?:\.(?:only|skip|todo))?\s*\(\s*(['"`])((?:\\.|(?!\1).)*)\1/);
-        const addedPyDefinition = addedStringDefinition ? null : line.match(/\bdef\s+(test_[A-Za-z0-9_]+)/);
-        const addedName = addedStringDefinition ? unescapeJsStringLiteral(addedStringDefinition[2] ?? "") : addedPyDefinition?.[1];
+        const addedName = testDefinitionName(line.slice(1), extension);
         if (addedName) names.add(addedName);
         addNearestDefinition(newLine);
         newLine += 1;
@@ -950,7 +960,7 @@ function negativeControlRefusal(ticket, result) {
     return {
       ok: false,
       reason: "negative_control_test_required",
-      message: `${ticket.ref} completion refused: the negative control did not report these added or modified tests: ${result.tests.join(", ")}. Claim-holder test markers found: ${(result.markerLines || []).map((line) => `"${line}"`).join(", ") || "none"}. ${recipe}`
+      message: `${ticket.ref} completion refused: the negative control did not report these added or modified tests: ${result.tests.map((name) => JSON.stringify(name)).join(", ")}. Each quoted value is one exact test name; report it without the quotes. Claim-holder test markers found: ${(result.markerLines || []).map((line) => `"${line}"`).join(", ") || "none"}. ${recipe}`
     };
   }
   if (result.kind === "short_waiver") {
