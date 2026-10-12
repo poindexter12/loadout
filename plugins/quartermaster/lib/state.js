@@ -326,8 +326,21 @@ function verifyDecisions(projectDir, env = process.env) {
     // rules, automode blocks, and rejected TaskStops it could never have touched.
     const isPermissionRule = typeof decision.fingerprint === 'string' && decision.fingerprint.startsWith('permission:');
     const signal = decision.signal && decision.signal !== 'any' ? decision.signal : null;
+    // Matching the fingerprint is not enough: the denial has to be one the permission system
+    // itself raised. A call the user stopped (`interrupted`), one they rejected at the prompt
+    // (`user-rejected`), or one another layer intercepted (Sidequest routing) carries the same
+    // fingerprint while saying nothing about the rule, so counting it grades the rule on somebody
+    // else's decision. Returns null when the session was tallied before the kind was recorded and
+    // the fingerprint saw denials of some unknown kind: those cannot be attributed either way.
+    const permissionDenialsOf = (tally) => {
+      const byPermissionRule = tally?.permissionDenialsByFingerprint;
+      if (byPermissionRule && typeof byPermissionRule === 'object') {
+        return byPermissionRule[decision.fingerprint] ?? 0;
+      }
+      return (tally?.denialsByFingerprint?.[decision.fingerprint] ?? 0) > 0 ? null : 0;
+    };
     const valueOf = isPermissionRule
-      ? (tally) => tally?.denialsByFingerprint?.[decision.fingerprint] ?? 0
+      ? (tally) => permissionDenialsOf(tally) ?? 0
       : (tally) => (signal ? tally?.[signal] ?? 0 : frictionOf(tally));
     const before = state.sessions.filter((session) => session.endedAt <= decision.at);
     const after = state.sessions.filter((session) => session.endedAt > decision.at);
@@ -335,13 +348,7 @@ function verifyDecisions(projectDir, env = process.env) {
       results.push({ id: decision.id, title: decision.title, fingerprint: decision.fingerprint, verdict: 'insufficient-data', sessionsBefore: before.length, sessionsAfter: after.length });
       continue;
     }
-    const mean = (sessions) => sessions.reduce((total, session) => total + valueOf(session.tally), 0) / sessions.length;
-    const beforeRate = mean(before);
-    const afterRate = mean(after);
-    // A rule's own fingerprint may simply never have been denied, before or after — there is
-    // nothing to compare, so "flat" (which a 0-vs-0 mean would otherwise report) would be a false
-    // signal that the rule made no difference. Report the absence of data instead.
-    if (isPermissionRule && beforeRate === 0 && afterRate === 0) {
+    const declineToJudge = () => {
       results.push({
         id: decision.id,
         title: decision.title,
@@ -351,6 +358,22 @@ function verifyDecisions(projectDir, env = process.env) {
         sessionsBefore: before.length,
         sessionsAfter: after.length,
       });
+    };
+    // Sessions recorded before the kind was tallied hold a fingerprint count of mixed kinds.
+    // Reading those as permission-rule denials revives the defect; reading them as zero invents a
+    // clean "before" that makes any later denial look like a regression.
+    if (isPermissionRule && [...before, ...after].some((session) => permissionDenialsOf(session.tally) === null)) {
+      declineToJudge();
+      continue;
+    }
+    const mean = (sessions) => sessions.reduce((total, session) => total + valueOf(session.tally), 0) / sessions.length;
+    const beforeRate = mean(before);
+    const afterRate = mean(after);
+    // A rule's own fingerprint may simply never have been denied by a permission rule, before or
+    // after — there is nothing to compare, so "flat" (which a 0-vs-0 mean would otherwise report)
+    // would be a false signal that the rule made no difference. Report the absence of data instead.
+    if (isPermissionRule && beforeRate === 0 && afterRate === 0) {
+      declineToJudge();
       continue;
     }
     const verdict = afterRate < beforeRate * 0.7 ? 'improved' : afterRate > beforeRate * 1.3 ? 'worse' : 'flat';
