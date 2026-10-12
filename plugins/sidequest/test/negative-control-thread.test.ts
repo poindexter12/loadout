@@ -34,12 +34,12 @@ const { slug } = store.ensureProject(PROJECT_DIR);
 const codingNormal = store.getCategory('coding.normal');
 store.setCategory(Object.assign({}, codingNormal, { route: { model: 'sonnet', effort: 'medium' }, fallback: null }));
 
-function createClaimedMixedChangeTicket(by: string) {
+function createClaimedMixedChangeTicket(by: string, files: string[] = ['lib/fixture.js', 'test/fixture.test.js']) {
   const ticket = store.createTicket(slug, {
     title: 'negative control thread fixture',
     description: 'Where: negative-control fixture. Contract: accept matching markers from the claim holder. Verify: inspect completion.',
     category: 'coding.normal',
-    files: ['lib/fixture.js', 'test/fixture.test.js'],
+    files,
     source: 'test',
   });
   const prepared = store.prepareDispatch(slug, ticket.ref, { sharedTree: true, sessionId: `${ticket.ref}-session` });
@@ -170,6 +170,119 @@ test('negative control test names unescape source string literals instead of dem
   const escapedQuoteControl = `[sidequest:negative-control] target=lib/fixture.js escaped-quote branch; assertion=printed name in ${printedTestName}; node --test test/fixture.test.js failed=1. Restored afterward.\n[sidequest:negative-control-test] failed ${printedTestName}`;
   assert.equal(store.addComment(slug, ticket.ref, { by, body: escapedQuoteControl, source: 'mcp' }).ok, true);
 
+  const completion = store.addComment(slug, ticket.ref, {
+    by,
+    body: '[sidequest:verify-complete] passed: fixture verification passed.',
+    source: 'mcp',
+  });
+  assert.equal(completion.ok, true, completion.message);
+});
+
+function resetFixtureTree() {
+  git(['checkout', '--', 'lib/fixture.js', 'test/fixture.test.js']);
+}
+
+function commitBaseFile(relativePath: string, content: string) {
+  fs.mkdirSync(path.dirname(path.join(PROJECT_DIR, relativePath)), { recursive: true });
+  fs.writeFileSync(path.join(PROJECT_DIR, relativePath), content);
+  git(['add', '--', relativePath]);
+  git(['commit', '-m', `base ${relativePath}`, '--', relativePath]);
+}
+
+const genuineControl = (assertion: string) => `[sidequest:negative-control] target=lib/fixture.js:1; assertion=${assertion}; npm run test:files test/fixture.test.js failed=10`;
+
+test('SQ-323: a changed bash test file does not turn quoted fixture data in a function body into required test names', () => {
+  resetFixtureTree();
+  // Mirrors iarx-com/github-terraform tests/verify.sh check_repo_survey_fail_closed:
+  // jq's test("<regex>") and quoted repo names are DATA inside a bash function,
+  // never test definitions. Written through fixtureTestDefinition so this
+  // authoring line is not itself mistaken for a JS test(...) definition.
+  const baseSuite = [
+    '#!/usr/bin/env bash',
+    'check_repo_survey_fail_closed() {',
+    '  local out',
+    '  out=$(survey --repos alpha,bravo,charlie,delta,echo,foxtrot)',
+    `  echo "$out" | jq -e '[.[] | select(.name | ${fixtureTestDefinition}("^(bravo|charlie|delta|echo|foxtrot)$"))] | length == 5'`,
+    `  echo "$out" | jq -e '.[] | select(.name == "bravo")'`,
+    '}',
+    '',
+    'ver_026() {',
+    '  check_repo_survey_fail_closed',
+    '}',
+    '',
+  ].join('\n');
+  commitBaseFile('test/verify.sh', baseSuite);
+  const by = 'sq-323-bash-fixture-data';
+  const ticket = createClaimedMixedChangeTicket(by, ['lib/fixture.js', 'test/verify.sh']);
+  fs.writeFileSync(
+    path.join(PROJECT_DIR, 'test', 'verify.sh'),
+    baseSuite.replace('  check_repo_survey_fail_closed\n}', '  check_repo_survey_fail_closed\n  echo ver_026 done\n}')
+      + 'ver_027() {\n  echo "types catalog"\n}\n',
+  );
+
+  assert.equal(store.addComment(slug, ticket.ref, { by, body: genuineControl('ver_027 types catalog'), source: 'mcp' }).ok, true);
+  const completion = store.addComment(slug, ticket.ref, {
+    by,
+    body: '[sidequest:verify-complete] passed: fixture verification passed.',
+    source: 'mcp',
+  });
+  assert.equal(completion.ok, true, completion.message);
+  git(['checkout', '--', 'test/verify.sh']);
+});
+
+test('SQ-323: a regex literal .test() call inside a changed JS test body is data, not a test definition', () => {
+  resetFixtureTree();
+  const realName = 'survey refuses unknown repos';
+  const by = 'sq-323-js-regex-call';
+  const ticket = createClaimedMixedChangeTicket(by);
+  fs.writeFileSync(
+    path.join(PROJECT_DIR, 'test', 'fixture.test.js'),
+    `${fixtureTestDefinition}('${realName}', () => {\n  assert.ok(/^(bravo|charlie)$/.${fixtureTestDefinition}('bravo'));\n});\n`,
+  );
+  assert.equal(store.addComment(slug, ticket.ref, {
+    by,
+    body: `${genuineControl(realName)}\n[sidequest:negative-control-test] failed ${realName}`,
+    source: 'mcp',
+  }).ok, true);
+  const completion = store.addComment(slug, ticket.ref, {
+    by,
+    body: '[sidequest:verify-complete] passed: fixture verification passed.',
+    source: 'mcp',
+  });
+  assert.equal(completion.ok, true, completion.message);
+});
+
+test('SQ-323: the refusal quotes each required test name and an unaffected <name> because <reason> marker clears it', () => {
+  resetFixtureTree();
+  const firstName = 'retries, then gives up';
+  const secondName = 'reports the survey | summary';
+  const by = 'sq-323-unaffected-marker';
+  const ticket = createClaimedMixedChangeTicket(by);
+  fs.writeFileSync(
+    path.join(PROJECT_DIR, 'test', 'fixture.test.js'),
+    `${fixtureTestDefinition}('${firstName}', () => {});\n${fixtureTestDefinition}('${secondName}', () => {});\n`,
+  );
+  assert.equal(store.addComment(slug, ticket.ref, { by, body: genuineControl('fixture value'), source: 'mcp' }).ok, true);
+
+  const refusal = store.addComment(slug, ticket.ref, {
+    by,
+    body: '[sidequest:verify-complete] passed: fixture verification passed.',
+    source: 'mcp',
+  });
+  assert.equal(refusal.reason, 'negative_control_test_required');
+  // Each name is quoted, so a name holding a comma or a pipe stays one name.
+  assert.ok(refusal.message.includes(JSON.stringify(firstName)), refusal.message);
+  assert.ok(refusal.message.includes(JSON.stringify(secondName)), refusal.message);
+
+  // The consolidated comment form the SQ-13 executor used.
+  assert.equal(store.addComment(slug, ticket.ref, {
+    by,
+    body: [
+      `[sidequest:negative-control-test] unaffected ${firstName} because the reverted branch is never reached by this test`,
+      `[sidequest:negative-control-test] unaffected "${secondName}" because it only formats output the revert does not touch`,
+    ].join('\n'),
+    source: 'mcp',
+  }).ok, true);
   const completion = store.addComment(slug, ticket.ref, {
     by,
     body: '[sidequest:verify-complete] passed: fixture verification passed.',
