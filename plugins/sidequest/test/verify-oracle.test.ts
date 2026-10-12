@@ -176,6 +176,18 @@ test('a ticket whose verify is derived says so in pulse and names the derived co
   assert.match(derivation.reason, /records no executorVerify of its own/);
   assert.equal(derivation.declaredKind, 'command');
 
+  // The dispatch result is the surface the executor itself reads, so the notice has to be
+  // there too, not only on the ticket it leaves behind.
+  const dispatchWarning = (prepared.warnings || []).find((entry: string) => /DERIVED/.test(entry));
+  assert.ok(
+    dispatchWarning,
+    `the dispatch result must announce the derivation, got ${JSON.stringify(prepared.warnings || [])}`,
+  );
+  assert.ok(
+    dispatchWarning.includes(JSON.stringify(requirement.command)),
+    'the dispatch result must name the exact derived command',
+  );
+
   // pulse has to carry it, structured and in `warnings` -- the latter because the default
   // compact pulse keeps only four dispatch fields but passes warnings through.
   const pulse = store.pulsePayload(slug, ticket.ref);
