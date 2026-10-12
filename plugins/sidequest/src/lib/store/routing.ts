@@ -32,7 +32,7 @@ function createRouting(dependencies: any) {
 const CLAUDE_RUNTIMES = ['haiku', 'sonnet', 'opus', 'fable'];
 const CLAUDE_RUNTIME_LABELS: Record<string, string> = {
   haiku: 'Claude Haiku', sonnet: 'Claude Sonnet',
-  opus: 'Claude Opus 5', fable: 'Claude Fable',
+  opus: 'Claude Opus', fable: 'Claude Fable',
 };
 const VALID_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const BACKEND_SLUG_RE = /^[a-z0-9][a-z0-9-]{1,31}$/;
