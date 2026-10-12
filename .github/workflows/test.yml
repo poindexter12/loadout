@@ -144,12 +144,20 @@ jobs:
           NODE
           fi
           printf 'OBSERVABILITY_OTELCOL_CONTRIB=%s\n' "$binary_path" >> "$GITHUB_ENV"
-      - name: Test affected plugin
+      # Deciding and running are separate steps so the run record says, per plugin, whether that
+      # plugin's suite actually executed. A commit touching none of the watched paths (a release
+      # fragment, an upstream ledger entry) short-circuits every leg, and the workflow then reports
+      # success having tested nothing. scripts/release/cut.mjs reads these two steps' conclusions
+      # from the jobs API: a skipped suite step is the signal that a green run says nothing about
+      # this plugin, so the release gate falls back to the local suite instead of trusting the
+      # aggregate verdict. GitHub records the conclusion itself, so the leg cannot report coverage
+      # it did not deliver. The plugin name has to live in the step NAME, because that is all the
+      # jobs API carries per step: keep it in sync with SUITE_STEP_PATTERN in cut.mjs.
+      - name: Select affected plugin
+        id: affected
         shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          SETUP: ${{ matrix.setup }}
-          COMMAND: ${{ matrix.command }}
         run: |
           base="$BASE_SHA"
           if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
@@ -157,8 +165,17 @@ jobs:
           fi
           if git diff --quiet "$base" "$GITHUB_SHA" -- "${{ matrix.path }}" .claude-plugin/marketplace.json scripts/release .github/workflows .claude/rules/** .gitignore; then
             echo "${{ matrix.name }} is unaffected"
-            exit 0
+            printf 'affected=false\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'affected=true\n' >> "$GITHUB_OUTPUT"
           fi
+      - name: Run plugin suite (${{ matrix.name }})
+        if: steps.affected.outputs.affected == 'true'
+        shell: bash
+        env:
+          SETUP: ${{ matrix.setup }}
+          COMMAND: ${{ matrix.command }}
+        run: |
           cd "${{ matrix.path }}"
           if [ -n "$SETUP" ]; then eval "$SETUP"; fi
           if [ -n "$COMMAND" ]; then eval "$COMMAND"; fi

@@ -7,7 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import * as cutModule from '../cut.mjs';
-import { assertGitHubReleasePublished, assertParentCiPassed, cut, defaultSuiteRunner, isGitHubRemote } from '../cut.mjs';
+import { assertGitHubReleasePublished, assertParentCiPassed, cut, defaultSuiteRunner, isGitHubRemote, readSuiteCoverage } from '../cut.mjs';
 import { createGit, spawnRunner } from '../lib/git.mjs';
 import { readValue } from '../lib/jsonedit.mjs';
 import { makeGitRepo } from './realrepo.mjs';
@@ -26,6 +26,28 @@ function tagAs(context, { name, email }, tag, target) {
 }
 
 const failingSuite = (suite) => ({ code: 1, command: suite.command });
+
+// A gh stand-in for the two calls assertParentCiPassed makes: the completed Test run for a commit,
+// and that run's step record. `steps` holds [name, conclusion] pairs exactly as the jobs API
+// reports them, so a skipped suite step here is a plugin whose leg short-circuited in CI.
+function ciRunner({ commit, conclusion = 'success', runId = 7021, steps = [], jobsFailure = null }) {
+  return (command, args) => {
+    assert.equal(command, 'gh');
+    if (args[0] === 'run') {
+      const run = runId === null ? { headSha: commit, conclusion } : { headSha: commit, conclusion, databaseId: runId };
+      assert.ok(args.includes('databaseId') || args.some((arg) => String(arg).includes('databaseId')), 'the run id is requested');
+      return { status: 0, stdout: JSON.stringify([run]), stderr: '' };
+    }
+    assert.deepEqual(args, [
+      'api', '--paginate', `repos/{owner}/{repo}/actions/runs/${runId}/jobs?per_page=100`,
+      '--jq', '.jobs[] | .steps[]? | [.name, .conclusion] | @json',
+    ]);
+    if (jobsFailure !== null) return { status: 1, stdout: '', stderr: jobsFailure };
+    return { status: 0, stdout: `${steps.map((step) => JSON.stringify(step)).join('\n')}\n`, stderr: '' };
+  };
+}
+
+const suiteStep = (plugin, conclusion) => [`Run plugin suite (${plugin})`, conclusion];
 
 // A second remote this clone can read: an empty bare repository beside origin.
 function addRemote(context, name) {
@@ -1615,6 +1637,221 @@ test('--trust-ci refuses without a CI verdict, beside --ci-override, and in a ho
     /--trust-ci applies to normal windows only/,
   );
   assert.equal(context.git('rev-parse', 'HEAD'), pinned);
+});
+
+test('a window moving a plugin version is refused when CI skipped that plugin suite', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const pinned = context.commit('integrate');
+  const before = context.remoteRefs();
+  let suiteRuns = 0;
+  // The shape of a fragment-only commit: every leg short-circuited, so the run is green having
+  // tested nothing that this window releases.
+  const runner = ciRunner({
+    commit: pinned,
+    steps: [suiteStep('codex-gateway', 'skipped'), suiteStep('sidequest', 'skipped'), suiteStep('toolbelt', 'skipped')],
+  });
+  const injected = (repoRoot, commit, suites) => assertParentCiPassed(repoRoot, commit, runner, suites);
+
+  const failure = await rejection(cut({
+    repoRoot: context.root,
+    log: () => {},
+    runSuite: () => {
+      suiteRuns += 1;
+      return { code: 0, command: 'should not run' };
+    },
+    assertParentCiPassed: injected,
+  }));
+
+  assert.match(failure.message, /concluded success without running these plugin suites: sidequest \(skipped\)/);
+  assert.match(failure.message, /Test workflow run 7021/);
+  assert.match(failure.message, /--force-local-tests/);
+  assert.equal(suiteRuns, 0, 'the refusal lands before any suite runs');
+  assert.equal(context.git('rev-parse', 'HEAD'), pinned, 'no release commit exists');
+  assert.equal(context.exists('.release/unreleased/SQ-1.md'), true, 'the fragment is still queued');
+  assert.equal(context.git('tag', '--list'), '', 'no release tags were created');
+  assert.equal(context.version('sidequest'), '3.6.17', 'the version never moved');
+  assert.deepEqual(context.remoteRefs(), before);
+
+  // --skip-tests is not an escape: it declines to run the suites, which is the opposite of
+  // supplying the evidence the workflow never produced.
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, skipTests: true, log: () => {}, assertParentCiPassed: injected }),
+    /concluded success without running these plugin suites: sidequest \(skipped\)/,
+  );
+  assert.equal(context.git('rev-parse', 'HEAD'), pinned);
+  assert.equal(context.git('tag', '--list'), '');
+});
+
+test('a released plugin with no suite step at all in the CI run is refused the same way', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const pinned = context.commit('integrate');
+  const runner = ciRunner({ commit: pinned, steps: [suiteStep('toolbelt', 'success'), ['Select affected plugin', 'success']] });
+
+  await assert.rejects(
+    () => cut({
+      repoRoot: context.root,
+      log: () => {},
+      runSuite: context.runSuite,
+      assertParentCiPassed: (repoRoot, commit, suites) => assertParentCiPassed(repoRoot, commit, runner, suites),
+    }),
+    /without running these plugin suites: sidequest \(no suite step recorded\)/,
+  );
+  assert.deepEqual(context.suites, [], 'nothing ran');
+  assert.equal(context.git('tag', '--list'), '');
+
+  // A run whose id gh did not report cannot be inspected, which is the same absence of evidence.
+  const idless = ciRunner({ commit: pinned, runId: null });
+  await assert.rejects(
+    () => cut({
+      repoRoot: context.root,
+      log: () => {},
+      assertParentCiPassed: (repoRoot, commit, suites) => assertParentCiPassed(repoRoot, commit, idless, suites),
+    }),
+    /concluded success but reported no run id, so which plugin suites ran in it cannot be checked/,
+  );
+  assert.equal(context.git('rev-parse', 'HEAD'), pinned);
+});
+
+test('--force-local-tests turns a CI coverage gap into a local suite run', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const pinned = context.commit('integrate');
+  const logs = [];
+  const runner = ciRunner({ commit: pinned, steps: [suiteStep('sidequest', 'skipped')] });
+
+  const result = await cut({
+    repoRoot: context.root,
+    forceLocalTests: true,
+    log: (message) => logs.push(message),
+    runSuite: context.runSuite,
+    assertParentCiPassed: (repoRoot, commit, suites) => assertParentCiPassed(repoRoot, commit, runner, suites),
+  });
+
+  assert.equal(result.status, 'cut');
+  assert.equal(result.ci.status, 'uncovered', 'a green run that tested nothing is not a passing verdict');
+  assert.deepEqual(result.ci.uncovered, ['sidequest']);
+  assert.equal(result.suitesSkipped, false);
+  assert.deepEqual(context.suites, ['sidequest'], 'the suite CI skipped runs locally instead');
+  assert.equal(context.version('sidequest'), '3.6.18');
+  assert.ok(logs.includes(`Test CI on the pinned commit ${pinned} passed without running the suites for sidequest; they ran locally instead.`));
+});
+
+test('--trust-ci refuses a window whose CI run never ran the released plugin suite', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const pinned = context.commit('integrate');
+  const runner = ciRunner({ commit: pinned, steps: [suiteStep('sidequest', 'skipped')] });
+  const injected = (repoRoot, commit, suites) => assertParentCiPassed(repoRoot, commit, runner, suites);
+
+  await assert.rejects(
+    () => cut({
+      repoRoot: context.root,
+      trustCi: true,
+      forceLocalTests: true,
+      log: () => {},
+      runSuite: failingSuite,
+      assertParentCiPassed: injected,
+    }),
+    (error) => {
+      assert.match(error.message, /--trust-ci needs a passing Test workflow on the pinned commit/);
+      assert.match(error.message, /never ran the suites for sidequest, so it cannot excuse a local failure/);
+      return true;
+    },
+  );
+  assert.equal(context.git('rev-parse', 'HEAD'), pinned, 'no release commit exists');
+  assert.equal(context.git('tag', '--list'), '');
+
+  // Without --force-local-tests the coverage refusal comes first, so --trust-ci never gets a say.
+  await assert.rejects(
+    () => cut({ repoRoot: context.root, trustCi: true, log: () => {}, runSuite: failingSuite, assertParentCiPassed: injected }),
+    /without running these plugin suites: sidequest \(skipped\)/,
+  );
+});
+
+test('a CI run that did run the released plugin suite still replaces the local suites', async (t) => {
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const pinned = context.commit('integrate');
+  const logs = [];
+  const runner = ciRunner({ commit: pinned, steps: [suiteStep('sidequest', 'success'), suiteStep('toolbelt', 'skipped')] });
+
+  const result = await cut({
+    repoRoot: context.root,
+    log: (message) => logs.push(message),
+    runSuite: context.runSuite,
+    assertParentCiPassed: (repoRoot, commit, suites) => assertParentCiPassed(repoRoot, commit, runner, suites),
+  });
+
+  assert.equal(result.status, 'cut');
+  assert.deepEqual(result.ci, { status: 'passed', commit: pinned, conclusion: 'success' });
+  assert.equal(result.suitesSkipped, true, 'the skip survives, now backed by a suite that actually ran');
+  assert.deepEqual(context.suites, [], 'a plugin this window does not release is allowed to have skipped');
+  assert.ok(logs.includes(`Test CI on the pinned commit ${pinned} passed; skipping local plugin suites. Pass --force-local-tests to run them.`));
+});
+
+test('readSuiteCoverage reads each plugin suite step, and partial coverage is not coverage', () => {
+  const lines = [
+    ['Select affected plugin', 'success'],
+    ['Run plugin suite (codex-gateway)', 'skipped'],
+    ['Run plugin suite (codex-gateway)', 'success'],
+    ['Run plugin suite (sidequest)', 'success'],
+    ['Run plugin suite (sidequest)', 'skipped'],
+    ['Run plugin suite (toolbelt)', 'success'],
+    ['Run plugin suite (observability)', 'cancelled'],
+    ['Post Run actions/checkout@v7', 'success'],
+  ];
+  const calls = [];
+  const coverage = readSuiteCoverage('/repo', 42, (command, args) => {
+    calls.push([command, ...args]);
+    return { status: 0, stdout: `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`, stderr: '' };
+  });
+
+  assert.deepEqual([...coverage.entries()], [
+    ['codex-gateway', 'skipped'],
+    ['sidequest', 'skipped'],
+    ['toolbelt', 'ran'],
+    ['observability', 'skipped'],
+  ], 'a hyphenated plugin name parses, and either order of conflicting verdicts resolves to skipped');
+  assert.deepEqual(calls, [[
+    'gh', 'api', '--paginate', 'repos/{owner}/{repo}/actions/runs/42/jobs?per_page=100',
+    '--jq', '.jobs[] | .steps[]? | [.name, .conclusion] | @json',
+  ]]);
+
+  assert.throws(
+    () => readSuiteCoverage('/repo', 42, () => ({ status: 1, stdout: '', stderr: 'gh: Not Found (HTTP 404)\n' })),
+    /cannot check which plugin suites ran in Test run 42: gh: Not Found \(HTTP 404\)/,
+  );
+  assert.throws(
+    () => readSuiteCoverage('/repo', 42, () => ({ error: new Error('gh is not installed') })),
+    /cannot check which plugin suites ran in Test run 42: gh is not installed/,
+  );
+  assert.throws(
+    () => readSuiteCoverage('/repo', 42, () => ({ status: 0, stdout: 'not json\n', stderr: '' })),
+    /cannot read the step record of Test run 42: gh returned invalid JSON/,
+  );
+});
+
+// The marker is a name agreed between two files. A rename on either side makes every window
+// uncovered, so the agreement is asserted rather than left to a comment.
+test('the Test workflow suite step is named the way readSuiteCoverage parses it', () => {
+  const workflow = readFileSync(new URL('../../../.github/workflows/test.yml', import.meta.url), 'utf8');
+  const template = 'Run plugin suite (${{ matrix.name }})';
+
+  assert.ok(workflow.includes(`- name: ${template}`), 'the suite step still carries the plugin name in its step name');
+  assert.match(
+    workflow,
+    /if: steps\.affected\.outputs\.affected == 'true'/,
+    'the suite step is conditional, so GitHub records `skipped` for a short-circuited leg',
+  );
+
+  const coverage = readSuiteCoverage('/repo', 42, () => ({
+    status: 0,
+    stdout: `${JSON.stringify([template.replace('${{ matrix.name }}', 'codex-gateway'), 'success'])}\n`,
+    stderr: '',
+  }));
+  assert.deepEqual([...coverage.entries()], [['codex-gateway', 'ran']]);
 });
 
 test('--marketplace-level parses as a normal-window override', () => {
