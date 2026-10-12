@@ -57,7 +57,7 @@ foreign paths changed after this dispatch baseline; pre-existing dirty or staged
 Out-of-scope changes are normal: commit what is declared, then request their scope or restore them before closeout;
 report every refused or unscoped path in the final report, never call partial work ready for integration;
 never release verified work over scope friction. Stay within declared files and scope test runs. Never read large files whole. Never publish, push, create or
-switch branches. NEVER edit or commit `.claude-plugin/plugin.json` or `.claude-plugin/marketplace.json`.
+switch branches. NEVER edit `version` fields (release-owned) or `.claude-plugin/marketplace.json`; other `.claude-plugin/plugin.json` fields may change only when the file is in the ticket's declared scope.
 NEVER update the codebase map (`.claude/.codebase-info/`), even when a hook or skill reports it stale: parallel
 executors would collide on it, and a mid-wave map would describe a tree that has not landed on main. Map refresh
 is the orchestrator's, once, after integration. If your change makes the map stale, say so in the final report.

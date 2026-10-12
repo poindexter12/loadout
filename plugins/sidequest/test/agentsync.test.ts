@@ -522,6 +522,14 @@ test('diagnostic probe definition has only read-only tools and a bounded lifetim
   assert.match(source, /Diagnose only the Agent spawn path/);
 });
 
+test('executor prompts allow scoped non-version plugin manifest changes', () => {
+  for (const [filename, source] of agentsync.bundledExecutorSources()) {
+    if (filename === 'sidequest-diagnostic-probe.md') continue;
+    assert.match(source, /NEVER edit `version` fields \(release-owned\) or `\.claude-plugin\/marketplace\.json`; other `\.claude-plugin\/plugin\.json` fields may change only when the file is in the ticket's declared scope\./);
+    assert.doesNotMatch(source, /NEVER edit or commit `\.claude-plugin\/plugin\.json` or `\.claude-plugin\/marketplace\.json`\./);
+  }
+});
+
 test('the packaged agent roster exactly matches the generator output', () => {
   const expected = agentsync.bundledExecutorSources();
   const directory = path.join(__dirname, '..', 'agents');
