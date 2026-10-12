@@ -1472,6 +1472,52 @@ function workingTreeContainsSubmittedContent(repo: string, submission: any, cand
   return missing.length ? { ok: false, missing } : { ok: true, evidence: 'working_tree_matches_candidate' };
 }
 
+// SQ-322: a manual delivery of a non-reachable pinned candidate (a forge PR
+// squash-merged its head) is first checked against the integration working
+// tree. Once a LATER commit changes a submitted path, that tree can never
+// match again, though the candidate did land. Prove the delivery at the point
+// it landed instead: the oldest commit on the integration branch's first-parent
+// history, after the candidate forked from it, whose every submitted path holds
+// exactly the content commit's object (deletions included). A fork point that
+// already holds that content proves nothing, so it never matches; a delivery
+// that no branch commit ever carried is still refused.
+function landedCommitWithContent(repo: string, submission: any, contentCommit: string, head: string, extraPaths: string[] = []) {
+  const candidate = String(submission.commit || '').toLowerCase();
+  let forkPoint: string;
+  try {
+    forkPoint = integrationGit(repo, ['merge-base', candidate, head]).toLowerCase();
+  } catch (error: any) {
+    if (error?.status === 1) return null;
+    throw error;
+  }
+  if (!forkPoint) return null;
+  const paths: string[] = Array.from(new Set([...changedIntegrationPaths(repo, submission), ...extraPaths]));
+  // cat-file reads one object name per line; a path with a line break cannot be asked.
+  if (!paths.length || paths.some((file) => /[\r\n]/.test(file))) return null;
+  const expected = paths.map((file) => objectAtPath(repo, contentCommit, file));
+  if (paths.every((file, index) => objectAtPath(repo, forkPoint, file) === expected[index])) return null;
+  const history = integrationGit(repo, ['rev-list', '--first-parent', '--reverse', head, `^${forkPoint}`]).split(/\r?\n/).filter(Boolean);
+  if (!history.length) return null;
+  const lines = history.flatMap((commit: string) => paths.map((file) => `${commit}:${file}`));
+  const objects = execFileSync('git', ['cat-file', '--batch-check=%(objectname)'], {
+    cwd: repo,
+    encoding: 'utf8',
+    input: `${lines.join('\n')}\n`,
+    timeout: 120_000,
+    windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    maxBuffer: 64 * 1024 * 1024,
+  }).split(/\r?\n/).slice(0, lines.length).map((line: string) => {
+    const object = line.trim().toLowerCase();
+    return /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(object) ? object : null;
+  });
+  for (let index = 0; index < history.length; index += 1) {
+    const offset = index * paths.length;
+    if (expected.every((object, pathIndex) => objects[offset + pathIndex] === object)) return history[index]!.toLowerCase();
+  }
+  return null;
+}
+
 function workingTreeDeliveryPaths(repo: string) {
   const tracked = integrationGit(repo, ['diff', '--name-only', 'HEAD']).split(/\r?\n/).filter(Boolean);
   const untracked = integrationGit(repo, ['ls-files', '--others', '--exclude-standard']).split(/\r?\n/).filter(Boolean);
@@ -1606,6 +1652,11 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
       ? workingTreeContainsSubmittedContent(repo, ticket.submission, deliveryCommit)
       : deliveryContainsSubmittedContent(repo, ticket.submission, deliveryCommit);
     let descendant: any = null;
+    let landingCommit: string | null = null;
+    if (!content.ok && workingTreeDelivery) {
+      landingCommit = landedCommitWithContent(repo, ticket.submission, deliveryCommit, resultingHead);
+      if (landingCommit) content = { ok: true, evidence: 'landed_candidate_content' };
+    }
     if (!content.ok) {
       const candidate = String(ticket.submission.commit || '').toLowerCase();
       const reviewed: any = reviewedCandidateDescendant(repo, ticket, opts.deliveryInteractionCommit);
@@ -1630,6 +1681,10 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
       content = workingTreeDelivery
         ? workingTreeContainsSubmittedContent(repo, ticket.submission, descendant.commit, descendant.paths)
         : deliveryContainsReviewedDescendant(repo, ticket.submission, descendant.commit, deliveryCommit);
+      if (!content.ok && workingTreeDelivery) {
+        landingCommit = landedCommitWithContent(repo, ticket.submission, descendant.commit, resultingHead, descendant.paths);
+        if (landingCommit) content = { ok: true, evidence: 'landed_candidate_content' };
+      }
       if (!content.ok) {
         return {
           ok: false,
@@ -1652,7 +1707,9 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
         message: `${ticket.ref} merged-tree verification returned ${verify.status} for recorded delivery ${deliveryCommit}: ${verify.command || `verification ${verify.status}`}. Log: ${verify.logPath || 'not created'}.${verificationRepinHint(ticket, verify)}`,
       });
     }
-    const deliveredFiles = workingTreeDelivery
+    const deliveredFiles = landingCommit
+      ? Array.from(new Set([...deliveredCommitPaths(repo, landingCommit), ...(descendant ? descendant.paths : [])]))
+      : workingTreeDelivery
       ? workingTreeDeliveryPaths(repo)
       : interaction.interaction || descendant
         ? Array.from(new Set([...deliveredCommitPaths(repo, deliveryCommit), ...(interaction.interaction || descendant).paths]))
@@ -1660,21 +1717,22 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
     const deliveryIdentity = {
       kind: descendant
         ? 'reviewed-candidate-descendant'
-        : interaction.interaction ? 'reviewed-merged-tree-interaction' : workingTreeDelivery ? 'pinned-working-tree' : 'reachable-commit',
+        : interaction.interaction ? 'reviewed-merged-tree-interaction' : landingCommit ? 'landed-candidate-content' : workingTreeDelivery ? 'pinned-working-tree' : 'reachable-commit',
       pinnedRef: submissionGitRef(ticket),
       candidate: ticket.submission.commit,
       sourceRevision: deliveryRevision,
       ...(interaction.interaction ? { sourceCommit: deliveryCommit, interaction: interaction.interaction } : {}),
       ...(descendant ? { sourceCommit: deliveryCommit, interaction: descendant } : {}),
       ...(workingTreeDelivery ? { method: deliveryMethod } : {}),
+      ...(landingCommit ? { landingCommit } : {}),
     };
     const recorded = updateSubmissionIntegration(slug, ticket.id, {
-      mode: interaction.interaction || (descendant && !workingTreeDelivery) ? 'recorded-reviewed-interaction' : workingTreeDelivery ? 'recorded-working-tree' : 'recorded',
+      mode: interaction.interaction || (descendant && (!workingTreeDelivery || landingCommit)) ? 'recorded-reviewed-interaction' : workingTreeDelivery && !landingCommit ? 'recorded-working-tree' : 'recorded',
       pinnedRef: submissionGitRef(ticket),
       pinnedCommit: ticket.submission.commit,
       deliveryCommit,
       resultingHead,
-      contentCommit: workingTreeDelivery ? deliveryCommit : resultingHead,
+      contentCommit: landingCommit || (workingTreeDelivery ? deliveryCommit : resultingHead),
       deliveryRevision,
       deliveryIdentity,
       targetBranch: target.branch,

@@ -926,6 +926,134 @@ test('a reviewed candidate descendant is refused when it leaves submitted paths 
   assert.notEqual(store.getTicket(slug, ticket.ref).status, 'done');
 });
 
+// SQ-322: a candidate delivered as a forge PR is squash-merged, then a LATER
+// PR changes one of its submitted paths. The candidate is not reachable (it was
+// squashed) and the integration tree no longer holds its content, so the
+// working-tree check alone can never pass again. The delivery is provable at
+// the point it landed: a first-parent commit on the integration branch whose
+// submitted-path content equals the candidate's.
+function squashThenLaterChange(label: string, landedBody: string | null = null) {
+  const fixture = makeRepo(label);
+  const { slug } = store.ensureProject(fixture.repo);
+  const ticket = store.createTicket(slug, {
+    title: `squash then later change ${label}`,
+    category: 'codebase-exploration',
+    description: 'A candidate squash-merged on the forge whose path a later PR changed.',
+    files: ['feature.txt'],
+  });
+  submitFixture(slug, ticket, fixture);
+  commitFile(fixture.repo, 'main-moved.txt', 'main moved before the squash\n');
+  let landing: string;
+  if (landedBody === null) {
+    git(['merge', '--squash', 'worktree-agent-abc123'], fixture.repo);
+    git(['commit', '-m', 'squash pinned candidate (#156)'], fixture.repo);
+    landing = head(fixture.repo);
+  } else {
+    landing = commitFile(fixture.repo, 'feature.txt', landedBody);
+  }
+  commitFile(fixture.repo, 'unrelated-later.txt', 'an unrelated later PR\n');
+  const later = commitFile(fixture.repo, 'feature.txt', 'a later PR changed this submitted path\n');
+  return { fixture, slug, ticket, landing, later };
+}
+
+test('SQ-322: a manual delivery of a squash-landed candidate closes after a later commit changes its paths', () => {
+  const { fixture, slug, ticket, landing, later } = squashThenLaterChange('squash-later-found');
+  assert.equal(head(fixture.repo), later);
+  assert.notEqual(fs.readFileSync(path.join(fixture.repo, 'feature.txt'), 'utf8'), 'executor work\n');
+
+  const delivered = store.completeTicketAsControlPlane(slug, ticket.ref, {
+    purpose: 'delivery',
+    by: 'orchestrator',
+    reason: 'PR #156 squash-merged the pinned candidate; PR #158 later changed feature.txt.',
+    deliveryCommit: fixture.submitted,
+    deliveryMethod: 'manual',
+  });
+  assert.equal(delivered.ok, true, delivered.message);
+  const stored = store.getTicket(slug, ticket.ref);
+  assert.equal(stored.status, 'done');
+  const integration = stored.submission.integration;
+  assert.equal(integration.contentEvidence, 'landed_candidate_content');
+  assert.equal(integration.deliveryIdentity.kind, 'landed-candidate-content');
+  assert.equal(integration.deliveryIdentity.landingCommit, landing);
+  assert.equal(integration.deliveryIdentity.candidate, fixture.submitted);
+  assert.equal(integration.deliveryCommit, fixture.submitted);
+  assert.equal(integration.contentCommit, landing);
+  assert.equal(integration.resultingHead, later);
+  assert.deepEqual(integration.deliveredFiles, ['feature.txt']);
+});
+
+test('SQ-322: naming the squash landing commit records delivery after a later commit changes its paths', () => {
+  const { slug, ticket, landing } = squashThenLaterChange('squash-later-named');
+  const delivered = store.completeTicketAsControlPlane(slug, ticket.ref, {
+    purpose: 'delivery',
+    by: 'orchestrator',
+    reason: 'Squash commit of PR #156 is on main; a later PR changed feature.txt.',
+    deliveryCommit: landing,
+    deliveryMethod: 'manual',
+  });
+  assert.equal(delivered.ok, true, delivered.message);
+  const stored = store.getTicket(slug, ticket.ref);
+  assert.equal(stored.status, 'done');
+  assert.equal(stored.submission.integration.deliveryCommit, landing);
+});
+
+test('SQ-322: a manual delivery is still refused when no commit on the branch ever carried the candidate content', () => {
+  const { fixture, slug, ticket } = squashThenLaterChange('squash-later-never', 'a different change that is not the candidate\n');
+  const refused = store.completeTicketAsControlPlane(slug, ticket.ref, {
+    purpose: 'delivery',
+    by: 'orchestrator',
+    reason: 'Claims the candidate landed, but no branch commit ever held its content.',
+    deliveryCommit: fixture.submitted,
+    deliveryMethod: 'manual',
+  });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.reason, 'delivery_content_missing');
+  assert.match(refused.message, /feature\.txt/);
+  assert.notEqual(store.getTicket(slug, ticket.ref).status, 'done');
+});
+
+test('SQ-322: a squash-landed reviewed descendant closes through deliveryInteractionCommit after a later change', () => {
+  const fixture = makeRepo('descendant-later');
+  const { slug } = store.ensureProject(fixture.repo);
+  const ticket = store.createTicket(slug, {
+    title: 'reviewed descendant squash then later change',
+    category: 'codebase-exploration',
+    description: 'A candidate plus reviewed fix squash-merged, then a later PR changed its path.',
+    files: ['feature.txt'],
+  });
+  submitFixture(slug, ticket, fixture);
+  const review = path.join(fixture.repo, '.claude', 'worktrees', 'review-descendant-later');
+  git(['worktree', 'add', '-b', 'review-descendant-later', review, fixture.submitted], fixture.repo);
+  const interaction = commitFile(review, 'feature.txt', 'reviewed fix\n');
+  git(['merge', '--squash', 'review-descendant-later'], fixture.repo);
+  git(['commit', '-m', 'squash reviewed candidate'], fixture.repo);
+  const squash = head(fixture.repo);
+  commitFile(fixture.repo, 'feature.txt', 'a later PR changed this submitted path\n');
+
+  // The pinned candidate's own content never landed, only the reviewed fix did.
+  const withoutInteraction = store.recordDeliveredSubmission(slug, ticket.ref, {
+    target: store.integrationTarget(slug),
+    deliveryCommit: fixture.submitted,
+    deliveryMethod: 'manual',
+    reason: 'Names the candidate alone, whose exact content never reached main.',
+  });
+  assert.equal(withoutInteraction.ok, false);
+  assert.equal(withoutInteraction.reason, 'delivery_content_missing');
+
+  const delivered = store.recordDeliveredSubmission(slug, ticket.ref, {
+    target: store.integrationTarget(slug),
+    deliveryCommit: fixture.submitted,
+    deliveryMethod: 'manual',
+    deliveryInteractionCommit: interaction,
+    reason: 'PR squash-merged the candidate plus reviewed fix; a later PR changed feature.txt.',
+  });
+  assert.equal(delivered.ok, true, delivered.message);
+  assert.equal(delivered.integration.deliveryIdentity.kind, 'reviewed-candidate-descendant');
+  assert.equal(delivered.integration.deliveryIdentity.landingCommit, squash);
+  assert.equal(delivered.integration.deliveryIdentity.interaction.commit, interaction);
+  assert.equal(delivered.integration.contentEvidence, 'landed_candidate_content:reviewed_candidate_descendant');
+});
+
 // SQ-158: groomClose's manual delivery targets a wave branch, but by the time
 // the orchestrator records the delivery, that wave branch's PR has already
 // merged into the checked-out branch (main) — and GitHub may have deleted the
