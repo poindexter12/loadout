@@ -24,6 +24,10 @@ Conditional release and manifest rules live in `.claude/rules/`. They are inject
 
 Documentation screenshots come ONLY from the committed pipeline (`docs/screenshots/`, `npm run screenshots`), which renders isolated, synthetically-seeded instances. Never screenshot live boards or dashboards for docs — real project names, session ids, and costs must never appear in committed imagery. Ad-hoc verification captures are gitignored (`/*.png`, `.playwright-mcp/`); keep them out of commits.
 
+## File writes
+
+Use the Write and Edit tools for file changes rather than `cat >` or `cat >>` redirection: shell redirection is not allowlisted here, and allowlisting it would auto-approve writes to any path.
+
 ## Platform support
 
 Windows is abandoned as a supported platform (decision 2026-09-15).
