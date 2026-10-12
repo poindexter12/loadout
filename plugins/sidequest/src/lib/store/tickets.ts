@@ -758,7 +758,19 @@ function requestScope(slug?: any, idOrRef?: any, by?: any, files?: any, opts?: a
     const packageScope = autoApprovedPackageScope(t, remainingAfterDerivedScope, slug);
     const approved = normalizeFiles([...derivedScope, ...packageScope]);
     if (approved.length) {
-      t.files = boundedFiles(scopeExpansionFiles(t, approved));
+      // The scope-expansion write re-validates the merged declaration, so it has to
+      // carry the same context `add` and `update` pass. Without the requesting ref the
+      // fragment guard ran against nothing and called this ticket's own declared
+      // release fragment foreign, which threw before the real request was ever ruled
+      // on; without the category it refused a readonly ticket's declared external
+      // output (SQ-318).
+      t.files = boundedFiles(scopeExpansionFiles(t, approved), {
+        category: t.category,
+        readonlyOverride: t.readonlyOverride,
+        slug,
+        ticketRef: t.ref,
+        operation: 'scopeRequest',
+      });
       syncLiveDispatchScope(slug, t);
     }
     const refused = normalizeFiles([

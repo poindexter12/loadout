@@ -1136,3 +1136,105 @@ test('the scope gates refuse a related review-rejected fragment but send the rep
     'the deletion rode the commit scope implicitly',
   );
 });
+
+// SQ-318: the scope-expansion write re-validated the merged declaration without a
+// context, so the fragment guard ran with no requesting ref: every scopeRequest on a
+// ticket that declared its own release fragment threw "refused undefined; only null is
+// implicitly writable" and named that ticket's own fragment as foreign.
+function ownFragmentFixture(label: string, by: string) {
+  const root = repo();
+  const slug = store.ensureProject(root, label).slug;
+  const declaredSource = 'plugins/sidequest/src/lib/commit-scope.ts';
+  const created = store.createTicket(slug, {
+    title: label,
+    files: [declaredSource],
+    complexity: 1,
+    complexityWhy: 'scopeRequest must rule on the request instead of re-running the fragment guard without a ref.',
+  });
+  const ownFragment = `.release/unreleased/${created.ref}.md`;
+  ticketHandler('update')({ project: root, ref: created.ref, files: [declaredSource, ownFragment] });
+  assert.deepEqual(store.getTicket(slug, created.ref).files, [declaredSource, ownFragment]);
+  assert.equal(
+    store.claimTicket(slug, created.ref, by, { direct: true, reason: 'The own-fragment fixture claims the ticket directly.' }).ok,
+    true,
+  );
+  return { root, slug, ref: created.ref, by, declaredSource, ownFragment };
+}
+
+test('scopeRequest rules for a ticket that declares its own release fragment', () => {
+  const fixture = ownFragmentFixture('own release fragment grant', 'own-fragment-grant-worker');
+  const requested = 'plugins/sidequest/src/lib/mcp-lifecycle.ts';
+
+  const ruling = lifecycleHandler('scopeRequest')({
+    project: fixture.root,
+    ref: fixture.ref,
+    by: fixture.by,
+    files: [requested],
+  });
+
+  assert.equal(ruling.ok, true, ruling.message as string);
+  assert.equal(ruling.state, 'granted');
+  assert.deepEqual(ruling.approved, [requested]);
+  assert.deepEqual(ruling.refused, []);
+  const ticket = store.getTicket(fixture.slug, fixture.ref);
+  assert.deepEqual(ticket.files, [fixture.declaredSource, fixture.ownFragment, requested]);
+  assert.equal(ticket.scopeResolution.state, 'granted');
+  assert.deepEqual(ticket.scopeResolution.granted, [requested]);
+});
+
+test('scopeRequest records a well-formed ruling for a path outside the scope of a ticket that owns a fragment', () => {
+  const fixture = ownFragmentFixture('own release fragment refusal', 'own-fragment-refusal-worker');
+  const approvable = 'plugins/sidequest/src/lib/mcp-lifecycle.ts';
+  const outside = 'docs/guide.md';
+
+  const ruling = lifecycleHandler('scopeRequest')({
+    project: fixture.root,
+    ref: fixture.ref,
+    by: fixture.by,
+    files: [approvable, outside],
+  });
+
+  assert.equal(ruling.ok, true, ruling.message as string);
+  assert.equal(ruling.state, 'refused');
+  assert.deepEqual(ruling.approved, [approvable]);
+  assert.deepEqual(ruling.refused, [outside]);
+  assert.ok(ruling.message.includes(outside), ruling.message);
+  const ticket = store.getTicket(fixture.slug, fixture.ref);
+  const persisted = ticket.comments.at(-1).body as string;
+  for (const text of [ruling.message as string, persisted]) {
+    assert.equal(text.includes('undefined'), false, text);
+    assert.equal(text.includes('only null is implicitly writable'), false, text);
+    assert.equal(text.includes(fixture.ownFragment), false, 'the ticket’s own fragment is never reported as foreign');
+  }
+  assert.deepEqual(ticket.files, [fixture.declaredSource, fixture.ownFragment, approvable]);
+  assert.equal(ticket.scopeResolution.state, 'refused');
+  assert.deepEqual(ticket.scopeResolution.refused, [outside]);
+});
+
+test('a foreign release fragment refusal names the requesting ref and the owning ref, never undefined', () => {
+  const fixture = ownFragmentFixture('own release fragment foreign refusal', 'own-fragment-foreign-worker');
+  const foreignFragment = '.release/unreleased/SQ-foreign.md';
+
+  const ruling = lifecycleHandler('scopeRequest')({
+    project: fixture.root,
+    ref: fixture.ref,
+    by: fixture.by,
+    files: [foreignFragment],
+  });
+
+  assert.equal(ruling.state, 'refused');
+  assert.deepEqual(ruling.refused, [foreignFragment]);
+  assert.ok(ruling.message.includes(fixture.ref), ruling.message);
+  assert.ok(ruling.message.includes('SQ-foreign'), ruling.message);
+  assert.ok(ruling.message.includes(`only ${fixture.ownFragment} is implicitly writable`), ruling.message);
+  assert.equal(ruling.message.includes('undefined'), false, ruling.message);
+
+  // The guard is defensive about a missing ref too: a caller that loses the ref must
+  // still produce prose, not "refused undefined; only null is implicitly writable".
+  for (const missing of [undefined, null, '', '   ']) {
+    const message = commitScope.foreignReleaseFragmentRefusalMessage('declared file scope', missing, [foreignFragment]);
+    assert.equal(message.includes('undefined'), false, message);
+    assert.equal(message.includes('null'), false, message);
+    assert.ok(message.includes(foreignFragment), message);
+  }
+});
