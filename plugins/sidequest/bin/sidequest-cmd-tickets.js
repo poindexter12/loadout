@@ -233,7 +233,11 @@ async function cmdList(opts) {
       limit: opts.limit,
       all: opts.all
     });
-    process.stdout.write(JSON.stringify(Object.assign({ project: slug, projectName: meta.name }, payload), null, 2) + "\n");
+    const response = Object.assign({ project: slug, projectName: meta.name }, payload);
+    if (payload.nextCursor) {
+      response.hint = `Showing ${payload.returned} of ${payload.total} tickets; pass --cursor ${payload.nextCursor} to continue until nextCursor is null, or increase --limit.`;
+    }
+    process.stdout.write(JSON.stringify(response, null, 2) + "\n");
     return;
   }
   let tickets = store.listTickets(slug);
