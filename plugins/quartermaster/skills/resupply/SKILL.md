@@ -122,11 +122,12 @@ loud: **keep** when it is used and helping, **improve** when it is used but unde
 **roll back** when it is unused or making no difference. Being honest about a recommendation that
 did not work is what makes the next one credible.
 
-A permission-allowlist rule (`permission:*` fingerprint) is scored only against denials that share
-its own fingerprint, never a session's total denial rate — an unrelated deny rule, an automode
-block, or a rejected TaskStop cannot count against a rule that could never have touched them.
-`insufficient-data` on one of these means that exact fingerprint was never denied before or after,
-not that the rule failed; it is silence, not a bad result, so do not report it as one.
+A permission-allowlist rule (`permission:*` fingerprint) is scored only against
+`permission-rule` denials that share its own fingerprint, never a session's total denial rate — an
+unrelated deny rule, an automode block, or a rejected TaskStop cannot count against a rule that
+could never have touched them. `insufficient-data` on one of these means that exact fingerprint was
+never denied by a permission rule before or after, not that the rule failed; it is silence, not a
+bad result, so do not report it as one.
 
 ### 4. Find the gaps
 
