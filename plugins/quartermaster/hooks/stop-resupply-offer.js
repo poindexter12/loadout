@@ -2,6 +2,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const path = require('node:path');
 
 const { markOffered, statusFor } = require('../lib/state.js');
 
@@ -14,8 +15,9 @@ function readStdin() {
   }
 }
 
-function offerReason(status) {
-  return `quartermaster: ${status.unanalyzedSessions} sessions and ${status.frictionEvents} friction events since the last resupply. Finish your reply, then offer a focused optimization round for the user's development system, setup, tooling, or workflow. If they say yes or gave standing permission, run /quartermaster:resupply. If they decline, run node "${'${CLAUDE_PLUGIN_ROOT}'}/bin/quartermaster.js" decline-resupply --project "${'${CLAUDE_PROJECT_DIR}'}" to reset the evidence window.`;
+function offerReason(status, projectDir) {
+  const cli = path.resolve(__dirname, '..', 'bin', 'quartermaster.js');
+  return `quartermaster: ${status.unanalyzedSessions} sessions and ${status.frictionEvents} friction events since the last resupply. Offer an optimization round. If they say yes or gave standing permission, run /quartermaster:resupply. If they decline, run node "${cli}" decline-resupply --project "${projectDir}" to reset the evidence window.`;
 }
 
 function main() {
@@ -27,7 +29,7 @@ function main() {
   if (!status.shouldOffer || status.offeredSessionIds.includes(data.session_id)) return;
 
   markOffered(projectDir, data.session_id);
-  process.stdout.write(JSON.stringify({ decision: 'block', reason: offerReason(status) }));
+  process.stdout.write(JSON.stringify({ decision: 'block', reason: offerReason(status, projectDir) }));
 }
 
 try {
