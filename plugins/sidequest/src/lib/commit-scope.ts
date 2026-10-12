@@ -266,22 +266,29 @@ export function foreignReleaseFragmentRefusalMessage(
 ): string {
   const implicitDeletions = diagnosis.implicitDeletions || [];
   const unlinkedRejected = diagnosis.unlinkedRejected || [];
+  // A caller that lost the requesting ref used to render "refused undefined; only null
+  // is implicitly writable", which told the reader nothing and read as a board defect
+  // rather than a ruling. Name the subject generically instead of interpolating a
+  // hole, so the refusal is always prose (SQ-318).
+  const ref = typeof ticketRef === 'string' ? ticketRef.trim() : '';
+  const subject = ref || 'the requesting ticket';
+  const ownFragment = ticketReleaseFragment(ref) || 'its own .release/unreleased/<ref>.md fragment';
   const implicit = implicitDeletions.length
     ? ` Only the deletion of ${implicitDeletions.join(', ')} is admitted, implicitly at commit and without any scope grant: delete the file instead of declaring, requesting, or editing it.`
     : '';
   const linkCommands = unlinkedRejected
-    .map((fragment) => `\`sidequest link ${ticketRef} related ${releaseFragmentOwner(fragment)}\``)
+    .map((fragment) => `\`sidequest link ${ref || '<requesting ref>'} related ${releaseFragmentOwner(fragment)}\``)
     .join(' and ');
   const unlinked = unlinkedRejected.length
-    ? ` ${unlinkedRejected.join(', ')} belongs to a review-rejected candidate that is not linked to ${ticketRef}, so nothing about it is implicit yet: a control-plane identity must run ${linkCommands} (MCP \`link\` with verb \`related\`), after which deleting the fragment needs no scope grant.`
+    ? ` ${unlinkedRejected.join(', ')} belongs to a review-rejected candidate that is not linked to ${subject}, so nothing about it is implicit yet: a control-plane identity must run ${linkCommands} (MCP \`link\` with verb \`related\`), after which deleting the fragment needs no scope grant.`
     : '';
   const remaining = fragments.filter((fragment) => (
     !implicitDeletions.includes(fragment) && !unlinkedRejected.includes(fragment)
   ));
   const foreign = remaining.length
-    ? ` ${remaining.join(', ')} belongs to another ticket: a foreign fragment becomes deletable only once its candidate is review-rejected and its ticket is linked to ${ticketRef} with \`related\`.`
+    ? ` ${remaining.join(', ')} belongs to another ticket: a foreign fragment becomes deletable only once its candidate is review-rejected and its ticket is linked to ${subject} with \`related\`.`
     : '';
-  return `${operation}: refused ${ticketRef}; only ${ticketReleaseFragment(ticketRef)} is implicitly writable. Other release fragments: ${fragments.join(', ')}.${implicit}${unlinked}${foreign}`;
+  return `${operation}: refused ${subject}; only ${ownFragment} is implicitly writable. Other release fragments: ${fragments.join(', ')}.${implicit}${unlinked}${foreign}`;
 }
 
 export function ticketCommitScope(effectiveFiles: unknown, declaredFiles: unknown, ticketRef: unknown): string[] {
