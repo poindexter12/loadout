@@ -302,7 +302,7 @@ function sharedTreeSubmissionBoundaries(slug: string, ticket: any): Array<{ ref:
     const integratedSubmission = Boolean(commit) && Boolean(submission.integratedAt);
     const boundaries = liveSubmission || integratedSubmission ? [{ ref: candidate.ref, commit }] : [];
     const seen = new Set(boundaries.map((boundary) => boundary.commit.toLowerCase()));
-    const sanctioned = store.dispatchState(candidate)?.sanctionedCommits;
+    const sanctioned = candidate.dispatch?.sanctionedCommits;
     for (const recorded of Array.isArray(sanctioned) ? sanctioned : []) {
       const sanctionedCommit = String(recorded || '').trim();
       if (!sanctionedCommit || seen.has(sanctionedCommit.toLowerCase())) continue;
