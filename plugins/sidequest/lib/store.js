@@ -1643,6 +1643,14 @@ function worktreeGcProjects(currentSlug, limit = 3) {
   writeGlobal("worktree-gc-project-cursor", result[result.length - 1].slug);
   return result;
 }
+function worktreeGcCandidateCursor(slug) {
+  return String(readGlobal(`worktree-gc-candidate-cursor:${String(slug || "")}`, "") || "");
+}
+function recordWorktreeGcCandidateCursor(slug, cursor) {
+  const key = String(slug || "");
+  if (!key) return;
+  writeGlobal(`worktree-gc-candidate-cursor:${key}`, String(cursor || ""));
+}
 function listAllProjectTickets(archivedOnly = false) {
   const cache = residentCache();
   const cacheKey = `all-project-tickets:${archivedOnly ? "archived" : "active"}`;
@@ -3399,6 +3407,8 @@ module.exports = {
   listTickets,
   worktreeGcTickets,
   worktreeGcProjects,
+  worktreeGcCandidateCursor,
+  recordWorktreeGcCandidateCursor,
   listAllProjectTickets,
   getTicket,
   addExternalLink,

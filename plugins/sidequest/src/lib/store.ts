@@ -1708,6 +1708,20 @@ function worktreeGcProjects(currentSlug?: any, limit: number = 3): any[] {
   return result;
 }
 
+// Per-project companion to worktree-gc-project-cursor: the worktree the last sweep
+// of this project finished assessing. The sweep resumes after it, which is what
+// stops a permanently unremovable head of the candidate list from starving every
+// tree behind it (SQ-267). Advisory — a lost cursor costs one repeated window.
+function worktreeGcCandidateCursor(slug?: any): string {
+  return String(readGlobal(`worktree-gc-candidate-cursor:${String(slug || '')}`, '') || '');
+}
+
+function recordWorktreeGcCandidateCursor(slug?: any, cursor?: any): void {
+  const key = String(slug || '');
+  if (!key) return;
+  writeGlobal(`worktree-gc-candidate-cursor:${key}`, String(cursor || ''));
+}
+
 function listAllProjectTickets(archivedOnly: boolean = false): any[] {
   const cache = residentCache();
   const cacheKey = `all-project-tickets:${archivedOnly ? 'archived' : 'active'}`;
@@ -3758,6 +3772,8 @@ module.exports = {
   listTickets,
   worktreeGcTickets,
   worktreeGcProjects,
+  worktreeGcCandidateCursor,
+  recordWorktreeGcCandidateCursor,
   listAllProjectTickets,
   getTicket,
   addExternalLink,

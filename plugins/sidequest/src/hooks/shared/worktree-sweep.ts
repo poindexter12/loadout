@@ -25,6 +25,8 @@ interface Store {
   boardConfig: (slug: string) => { notIntegratedSalvageAgeHours?: number; worktreeRecoveryRetentionAgeHours?: number; worktreeRecoveryRetentionMaxPerAgent?: number } | null;
   worktreeGcTickets: () => any[];
   worktreeGcProjects: (currentSlug: string, limit: number) => Project[];
+  worktreeGcCandidateCursor: (slug: string) => string;
+  recordWorktreeGcCandidateCursor: (slug: string, cursor: string) => void;
 }
 
 interface Worktrees {
@@ -34,12 +36,16 @@ interface Worktrees {
     livePaths: string[];
     integrationTarget: { upstream: string; branch: string };
     maxCandidates: number;
+    candidateCursor: string;
     notIntegratedSalvageAgeMs: number;
     recoveryRetentionAgeMs: number;
     recoveryRetentionMaxPerAgent: number;
     onProgress?: (progress: SweepProgress) => void;
   }) => Promise<{
     skipped?: string;
+    candidateCursor?: string;
+    candidatesConsidered?: number;
+    candidatesTotal?: number;
     failures?: Array<{ path: string | null; message: string; suppressed?: boolean }>;
     salvaged?: Array<{ path: string; ref: string; recovery: string }>;
     orphanBranches?: Array<{ branch: string; action: string; reason: string; subject?: string }>;
@@ -190,7 +196,7 @@ export function unregisterSweepSession(data: HookInput): void {
 }
 
 function liveSessionPaths(): string[] {
-  return Object.values(readState().sessions || {});
+  return Object.values(readState().sessions || {}).map((pathname) => String(pathname)).filter(Boolean);
 }
 
 function abbreviated(value: string): string {
@@ -208,6 +214,48 @@ function orphanNotices(data: HookInput, project: Project, orphanBranches: Array<
   state.reportedOrphans[id] = [...reported, ...kept.map((entry) => `${project.slug}:${entry.branch}`)];
   writeState(state);
   return kept.map((entry) => `sidequest: unintegrated orphan worktree branch ${entry.branch}: ${abbreviated(String(entry.subject || 'no commit subject'))}.`);
+}
+
+function candidateCursor(store: Store, slug: string): string {
+  try {
+    return String(store.worktreeGcCandidateCursor(slug) || '');
+  } catch (_) {
+    // No cursor just means this sweep starts at the head of the candidate list.
+    return '';
+  }
+}
+
+function flushCandidateCursors(store: Store, cursors: ReadonlyMap<string, string>): void {
+  for (const [slug, cursor] of cursors) {
+    try {
+      store.recordWorktreeGcCandidateCursor(slug, cursor);
+    } catch (_) {
+      // Advisory: the next sweep repeats this window rather than losing collection work.
+    }
+  }
+}
+
+// A completed sweep that plans nothing used to produce an empty notice array, so
+// writeReport carried nothing and the next session could not tell a sweep that ran
+// and found nothing from a sweep that never ran. It also never said how much of the
+// backlog it had reached, which is the number that matters while a window rotates
+// through it (SQ-267).
+export function sweepSummaryNotices(
+  project: Project,
+  result: { skipped?: string },
+  progress: SweepProgress | undefined
+): string[] {
+  if (result.skipped || !progress || progress.planned > 0 || progress.total < 1) return [];
+  const reasons = Object.entries(progress.keptByReason).map(([reason, count]) => `${reason} ${count}`).join(', ') || 'none';
+  const remaining = Math.max(0, progress.total - progress.considered);
+  const rest = remaining
+    ? ` ${remaining} not assessed this session; the window resumes after the last one it reached. Collect the rest now with ${sweepCommand(project)}.`
+    : '';
+  return [`sidequest: worktree sweep for ${project.name || project.slug} assessed ${progress.considered} of ${progress.total} agent worktrees and found nothing to collect (kept: ${reasons}).${rest}`];
+}
+
+function sweepCommand(project: Project): string {
+  return `node "${pluginRoot()}/bin/sidequest.js" worktrees sweep --yes --project "${project.path}"`;
 }
 
 function salvageNotices(salvaged: Array<{ path: string; ref: string; recovery: string }>): string[] {
@@ -235,15 +283,24 @@ export async function sweepWorktrees(data: HookInput, includeKnownProjects: bool
     const keptByReason: Record<string, number> = {};
     let planned = 0;
     let removed = 0;
+    let considered = 0;
+    let total = 0;
     for (const currentProgress of projectProgress.values()) {
       planned += currentProgress.planned;
       removed += currentProgress.removed;
+      considered += currentProgress.considered;
+      total += currentProgress.total;
       for (const [reason, count] of Object.entries(currentProgress.keptByReason)) {
         keptByReason[reason] = (keptByReason[reason] || 0) + count;
       }
     }
-    writeSweepProgress(progressCwd, { planned, removed, keptByReason });
+    writeSweepProgress(progressCwd, { planned, removed, keptByReason, considered, total });
   };
+  // One write at the end of the loop, not one per project: worktreeGcProjects
+  // already writes a global at the head of the sweep, and a contended board has
+  // stalled that write for 46s (SQ-253). The cursor is advisory, so losing it to a
+  // locked database must not cost the sweep its collection work.
+  const cursors = new Map<string, string>();
 
   for (const project of projects) {
     const isCurrentProject = project.slug === current.slug;
@@ -277,12 +334,15 @@ export async function sweepWorktrees(data: HookInput, includeKnownProjects: bool
         livePaths: activePaths,
         integrationTarget: target,
         maxCandidates: MAX_CANDIDATES_PER_PROJECT,
+        candidateCursor: candidateCursor(store, project.slug),
         notIntegratedSalvageAgeMs: (config?.notIntegratedSalvageAgeHours || DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_HOURS) * 60 * 60 * 1e3,
         recoveryRetentionAgeMs: (config?.worktreeRecoveryRetentionAgeHours || 14 * 24) * 60 * 60 * 1e3,
         recoveryRetentionMaxPerAgent: config?.worktreeRecoveryRetentionMaxPerAgent || 3,
         onProgress: (progress) => updateProgress(project, progress),
       });
+      if (result.candidateCursor) cursors.set(project.slug, String(result.candidateCursor));
       if (!isCurrentProject) continue;
+      notices.push(...sweepSummaryNotices(project, result, projectProgress.get(project.slug)));
       if (result.skipped === 'repository_busy') {
         notices.push(`sidequest: skipped worktree sweep for ${project.name || project.slug}: the repository has an in-progress git operation.`);
       }
@@ -299,5 +359,6 @@ export async function sweepWorktrees(data: HookInput, includeKnownProjects: bool
       }
     }
   }
+  flushCandidateCursors(store, cursors);
   return notices;
 }

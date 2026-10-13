@@ -139,7 +139,7 @@ var import_node_child_process = require("node:child_process");
 var import_node_crypto = __toESM(require("node:crypto"));
 var import_node_fs3 = __toESM(require("node:fs"));
 var import_node_path4 = __toESM(require("node:path"));
-var EMPTY_SWEEP_PROGRESS = { planned: 0, removed: 0, keptByReason: {} };
+var EMPTY_SWEEP_PROGRESS = { planned: 0, removed: 0, keptByReason: {}, considered: 0, total: 0 };
 function stateDirectory() {
   const home = resolveSidequestHome();
   return import_node_path4.default.join(home, "sweep-reports");
@@ -156,7 +156,13 @@ function normalizedProgress(value) {
   const record = value;
   const count = (candidate) => Number.isFinite(Number(candidate)) && Number(candidate) >= 0 ? Math.floor(Number(candidate)) : 0;
   const keptByReason = Object.fromEntries(Object.entries(record.keptByReason || {}).map(([reason, amount]) => [reason, count(amount)]).filter(([, amount]) => amount > 0));
-  return { planned: count(record.planned), removed: count(record.removed), keptByReason };
+  return {
+    planned: count(record.planned),
+    removed: count(record.removed),
+    keptByReason,
+    considered: count(record.considered),
+    total: count(record.total)
+  };
 }
 function writeSweepProgress(cwd, progress) {
   try {
@@ -273,7 +279,7 @@ function unregisterSweepSession(data) {
   writeState(state);
 }
 function liveSessionPaths() {
-  return Object.values(readState().sessions || {});
+  return Object.values(readState().sessions || {}).map((pathname) => String(pathname)).filter(Boolean);
 }
 function abbreviated(value) {
   return value.length <= MAX_ORPHAN_SUBJECT_LENGTH ? value : `${value.slice(0, MAX_ORPHAN_SUBJECT_LENGTH - 1)}…`;
@@ -289,6 +295,31 @@ function orphanNotices(data, project, orphanBranches) {
   state.reportedOrphans[id] = [...reported, ...kept.map((entry) => `${project.slug}:${entry.branch}`)];
   writeState(state);
   return kept.map((entry) => `sidequest: unintegrated orphan worktree branch ${entry.branch}: ${abbreviated(String(entry.subject || "no commit subject"))}.`);
+}
+function candidateCursor(store, slug) {
+  try {
+    return String(store.worktreeGcCandidateCursor(slug) || "");
+  } catch (_) {
+    return "";
+  }
+}
+function flushCandidateCursors(store, cursors) {
+  for (const [slug, cursor] of cursors) {
+    try {
+      store.recordWorktreeGcCandidateCursor(slug, cursor);
+    } catch (_) {
+    }
+  }
+}
+function sweepSummaryNotices(project, result, progress) {
+  if (result.skipped || !progress || progress.planned > 0 || progress.total < 1) return [];
+  const reasons = Object.entries(progress.keptByReason).map(([reason, count]) => `${reason} ${count}`).join(", ") || "none";
+  const remaining = Math.max(0, progress.total - progress.considered);
+  const rest = remaining ? ` ${remaining} not assessed this session; the window resumes after the last one it reached. Collect the rest now with ${sweepCommand(project)}.` : "";
+  return [`sidequest: worktree sweep for ${project.name || project.slug} assessed ${progress.considered} of ${progress.total} agent worktrees and found nothing to collect (kept: ${reasons}).${rest}`];
+}
+function sweepCommand(project) {
+  return `node "${pluginRoot()}/bin/sidequest.js" worktrees sweep --yes --project "${project.path}"`;
 }
 function salvageNotices(salvaged) {
   return salvaged.map((entry) => `sidequest: salvaged unintegrated worktree ${entry.path} at ${entry.ref}. Recover with ${entry.recovery}.`);
@@ -311,15 +342,20 @@ async function sweepWorktrees(data, includeKnownProjects) {
     const keptByReason = {};
     let planned = 0;
     let removed = 0;
+    let considered = 0;
+    let total = 0;
     for (const currentProgress of projectProgress.values()) {
       planned += currentProgress.planned;
       removed += currentProgress.removed;
+      considered += currentProgress.considered;
+      total += currentProgress.total;
       for (const [reason, count] of Object.entries(currentProgress.keptByReason)) {
         keptByReason[reason] = (keptByReason[reason] || 0) + count;
       }
     }
-    writeSweepProgress(progressCwd, { planned, removed, keptByReason });
+    writeSweepProgress(progressCwd, { planned, removed, keptByReason, considered, total });
   };
+  const cursors = /* @__PURE__ */ new Map();
   for (const project of projects) {
     const isCurrentProject = project.slug === current.slug;
     try {
@@ -350,12 +386,15 @@ async function sweepWorktrees(data, includeKnownProjects) {
         livePaths: activePaths,
         integrationTarget: target,
         maxCandidates: MAX_CANDIDATES_PER_PROJECT,
+        candidateCursor: candidateCursor(store, project.slug),
         notIntegratedSalvageAgeMs: (config?.notIntegratedSalvageAgeHours || DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_HOURS) * 60 * 60 * 1e3,
         recoveryRetentionAgeMs: (config?.worktreeRecoveryRetentionAgeHours || 14 * 24) * 60 * 60 * 1e3,
         recoveryRetentionMaxPerAgent: config?.worktreeRecoveryRetentionMaxPerAgent || 3,
         onProgress: (progress) => updateProgress(project, progress)
       });
+      if (result.candidateCursor) cursors.set(project.slug, String(result.candidateCursor));
       if (!isCurrentProject) continue;
+      notices.push(...sweepSummaryNotices(project, result, projectProgress.get(project.slug)));
       if (result.skipped === "repository_busy") {
         notices.push(`sidequest: skipped worktree sweep for ${project.name || project.slug}: the repository has an in-progress git operation.`);
       }
@@ -372,6 +411,7 @@ async function sweepWorktrees(data, includeKnownProjects) {
       }
     }
   }
+  flushCandidateCursors(store, cursors);
   return notices;
 }
 

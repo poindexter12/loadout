@@ -20,9 +20,15 @@ export type SweepProgress = Readonly<{
   planned: number;
   removed: number;
   keptByReason: Readonly<Record<string, number>>;
+  // How much of the candidate list this sweep has classified, and how much exists.
+  // Without them the budget notice could not distinguish "assessed everything,
+  // nothing to collect" from "assessed nothing yet", and reported the second as the
+  // first while 81 worktrees sat resident (SQ-267).
+  considered: number;
+  total: number;
 }>;
 
-const EMPTY_SWEEP_PROGRESS: SweepProgress = { planned: 0, removed: 0, keptByReason: {} };
+const EMPTY_SWEEP_PROGRESS: SweepProgress = { planned: 0, removed: 0, keptByReason: {}, considered: 0, total: 0 };
 
 export const HANDOFF_FAILED_NOTICE =
   'sidequest: worktree sweep could not run, so stale agent worktrees were not collected this session.';
@@ -48,12 +54,18 @@ function progressFile(cwd: string): string {
 
 function normalizedProgress(value: unknown): SweepProgress {
   if (!value || typeof value !== 'object') return EMPTY_SWEEP_PROGRESS;
-  const record = value as { planned?: unknown; removed?: unknown; keptByReason?: unknown };
+  const record = value as { planned?: unknown; removed?: unknown; keptByReason?: unknown; considered?: unknown; total?: unknown };
   const count = (candidate: unknown) => Number.isFinite(Number(candidate)) && Number(candidate) >= 0 ? Math.floor(Number(candidate)) : 0;
   const keptByReason = Object.fromEntries(Object.entries(record.keptByReason || {})
     .map(([reason, amount]): [string, number] => [reason, count(amount)])
     .filter(([, amount]) => amount > 0));
-  return { planned: count(record.planned), removed: count(record.removed), keptByReason };
+  return {
+    planned: count(record.planned),
+    removed: count(record.removed),
+    keptByReason,
+    considered: count(record.considered),
+    total: count(record.total),
+  };
 }
 
 export function writeSweepProgress(cwd: string, progress: SweepProgress): void {
@@ -87,8 +99,10 @@ export function deferralNotice(cwd: string, progress: SweepProgress): string {
   // result: the detached child keeps collecting and reports on the next session
   // start. SQ-70's reporter read a deferred "planned 0, removed 0, skipped 0" as
   // proof that stale agent worktrees are never reaped, and spent the run chasing
-  // that instead of the capture failure in front of them.
-  return `${DEFERRAL_NOTICE} Progress at the ${deadlineMs()}ms budget, not a final result: planned ${progress.planned}, removed ${progress.removed}, skipped ${kept} (${reasons}). The detached sweep keeps running and reports on the next session start. Finish it sooner with ${command}.`;
+  // that instead of the capture failure in front of them. The assessed count is
+  // what makes that misreading avoidable: "assessed 0 of 81" says the zeros are a
+  // starting position, where bare "planned 0" read as a verdict (SQ-267).
+  return `${DEFERRAL_NOTICE} Progress at the ${deadlineMs()}ms budget, not a final result: assessed ${progress.considered} of ${progress.total} candidate worktrees, planned ${progress.planned}, removed ${progress.removed}, skipped ${kept} (${reasons}). The detached sweep keeps running and reports on the next session start. Finish it sooner with ${command}.`;
 }
 
 export function writeReport(cwd: string, notices: string[]): void {
