@@ -804,7 +804,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: 'commit',
-    description: 'Commit only a claimed ticket’s declared paths in an explicit local git worktree. Returns the commit hash; foreign staged paths stay staged. Repositories whose root DCO, CONTRIBUTING.md, or AGENTS.md asks for a Signed-off-by trailer or git commit -s receive --signoff.',
+    description: 'Commit only what a claimed ticket changed in an explicit local git worktree. Returns the hash; in-scope paths it never wrote, another live claim\'s included, are left alone and named. Repositories whose root DCO, CONTRIBUTING.md, or AGENTS.md asks for a Signed-off-by trailer or git commit -s receive --signoff.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -863,7 +863,8 @@ const tools: ToolDefinition[] = [
           message: foreignReleaseFragmentRefusal('commit', slug, ticket, foreignFragments),
         });
       }
-      const result = commitScope.commitScoped(root, message, scope);
+      const foreign = store.foreignCommitPaths(slug, ticket, root);
+      const result = commitScope.commitScoped(root, message, scope, { excludePaths: foreign.paths });
       if (!result.ok) {
         const message = result.reason === 'missing_scope'
           ? `commit: ${ticket.ref} has no declared file scope.`
@@ -871,7 +872,9 @@ const tools: ToolDefinition[] = [
             ? `commit: refused ${ticket.ref}; commit contains paths outside its declared scope: ${(result.outside || []).join(', ')}. Expand scope with: ${store.scopeExpansionCommand(ticket, result.outside)}`
             : result.reason === 'no_existing_scope'
               ? `commit: ${ticket.ref} has no declared paths that exist in this worktree. Missing: ${(result.missingScopes || []).join(', ')}.`
-              : `commit: git failed: ${result.message || result.reason}`;
+              : result.reason === 'no_own_changes'
+                ? `commit: refused ${ticket.ref}; every changed path in its commit scope belongs to someone else, so the commit would carry only work this ticket did not make: ${store.foreignCommitPathsMessage(foreign)}. A directory scope entry is a Git pathspec, so a widened scope covers paths this ticket never touched; it never makes them its own. Edit the files this ticket owns and commit again, or release with kind "handback" naming those paths.`
+                : `commit: git failed: ${result.message || result.reason}`;
         return mutationAck(slug, { ok: false, ticket, reason: result.reason, message });
       }
       store.touchClaim(slug, ticket.ref, by); // committing is proof of life; keep the backstop honest
@@ -884,7 +887,14 @@ const tools: ToolDefinition[] = [
         const comment = store.addComment(slug, ticket.ref, { by, body: outOfScopeComment(result.unscopedPaths), kind: 'comment', source: 'mcp' });
         if (!comment.ok) warnings.push(`out-of-scope paths weren't recorded: ${comment.reason}`);
       }
-      return mutationAck(slug, { ok: true, ticket }, { commit: result.commit, ...(warnings.length ? { warnings } : {}) });
+      // Silence is what made the sweep invisible: the executor saw ok:true and an empty
+      // unscopedPaths while another ticket's file left its working tree (SQ-276).
+      if (result.excludedPaths?.length) warnings.push(`left out of this commit; they are inside its scope but not its work: ${store.foreignCommitPathsMessage(foreign)}`);
+      return mutationAck(slug, { ok: true, ticket }, {
+        commit: result.commit,
+        ...(result.excludedPaths?.length ? { excludedPaths: result.excludedPaths } : {}),
+        ...(warnings.length ? { warnings } : {}),
+      });
     },
   },
   {

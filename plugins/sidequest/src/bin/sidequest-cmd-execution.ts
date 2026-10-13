@@ -376,13 +376,20 @@ async function cmdCommit(opts: any, positional: any) {
   if (foreignFragments.length) {
     fail(foreignReleaseFragmentRefusal('commit', slug, ticket, foreignFragments));
   }
-  const result = commitScope.commitScoped(process.cwd(), opts.message, scope);
+  // Mirrors the MCP commit path: a widened directory scope is a pathspec, so the paths
+  // under it that belong to another live claim or predate this dispatch are subtracted
+  // instead of swept into the commit (SQ-276).
+  const foreign = store.foreignCommitPaths(slug, ticket, process.cwd());
+  const result = commitScope.commitScoped(process.cwd(), opts.message, scope, { excludePaths: foreign.paths });
   if (!result.ok) {
     if (result.reason === 'missing_scope') fail(`commit: ${ticket.ref} has no declared file scope; use the explicit shared-tree escape hatch only for uncommitted-state work, not commits.`);
     if (result.reason === 'outside_scope') {
       fail(`commit: refused ${ticket.ref}; commit contains paths outside its declared scope: ${result.outside.join(', ')}. Expand scope with: ${scopeRemedy(ticket, result.outside)}`);
     }
     if (result.reason === 'no_existing_scope') fail(`commit: ${ticket.ref} has no declared paths that exist in this worktree. Missing: ${(result.missingScopes || []).join(', ')}.`);
+    if (result.reason === 'no_own_changes') {
+      fail(`commit: refused ${ticket.ref}; every changed path in its commit scope belongs to someone else, so the commit would carry only work this ticket did not make: ${store.foreignCommitPathsMessage(foreign)}. A directory scope entry is a Git pathspec, so a widened scope covers paths this ticket never touched; it never makes them its own. Edit the files this ticket owns and commit again, or release with --release-kind handback naming those paths.`);
+    }
     fail(`commit: git failed: ${result.message || result.reason}`);
   }
   store.touchClaim(slug, ticket.ref, by); // committing is proof of life; keep the backstop honest
@@ -403,6 +410,7 @@ async function cmdCommit(opts: any, positional: any) {
       paths: result.paths,
       missingScopes: result.missingScopes,
       unscopedPaths: result.unscopedPaths,
+      ...(result.excludedPaths?.length ? { excludedPaths: result.excludedPaths } : {}),
       ...(warnings.length ? { warnings } : {}),
     }, null, 2) + '\n');
     return;
@@ -410,6 +418,7 @@ async function cmdCommit(opts: any, positional: any) {
   warnings.push(
     result.missingScopes.length ? `missing declared paths: ${result.missingScopes.join(', ')}` : '',
     result.unscopedPaths.length ? `out-of-scope changes: ${result.unscopedPaths.join(', ')}` : '',
+    result.excludedPaths?.length ? `in scope but not this ticket's work, left uncommitted: ${store.foreignCommitPathsMessage(foreign)}` : '',
   );
   const visibleWarnings = warnings.filter(Boolean);
   console.log(`✓ ${ticket.ref} committed ${result.commit.slice(0, 12)} (${result.paths.join(', ')})${visibleWarnings.length ? `\n  ${visibleWarnings.join('\n  ')}` : ''}`);

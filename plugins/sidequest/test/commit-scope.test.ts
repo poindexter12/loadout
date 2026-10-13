@@ -16,6 +16,7 @@ interface ScopeResult {
   outside: string[];
   missingScopes: string[];
   unscopedPaths: string[];
+  excludedPaths: string[];
 }
 
 const SIDEQUEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-commit-scope-home-'));
@@ -41,7 +42,8 @@ interface RangeResult {
 }
 
 const commitScope = require('../lib/commit-scope.js') as {
-  commitScoped(cwd: string, message: string, files: string[]): ScopeResult;
+  commitScoped(cwd: string, message: string, files: string[], options?: { excludePaths?: string[] }): ScopeResult;
+  commitScopedExclusions(scopes: readonly string[], excludePaths: unknown): string[];
   commitPaths(cwd: string, commit: string): string[];
   validateCommitScope(cwd: string, commit: string, files: string[]): ScopeResult;
   validateScopeResolution(cwd: string, files: string[], opts?: { inspectDescendants?: boolean }): { ok: boolean; reason: string | null; outside: string[]; indirect: string[] };
@@ -394,6 +396,128 @@ test('scoped commit leaves another executor’s staged file in the shared index'
   assert.deepEqual(committed.unscopedPaths, ['plugins/other-plugin/worker-b.js']);
   assert.equal(git(root, ['diff', '--cached', '--name-only']), 'plugins/other-plugin/worker-b.js');
   assert.deepEqual(commitScope.commitPaths(root, committed.commit), ['plugins/sidequest/worker-a.js']);
+});
+
+// SQ-276: an auto-approved widening turned one requested test file into the enclosing
+// `plugins/devx/tests` directory, and that directory went to Git as a pathspec, so the
+// ticket's commit swept up a second live claim's uncommitted file and removed it from
+// the working tree. The commit reported ok:true with unscopedPaths: [], because the
+// swept path was inside the widened scope rather than outside it.
+function sweepFixture() {
+  const root = repo();
+  fs.mkdirSync(path.join(root, 'plugins', 'devx', 'scripts'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'plugins', 'devx', 'tests'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'plugins', 'devx', 'scripts', 'review-post.sh'), 'echo base\n');
+  fs.writeFileSync(path.join(root, 'plugins', 'devx', 'tests', 'test-review-post.js'), '// base\n');
+  fs.writeFileSync(path.join(root, 'plugins', 'devx', 'tests', 'test-review-jury-integration.js'), '// base\n');
+  git(root, ['add', '.']);
+  git(root, ['commit', '-m', 'devx review fixture']);
+  return root;
+}
+
+test('a widened directory scope leaves another live claim’s uncommitted file out of the commit', () => {
+  const root = sweepFixture();
+  const slug = store.ensureProject(root, 'widened directory sweep').slug;
+  const owner = store.createTicket(slug, {
+    title: 'review post scope',
+    files: ['plugins/devx/scripts/review-post.sh', 'plugins/devx/tests/test-review-post.js'],
+    complexity: 2,
+    complexityWhy: 'The commit gate must subtract paths a widened directory covers but this ticket never wrote.',
+  });
+  const sibling = store.createTicket(slug, {
+    title: 'review to claims scope',
+    files: ['plugins/devx/tests/test-review-to-claims.js'],
+    complexity: 1,
+    complexityWhy: 'A second live claim owns a sibling test file inside the same test directory.',
+  });
+  const ownerBy = 'sweep-owner-worker';
+  const siblingBy = 'sweep-sibling-worker';
+  assert.equal(store.claimTicket(slug, owner.ref, ownerBy, { direct: true, reason: 'The sweep fixture claims both tickets directly.' }).ok, true);
+  assert.equal(store.claimTicket(slug, sibling.ref, siblingBy, { direct: true, reason: 'The sweep fixture claims both tickets directly.' }).ok, true);
+
+  // The sibling's claimed work, uncommitted, inside the directory the owner widens into.
+  fs.writeFileSync(path.join(root, 'plugins', 'devx', 'tests', 'test-review-to-claims.js'), '// sibling work\n');
+  // The owner's own work: two declared files plus one more file in the same directory.
+  fs.writeFileSync(path.join(root, 'plugins', 'devx', 'scripts', 'review-post.sh'), 'echo owner\n');
+  fs.writeFileSync(path.join(root, 'plugins', 'devx', 'tests', 'test-review-post.js'), '// owner\n');
+  fs.writeFileSync(path.join(root, 'plugins', 'devx', 'tests', 'test-review-jury-integration.js'), '// owner\n');
+
+  const widened = lifecycleHandler('scopeRequest')({
+    project: root,
+    ref: owner.ref,
+    by: ownerBy,
+    files: ['plugins/devx/tests/test-review-jury-integration.js'],
+  });
+  assert.equal(widened.ok, true, widened.message as string);
+  assert.equal(widened.autoApproved, true, 'the test-scope widening is auto-approved');
+  assert.deepEqual(widened.approved, ['plugins/devx/tests'], 'the grant is the enclosing test directory, not the requested file');
+
+  const committed = lifecycleHandler('commit')({ project: root, ref: owner.ref, by: ownerBy, message: 'review post', worktree: root });
+
+  assert.equal(committed.ok, true, committed.message as string);
+  const paths = commitScope.commitPaths(root, committed.commit as string);
+  assert.equal(
+    paths.includes('plugins/devx/tests/test-review-to-claims.js'),
+    false,
+    `the sibling's claimed file must stay out of the commit; got ${paths.join(', ')}`,
+  );
+  assert.deepEqual(paths.sort(), [
+    'plugins/devx/scripts/review-post.sh',
+    'plugins/devx/tests/test-review-jury-integration.js',
+    'plugins/devx/tests/test-review-post.js',
+  ], 'the owner still commits its own files, including the one the widening admitted');
+  assert.equal(
+    git(root, ['status', '--porcelain', '--', 'plugins/devx/tests/test-review-to-claims.js']),
+    '?? plugins/devx/tests/test-review-to-claims.js',
+    'the sibling’s uncommitted work is still in the working tree',
+  );
+  assert.deepEqual(committed.excludedPaths, ['plugins/devx/tests/test-review-to-claims.js']);
+  assert.ok(
+    (committed.warnings || []).some((warning: string) => warning.includes('plugins/devx/tests/test-review-to-claims.js') && warning.includes(sibling.ref)),
+    `the commit warns which path it left behind and who owns it; got ${JSON.stringify(committed.warnings)}`,
+  );
+});
+
+test('a commit whose widened scope holds only foreign changes is refused by name', () => {
+  const root = sweepFixture();
+  const slug = store.ensureProject(root, 'all foreign widened sweep').slug;
+  const owner = store.createTicket(slug, {
+    title: 'review post scope only',
+    files: ['plugins/devx/tests/test-review-post.js'],
+    complexity: 1,
+    complexityWhy: 'An all-foreign pathspec makes git commit --only exit 1 with empty stderr.',
+  });
+  const sibling = store.createTicket(slug, {
+    title: 'review to claims scope only',
+    files: ['plugins/devx/tests/test-review-to-claims.js'],
+    complexity: 1,
+    complexityWhy: 'The sibling owns the only changed path under the widened directory.',
+  });
+  const ownerBy = 'all-foreign-owner-worker';
+  const siblingBy = 'all-foreign-sibling-worker';
+  assert.equal(store.claimTicket(slug, owner.ref, ownerBy, { direct: true, reason: 'The all-foreign fixture claims both tickets directly.' }).ok, true);
+  assert.equal(store.claimTicket(slug, sibling.ref, siblingBy, { direct: true, reason: 'The all-foreign fixture claims both tickets directly.' }).ok, true);
+
+  fs.writeFileSync(path.join(root, 'plugins', 'devx', 'tests', 'test-review-to-claims.js'), '// sibling work\n');
+  const widened = lifecycleHandler('scopeRequest')({
+    project: root,
+    ref: owner.ref,
+    by: ownerBy,
+    files: ['plugins/devx/tests/test-review-to-claims.js'],
+  });
+  assert.equal(widened.ok, true, widened.message as string);
+  assert.deepEqual(widened.approved, ['plugins/devx/tests']);
+
+  const committed = lifecycleHandler('commit')({ project: root, ref: owner.ref, by: ownerBy, message: 'nothing of its own', worktree: root });
+
+  assert.equal(committed.ok, false);
+  assert.equal(committed.reason, 'no_own_changes', committed.message as string);
+  assert.match(committed.message as string, /plugins\/devx\/tests\/test-review-to-claims\.js/);
+  assert.ok((committed.message as string).includes(sibling.ref), 'the refusal names the owning ref');
+  assert.equal(
+    git(root, ['status', '--porcelain', '--', 'plugins/devx/tests/test-review-to-claims.js']),
+    '?? plugins/devx/tests/test-review-to-claims.js',
+  );
 });
 
 test('scoped commit preserves an uppercase tracked path from a nested directory', () => {

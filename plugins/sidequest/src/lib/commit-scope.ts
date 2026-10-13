@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { hasGlob, isInScope, normalizeScope, scopeKey, scopedPaths } from './scope-match.js';
 
-export { isInScope, scopedPaths } from './scope-match.js';
+export { isInScope, scopeKey, scopedPaths } from './scope-match.js';
 
 type UnknownRecord = Record<string, unknown>;
 type GitResult = { ok: true; value: string } | { ok: false; message: string };
@@ -779,7 +779,22 @@ export function validateStoredSubmissionRange(cwd: string, submissionValue: unkn
   });
 }
 
-export function commitScoped(cwd: string, message: unknown, files: unknown) {
+// A declared scope entry is handed to Git as a pathspec, so a directory entry stages
+// and commits every changed path beneath it. When an auto-approved widening turns one
+// requested test file into its enclosing test root, that pathspec sweeps up work the
+// ticket never touched: another live claim's uncommitted file, or dirt that predates
+// the dispatch. `unscopedWorkingPaths` cannot see it, because the swept paths are
+// inside the scope, not outside it. Subtracting them as `:(exclude)` pathspecs on both
+// the add and the commit keeps a foreign staged path staged, a foreign untracked file
+// untracked, and a foreign deletion uncommitted, without narrowing the ticket's own
+// paths (SQ-276).
+export function commitScopedExclusions(scopes: readonly string[], excludePaths: unknown): string[] {
+  return scopedPaths(excludePaths).filter((file) => isInScope(file, scopes));
+}
+
+type CommitScopedOptions = { excludePaths?: unknown };
+
+export function commitScoped(cwd: string, message: unknown, files: unknown, options?: CommitScopedOptions) {
   const scopes = scopedPaths(files);
   if (!scopes.length) return { ok: false, reason: 'missing_scope' };
   try {
@@ -790,9 +805,21 @@ export function commitScoped(cwd: string, message: unknown, files: unknown) {
     const commitScopes = commitScopedPaths(root, canonicalScopes);
     const missingScopes = canonicalScopes.filter((scope) => !commitScopes.includes(scope));
     const unscopedPaths = unscopedWorkingPaths(root, scopes);
+    const excludedPaths = commitScopedExclusions(canonicalScopes, options?.excludePaths);
     if (!commitScopes.length) {
-      return { ok: false, reason: 'no_existing_scope', missingScopes, unscopedPaths };
+      return { ok: false, reason: 'no_existing_scope', missingScopes, unscopedPaths, excludedPaths };
     }
+    // Every changed path under the pathspec being foreign makes `git commit --only`
+    // exit 1 with empty stderr, which would surface as a contentless `git_error`.
+    // Name that case instead, so the refusal can say whose work it refused to take.
+    if (excludedPaths.length) {
+      const ownChanges = workingPaths(root)
+        .filter((file) => isInScope(file, commitScopes) && !isInScope(file, excludedPaths));
+      if (!ownChanges.length) {
+        return { ok: false, reason: 'no_own_changes', missingScopes, unscopedPaths, excludedPaths };
+      }
+    }
+    const excludePathspecs = excludedPaths.map((file) => `:(exclude)${file}`);
     const concreteGlobPaths = globScopedWorkingPaths(root, commitScopes);
     const directScopes = commitScopes.filter((scope) => !hasGlob(scope));
     const stageableScopes = [...new Set([...stageableScopedPaths(root, directScopes), ...concreteGlobPaths])];
@@ -800,13 +827,13 @@ export function commitScoped(cwd: string, message: unknown, files: unknown) {
       ...directScopes.filter((scope) => !ignoredUntrackedScope(root, scope)),
       ...concreteGlobPaths.filter((scope) => !ignoredUntrackedScope(root, scope)),
     ])];
-    if (stageableScopes.length) git(root, ['add', '--all', '--', ...stageableScopes]);
+    if (stageableScopes.length) git(root, ['add', '--all', '--', ...stageableScopes, ...excludePathspecs]);
     const commitArgs = ['commit', '--only'];
     if (repoRequestsSignoff(root)) commitArgs.push('--signoff');
-    git(root, [...commitArgs, '-m', String(message || ''), '--', ...committableScopes]);
+    git(root, [...commitArgs, '-m', String(message || ''), '--', ...committableScopes, ...excludePathspecs]);
     const commit = git(root, ['rev-parse', 'HEAD']).trim();
     const validation = validateCommitScope(root, commit, scopes);
-    return Object.assign({ commit, missingScopes, unscopedPaths }, validation);
+    return Object.assign({ commit, missingScopes, unscopedPaths, excludedPaths }, validation);
   } catch (error) {
     return { ok: false, reason: 'git_error', message: errorMessage(error) };
   }

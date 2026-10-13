@@ -2616,6 +2616,9 @@ function createDispatch(dependencies) {
     recordSanctionedCommit,
     dispatchWorkspace,
     dispatchDelta,
+    // The commit gate needs the same baseline comparison dispatchDelta makes, to tell
+    // the paths this executor changed from the dirt it inherited (SQ-276).
+    postDispatchWorkingState,
     activeSharedTreeClaim,
     dispatchIdentityAmbiguous,
     dispatchCanBindRuntimeIdentity,
