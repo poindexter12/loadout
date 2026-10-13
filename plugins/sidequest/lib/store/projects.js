@@ -1,4 +1,9 @@
 "use strict";
+const DEFAULT_REF_PREFIX = "SQ";
+function refPrefixOf(meta) {
+  const raw = String(meta?.refPrefix ?? "").trim().toUpperCase();
+  return /^[A-Z][A-Z0-9]*$/.test(raw) ? raw : DEFAULT_REF_PREFIX;
+}
 function createProjects({ acquireLock, assetsDir, claimReclaimable, cloneCached, database, db, defaultAlwaysInScope, defaultProjectName, deleteCachedRow, ensureDir, fs, invalidateStoreCaches, listStories, listTickets, normalizeForHash, path, projectDir, putProject, putStory, putTicket, releaseLock, residentCache, slugify, sourceRevisionAdapterForPath, ticketsDir, transaction }) {
   function canonicalize(absPath) {
     const resolved = path.resolve(absPath);
@@ -95,10 +100,34 @@ function createProjects({ acquireLock, assetsDir, claimReclaimable, cloneCached,
       if (locked) releaseLock(lock, locked);
     }
   }
+  function releasedRefNumbers(meta, prefix) {
+    const taken = /* @__PURE__ */ new Set();
+    const root = typeof meta?.path === "string" ? meta.path : null;
+    if (!root) return taken;
+    try {
+      const text = String(fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8"));
+      for (const match of text.matchAll(new RegExp(`\\b${prefix}-(\\d+)\\b`, "g"))) {
+        taken.add(parseInt(match[1], 10));
+      }
+    } catch (_) {
+    }
+    try {
+      const fragmentRef = new RegExp(`^${prefix}-(\\d+)\\.md$`);
+      for (const name of fs.readdirSync(path.join(root, ".release", "unreleased"))) {
+        const match = fragmentRef.exec(String(name));
+        if (match) taken.add(parseInt(match[1], 10));
+      }
+    } catch (_) {
+    }
+    return taken;
+  }
   function nextSeq(slug) {
     return withMetaLock(slug, () => {
       const meta = readMeta(slug) || { seq: 0 };
-      meta.seq = (typeof meta.seq === "number" ? meta.seq : 0) + 1;
+      const taken = releasedRefNumbers(meta, refPrefixOf(meta));
+      let seq = (typeof meta.seq === "number" ? meta.seq : 0) + 1;
+      while (taken.has(seq)) seq += 1;
+      meta.seq = seq;
       putProject(slug, meta);
       return meta.seq;
     });
@@ -282,10 +311,33 @@ function createProjects({ acquireLock, assetsDir, claimReclaimable, cloneCached,
       throw new Error(`refusing to merge board "${srcSlug}": ${liveClaimed.length} live-claimed ticket(s): ${refs}. Release the claims first; merge cannot move a ticket its executor is still working under.`);
     }
     const stories = listStories(srcSlug);
+    const destPrefix = refPrefixOf(readMeta(destSlug));
+    const occupied = new Set(listTickets(destSlug).map((ticket) => String(ticket.ref || "").toUpperCase()));
+    const keptRefs = /* @__PURE__ */ new Map();
+    let maxKept = 0;
+    for (const ticket of tickets) {
+      const ref = String(ticket.ref || "").toUpperCase();
+      const seq = seqOfRef(ref);
+      if (!ref || seq === Number.MAX_SAFE_INTEGER) continue;
+      if (ref !== `${destPrefix}-${seq}` || occupied.has(ref)) continue;
+      occupied.add(ref);
+      keptRefs.set(ticket.id, ref);
+      if (seq > maxKept) maxKept = seq;
+    }
+    if (!dryRun && maxKept > 0) {
+      withMetaLock(destSlug, () => {
+        const meta = readMeta(destSlug);
+        if (meta && (typeof meta.seq !== "number" || meta.seq < maxKept)) {
+          meta.seq = maxKept;
+          putProject(destSlug, meta);
+        }
+      });
+    }
     const refMap = {};
     const ticketPlan = [];
     for (const ticket of tickets) {
-      const newRef = dryRun ? `SQ-?` : `SQ-${nextSeq(destSlug)}`;
+      const kept = keptRefs.get(ticket.id);
+      const newRef = kept || (dryRun ? `${destPrefix}-?` : `${destPrefix}-${nextSeq(destSlug)}`);
       if (ticket.ref) refMap[String(ticket.ref).toUpperCase()] = newRef;
       ticketPlan.push({ ticket, newRef });
     }
@@ -321,4 +373,4 @@ function createProjects({ acquireLock, assetsDir, claimReclaimable, cloneCached,
   }
   return { archiveProject, deleteProjectExact, ensureProject, findProject, listProjects, mergeProject, metaLockPath, nextSeq, nextStorySeq, projectRoutingEnabled, readMeta, setProjectNotify, setProjectRouting, unarchiveProject, withMetaLock };
 }
-module.exports = { createProjects };
+module.exports = { createProjects, refPrefixOf };

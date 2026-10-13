@@ -1,4 +1,5 @@
 "use strict";
+const { refPrefixOf } = require("./projects.js");
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationRef } = require("../kernel/review-binding");
 const { classifyVerificationKind, verificationRequirement } = require("../kernel/verification.js");
 function emptyVerifyCommandRefusal(kind, verify, fields) {
@@ -200,7 +201,7 @@ function createTickets(dependencies) {
     const status = fields.status === void 0 ? "todo" : requireStatus(fields.status);
     const id = newTicketId();
     const seq = nextSeq(slug);
-    const ref = `SQ-${seq}`;
+    const ref = `${refPrefixOf(readMeta(slug))}-${seq}`;
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const assets = [];
     const imgs = Array.isArray(fields.images) ? fields.images : [];

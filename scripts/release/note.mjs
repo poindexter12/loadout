@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 
+import { readRepoChangelog, releasedRefTitles } from './lib/changelog.mjs';
 import { fragmentFile, parseFragment, renderFragment, writeFragment } from './lib/fragments.mjs';
 import { readManifest } from './lib/manifests.mjs';
 import { LEVELS } from './lib/semver.mjs';
@@ -14,6 +15,10 @@ const USAGE = `Usage: node scripts/release/note.mjs <REF> --bump <${LEVELS.join(
 Writes one release fragment to .release/unreleased/<REF>.md. Run it at integration time, in the
 same push as the ticket's code, so the release cut can see what shipped.
 
+A ref CHANGELOG.md already shipped is refused when the title differs, because the cut dedups by
+content fingerprint and would ship that ref a second time for unrelated work. Re-noting the SAME
+title is an amend and stays allowed; --allow-shipped-ref overrides the refusal deliberately.
+
   --title <text>       Ticket title (defaults to the board export's title)
   --plugins <a,b>      Plugins this ticket releases; omit to infer from --changed
   --bump <level>       ${LEVELS.join(' | ')} (applies to every named plugin)
@@ -23,6 +28,7 @@ same push as the ticket's code, so the release cut can see what shipped.
   --body <text>        Extra detail rendered under the changelog entry
   --hold               Keep this fragment out of normal windows until it is unheld
   --from-json <file>   Read a board ticket export ("-" for stdin); flags win over its fields
+  --allow-shipped-ref  Reuse a ref CHANGELOG.md shipped under a different title
   --force              Overwrite an existing fragment
   --dry-run            Print the fragment instead of writing it
   --json               Print the written path and parsed fragment as JSON
@@ -43,7 +49,12 @@ function inferPlugins(changed, knownPlugins) {
   return [...found].sort();
 }
 
-export function buildFragment({ input = {}, manifest }) {
+/**
+ * `releasedTitles` is the ref -> titles map from `releasedRefTitles`. Omitting it skips the
+ * reused-ref check entirely, which is what a caller holding no changelog gets; `main` always
+ * passes the real one, so the CLI always checks.
+ */
+export function buildFragment({ input = {}, manifest, releasedTitles = null }) {
   const ref = input.ref;
   if (!ref) throw new UsageError('a board ref is required (e.g. SQ-843)');
 
@@ -71,6 +82,23 @@ export function buildFragment({ input = {}, manifest }) {
     body: input.body ?? '',
   };
   if (!draft.title) throw new UsageError(`no title for ${ref}: pass --title or a board export that has one`);
+
+  // Board refs and release-fragment refs are two minters over one number space, so a ref that
+  // already shipped can be handed to unrelated work and ship again: the cut skips a fragment
+  // only on an exact content fingerprint, and a different title is a different fingerprint. The
+  // written fragment is the last point that still knows both the ref and the title, so refuse
+  // here. The SAME title is an amend of shipped work, which the fingerprint dedup then handles,
+  // so it stays allowed for re-note flows (SQ-32).
+  const shipped = releasedTitles ? releasedTitles.get(ref) : null;
+  if (shipped && shipped.size > 0 && !shipped.has(draft.title) && input.allowShippedRef !== true) {
+    const under = [...shipped].map((title) => `"${title}"`).join(' and ');
+    throw new UsageError(
+      `${ref} already shipped in CHANGELOG.md as ${under}, not "${draft.title}": a shipped ref cannot `
+      + `be reused for different work, because the cut dedups by content fingerprint and would ship `
+      + `${ref} a second time. Use the ref the board minted for this work, or pass --allow-shipped-ref `
+      + `if reusing it is deliberate.`,
+    );
+  }
 
   const file = fragmentFile(ref);
   const text = renderFragment(draft);
@@ -106,6 +134,9 @@ function collectInput(values, positionals) {
     changed: splitList(values.changed) ?? exported.changedPaths ?? exported.files ?? [],
     body: values.body ?? exported.body ?? '',
     hold: values.hold === true || exported.hold === true,
+    // Deliberately flag-only: a board export must never be able to wave away the
+    // reused-ref refusal on its own.
+    allowShippedRef: values['allow-shipped-ref'] === true,
     category: exported.category ?? exported.categoryId ?? null,
     story: exported.story ?? null,
   };
@@ -125,6 +156,7 @@ export async function main(argv) {
       body: { type: 'string' },
       hold: { type: 'boolean' },
       'from-json': { type: 'string' },
+      'allow-shipped-ref': { type: 'boolean' },
       force: { type: 'boolean' },
       'dry-run': { type: 'boolean' },
       json: { type: 'boolean' },
@@ -139,8 +171,13 @@ export async function main(argv) {
   }
 
   const repoRoot = path.resolve(values.repo ?? repoRootFrom(import.meta.url));
-  const manifest = readManifest(diskSource(repoRoot), repoRoot);
-  const { text, file, fragment } = buildFragment({ input: collectInput(values, positionals), manifest });
+  const source = diskSource(repoRoot);
+  const manifest = readManifest(source, repoRoot);
+  const { text, file, fragment } = buildFragment({
+    input: collectInput(values, positionals),
+    manifest,
+    releasedTitles: releasedRefTitles(readRepoChangelog(source)),
+  });
 
   if (values['dry-run']) {
     console.log(values.json ? JSON.stringify({ file, fragment }, null, 2) : text);
