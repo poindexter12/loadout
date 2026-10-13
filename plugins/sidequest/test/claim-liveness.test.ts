@@ -478,6 +478,7 @@ test('a changed release cannot use no-op provenance to bypass submission', () =>
   const refused = store.completeTicket(slug, ticket.ref, 'orchestrator', { body: 'Repository work was not submitted.', source: 'mcp' });
   assert.equal(refused.ok, false);
   assert.equal(refused.reason, 'submission_required');
+  assert.match(refused.message, new RegExp(`sidequest groomClose ${ticket.ref} --by <integrator> --deliveryCommit <sha>`));
 });
 
 test('SQ-1328: a shared-tree read-only dispatch closes after a sibling commits in its scope', () => {
@@ -857,6 +858,7 @@ test('a closeout after an auto-release names the exact recovery instead of silen
   assert.strictEqual(closed.ok, false);
   assert.strictEqual(closed.reason, 'claim_released');
   assert.match(closed.message, new RegExp(`sidequest dispatch ${ticket.ref}`));
+  assert.match(closed.message, new RegExp(`sidequest groomClose ${ticket.ref} --by <integrator> --deliveryCommit <sha>`));
 
   const committed = runCli(['commit', ticket.ref, '--by', 'stranded-executor', '--message', 'after the sweep']);
   assert.notStrictEqual(committed.status, 0);
