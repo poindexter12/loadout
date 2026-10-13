@@ -277,6 +277,21 @@ function dispatchBaseMessage(ticket: any): string {
     : 'the pinned dispatch base commit recorded in the dispatch';
 }
 
+// Commits a sibling ticket is known to own, so this candidate's range can start after
+// them instead of swallowing them.
+//
+// A sibling's board-authored commit counts as soon as it exists, not only once that
+// sibling submits (SQ-277). Sequential committers in one shared tree deadlocked
+// otherwise: the later candidate's dispatch-base range swallowed the earlier commit and
+// refused outside_scope, while the explicit `--base` remedy refused unrecognized_base, so
+// no executor had a route until a sibling submitted — an ordering none of them can see or
+// arrange. dispatch.sanctionedCommits is the board's own record of the commits its commit
+// tool authored for a held claim, so it carries the same provenance a submission.commit
+// does. It stays a boundary once that claim is released: the commit is still in this
+// tree's history, and an executor that died after committing must not deadlock the
+// siblings it committed in front of. The ancestry and nearest-base guards in
+// commitScope.submissionRange still decide which of these a given candidate may start
+// from.
 function sharedTreeSubmissionBoundaries(slug: string, ticket: any): Array<{ ref: string; commit: string }> {
   if (ticket.dispatch?.sharedTree !== true) return [];
   return store.listTickets(slug).flatMap((candidate: any): Array<{ ref: string; commit: string }> => {
@@ -285,7 +300,16 @@ function sharedTreeSubmissionBoundaries(slug: string, ticket: any): Array<{ ref:
     const commit = String(submission?.commit || '').trim();
     const liveSubmission = Boolean(commit) && !submission.integratedAt && candidate.status !== 'done';
     const integratedSubmission = Boolean(commit) && Boolean(submission.integratedAt);
-    return liveSubmission || integratedSubmission ? [{ ref: candidate.ref, commit }] : [];
+    const boundaries = liveSubmission || integratedSubmission ? [{ ref: candidate.ref, commit }] : [];
+    const seen = new Set(boundaries.map((boundary) => boundary.commit.toLowerCase()));
+    const sanctioned = store.dispatchState(candidate)?.sanctionedCommits;
+    for (const recorded of Array.isArray(sanctioned) ? sanctioned : []) {
+      const sanctionedCommit = String(recorded || '').trim();
+      if (!sanctionedCommit || seen.has(sanctionedCommit.toLowerCase())) continue;
+      seen.add(sanctionedCommit.toLowerCase());
+      boundaries.push({ ref: candidate.ref, commit: sanctionedCommit });
+    }
+    return boundaries;
   });
 }
 
@@ -405,14 +429,33 @@ function collectGitSubmissionFacts(options: any) {
   const scope = ticketCommitScope(slug, ticket);
   const requirements: any[] = targetFailure ? [targetFailure] : [];
   const surfaces: any = { declared: scope, admitted: scope, changed: range?.ok ? range.changedPaths : [], pending: [] };
+  const excludedScopePaths: Array<{ path: string; owners: string[] }> = [];
   if (!range?.ok) {
     surfaces.diagnostic = { code: range?.reason || 'integration_target_unavailable', message: range ? submissionRangeFailureMessage(ticket, range, gitRef) : targetFailure.message, retryable: true };
   } else {
     const pending = commitScope.scopedWorkPending(root, scope, { base: range.base });
     if (!pending.ok) {
       requirements.push({ code: pending.reason, message: `submit: could not inspect the declared scope in ${root}: ${pending.message || pending.reason}`, retryable: true });
-    } else {
+    } else if (ticket.dispatch?.sharedTree !== true) {
       surfaces.pending = pending.working;
+    } else {
+      // The commit tool already leaves these paths out of this ticket's commit (SQ-276), so
+      // demanding they be committed here is a refusal with no legal action behind it: the
+      // board widened this scope itself, and sweeping a sibling's file into the commit is
+      // exactly what the commit gate prevents. Attribute them instead and report them the
+      // way closeout already reports shared-tree working paths (SQ-277). Isolated
+      // worktrees keep the unfiltered surface: one executor owns the whole checkout, so
+      // nothing uncommitted in it is foreign.
+      const foreign = store.foreignCommitPaths(slug, ticket, root);
+      const foreignOwners = new Map<string, string[]>(Object.entries(foreign.owners || {})
+        .map(([file, owners]: [string, any]) => [commitScope.scopeKey(file), Array.isArray(owners) ? owners : []]));
+      const retained: string[] = [];
+      for (const file of pending.working) {
+        const owners = foreignOwners.get(commitScope.scopeKey(file));
+        if (owners) excludedScopePaths.push({ path: file, owners });
+        else retained.push(file);
+      }
+      surfaces.pending = retained;
     }
     const scopedRange = commitScope.validateCommitRangeScope(root, range.commits, scope);
     if (!scopedRange.ok) {
@@ -464,6 +507,7 @@ function collectGitSubmissionFacts(options: any) {
         }
         : { identity: null },
       requirements,
+      excludedScopePaths,
     },
   };
 }

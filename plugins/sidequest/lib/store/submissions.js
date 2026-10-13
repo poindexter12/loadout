@@ -423,10 +423,13 @@ Expires: ${checkpoint.expiresAt}`;
     if (dispatchState(ticket)?.sharedTree !== true || !range) return [];
     return reportedPaths.filter((file) => !inherited.has(dirtyPathKey(file)));
   }
-  function sharedTreeWorkingPathAdvisory(inheritedPaths, unsubmittedWorkingPaths) {
+  function sharedTreeWorkingPathAdvisory(inheritedPaths, unsubmittedWorkingPaths, excludedScopePaths) {
     const attributedPaths = [
       ...inheritedPaths.map((file) => `${file} (present before dispatch)`),
-      ...unsubmittedWorkingPaths.map((file) => `${file} (not in submitted range)`)
+      ...unsubmittedWorkingPaths.map((file) => `${file} (not in submitted range)`),
+      // Inside the declared scope rather than beside it, so these never reach the unscoped
+      // gate — they were dropped from the dirty-scope surface instead (SQ-277).
+      ...(Array.isArray(excludedScopePaths) ? excludedScopePaths : []).map((entry) => `${entry.path} (${(Array.isArray(entry.owners) ? entry.owners : []).join(", ")})`)
     ];
     if (!attributedPaths.length) return null;
     return `Shared-tree working paths excluded from this submission: ${attributedPaths.join(", ")}. Commit only your declared scope; never stash or revert foreign paths.`;
@@ -2399,7 +2402,7 @@ ${verify.outputTail}` : null
         ...readiness.ok ? [] : [{ code: readiness.reason, message: `submit: refused ${ticket.ref}; ${readiness.message} Request scope only for work this ticket owns. Commit only approved scope; never stash, revert, or include foreign paths.`, retryable: true }]
       ]
     });
-    return { decision, verification, admittedScope: admitted, inheritedPaths, unsubmittedWorkingPaths, gatedPaths };
+    return { decision, verification, admittedScope: admitted, inheritedPaths, unsubmittedWorkingPaths, gatedPaths, excludedScopePaths: Array.isArray(adapterFacts.excludedScopePaths) ? adapterFacts.excludedScopePaths : [] };
   }
   function submitTicket(slug, idOrRef, by, opts) {
     opts = opts || {};
@@ -2481,8 +2484,8 @@ ${verify.outputTail}` : null
         }
       }
       const rejectedSubmission = rejectionHistory(t).find((entry) => entry && !entry.supersededAt) || null;
-      const { admittedScope, verification: submissionVerification, inheritedPaths, unsubmittedWorkingPaths, gatedPaths } = admission;
-      const workingPathAdvisory = sharedTreeWorkingPathAdvisory(inheritedPaths, unsubmittedWorkingPaths);
+      const { admittedScope, verification: submissionVerification, inheritedPaths, unsubmittedWorkingPaths, gatedPaths, excludedScopePaths } = admission;
+      const workingPathAdvisory = sharedTreeWorkingPathAdvisory(inheritedPaths, unsubmittedWorkingPaths, excludedScopePaths);
       const submittedAt = (/* @__PURE__ */ new Date()).toISOString();
       let comment = null;
       delete t.submissionRetry;
@@ -2505,6 +2508,7 @@ ${verify.outputTail}` : null
         ...rejectedSubmission ? { supersedesRejectedSubmission: rejectedSubmission.commit } : {},
         ...inheritedPaths.length ? { inheritedPaths } : {},
         ...unsubmittedWorkingPaths.length ? { unsubmittedWorkingPaths } : {},
+        ...excludedScopePaths.length ? { excludedScopePaths } : {},
         integratedAt: null
       }, range || {});
       if (rejectedSubmission) {
