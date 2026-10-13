@@ -127,6 +127,62 @@ test('a destructive verb is caught behind a wrapper, not only at the command sta
   assert.equal(result.blocked.length, 1);
 });
 
+test('a destructive verb quoted inside a search pattern never blocks the fingerprint', async () => {
+  // SQ-174: `Drop` inside a quoted grep alternation was tokenized as the bare word `drop`,
+  // so a read-only `grep -n` with hundreds of clean approvals was reported as a "sighted
+  // destructive command". A destructive verb only counts where a shell would RUN it.
+  const projectDir = temporaryProject();
+  enablePermissionAutomation(projectDir);
+  const searchCommand = 'grep -n "struct TestRedirect\\|impl TestRedirect\\|impl Drop for TestRedirect" baude-core/src/testing.rs';
+  const environment = writeWindow(projectDir, Array.from({ length: 5 }, () => permissionTranscript(searchCommand)));
+
+  const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
+
+  assert.deepEqual(result.blocked.map((entry) => entry.fingerprint), [], 'a quoted pattern is an argument, never a command position');
+  assert.equal(result.additions[0]?.fingerprint, 'permission:Bash:grep');
+});
+
+test('a destructive phrase quoted inside an argument never blocks the fingerprint', async () => {
+  const projectDir = temporaryProject();
+  enablePermissionAutomation(projectDir);
+  const environment = writeWindow(projectDir, [
+    ...Array.from({ length: 3 }, () => permissionTranscript('rg -n "docker rm" docs/')),
+    ...Array.from({ length: 3 }, () => permissionTranscript('echo -n "drop table users"')),
+  ]);
+
+  const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
+
+  assert.deepEqual(result.blocked.map((entry) => entry.fingerprint), []);
+  assert.deepEqual(result.additions.map((entry) => entry.fingerprint).sort(), ['permission:Bash:echo', 'permission:Bash:rg']);
+});
+
+test('a destructive command in a later command position still condemns the fingerprint', async () => {
+  const projectDir = temporaryProject();
+  enablePermissionAutomation(projectDir);
+  const environment = writeWindow(projectDir, [
+    ...Array.from({ length: 3 }, () => permissionTranscript('rg -n foo src/ | xargs rm')),
+    ...Array.from({ length: 3 }, () => permissionTranscript('npm test && sudo rm -rf /tmp/build')),
+    ...Array.from({ length: 3 }, () => permissionTranscript('psql -c "drop table users"')),
+    ...Array.from({ length: 3 }, () => permissionTranscript('find . -name "*.o" -exec rm {} \\;')),
+  ]);
+
+  const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
+
+  assert.equal(result.additions.length, 0);
+  assert.deepEqual(result.blocked.map((entry) => entry.fingerprint).sort(), [
+    'permission:Bash:find .',
+    'permission:Bash:npm test',
+    'permission:Bash:psql',
+    'permission:Bash:rg',
+  ]);
+  assert.deepEqual(result.blocked.map((entry) => entry.vetoReason), Array(4).fill(null), 'each of these is blocked by a sighting, not by rule shape');
+  assert.equal(
+    result.blocked.find((entry) => entry.fingerprint === 'permission:Bash:psql').destructiveCommand,
+    'psql -c "drop table users"',
+    'inline SQL passed to a code runner is a command position',
+  );
+});
+
 test('an approved command never earns a rule whose wildcard covers a destructive sibling', async () => {
   const projectDir = temporaryProject();
   enablePermissionAutomation(projectDir);
