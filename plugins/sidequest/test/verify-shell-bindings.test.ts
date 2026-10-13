@@ -59,3 +59,26 @@ test('a binding covers only its own scope and the scopes nested inside it', () =
 test('positional and special parameters are never reported', () => {
   assert.deepEqual(unsetErrors(`bash -c 'test "$#" -ge 0 && test -z "$1" && echo "$@" "$9"' probe`), []);
 });
+
+// #19's second half: for a name the command really does read from the ambient
+// environment, the refusal was right but its remedy was not. `${NAME:-/tmp}` is
+// a concrete value the validator picked without knowing what the check needs, so
+// an author who pastes it gets a verify that runs, exits 0, and no longer checks
+// what it claims to. The refusal must stay and the invented default must go.
+test('#19 remedy: an ambient name is refused without recommending a default the validator invented', () => {
+  for (const command of [`test -d "$HOME_DIR_X"`, `test -d "%HOME_DIR_X%"`]) {
+    const errors = unsetErrors(command);
+    assert.equal(errors.length, 1, `${command} is still refused`);
+    const remedy = errors[0] ?? '';
+    assert.match(remedy, /variable HOME_DIR_X/, 'the remedy names the variable it refused');
+    assert.match(remedy, /manual: <what you checked>/, 'the remedy keeps the non-shell escape hatch');
+    assert.ok(
+      !/Set a portable default/.test(remedy),
+      `the remedy must not tell the author to set a default the validator cannot choose: ${remedy}`,
+    );
+    assert.ok(
+      !/:-\s*[^<\s}]/.test(remedy),
+      `any \`:-\` the remedy shows must be a placeholder, never a value to paste: ${remedy}`,
+    );
+  }
+});

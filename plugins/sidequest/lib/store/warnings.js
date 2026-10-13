@@ -454,13 +454,13 @@ function createWarnings({ boardConfig, categoryReadOnly, claimReclaimable, coerc
     for (const match of command.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)(?:\}|(?::[^}]*)\})/g)) {
       const name = match[1] || match[2];
       if (name && process.env[name] == null && !match[0].includes(":-") && !shellBindsBefore(command, name, match.index ?? 0)) {
-        errors.push(`Verify references unset environment variable ${name}. Set a portable default such as \`${"${"}${name}:-/tmp}\`, or use \`manual: <what you checked>\`.`);
+        errors.push(`Verify references unset environment variable ${name}, so the check depends on whatever the operator's environment happens to hold. Write the value the check needs into the command, bind the name in the command itself (\`${name}=<value> && <command>\`), or use \`manual: <what you checked>\`. A \`${"${"}${name}:-<default>}\` fallback only helps when that default still checks what the verify claims to check.`);
       }
     }
     for (const match of command.matchAll(/%([A-Za-z_][A-Za-z0-9_]*)%/g)) {
       const name = match[1];
       if (name != null && process.env[name] == null) {
-        errors.push(`Verify references unset environment variable ${name}. Set a portable default or use \`manual: <what you checked>\`.`);
+        errors.push(`Verify references unset environment variable ${name}, so the check depends on whatever the operator's environment happens to hold. Write the value the check needs into the command, or use \`manual: <what you checked>\`.`);
       }
     }
     return errors;
