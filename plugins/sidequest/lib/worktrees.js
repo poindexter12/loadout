@@ -238,6 +238,17 @@ function agentWorktreeRoots(repository) {
 function persistentStateFile() {
   return path.join(sidequestHome(), "worktree-sweep-failures.json");
 }
+function sweepSessionStateFile() {
+  return path.join(sidequestHome(), "worktree-sweep-sessions.json");
+}
+function liveSweepSessionPaths() {
+  try {
+    const state = JSON.parse(nativeFs.readFileSync(sweepSessionStateFile(), "utf8"));
+    return Object.values(state?.sessions || {}).map((pathname) => String(pathname)).filter(Boolean);
+  } catch (_) {
+    return [];
+  }
+}
 function readFailureState() {
   try {
     return JSON.parse(nativeFs.readFileSync(persistentStateFile(), "utf8"));
@@ -403,13 +414,22 @@ function dispatchHasTerminalLifecycleAuthority(dispatch) {
   const attempts = Array.isArray(dispatch?.attempts) ? dispatch.attempts : [];
   return attempts.some((attempt) => attempt?.terminalAt === terminalAt && attempt?.terminalSource === terminalSource && attempt?.outcome === outcome);
 }
+function dispatchHasCompleteWorktreeBinding(dispatch) {
+  return Boolean(dispatch?.worktree && dispatch?.worktreeGitDirectory && dispatch?.worktreeCommonGitDirectory && dispatch?.worktreeCheckoutInstance && dispatch?.worktreeObservedRevision);
+}
 function dispatchHasCompletedWorktreeCreation(dispatch) {
-  return Boolean(dispatch?.worktreeBindingSource === "worktree-create" && dispatch?.worktreeCreationCompletedAt && dispatch?.worktree && dispatch?.worktreeGitDirectory && dispatch?.worktreeCommonGitDirectory && dispatch?.worktreeCheckoutInstance && dispatch?.worktreeObservedRevision);
+  return Boolean(dispatch?.worktreeBindingSource === "worktree-create" && dispatch?.worktreeCreationCompletedAt && dispatchHasCompleteWorktreeBinding(dispatch));
+}
+function dispatchHasBoundWorktreeIdentity(dispatch) {
+  if (!dispatchHasCompleteWorktreeBinding(dispatch)) return false;
+  const source = String(dispatch?.worktreeBindingSource || "").trim();
+  if (source === "worktree-create") return Boolean(dispatch?.worktreeCreationCompletedAt);
+  return source === "continuation";
 }
 function worktreeLeaseIdentity(ticket, entry) {
   const dispatch = ticket?.dispatch;
   const expected = dispatchWorktreeForTicket(ticket);
-  if (!dispatchHasCompletedWorktreeCreation(dispatch) || !expected || canonicalPath(expected) !== canonicalPath(entry.worktree)) {
+  if (!dispatchHasBoundWorktreeIdentity(dispatch) || !expected || canonicalPath(expected) !== canonicalPath(entry.worktree)) {
     return { status: "unknown" };
   }
   const agentId = String(dispatch?.agentId || "").trim();
@@ -606,7 +626,12 @@ async function classifyWorktree(repo, tickets, entry, currentPath, minAgeMs, ups
     action = "remove";
     reason = "ticket_done";
   } else if (facts.trackedChanges && (facts.reachable || facts.patchEquivalent)) {
-    reason = "tracked_changes";
+    if (facts.oldEnoughToSalvage) {
+      action = "salvage";
+      reason = "tracked_changes_salvage";
+    } else {
+      reason = "tracked_changes";
+    }
   } else if (!facts.oldEnough) reason = "too_young";
   else if (facts.reachable) {
     action = "remove";
@@ -1386,7 +1411,7 @@ async function recoveryStoreSizes(recovery, options) {
     quarantine: { path: recovery.quarantine.path, bytes: recovery.quarantine.bytes }
   };
 }
-function sweepProgress(entries, removed) {
+function sweepProgress(entries, removed, window) {
   const keptByReason = {};
   for (const entry of entries) {
     if (entry.action !== "keep") continue;
@@ -1396,11 +1421,20 @@ function sweepProgress(entries, removed) {
   return {
     planned: entries.filter((entry) => entry.action === "remove" || entry.action === "salvage").length,
     removed: removed.length,
-    keptByReason
+    keptByReason,
+    considered: window.considered,
+    total: window.total
   };
 }
-function reportSweepProgress(options, entries, removed) {
-  if (typeof options.onProgress === "function") options.onProgress(sweepProgress(entries, removed));
+function reportSweepProgress(options, entries, removed, window) {
+  if (typeof options.onProgress === "function") options.onProgress(sweepProgress(entries, removed, window));
+}
+function rotatedCandidates(candidates, cursor) {
+  if (candidates.length < 2 || !cursor) return candidates;
+  const resolved = canonicalPath(cursor);
+  const start = Math.max(0, candidates.findIndex((entry) => canonicalPath(entry.worktree) === resolved) + 1) % candidates.length;
+  if (!start) return candidates;
+  return [...candidates.slice(start), ...candidates.slice(0, start)];
 }
 async function sweep(repo, tickets, options = {}) {
   const minAgeMs = Number.isFinite(Number(options.minAgeMs)) && Number(options.minAgeMs) >= 0 ? Number(options.minAgeMs) : DEFAULT_MIN_AGE_MS;
@@ -1420,6 +1454,10 @@ async function sweep(repo, tickets, options = {}) {
       minAgeMs,
       notIntegratedSalvageAgeMs,
       upstream,
+      // A busy repository assessed nothing, so the cursor must not advance.
+      candidateCursor: String(options.candidateCursor || ""),
+      candidatesConsidered: 0,
+      candidatesTotal: 0,
       entries: [],
       orphanBranches: [],
       removed: [],
@@ -1451,7 +1489,11 @@ async function sweep(repo, tickets, options = {}) {
   const orphanCandidates = [];
   const allCandidates = candidates;
   const maxCandidates = Number.isFinite(Number(options.maxCandidates)) && Number(options.maxCandidates) > 0 ? Math.floor(Number(options.maxCandidates)) : allCandidates.length;
-  const boundedCandidates = allCandidates.slice(0, maxCandidates);
+  const windowed = rotatedCandidates(allCandidates, String(options.candidateCursor || ""));
+  const boundedCandidates = windowed.slice(0, maxCandidates);
+  const candidateCursor = boundedCandidates.length ? String(boundedCandidates[boundedCandidates.length - 1].worktree) : String(options.candidateCursor || "");
+  const progressWindow = { considered: boundedCandidates.length, total: allCandidates.length };
+  reportSweepProgress(options, [], [], { considered: 0, total: allCandidates.length });
   const livePaths = Array.isArray(options.livePaths) ? options.livePaths.map((pathname) => String(pathname)) : [];
   const entries = await Promise.all(boundedCandidates.map((entry) => entry.orphanDirectory ? classifyOrphanDirectory(tickets, entry, livePaths, minAgeMs) : classifyWorktree(repo, tickets, entry, options.currentPath || process.cwd(), minAgeMs, upstream, livePaths, notIntegratedSalvageAgeMs, [...registered])));
   await Promise.all(entries.map(async (entry) => {
@@ -1461,7 +1503,7 @@ async function sweep(repo, tickets, options = {}) {
   }));
   const execute = !!options.execute;
   const removed = [];
-  reportSweepProgress(options, entries, removed);
+  reportSweepProgress(options, entries, removed, progressWindow);
   const backups = [];
   const salvaged = [];
   const deletedBranches = [];
@@ -1473,7 +1515,7 @@ async function sweep(repo, tickets, options = {}) {
       if (shouldSkipKnownFailure(entry.path)) {
         entry.action = "keep";
         entry.reason = "known_permanent_failure";
-        reportSweepProgress(options, entries, removed);
+        reportSweepProgress(options, entries, removed, progressWindow);
         continue;
       }
       if (entry.action === "salvage") {
@@ -1484,7 +1526,7 @@ async function sweep(repo, tickets, options = {}) {
           entry.action = "keep";
           entry.reason = "salvage_failed";
           failures.push({ path: entry.path, message: `salvage failed: ${error && error.message || error}` });
-          reportSweepProgress(options, entries, removed);
+          reportSweepProgress(options, entries, removed, progressWindow);
           continue;
         }
       }
@@ -1506,7 +1548,7 @@ async function sweep(repo, tickets, options = {}) {
           entry.action = "keep";
           entry.reason = "quarantine_failed";
           failures.push({ path: entry.path, message: `${message}; quarantine failed: ${quarantine.stderr}` });
-          reportSweepProgress(options, entries, removed);
+          reportSweepProgress(options, entries, removed, progressWindow);
           continue;
         }
         entry.action = "quarantine";
@@ -1516,12 +1558,12 @@ async function sweep(repo, tickets, options = {}) {
         if (quarantine.stripFailure) {
           failures.push({ path: quarantine.destination, message: `quarantine cleanup failed: ${quarantine.stripFailure}` });
         }
-        reportSweepProgress(options, entries, removed);
+        reportSweepProgress(options, entries, removed, progressWindow);
         continue;
       }
       clearFailure(entry.path);
       removed.push(entry.path);
-      reportSweepProgress(options, entries, removed);
+      reportSweepProgress(options, entries, removed, progressWindow);
       if (entry.orphanDirectory) continue;
       const branch = localBranchName(entry.branch);
       if (!branch) continue;
@@ -1546,12 +1588,17 @@ async function sweep(repo, tickets, options = {}) {
       else failures.push({ path: entry.branch, message: deleted.stderr || "git branch delete failed" });
     }
   }
-  reportSweepProgress(options, entries, removed);
+  reportSweepProgress(options, entries, removed, progressWindow);
   return {
     dryRun: !execute,
     minAgeMs,
     notIntegratedSalvageAgeMs,
     upstream,
+    // The caller persists candidateCursor so the next sweep resumes after this
+    // window instead of restarting at the same unremovable head.
+    candidateCursor,
+    candidatesConsidered: progressWindow.considered,
+    candidatesTotal: progressWindow.total,
     entries,
     orphanBranches,
     removed,
@@ -1575,4 +1622,4 @@ async function sweep(repo, tickets, options = {}) {
     skipped: skippedSweepEntries(entries)
   };
 }
-module.exports = { DEFAULT_MIN_AGE_MS, DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_MS, DEFAULT_RECOVERY_RETENTION_AGE_MS, DEFAULT_RECOVERY_RETENTION_MAX_PER_AGENT, gitBashPath, canonicalPath, worktreeRoot, legacyWorktreeRoot, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, namedWorktreePath, agentWorktreeRoots, parseWorktreeList, isAgentWorktree, ignoredPathsMissingFromWorktree, provisionWorktree, preferredWorktreeIntegrationTarget, classifyWorktree, advanceIntegrationBranch, reclaimUnclaimedDispatchWorktree, quarantineCandidate, storageStatus, sweep };
+module.exports = { DEFAULT_MIN_AGE_MS, DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_MS, DEFAULT_RECOVERY_RETENTION_AGE_MS, DEFAULT_RECOVERY_RETENTION_MAX_PER_AGENT, gitBashPath, canonicalPath, liveSweepSessionPaths, worktreeRoot, legacyWorktreeRoot, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, namedWorktreePath, agentWorktreeRoots, parseWorktreeList, isAgentWorktree, ignoredPathsMissingFromWorktree, provisionWorktree, preferredWorktreeIntegrationTarget, classifyWorktree, advanceIntegrationBranch, reclaimUnclaimedDispatchWorktree, quarantineCandidate, storageStatus, sweep };

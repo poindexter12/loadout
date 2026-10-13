@@ -410,3 +410,58 @@ test('dirty worktree backup contains patches and recovery metadata without a cop
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('successive bounded sweeps rotate past an unremovable head and collect every removable worktree', async () => {
+  // SQ-267: the candidate window was a prefix of a stable name-sorted list, so an
+  // unremovable head was reassessed every session and the tail was never assessed in
+  // any session. 81 worktrees and 22GB accumulated behind eight such entries. Two
+  // sweeps bounded to two candidates each must therefore reach all four candidates.
+  const { repository, baseCommit, worktreeRoot } = repositoryFixture();
+  const dirtyWorktree = createAgentWorktree(repository, worktreeRoot, 'a1-dirty', false);
+  const liveWorktree = createAgentWorktree(repository, worktreeRoot, 'a2-live');
+  const firstDoneWorktree = createAgentWorktree(repository, worktreeRoot, 'b1-done');
+  const secondDoneWorktree = createAgentWorktree(repository, worktreeRoot, 'b2-done');
+  fs.writeFileSync(path.join(dirtyWorktree, 'unfinished.txt'), 'keep this work\n');
+  const liveTicket = integratedTicket('SQ-LIVE-ROTATE', 'a2-live', liveWorktree, baseCommit);
+  liveTicket.status = 'doing';
+  liveTicket.claimLive = true;
+  const tickets = [
+    liveTicket,
+    integratedTicket('SQ-DONE-ROTATE-1', 'b1-done', firstDoneWorktree, baseCommit),
+    integratedTicket('SQ-DONE-ROTATE-2', 'b2-done', secondDoneWorktree, baseCommit),
+  ];
+  const sweepOptions = { execute: true, maxCandidates: 2, integrationTarget };
+  const pathsOf = (result: any) => result.entries.map((entry: any) => worktrees.canonicalPath(entry.path));
+  const reasonFor = (result: any, worktree: string) => result.entries
+    .find((entry: any) => worktrees.canonicalPath(entry.path) === worktrees.canonicalPath(worktree))?.reason;
+  try {
+    const first = await worktrees.sweep(repository, tickets, sweepOptions);
+
+    // Precondition: the unremovable pair really is the head of the candidate list,
+    // which is what made the tail unreachable before the cursor existed.
+    assert.deepEqual(pathsOf(first).sort(), [dirtyWorktree, liveWorktree].map(worktrees.canonicalPath).sort());
+    assert.equal(reasonFor(first, dirtyWorktree), 'legacy_unreclaimed');
+    assert.equal(reasonFor(first, liveWorktree), 'live_session');
+
+    const second = await worktrees.sweep(repository, tickets, { ...sweepOptions, candidateCursor: first.candidateCursor });
+
+    // The rotation itself, asserted before any of the new reporting fields so that
+    // this is the assertion that goes red on base rather than a missing counter.
+    assert.deepEqual(pathsOf(second).sort(), [firstDoneWorktree, secondDoneWorktree].map(worktrees.canonicalPath).sort());
+    assert.equal(reasonFor(second, firstDoneWorktree), 'ticket_done');
+    assert.equal(reasonFor(second, secondDoneWorktree), 'ticket_done');
+    assert.equal(fs.existsSync(firstDoneWorktree), false);
+    assert.equal(fs.existsSync(secondDoneWorktree), false);
+
+    // Rotation must never be a licence to remove what the first window protected.
+    assert.equal(fs.existsSync(dirtyWorktree), true);
+    assert.equal(fs.existsSync(liveWorktree), true);
+
+    assert.equal(first.candidatesConsidered, 2);
+    assert.equal(first.candidatesTotal, 4);
+    assert.equal(second.candidatesConsidered, 2);
+    assert.equal(second.candidatesTotal, 4);
+  } finally {
+    fs.rmSync(repository, { recursive: true, force: true });
+  }
+});

@@ -289,6 +289,24 @@ function persistentStateFile(): string {
   return path.join(sidequestHome(), 'worktree-sweep-failures.json');
 }
 
+function sweepSessionStateFile(): string {
+  return path.join(sidequestHome(), 'worktree-sweep-sessions.json');
+}
+
+// The checkout of every registered live session, which is the sweep's second piece
+// of liveness evidence beside the board claim. The SessionStart hook has always
+// passed it; the CLI sweep did not, and the CLI is the command the budget notice
+// tells agents to run, so the hand-run path was the one protecting live work on the
+// claim alone (SQ-267). One reader, so both paths agree on the file's shape.
+function liveSweepSessionPaths(): string[] {
+  try {
+    const state = JSON.parse(nativeFs.readFileSync(sweepSessionStateFile(), 'utf8')) as { sessions?: Record<string, string> };
+    return Object.values(state?.sessions || {}).map((pathname) => String(pathname)).filter(Boolean);
+  } catch (_) {
+    return [];
+  }
+}
+
 type FailureState = Record<string, {
   fingerprint: string;
   attempts: number;
@@ -500,20 +518,39 @@ function dispatchHasTerminalLifecycleAuthority(dispatch: any): boolean {
     && attempt?.outcome === outcome);
 }
 
-function dispatchHasCompletedWorktreeCreation(dispatch: any): boolean {
-  return Boolean(dispatch?.worktreeBindingSource === 'worktree-create'
-    && dispatch?.worktreeCreationCompletedAt
-    && dispatch?.worktree
+function dispatchHasCompleteWorktreeBinding(dispatch: any): boolean {
+  return Boolean(dispatch?.worktree
     && dispatch?.worktreeGitDirectory
     && dispatch?.worktreeCommonGitDirectory
     && dispatch?.worktreeCheckoutInstance
     && dispatch?.worktreeObservedRevision);
 }
 
+function dispatchHasCompletedWorktreeCreation(dispatch: any): boolean {
+  return Boolean(dispatch?.worktreeBindingSource === 'worktree-create'
+    && dispatch?.worktreeCreationCompletedAt
+    && dispatchHasCompleteWorktreeBinding(dispatch));
+}
+
+// Cleanup identity answers "does the board know which dispatch owns this tree",
+// which is not the same question as "did the board create it". A continuation
+// dispatch records the whole five-field binding over the checkout it retained but
+// never a creation stamp, so keying identity on 'worktree-create' alone left every
+// continuation-bound tree permanently unknown_identity and therefore unreclaimable
+// through the lease path (SQ-267). Reclaiming an *unclaimed* dispatch's checkout is
+// still gated on a real WorktreeCreate, because a retained checkout was never the
+// board's to recreate (SQ-167).
+function dispatchHasBoundWorktreeIdentity(dispatch: any): boolean {
+  if (!dispatchHasCompleteWorktreeBinding(dispatch)) return false;
+  const source = String(dispatch?.worktreeBindingSource || '').trim();
+  if (source === 'worktree-create') return Boolean(dispatch?.worktreeCreationCompletedAt);
+  return source === 'continuation';
+}
+
 function worktreeLeaseIdentity(ticket: any, entry: any): { status: 'bound'; agentId?: string; dispatchRef?: string } | { status: 'unknown' } {
   const dispatch = ticket?.dispatch;
   const expected = dispatchWorktreeForTicket(ticket);
-  if (!dispatchHasCompletedWorktreeCreation(dispatch) || !expected || canonicalPath(expected) !== canonicalPath(entry.worktree)) {
+  if (!dispatchHasBoundWorktreeIdentity(dispatch) || !expected || canonicalPath(expected) !== canonicalPath(entry.worktree)) {
     return { status: 'unknown' };
   }
   const agentId = String(dispatch?.agentId || '').trim();
@@ -752,7 +789,17 @@ async function classifyWorktree(repo: string, tickets: any[], entry: any, curren
   } else if (facts.trackedChanges && (facts.reachable || facts.patchEquivalent)) {
     // Settled branches are removable only after preserving tracked edits, including
     // patch-equivalent commits that are absent from the integration branch (SQ-1848).
-    reason = 'tracked_changes';
+    // "Preserve first" was a hold with no terminal route, so these trees were kept
+    // forever: the oldest resident worktree on this board had sat in tracked_changes
+    // for 413h (SQ-267). Past the salvage age the edits go to refs/salvage/<agent>
+    // and refs/salvage/<agent>-uncommitted, the same mechanism the unintegrated
+    // route already uses, so preservation is satisfied by capture rather than tenure.
+    if (facts.oldEnoughToSalvage) {
+      action = 'salvage';
+      reason = 'tracked_changes_salvage';
+    } else {
+      reason = 'tracked_changes';
+    }
   } else if (!facts.oldEnough) reason = 'too_young';
   else if (facts.reachable) {
     action = 'remove';
@@ -1659,9 +1706,15 @@ async function recoveryStoreSizes(recovery: Awaited<ReturnType<typeof sweepRecov
 }
 
 type SweepProgressEntry = { action: string; reason?: unknown };
-type SweepProgressOptions = { onProgress?: (progress: { planned: number; removed: number; keptByReason: Record<string, number> }) => void };
+// considered/total separate "assessed, nothing to do" from "nothing assessed yet".
+// Without them a budget-expiry notice reported planned 0 / removed 0 / skipped 0
+// while 81 worktrees sat resident and unclassified, which read as proof the sweep
+// had nothing to collect (SQ-267).
+type SweepProgressCounts = { planned: number; removed: number; keptByReason: Record<string, number>; considered: number; total: number };
+type SweepProgressWindow = { considered: number; total: number };
+type SweepProgressOptions = { onProgress?: (progress: SweepProgressCounts) => void };
 
-function sweepProgress(entries: readonly SweepProgressEntry[], removed: readonly string[]): { planned: number; removed: number; keptByReason: Record<string, number> } {
+function sweepProgress(entries: readonly SweepProgressEntry[], removed: readonly string[], window: SweepProgressWindow): SweepProgressCounts {
   const keptByReason: Record<string, number> = {};
   for (const entry of entries) {
     if (entry.action !== 'keep') continue;
@@ -1672,11 +1725,27 @@ function sweepProgress(entries: readonly SweepProgressEntry[], removed: readonly
     planned: entries.filter((entry) => entry.action === 'remove' || entry.action === 'salvage').length,
     removed: removed.length,
     keptByReason,
+    considered: window.considered,
+    total: window.total,
   };
 }
 
-function reportSweepProgress(options: SweepProgressOptions, entries: readonly SweepProgressEntry[], removed: readonly string[]): void {
-  if (typeof options.onProgress === 'function') options.onProgress(sweepProgress(entries, removed));
+function reportSweepProgress(options: SweepProgressOptions, entries: readonly SweepProgressEntry[], removed: readonly string[], window: SweepProgressWindow): void {
+  if (typeof options.onProgress === 'function') options.onProgress(sweepProgress(entries, removed, window));
+}
+
+// The window used to be a prefix of name-sorted `git worktree list` order. Every
+// candidate at its head was permanently unremovable — dirty, continuation-bound, or
+// legacy-unreclaimed — so the same eight entries were reclassified every session and
+// candidates 9..81 were never assessed at all, in any session, forever. Rotating from
+// a persisted cursor is what bounds residency: each sweep starts after the last tree
+// it assessed, so an unremovable head costs one window, not every window (SQ-267).
+function rotatedCandidates<T extends { worktree: string }>(candidates: readonly T[], cursor: string): readonly T[] {
+  if (candidates.length < 2 || !cursor) return candidates;
+  const resolved = canonicalPath(cursor);
+  const start = Math.max(0, candidates.findIndex((entry) => canonicalPath(entry.worktree) === resolved) + 1) % candidates.length;
+  if (!start) return candidates;
+  return [...candidates.slice(start), ...candidates.slice(0, start)];
 }
 
 async function sweep(repo: string, tickets: any[], options: any = {}): Promise<any> {
@@ -1703,6 +1772,10 @@ async function sweep(repo: string, tickets: any[], options: any = {}): Promise<a
       minAgeMs,
       notIntegratedSalvageAgeMs,
       upstream,
+      // A busy repository assessed nothing, so the cursor must not advance.
+      candidateCursor: String(options.candidateCursor || ''),
+      candidatesConsidered: 0,
+      candidatesTotal: 0,
       entries: [],
       orphanBranches: [],
       removed: [],
@@ -1739,7 +1812,16 @@ async function sweep(repo: string, tickets: any[], options: any = {}): Promise<a
   const maxCandidates = Number.isFinite(Number(options.maxCandidates)) && Number(options.maxCandidates) > 0
     ? Math.floor(Number(options.maxCandidates))
     : allCandidates.length;
-  const boundedCandidates = allCandidates.slice(0, maxCandidates);
+  const windowed = rotatedCandidates(allCandidates, String(options.candidateCursor || ''));
+  const boundedCandidates = windowed.slice(0, maxCandidates);
+  const candidateCursor = boundedCandidates.length
+    ? String(boundedCandidates[boundedCandidates.length - 1].worktree)
+    : String(options.candidateCursor || '');
+  const progressWindow = { considered: boundedCandidates.length, total: allCandidates.length };
+  // Classification is the expensive half (eight git spawns per tree, measured
+  // ~1.3s each), so the pre-classification report is the only progress a sweep that
+  // loses its SessionStart budget can possibly have published.
+  reportSweepProgress(options, [], [], { considered: 0, total: allCandidates.length });
   const livePaths = Array.isArray(options.livePaths) ? options.livePaths.map((pathname: unknown) => String(pathname)) : [];
   const entries = await Promise.all(boundedCandidates.map((entry) => (
     entry.orphanDirectory
@@ -1753,7 +1835,7 @@ async function sweep(repo: string, tickets: any[], options: any = {}): Promise<a
   }));
   const execute = !!options.execute;
   const removed: string[] = [];
-  reportSweepProgress(options, entries, removed);
+  reportSweepProgress(options, entries, removed, progressWindow);
   const backups: string[] = [];
   const salvaged: Array<{ path: string; ref: string; uncommittedRef: string | null; recovery: string }> = [];
   const deletedBranches: string[] = [];
@@ -1766,7 +1848,7 @@ async function sweep(repo: string, tickets: any[], options: any = {}): Promise<a
       if (shouldSkipKnownFailure(entry.path)) {
         entry.action = 'keep';
         entry.reason = 'known_permanent_failure';
-        reportSweepProgress(options, entries, removed);
+        reportSweepProgress(options, entries, removed, progressWindow);
         continue;
       }
       if (entry.action === 'salvage') {
@@ -1777,7 +1859,7 @@ async function sweep(repo: string, tickets: any[], options: any = {}): Promise<a
           entry.action = 'keep';
           entry.reason = 'salvage_failed';
           failures.push({ path: entry.path, message: `salvage failed: ${(error && error.message) || error}` });
-          reportSweepProgress(options, entries, removed);
+          reportSweepProgress(options, entries, removed, progressWindow);
           continue;
         }
       }
@@ -1801,7 +1883,7 @@ async function sweep(repo: string, tickets: any[], options: any = {}): Promise<a
           entry.action = 'keep';
           entry.reason = 'quarantine_failed';
           failures.push({ path: entry.path, message: `${message}; quarantine failed: ${quarantine.stderr}` });
-          reportSweepProgress(options, entries, removed);
+          reportSweepProgress(options, entries, removed, progressWindow);
           continue;
         }
         entry.action = 'quarantine';
@@ -1811,12 +1893,12 @@ async function sweep(repo: string, tickets: any[], options: any = {}): Promise<a
         if (quarantine.stripFailure) {
           failures.push({ path: quarantine.destination, message: `quarantine cleanup failed: ${quarantine.stripFailure}` });
         }
-        reportSweepProgress(options, entries, removed);
+        reportSweepProgress(options, entries, removed, progressWindow);
         continue;
       }
       clearFailure(entry.path);
       removed.push(entry.path);
-      reportSweepProgress(options, entries, removed);
+      reportSweepProgress(options, entries, removed, progressWindow);
       if (entry.orphanDirectory) continue;
       const branch = localBranchName(entry.branch);
       if (!branch) continue;
@@ -1845,12 +1927,17 @@ async function sweep(repo: string, tickets: any[], options: any = {}): Promise<a
     }
   }
 
-  reportSweepProgress(options, entries, removed);
+  reportSweepProgress(options, entries, removed, progressWindow);
   return {
     dryRun: !execute,
     minAgeMs,
     notIntegratedSalvageAgeMs,
     upstream,
+    // The caller persists candidateCursor so the next sweep resumes after this
+    // window instead of restarting at the same unremovable head.
+    candidateCursor,
+    candidatesConsidered: progressWindow.considered,
+    candidatesTotal: progressWindow.total,
     entries,
     orphanBranches,
     removed,
@@ -1875,4 +1962,4 @@ async function sweep(repo: string, tickets: any[], options: any = {}): Promise<a
   };
 }
 
-module.exports = { DEFAULT_MIN_AGE_MS, DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_MS, DEFAULT_RECOVERY_RETENTION_AGE_MS, DEFAULT_RECOVERY_RETENTION_MAX_PER_AGENT, gitBashPath, canonicalPath, worktreeRoot, legacyWorktreeRoot, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, namedWorktreePath, agentWorktreeRoots, parseWorktreeList, isAgentWorktree, ignoredPathsMissingFromWorktree, provisionWorktree, preferredWorktreeIntegrationTarget, classifyWorktree, advanceIntegrationBranch, reclaimUnclaimedDispatchWorktree, quarantineCandidate, storageStatus, sweep };
+module.exports = { DEFAULT_MIN_AGE_MS, DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_MS, DEFAULT_RECOVERY_RETENTION_AGE_MS, DEFAULT_RECOVERY_RETENTION_MAX_PER_AGENT, gitBashPath, canonicalPath, liveSweepSessionPaths, worktreeRoot, legacyWorktreeRoot, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, namedWorktreePath, agentWorktreeRoots, parseWorktreeList, isAgentWorktree, ignoredPathsMissingFromWorktree, provisionWorktree, preferredWorktreeIntegrationTarget, classifyWorktree, advanceIntegrationBranch, reclaimUnclaimedDispatchWorktree, quarantineCandidate, storageStatus, sweep };

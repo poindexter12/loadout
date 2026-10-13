@@ -270,7 +270,7 @@ var import_node_fs4 = __toESM(require("node:fs"));
 var import_node_path5 = __toESM(require("node:path"));
 var DEFAULT_DEADLINE_MS = 2500;
 var DEFERRAL_NOTICE = "sidequest: worktree sweep exceeded its SessionStart budget and is still running in the background.";
-var EMPTY_SWEEP_PROGRESS = { planned: 0, removed: 0, keptByReason: {} };
+var EMPTY_SWEEP_PROGRESS = { planned: 0, removed: 0, keptByReason: {}, considered: 0, total: 0 };
 var HANDOFF_FAILED_NOTICE = "sidequest: worktree sweep could not run, so stale agent worktrees were not collected this session.";
 function deadlineMs() {
   const raw = Number(process.env.SIDEQUEST_SWEEP_DEADLINE_MS);
@@ -292,7 +292,13 @@ function normalizedProgress(value) {
   const record = value;
   const count = (candidate) => Number.isFinite(Number(candidate)) && Number(candidate) >= 0 ? Math.floor(Number(candidate)) : 0;
   const keptByReason = Object.fromEntries(Object.entries(record.keptByReason || {}).map(([reason, amount]) => [reason, count(amount)]).filter(([, amount]) => amount > 0));
-  return { planned: count(record.planned), removed: count(record.removed), keptByReason };
+  return {
+    planned: count(record.planned),
+    removed: count(record.removed),
+    keptByReason,
+    considered: count(record.considered),
+    total: count(record.total)
+  };
 }
 function writeSweepProgress(cwd, progress) {
   try {
@@ -318,7 +324,7 @@ function deferralNotice(cwd, progress) {
   const kept = Object.values(progress.keptByReason).reduce((total, count) => total + count, 0);
   const reasons = Object.entries(progress.keptByReason).map(([reason, count]) => `${reason} ${count}`).join(", ") || "none";
   const command = `node "${pluginRoot()}/bin/sidequest.js" worktrees sweep --yes --project "${import_node_path5.default.resolve(cwd || ".")}"`;
-  return `${DEFERRAL_NOTICE} Progress at the ${deadlineMs()}ms budget, not a final result: planned ${progress.planned}, removed ${progress.removed}, skipped ${kept} (${reasons}). The detached sweep keeps running and reports on the next session start. Finish it sooner with ${command}.`;
+  return `${DEFERRAL_NOTICE} Progress at the ${deadlineMs()}ms budget, not a final result: assessed ${progress.considered} of ${progress.total} candidate worktrees, planned ${progress.planned}, removed ${progress.removed}, skipped ${kept} (${reasons}). The detached sweep keeps running and reports on the next session start. Finish it sooner with ${command}.`;
 }
 function drainReport(cwd) {
   const file = reportFile(cwd);

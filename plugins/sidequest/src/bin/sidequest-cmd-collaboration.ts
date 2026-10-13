@@ -103,6 +103,10 @@ async function cmdWorktrees(opts: any, positional: any) {
     result = await worktrees.sweep(meta.path, store.worktreeGcTickets(), {
       execute: !!opts.yes && !opts['dry-run'],
       currentPath: store.nearestRepoRoot(process.cwd()),
+      // The hand-run sweep is the command the SessionStart budget notice points at,
+      // so it must see the same liveness evidence the hook does. Without these a
+      // live executor's checkout was protected by its board claim alone (SQ-267).
+      livePaths: worktrees.liveSweepSessionPaths(),
       integrationTarget: store.integrationTarget(slug),
       minAgeMs: minAgeHours * 60 * 60 * 1000,
       recoveryRetentionAgeMs: recoveryRetentionAgeHours * 60 * 60 * 1000,

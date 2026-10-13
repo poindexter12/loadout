@@ -77,9 +77,14 @@ test('deferred SessionStart sweep reports reached counts and the finishing comma
     planned: 4,
     removed: 2,
     keptByReason: { legacy_unreclaimed: 1, active_ticket: 3 },
+    considered: 8,
+    total: 81,
   });
 
   assert.match(notice, /planned 4, removed 2, skipped 4 \(legacy_unreclaimed 1, active_ticket 3\)/);
+  // SQ-267: the zeros in a budget-expiry notice are only readable as a verdict if
+  // the notice also says how much it managed to assess.
+  assert.match(notice, /assessed 8 of 81 candidate worktrees/);
   // SQ-70: the counts are a snapshot at the budget, and the notice has to say so
   // rather than read as the sweep's final result.
   assert.match(notice, /Progress at the \d+ms budget, not a final result/);
