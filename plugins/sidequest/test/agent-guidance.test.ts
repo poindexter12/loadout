@@ -45,6 +45,11 @@ test('published guidance excludes retired instructions', () => {
   assert.match(skill, /TaskStop\(\{ task_id: "<agent name>" \}\)/);
   assert.match(executorTemplate, /After terminal closeout, the board terminal state is authoritative/);
   assert.match(executorTemplate, /Never call `TaskStop` on another ticket's executor or dispatch id/);
+  // SQ-224: the rule forbade exactly one stop verb, so an executor reaching for Bash violated nothing.
+  assert.match(executorTemplate, /never signal a process this attempt did not start, however stuck it looks/);
+  assert.match(executorTemplate, /pattern-selected kill \(`pkill -f`, `killall`, `pgrep \| xargs kill`/);
+  assert.match(executorTemplate, /Signal only by a pid or\s+job spec this attempt owns/);
+  assert.match(executorTemplate, /a verify run that overruns its budget is the wrapper's\s+to terminate, not yours/);
 
   for (const source of [skill, orchestration]) {
     assert.doesNotMatch(source, new RegExp('native' + '_agent', 'i'));
