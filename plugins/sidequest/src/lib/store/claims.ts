@@ -279,7 +279,7 @@ function createClaims(dependencies: any) {
   function autoReleasedClaimMessage(ref?: any, release?: any) {
     const when = release && release.at ? ` at ${release.at}` : '';
     const why = (release && (release.reason || release.kind)) || 'the claim sweep released it';
-    return `${ref}'s claim was auto-released${when}: ${why}. Its dispatch token went with it, so this closeout cannot be recorded. Your commits are safe — do NOT discard, reset, or redo the work. Recovery: have the orchestrator run \`sidequest dispatch ${ref}\`, claim with that fresh token and executor, then hand in the SAME commit.`;
+    return `${ref}'s claim was auto-released${when}: ${why}. Its dispatch token went with it, so this closeout cannot be recorded. Your commits are safe — do NOT discard, reset, or redo the work. Recovery: have the orchestrator run \`sidequest dispatch ${ref}\`, claim with that fresh token and executor, then hand in the SAME commit. After a terminal dispatch, deliver verified landed work through \`sidequest groomClose ${ref} --by <integrator> --deliveryCommit <sha>\`.`;
   }
 
   function claimIdleLabel(idleMs?: any) {
