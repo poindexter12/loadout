@@ -10,10 +10,24 @@ const { streamTranscript } = require('./stream.js');
 
 const MIN_APPROVALS = 3;
 const ENABLED_SETTING = 'autoApprovePermissions';
-// Anchoring on the start of the command missed every wrapped form (`sudo rm`,
-// `xargs rm`, `find . -exec rm`), so the verb is matched as a word anywhere.
+// Matched against a command POSITION, never against the command body as text:
+// `grep -n "impl Drop for TestRedirect" src/testing.rs` reported a "sighted
+// destructive command" for 702 clean approvals because `Drop` fell out of the
+// quoted regex as a bare word. A verb only destroys where a shell runs it.
 const DESTRUCTIVE_WORD = /^(?:rm|rmdir|rd|del|erase|unlink|shred|rimraf|remove-item|ri|taskkill|kill|killall|pkill|format|mkfs|dd|diskpart|drop|truncate)$/i;
 const DESTRUCTIVE_PHRASE = /\bgit\s+(?:push[^\n]*(?:\s--force(?:\b|=)|\s-f\b)|reset\s+--hard\b|clean\b[^\n]*\s-[a-z]*[fdx]|branch[^\n]*\s-D\b|rm\b)|\b(?:docker|kubectl|podman)\s+(?:rm|rmi|delete|prune|system\s+prune)\b|\bnpm\s+unpublish\b|\bfind\b[^\n]*\s-delete\b|\b(?:drop|truncate)\s+(?:table|database)\b/i;
+// A wrapper runs whatever follows it, so its whole argument list is command
+// positions (`sudo rm`, `timeout 30 rm`, `xargs -0 rm`).
+const COMMAND_WRAPPER = /^(?:sudo|doas|env|time|timeout|nohup|nice|ionice|stdbuf|setsid|command|builtin|exec|xargs|parallel|watch)$/i;
+const FIND_EXEC_FLAG = /^-(?:exec|execdir|ok|okdir)$/i;
+// These read a command, a script, or SQL out of the NEXT argument, quoted or
+// not, so that argument is analyzed as a command in its own right.
+const INLINE_CODE_RUNNER = /^(?:sh|bash|zsh|dash|ksh|ash|fish|pwsh|powershell|cmd|node|nodejs|deno|bun|python|python2|python3|py|ruby|perl|php|psql|mysql|mariadb|sqlite|sqlite3|mongosh|redis-cli)$/i;
+const INLINE_CODE_FLAG = /^(?:-c|-e|-x|--eval|--execute|--command|-command|\/c|\/k)$/i;
+// Remote execution takes its command as a plain argument, with no flag to key on.
+const REMOTE_EXECUTION_RUNNER = /^(?:ssh|rsh)$/i;
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const NESTED_COMMAND_DEPTH = 3;
 
 // A rule is a PREFIX wildcard, so it grants far more than the command that
 // earned it: `git push origin main` would become `Bash(git push:*)`, which also
@@ -47,13 +61,6 @@ function permissionAutomationEnabled(projectDir) {
   return readSettings(projectDir).quartermaster?.[ENABLED_SETTING] === true;
 }
 
-function commandWords(command) {
-  return String(command ?? '')
-    .split(/[\s;&|(){}<>]+/)
-    .filter(Boolean)
-    .map((word) => word.replace(/^.*[\\/]/, '').replace(/\.exe$/i, ''));
-}
-
 function shouldSkipLearning(input) {
   const command = String(input?.command ?? '');
   return SLEEP_PREFIX.test(command)
@@ -61,9 +68,138 @@ function shouldSkipLearning(input) {
     || SESSION_SCRATCHPAD_PATH.test(command);
 }
 
+// A shell tokenizer small enough to audit: just enough quoting and operator
+// awareness to tell where one simple command ends and the next begins. Words
+// carry whether any of their text was quoted, because quoted text is data
+// (a regex, a message, a path) unless something reads it back as code.
+function tokenizeCommand(command) {
+  const source = String(command ?? '');
+  const tokens = [];
+  let text = '';
+  let quoted = false;
+  let open = false;
+
+  const endWord = () => {
+    if (!open) return;
+    tokens.push({ text, quoted });
+    text = '';
+    quoted = false;
+    open = false;
+  };
+  const endCommand = () => {
+    endWord();
+    if (tokens.length && tokens[tokens.length - 1] !== null) tokens.push(null);
+  };
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === '\\') {
+      const escaped = source[index + 1];
+      index += 1;
+      if (escaped === undefined || escaped === '\n') continue;
+      text += escaped;
+      open = true;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      // An unterminated quote swallows the rest of the command, exactly as the
+      // shell would wait for its close.
+      const close = source.indexOf(character, index + 1);
+      const end = close === -1 ? source.length : close;
+      text += source.slice(index + 1, end);
+      quoted = true;
+      open = true;
+      index = end;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      if (character === '\n') endCommand();
+      else endWord();
+      continue;
+    }
+    if (character === ';' || character === '&' || character === '|' || character === '`') {
+      endCommand();
+      continue;
+    }
+    if (character === '(' && text.endsWith('$')) {
+      text = text.slice(0, -1);
+      endCommand();
+      continue;
+    }
+    // A brace or paren only groups commands when it stands on its own; inside a
+    // word it is `-I{}`, `${VAR}`, or `name()`.
+    if (!open && (character === '(' || character === ')' || character === '{' || character === '}')) {
+      endCommand();
+      continue;
+    }
+    text += character;
+    open = true;
+  }
+  endWord();
+  return tokens;
+}
+
+function simpleCommands(command) {
+  const commands = [[]];
+  for (const token of tokenizeCommand(command)) {
+    if (token === null) commands.push([]);
+    else commands[commands.length - 1].push(token);
+  }
+  return commands.filter((words) => words.length);
+}
+
+function executableName(word) {
+  return word.replace(/^.*[\\/]/, '').replace(/\.exe$/i, '');
+}
+
+// Leading `FOO=bar` assignments precede the command they decorate.
+function commandBody(words) {
+  let index = 0;
+  while (index < words.length && !words[index].quoted && ENV_ASSIGNMENT.test(words[index].text)) index += 1;
+  return words.slice(index);
+}
+
+// Quoted words are collapsed so a phrase can never be read out of one argument
+// (`rg -n "docker rm" docs/`) or spliced across two.
+function phraseText(words) {
+  return words.map((word) => (word.quoted ? "''" : word.text)).join(' ');
+}
+
+function nestedCommands(executable, args) {
+  const nested = [];
+  if (INLINE_CODE_RUNNER.test(executable)) {
+    args.forEach((word, index) => {
+      if (!word.quoted && INLINE_CODE_FLAG.test(word.text) && args[index + 1]) nested.push(args[index + 1].text);
+    });
+  }
+  if (REMOTE_EXECUTION_RUNNER.test(executable)) {
+    for (const word of args) if (word.quoted) nested.push(word.text);
+  }
+  return nested;
+}
+
+function destroysInCommandPosition(words, depth) {
+  const body = commandBody(words);
+  if (!body.length) return false;
+  const [head, ...args] = body;
+  const executable = executableName(head.text);
+  if (DESTRUCTIVE_WORD.test(executable)) return true;
+  if (DESTRUCTIVE_PHRASE.test(phraseText(body))) return true;
+  if (COMMAND_WRAPPER.test(executable)
+    && args.some((word) => !word.quoted && DESTRUCTIVE_WORD.test(executableName(word.text)))) return true;
+  if (executable.toLowerCase() === 'find'
+    && args.some((word, index) => index > 0 && !word.quoted
+      && FIND_EXEC_FLAG.test(args[index - 1].text) && DESTRUCTIVE_WORD.test(executableName(word.text)))) return true;
+  if (depth >= NESTED_COMMAND_DEPTH) return false;
+  return nestedCommands(executable, args).some((nested) => destroysAnywhere(nested, depth + 1));
+}
+
+function destroysAnywhere(command, depth = 0) {
+  return simpleCommands(command).some((words) => destroysInCommandPosition(words, depth));
+}
+
 function isDestructive(input) {
-  const command = String(input?.command ?? '');
-  return commandWords(command).some((word) => DESTRUCTIVE_WORD.test(word)) || DESTRUCTIVE_PHRASE.test(command);
+  return destroysAnywhere(String(input?.command ?? ''));
 }
 
 // The rule, not the observed command, is what gets granted, so it carries its
