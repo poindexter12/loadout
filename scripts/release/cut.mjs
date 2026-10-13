@@ -35,7 +35,9 @@ tag, then pushes the plugin tags separately.
   --dry-run                Plan only: no file writes, no git mutations
   --push                   Acquire the publish lock and run the atomic push
   --skip-tests             Do not run the changed plugins' suites
-  --force-local-tests      Run the changed plugins' suites even when Test passed on the pinned commit
+  --force-local-tests      Run the changed plugins' suites even when Test passed on the pinned commit.
+                           Also the answer when Test passed there without running a released plugin's
+                           suite: the cut refuses that window rather than read the green as coverage
   --no-merge               The tree is already prepared; skip the fast-forward merge
   --no-branch-check        Allow cutting from a branch other than --publish-branch
   --allow-dirty            Tolerate unstaged or untracked files outside the paths the release writes
@@ -45,8 +47,9 @@ tag, then pushes the plugin tags separately.
                            configured remote lists them, and no remote branch contains their commits.
                            Refuses when any remote cannot be checked. Never moves a remote tag
   --ci-override <reason>   Proceed after a failed or missing Test workflow, recording why
-  --trust-ci               When the Test workflow passed on the pinned commit itself, record a failing
-                           local suite as a warning instead of aborting (normal windows only)
+  --trust-ci               When the Test workflow passed on the pinned commit itself and ran every
+                           released plugin's suite, record a failing local suite as a warning instead
+                           of aborting (normal windows only)
   --keep-on-failure        On a failure before anything is pushed, keep the release commit and tags
                            and print the undo commands instead of rolling the window back
   --json                   Machine-readable result
@@ -644,9 +647,59 @@ function containerTestCommand(commit, suites) {
   return `git archive ${commit} | docker run -i --rm node:22 sh -c ${quoteForSh(commands)}`;
 }
 
+// The Test workflow runs one leg per published plugin and short-circuits a leg whose plugin the
+// commit did not touch, so a successful run is not evidence that any suite executed: a commit that
+// only adds a release fragment or an upstream ledger line skips every leg and still concludes
+// success. GitHub records each step's own conclusion, so the run itself says which plugins were
+// covered: the suite step is `skipped` on a short-circuited leg. The plugin name is carried in the
+// step name, which is the only per-plugin identity the jobs API exposes; keep this in sync with
+// .github/workflows/test.yml.
+const SUITE_STEP_PATTERN = /^Run plugin suite \((.+)\)$/;
+// A suite step that failed or succeeded ran. Anything else (skipped, cancelled, timed out, still
+// pending) did not deliver a verdict for this plugin, so it does not count as coverage. A failure
+// is already refused by the run's own conclusion.
+const SUITE_STEP_RAN = new Set(['success', 'failure']);
+
+// Which plugins' suites actually ran in a Test workflow run, from that run's step record.
+// Conflicting verdicts for one plugin (a multi-OS matrix where one leg short-circuited) resolve to
+// `skipped`: partial coverage is not coverage.
+export function readSuiteCoverage(repoRoot, runId, runner = spawnSync) {
+  const result = runner('gh', [
+    'api', '--paginate', `repos/{owner}/{repo}/actions/runs/${runId}/jobs?per_page=100`,
+    '--jq', '.jobs[] | .steps[]? | [.name, .conclusion] | @json',
+  ], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.error) throw new Error(`cannot check which plugin suites ran in Test run ${runId}: ${result.error.message}`);
+  if (result.status !== 0) {
+    const detail = String(result.stderr || '').trim();
+    throw new Error(`cannot check which plugin suites ran in Test run ${runId}${detail ? `: ${detail}` : ''}`);
+  }
+  const coverage = new Map();
+  for (const line of String(result.stdout || '').split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed === '') continue;
+    let step;
+    try {
+      step = JSON.parse(trimmed);
+    } catch (_) {
+      throw new Error(`cannot read the step record of Test run ${runId}: gh returned invalid JSON`);
+    }
+    const match = SUITE_STEP_PATTERN.exec(String(step?.[0] ?? ''));
+    if (!match) continue;
+    const plugin = match[1];
+    const verdict = SUITE_STEP_RAN.has(step?.[1]) ? 'ran' : 'skipped';
+    if (coverage.get(plugin) === 'skipped') continue;
+    coverage.set(plugin, verdict);
+  }
+  return coverage;
+}
+
 export function assertParentCiPassed(repoRoot, commit, runner = spawnSync, suites = []) {
   const result = runner('gh', [
-    'run', 'list', '--workflow', 'Test', '--commit', commit, '--status', 'completed', '--limit', '1', '--json', 'conclusion,headSha',
+    'run', 'list', '--workflow', 'Test', '--commit', commit, '--status', 'completed', '--limit', '1', '--json', 'conclusion,databaseId,headSha',
   ], {
     cwd: repoRoot,
     encoding: 'utf8',
@@ -676,7 +729,34 @@ export function assertParentCiPassed(repoRoot, commit, runner = spawnSync, suite
       'Retry with --ci-override "<reason>" only when the release fixes that CI failure.',
     );
   }
-  return { commit, conclusion: run.conclusion };
+  // A success is only a verdict on the plugins this window releases if their suites ran in it.
+  // Every published plugin has a matrix leg (the matrix refuses one without a suite), so the plugins
+  // that move here are exactly the legs whose coverage has to be accounted for.
+  if (suites.length === 0) return { commit, conclusion: run.conclusion, runId: run.databaseId ?? null, coverage: new Map() };
+  if (!run.databaseId) {
+    const error = new Error(
+      `Test workflow for ${commit} concluded success but reported no run id, so which plugin suites ran in it ` +
+      'cannot be checked; refusing to publish. Retry with --force-local-tests to run them locally instead.',
+    );
+    error.suiteCoverage = { uncovered: suites.map((suite) => suite.plugin), runId: null };
+    throw error;
+  }
+  const coverage = readSuiteCoverage(repoRoot, run.databaseId, runner);
+  const uncovered = suites.map((suite) => suite.plugin).filter((plugin) => coverage.get(plugin) !== 'ran');
+  if (uncovered.length > 0) {
+    const detail = uncovered
+      .map((plugin) => `${plugin} (${coverage.has(plugin) ? coverage.get(plugin) : 'no suite step recorded'})`)
+      .join(', ');
+    const error = new Error(
+      `Test workflow run ${run.databaseId} for ${commit} concluded success without running these plugin suites: ${detail}. ` +
+      "A commit touching none of a plugin's watched paths short-circuits its leg, so that success says nothing " +
+      'about the plugins this window releases; refusing to publish. Retry with --force-local-tests to run them ' +
+      'locally, or --ci-override "<reason>" when you have other evidence.',
+    );
+    error.suiteCoverage = { uncovered, runId: run.databaseId };
+    throw error;
+  }
+  return { commit, conclusion: run.conclusion, runId: run.databaseId, coverage };
 }
 
 export function isGitHubRemote(repoRoot, remote, remoteUrl, runner = spawnSync) {
@@ -903,15 +983,33 @@ export async function cut(options = {}) {
       const result = assertCiPassed(repoRoot, pinned, plan.suites);
       ci = { status: 'passed', commit: pinned, conclusion: result?.conclusion ?? 'success' };
     } catch (error) {
-      if (!ciOverrideReason) throw error;
-      ci = { status: 'overridden', commit: pinned, reason: ciOverrideReason, error: error.message };
+      // A coverage gap is not a CI verdict at all: the workflow never ran the suites this window
+      // needs, so the local suites are precisely the missing evidence rather than a second opinion.
+      // --force-local-tests supplies them, and `uncovered` keeps every consumer of a passing
+      // verdict (the suite skip, --trust-ci) refusing this window.
+      if (error.suiteCoverage && forceLocalTests) {
+        ci = {
+          status: 'uncovered',
+          commit: pinned,
+          conclusion: 'success',
+          uncovered: error.suiteCoverage.uncovered,
+          error: error.message,
+        };
+      } else if (ciOverrideReason) {
+        ci = { status: 'overridden', commit: pinned, reason: ciOverrideReason, error: error.message };
+      } else {
+        throw error;
+      }
     }
   }
   const ciTrusted = trustCi && ci?.status === 'passed' && ci.commit === pinned;
   if (trustCi && !dryRun && !ciTrusted) {
+    const why = ci?.status === 'uncovered'
+      ? `the run there never ran the suites for ${ci.uncovered.join(', ')}, so it cannot excuse a local failure`
+      : 'none was checked (the remote is not on GitHub and no CI check was supplied)';
     throw new Error(
-      `--trust-ci needs a passing Test workflow on the pinned commit ${pinned}, but none was checked ` +
-      `(the remote is not on GitHub and no CI check was supplied); nothing was changed. Run the suites, or drop --trust-ci.`,
+      `--trust-ci needs a passing Test workflow on the pinned commit ${pinned}, but ${why}; ` +
+      'nothing was changed. Run the suites, or drop --trust-ci.',
     );
   }
 
@@ -1054,6 +1152,8 @@ export async function cut(options = {}) {
         log(`built ${plan.tag} locally as ${commit}; publish it with:`);
         if (ci?.status === 'passed') {
           log(`Test CI on the pinned commit ${ci.commit} passed.`);
+        } else if (ci?.status === 'uncovered') {
+          log(`Test CI on the pinned commit ${ci.commit} passed without running the suites for ${ci.uncovered.join(', ')}; they ran locally instead.`);
         } else if (ci?.status === 'overridden') {
           log(`Test CI on the pinned commit ${ci.commit} was overridden: ${ci.reason}`);
         }
