@@ -219,7 +219,7 @@ test('emits a linked metadata-only route span and strips trace and auth before C
   });
   assert.match(routeEntry.at, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(logText.includes('secret'), false);
-  if (process.platform !== 'win32') assert.equal(fs.statSync(routeLog).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(routeLog).mode & 0o777, 0o600);
 });
 
 test('reports dispatch and cached-route truth while invalid trace context stays unlinked', async (t) => {

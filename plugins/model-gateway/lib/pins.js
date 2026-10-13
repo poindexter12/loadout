@@ -1,14 +1,14 @@
 'use strict';
 
-const { spawn, spawnSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const http = require('node:http');
 const { writeFileAtomically } = require('./atomic-file.js');
 const {
-  CLAUDE_BIN, CLAUDE_BIN_IS_BATCH, CODEX_FAMILY_RE, COMPAT_BASE_URL, DEFAULT_BASE_URL,
+  CLAUDE_BIN, CODEX_FAMILY_RE, COMPAT_BASE_URL, DEFAULT_BASE_URL,
   DISPATCH_MODEL_ID, GROK_PREFIX, KNOWN_GOOD_PINS, LEGACY_CODEX_PREFIX, LEGACY_DEFAULT_BASE_URL, PIN_ALIASES,
   PIN_CACHE_PATH, PIN_CACHE_TTL_MS, PIN_OVERRIDE_PATH, PIN_PROBE_TIMEOUT_MS, PREFIX,
-  STATE, STATIC_ENV_BLOCK, WIN,
+  STATE, STATIC_ENV_BLOCK,
 } = require('./runtime.js');
 
 function codexBaseFromId(id) {
@@ -73,10 +73,7 @@ function terminateProbe(child) {
   child.kill('SIGTERM');
   setTimeout(() => {
     if (child.exitCode != null) return;
-    if (WIN) spawnSync('taskkill', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true });
-    else {
-      try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
-    }
+    try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
   }, 250).unref();
 }
 
@@ -93,7 +90,7 @@ function startPinProbeServer() {
 
 function claudeVersion() {
   return new Promise((resolve) => {
-    const child = spawn(CLAUDE_BIN, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: !WIN, shell: CLAUDE_BIN_IS_BATCH });
+    const child = spawn(CLAUDE_BIN, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });
     let output = '';
     const timeout = setTimeout(() => { terminateProbe(child); resolve(null); }, PIN_PROBE_TIMEOUT_MS);
     child.stdout.on('data', (chunk) => { output += chunk; });
@@ -134,8 +131,7 @@ function probeClaudeAlias(alias, endpoint, timeoutMs = PIN_PROBE_TIMEOUT_MS) {
       },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
-      detached: !WIN,
-      shell: CLAUDE_BIN_IS_BATCH,
+      detached: true,
     });
     let output = '';
     let detected = null;

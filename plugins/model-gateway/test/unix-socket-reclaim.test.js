@@ -40,7 +40,7 @@ async function spawnOrphanedSocketHolder(socketPath) {
   return child;
 }
 
-test('probeUnixSocketLive reports stale for an orphaned socket file and live for an active listener', { skip: process.platform === 'win32' }, async (t) => {
+test('probeUnixSocketLive reports stale for an orphaned socket file and live for an active listener', async (t) => {
   const { directory, socketPath } = socketFixtureDir('probe');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
@@ -60,7 +60,7 @@ test('probeUnixSocketLive reports stale for an orphaned socket file and live for
   assert.equal(await probeUnixSocketLive(socketPath), 'live');
 });
 
-test('reclaimStaleUnixSocket removes a socket file orphaned by an unclean shutdown', { skip: process.platform === 'win32' }, async (t) => {
+test('reclaimStaleUnixSocket removes a socket file orphaned by an unclean shutdown', async (t) => {
   const { directory, socketPath } = socketFixtureDir('stale');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
@@ -74,7 +74,7 @@ test('reclaimStaleUnixSocket removes a socket file orphaned by an unclean shutdo
   assert.equal(fs.existsSync(socketPath), false, 'the stale file must be gone so listen() can succeed');
 });
 
-test('reclaimStaleUnixSocket leaves a live peer socket in place -- conservative by construction', { skip: process.platform === 'win32' }, async (t) => {
+test('reclaimStaleUnixSocket leaves a live peer socket in place -- conservative by construction', async (t) => {
   const { directory, socketPath } = socketFixtureDir('live');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
@@ -102,14 +102,14 @@ test('reclaimStaleUnixSocket leaves a live peer socket in place -- conservative 
   assert.equal(contacted, 2);
 });
 
-test('reclaimStaleUnixSocket is a no-op when nothing has ever bound the path', { skip: process.platform === 'win32' }, async (t) => {
+test('reclaimStaleUnixSocket is a no-op when nothing has ever bound the path', async (t) => {
   const { directory, socketPath } = socketFixtureDir('absent');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   assert.equal(fs.existsSync(socketPath), false);
   assert.equal(await reclaimStaleUnixSocket(socketPath), 'absent');
 });
 
-test('reclaimStaleUnixSocket leaves a non-socket file alone rather than guessing', { skip: process.platform === 'win32' }, async (t) => {
+test('reclaimStaleUnixSocket leaves a non-socket file alone rather than guessing', async (t) => {
   const { directory, socketPath } = socketFixtureDir('notasocket');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.writeFileSync(socketPath, 'unexpected regular file, not a socket');
@@ -117,44 +117,4 @@ test('reclaimStaleUnixSocket leaves a non-socket file alone rather than guessing
   const result = await reclaimStaleUnixSocket(socketPath);
   assert.equal(result, 'not-a-socket');
   assert.equal(fs.existsSync(socketPath), true, 'never delete something that is not ours to clean up');
-});
-
-// The Windows named-pipe path (see runtime.js SOCKET_PATH / socketScopeSuffix)
-// has no filesystem entry to leak in the first place -- a dead process's pipe
-// name is released by the kernel automatically. reclaimStaleUnixSocket must
-// bail out before touching fs at all on that platform, leaving the existing
-// (already-scoped, see commit b4d7d37c) listen() call exactly as it was.
-// process.platform can't be flipped for a real Windows run from here, so this
-// simulates it the same way rc-compat-mode.test.js reloads the gateway module
-// graph under a fixture HOME: evict lib/, flip platform, re-require, restore.
-test('reclaimStaleUnixSocket skips every filesystem check on win32 (named pipes leak nothing)', async (t) => {
-  const { directory, socketPath } = socketFixtureDir('winguard');
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  fs.rmSync(directory, { recursive: true, force: true }); // this platform never gets to create anything to check
-  fs.mkdirSync(directory, { recursive: true });
-
-  const libDir = path.join(__dirname, '..', 'lib') + path.sep;
-  const evicted = new Map();
-  for (const key of Object.keys(require.cache)) {
-    if (key.startsWith(libDir)) {
-      evicted.set(key, require.cache[key]);
-      delete require.cache[key];
-    }
-  }
-  const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
-  Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
-  let windowsRequestWorker;
-  try {
-    windowsRequestWorker = require('../lib/request-worker.js');
-  } finally {
-    Object.defineProperty(process, 'platform', originalPlatform);
-    for (const key of Object.keys(require.cache)) {
-      if (key.startsWith(libDir)) delete require.cache[key];
-    }
-    for (const [key, value] of evicted) require.cache[key] = value;
-  }
-
-  const result = await windowsRequestWorker.reclaimStaleUnixSocket(socketPath);
-  assert.equal(result, 'skipped-windows');
-  assert.equal(fs.existsSync(socketPath), false, 'nothing should have been statted or created for a win32 path');
 });

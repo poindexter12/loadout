@@ -75,8 +75,7 @@ function requestFixtureSupervisorStop(child) {
 
 function forceStopGatewayProcess(pid) {
   if (!processIsRunning(pid)) return;
-  if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-  else { try { process.kill(pid, 'SIGTERM'); } catch {} }
+  try { process.kill(pid, 'SIGTERM'); } catch {}
 }
 
 async function stopGatewayFixtureProcess(home) {
@@ -207,7 +206,6 @@ function isInheritedGatewayOverride(key, value) {
 }
 
 function testSocketPath(home) {
-  if (process.platform === 'win32') return `\\\\.\\pipe\\model-gateway-test-${path.basename(home)}`;
   return path.join(home, 'gateway.sock');
 }
 

@@ -53,7 +53,6 @@ const {
   modelCatalogDetails, readJsonFile,
 } = require('./catalog.js');
 
-const WIN = process.platform === 'win32';
 // Must stay in lockstep with runtime.js STATE: this module owns the proxy
 // binary, wiring config and logs, so a homedir join here would put two account
 // trees back on one binary and one wiring.json.
@@ -85,7 +84,7 @@ const ENSURE_LOCK_WRITE_GRACE_MS = 2000;
 // mid-recovery.
 const ENSURE_LOCK_MAX_AGE_MS = 150 * ENSURE_LOCK_WRITE_GRACE_MS; // 5 minutes
 const PLUGIN_VERSION = readPluginVersion();
-const PROXY_BIN = path.join(BIN_DIR, WIN ? 'claude-code-proxy.exe' : 'claude-code-proxy');
+const PROXY_BIN = path.join(BIN_DIR, 'claude-code-proxy');
 const PROXY_SERVING_VERSION_PATH = path.join(STATE, 'proxy-serving-version.txt');
 // Per-account ports (SQ-175): one definition, in runtime.js. This file used to
 // carry its own fixed 18764/18765 copy, which would have kept every account on
@@ -351,24 +350,16 @@ const {
   managedHostsBlock, parseHostsCompatBlock, parseHostsCompatEntry, removeManagedHostsBlock, remoteControlCommand,
 } = require('./remote-control.js');
 function compatibilityPortOwnerIdentifiers() {
-  const portLookup = WIN
-    ? spawnSync('netstat', ['-ano', '-p', 'tcp'], { encoding: 'utf8', windowsHide: true })
-    : spawnSync('lsof', ['-nP', `-iTCP:${COMPAT_PORT}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8', windowsHide: true });
+  const portLookup = spawnSync('lsof', ['-nP', `-iTCP:${COMPAT_PORT}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8', windowsHide: true });
   if (portLookup.status !== 0) return [];
   const output = String(portLookup.stdout || '');
-  if (!WIN) return [...new Set(output.split(/\s+/).map(Number).filter(Boolean))];
-  const listeningPort = new RegExp(`^\\s*TCP\\s+\\S+:${COMPAT_PORT}\\s+\\S+\\s+LISTENING\\s+(\\d+)\\s*$`, 'gim');
-  return [...new Set(Array.from(output.matchAll(listeningPort), (match) => Number(match[1])).filter(Boolean))];
+  return [...new Set(output.split(/\s+/).map(Number).filter(Boolean))];
 }
 
 function processNameForIdentifier(processIdentifier) {
-  const processLookup = WIN
-    ? spawnSync('tasklist', ['/FI', `PID eq ${processIdentifier}`, '/FO', 'CSV', '/NH'], { encoding: 'utf8', windowsHide: true })
-    : spawnSync('ps', ['-p', String(processIdentifier), '-o', 'comm='], { encoding: 'utf8', windowsHide: true });
+  const processLookup = spawnSync('ps', ['-p', String(processIdentifier), '-o', 'comm='], { encoding: 'utf8', windowsHide: true });
   if (processLookup.status !== 0) return null;
-  const output = String(processLookup.stdout || '').trim();
-  if (!output) return null;
-  return WIN ? output.match(/^"([^"]+)"/)?.[1] || null : output;
+  return String(processLookup.stdout || '').trim() || null;
 }
 
 function compatibilityPortConflict() {
@@ -607,9 +598,8 @@ async function setup() {
   mkdirs();
   sweepOldProxyBinaries();
   const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
-  const plat = WIN ? 'windows' : process.platform === 'darwin' ? 'darwin' : 'linux';
-  const ext = WIN ? 'zip' : 'tar.gz';
-  const assetName = `claude-code-proxy-${plat}-${arch}.${ext}`;
+  const plat = process.platform === 'darwin' ? 'darwin' : 'linux';
+  const assetName = `claude-code-proxy-${plat}-${arch}.tar.gz`;
 
   log(`fetching latest release of ${REPO}...`);
   const rel = await fetchUrl(`https://api.github.com/repos/${REPO}/releases/latest`);
@@ -617,7 +607,7 @@ async function setup() {
   const release = JSON.parse(rel.body.toString());
   const asset = (release.assets || []).find((a) => a.name === assetName);
   if (!asset) die(`no asset ${assetName} in release ${release.tag_name}`);
-  const shaAsset = (release.assets || []).find((a) => a.name === assetName.replace(/\.(zip|tar\.gz)$/, '.sha256'));
+  const shaAsset = (release.assets || []).find((a) => a.name === assetName.replace(/\.tar\.gz$/, '.sha256'));
 
   log(`downloading ${assetName} (${release.tag_name})...`);
   const archive = await fetchUrl(asset.browser_download_url, { timeout: 120000 });
@@ -634,16 +624,13 @@ async function setup() {
   const stage = fs.mkdtempSync(path.join(BIN_DIR, 'stage-'));
   const archiveFile = path.join(stage, assetName);
   fs.writeFileSync(archiveFile, archive.body);
-  const tarBin = WIN
-    ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe')
-    : 'tar';
-  const tar = spawnSync(tarBin, ['-xf', archiveFile], { encoding: 'utf8', cwd: stage, windowsHide: true });
+  const tar = spawnSync('tar', ['-xf', archiveFile], { encoding: 'utf8', cwd: stage, windowsHide: true });
   if (tar.status !== 0) die(`extract failed: ${tar.stderr || tar.status}`);
   const staged = fs.readdirSync(stage, { recursive: true })
     .map(String).find((file) => path.basename(file) === path.basename(PROXY_BIN));
   if (!staged) die(`extracted, but ${path.basename(PROXY_BIN)} not found in ${BIN_DIR}`);
   const stagedProxy = path.join(stage, staged);
-  if (!WIN) fs.chmodSync(stagedProxy, 0o755);
+  fs.chmodSync(stagedProxy, 0o755);
   const currentVersion = parseSemver((spawnSync(PROXY_BIN, ['--version'], { encoding: 'utf8', windowsHide: true }).stdout || '').trim());
   const stagedVersion = parseSemver((spawnSync(stagedProxy, ['--version'], { encoding: 'utf8', windowsHide: true }).stdout || '').trim());
   const proxyChanged = !currentVersion || !stagedVersion || currentVersion.join('.') !== stagedVersion.join('.');
@@ -807,9 +794,6 @@ const REPARENTING_LAUNCHER = [
 ].join('\n');
 
 function spawnReparented(name, command, cmdArgs, env, { launch = spawnSync, fallback = spawnDetached } = {}) {
-  // Windows has no parent-PID tree kill of a detached, job-breakaway child; the
-  // existing detached launcher already covers it.
-  if (WIN) return fallback(name, command, cmdArgs, env);
   const launched = launch(process.execPath, ['-e', REPARENTING_LAUNCHER, JSON.stringify([path.join(LOGS, name + '.log'), command, ...cmdArgs])], {
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'ignore'],
@@ -2302,7 +2286,7 @@ function runShim() {
             component: 'supervisor',
             pid: process.pid,
             child: { component: 'worker', pid: worker.pid },
-            signal: WIN ? 'TASKKILL' : signal,
+            signal,
           });
         }
       }
@@ -2459,7 +2443,7 @@ function runShim() {
           component: 'supervisor',
           pid: process.pid,
           child: { component: 'worker', pid: current.pid },
-          signal: WIN ? 'TASKKILL' : 'SIGTERM',
+          signal: 'SIGTERM',
           outcome: 'drain-timeout',
         });
         void killPidAsync(current.pid, { probeChildren });

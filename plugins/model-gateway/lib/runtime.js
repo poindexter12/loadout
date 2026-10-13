@@ -7,7 +7,6 @@ const path = require('node:path');
 const grokBackend = require('./grok-backend.js');
 const { writeFileAtomically } = require('./atomic-file.js');
 
-const WIN = process.platform === 'win32';
 // Every gateway path hangs off the active config dir, never a hardcoded
 // ~/.claude. Account trees (a work tree and a personal tree) each run their own
 // gateway, so sharing one STATE dir would mean sharing one pid file, one unix
@@ -23,7 +22,7 @@ const WIRING_CONFIG_PATH = path.join(STATE, 'wiring.json');
 const PROJECT_WIRING_REGISTRY_PATH = path.join(STATE, 'wired-projects.json');
 const SHIM_FAILURE_PATH = path.join(STATE, 'shim-supervisor-failure.txt');
 const CODEX_UPSTREAM_BLOCK_PATH = path.join(STATE, 'codex-upstream-blocked.json');
-const PROXY_BIN = path.join(BIN_DIR, WIN ? 'claude-code-proxy.exe' : 'claude-code-proxy');
+const PROXY_BIN = path.join(BIN_DIR, 'claude-code-proxy');
 // Ports are per account tree too (SQ-175). A fixed 18764/18765 for every
 // config dir meant whichever account started first owned the listener, and the
 // other account's `ensure` correctly refused to stop a foreign install root's
@@ -90,23 +89,9 @@ const DEFAULT_BASE_URL = `http://127.0.0.1:${PUBLIC_SHIM_PORT}`;
 // account's DEFAULT_BASE_URL instead of treating it as a foreign base URL and
 // leaving the account routed through another account's shim.
 const LEGACY_DEFAULT_BASE_URL = `http://127.0.0.1:${LEGACY_SHIM_PORT}`;
-// A Windows named pipe is a flat global name, so it cannot hang off STATE the
-// way the unix socket does. Without a per-config-dir suffix every account tree
-// would still meet on one pipe and share one gateway, which is the collision
-// this module otherwise exists to prevent. The suffix is a digest of the
-// resolved config dir, case-folded because Windows paths are case-insensitive
-// and two spellings of one directory must not become two gateways.
-function socketScopeSuffix() {
-  const resolved = path.resolve(CLAUDE_CONFIG_DIR);
-  return crypto.createHash('sha256')
-    .update(WIN ? resolved.toLowerCase() : resolved)
-    .digest('hex')
-    .slice(0, 12);
-}
-
-const SOCKET_PATH = process.env.CODEX_GATEWAY_SOCKET_PATH || (WIN
-  ? `\\\\.\\pipe\\model-gateway-${socketScopeSuffix()}`
-  : path.join(STATE, 'gateway.sock'));
+// The socket hangs off STATE, which is already per-config-dir, so two account
+// trees can never meet on one socket and share one gateway.
+const SOCKET_PATH = process.env.CODEX_GATEWAY_SOCKET_PATH || path.join(STATE, 'gateway.sock');
 const COMPAT_BASE_URL = `http://${COMPAT_HOST}`;
 const HOSTS_BLOCK_START = '# >>> model-gateway RC compatibility >>>';
 const HOSTS_BLOCK_END = '# <<< model-gateway RC compatibility <<<';
@@ -269,7 +254,6 @@ const PIN_CACHE_PATH = path.join(STATE, 'detected-pins.json');
 const PIN_CACHE_TTL_MS = Number(process.env.CODEX_GATEWAY_PIN_CACHE_TTL_MS) || 24 * 60 * 60 * 1000;
 const PIN_PROBE_TIMEOUT_MS = Number(process.env.CODEX_GATEWAY_PIN_PROBE_TIMEOUT_MS) || 5000;
 const CLAUDE_BIN = process.env.CODEX_GATEWAY_CLAUDE_BIN || 'claude';
-const CLAUDE_BIN_IS_BATCH = WIN && /\.(?:cmd|bat)$/i.test(CLAUDE_BIN);
 const LEGACY_ENV_BLOCK = { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '950000' };
 const GATEWAY_MODELS_CACHE = path.join(CLAUDE_CONFIG_DIR, 'cache', 'gateway-models.json');
 const CLI_PATH = path.join(__dirname, '..', 'bin', 'model-gateway.js');
@@ -367,7 +351,7 @@ function mkdirs() {
 }
 
 module.exports = {
-  ANTHROPIC_UPSTREAM, AUTH_HEADERS, BIN_DIR, CLAUDE_BIN, CLAUDE_BIN_IS_BATCH, CODEX_CONTEXT_WINDOWS,
+  ANTHROPIC_UPSTREAM, AUTH_HEADERS, BIN_DIR, CLAUDE_BIN, CODEX_CONTEXT_WINDOWS,
   CODEX_FAMILY_RE, CODEX_UNKNOWN_MODEL_WINDOW, CODEX_UPSTREAM_BLOCK_PATH, COMPAT_BASE_URL, COMPAT_HOST, COMPAT_PORT,
   DEFAULT_BASE_URL, DEFAULT_GATEWAY_PORTS, LEGACY_DEFAULT_BASE_URL, LEGACY_PROXY_PORT, LEGACY_SHIM_PORT, MODEL_WINDOW_POLICY,
   defaultGatewayPorts, physicalConfigDir,
@@ -376,8 +360,8 @@ module.exports = {
   LEGACY_ENV_BLOCK, LIST_DISPATCH_MODEL, LOGS, MIN_PROXY_VERSION, PIN_ALIASES, PIN_CACHE_PATH,
   PIN_CACHE_TTL_MS, PIN_OVERRIDE_PATH, PIN_PROBE_TIMEOUT_MS, PLUGIN_VERSION, PREFIX, PROXY_BIN,
   PROXY_PORT, PUBLIC_SHIM_PORT, REPO, REQUEST_ROUTE_LOG, REQUEST_ROUTE_LOG_PATH, LIFECYCLE_LOG_PATH,
-  PROJECT_WIRING_REGISTRY_PATH, ROUTE_TELEMETRY_ENABLED, ROUTE_TELEMETRY_TIMEOUT_MS, SHIM_FAILURE_PATH, SHIM_PORT, SOCKET_PATH, socketScopeSuffix, STATE,
-  STATIC_ENV_BLOCK, TRACE_HEADERS, WIRING_CONFIG_PATH, WIN, CLI_PATH, CLAUDE_CONFIG_DIR, mkdirs,
+  PROJECT_WIRING_REGISTRY_PATH, ROUTE_TELEMETRY_ENABLED, ROUTE_TELEMETRY_TIMEOUT_MS, SHIM_FAILURE_PATH, SHIM_PORT, SOCKET_PATH, STATE,
+  STATIC_ENV_BLOCK, TRACE_HEADERS, WIRING_CONFIG_PATH, CLI_PATH, CLAUDE_CONFIG_DIR, mkdirs,
   canReplaceInstalledCliPath, codexClientModelId, codexContextWindow, codexContextWindowModelId,
   gatewayAdvertisedWindow, gatewayBackendModelId, gatewayClientModelId, gatewayDiscoveryModels,
   readGatewayDiscoveryCache, resolveGatewayModelPolicy, resolveNewestInstalledCliPath,

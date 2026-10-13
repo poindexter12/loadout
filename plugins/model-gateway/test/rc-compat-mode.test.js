@@ -600,9 +600,7 @@ test('serve-shim accepts requests through ANTHROPIC_UNIX_SOCKET', async (t) => {
   const hostsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-shimsocket-'));
   const hostsFile = path.join(hostsDir, 'hosts');
   fs.writeFileSync(hostsFile, '127.0.0.1 localhost\n');
-  const socketPath = process.platform === 'win32'
-    ? `\\\\.\\pipe\\model-gateway-test-${process.pid}-${Date.now()}`
-    : path.join(hostsDir, 'gateway.sock');
+  const socketPath = path.join(hostsDir, 'gateway.sock');
 
   const shimPort = await freePort();
   const proxyPort = await freePort();
@@ -623,7 +621,7 @@ test('serve-shim accepts requests through ANTHROPIC_UNIX_SOCKET', async (t) => {
 // test/unix-socket-reclaim.test.js: pre-seed a genuinely orphaned socket
 // file, then confirm a real serve-shim boot reclaims it and serves through
 // it exactly like the happy-path test above.
-test('serve-shim reclaims a stale ANTHROPIC_UNIX_SOCKET file and serves through it', { skip: process.platform === 'win32' }, async (t) => {
+test('serve-shim reclaims a stale ANTHROPIC_UNIX_SOCKET file and serves through it', async (t) => {
   const hostsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-shimstale-'));
   const hostsFile = path.join(hostsDir, 'hosts');
   fs.writeFileSync(hostsFile, '127.0.0.1 localhost\n');
@@ -653,7 +651,7 @@ test('serve-shim reclaims a stale ANTHROPIC_UNIX_SOCKET file and serves through 
 // touch it) the shim must keep serving on TCP and must say so loudly -- this
 // used to look like routine startup noise, which is exactly why nobody
 // noticed the transport was never actually working.
-test('serve-shim logs a DEGRADED line and keeps serving on TCP when the unix socket cannot be bound', { skip: process.platform === 'win32' }, async (t) => {
+test('serve-shim logs a DEGRADED line and keeps serving on TCP when the unix socket cannot be bound', async (t) => {
   const hostsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-shimdegraded-'));
   const hostsFile = path.join(hostsDir, 'hosts');
   fs.writeFileSync(hostsFile, '127.0.0.1 localhost\n');

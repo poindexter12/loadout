@@ -16,10 +16,10 @@ const localProcess = { pid: 42, command: `node ${path.join(supervision.gatewayIn
 
 // Platform behavior and mutation-negative tests never spawn or signal real
 // processes. All filesystem/process/HTTP mutation surfaces fail unless stubbed.
-function isolatedSupervision({ platform = process.platform, dependencies = {} } = {}) {
+function isolatedSupervision({ platform = process.platform, dependencies = {}, processOverrides = {} } = {}) {
   const localRequire = createRequire(sourcePath);
   const forbidden = () => assert.fail('unexpected lifecycle mutation');
-  const runtime = { ...localRequire('./runtime.js'), WIN: platform === 'win32' };
+  const runtime = localRequire('./runtime.js');
   const defaults = {
     'node:child_process': { spawn: forbidden, spawnSync: forbidden },
     'node:fs': { ...fs, writeFileSync: forbidden, rmSync: forbidden, openSync: forbidden },
@@ -29,7 +29,7 @@ function isolatedSupervision({ platform = process.platform, dependencies = {} } 
   };
   const context = {
     module: { exports: {} }, Buffer, console, setTimeout, clearTimeout,
-    process: { platform, pid: 1, env: {}, kill: forbidden },
+    process: { platform, pid: 1, env: {}, kill: forbidden, ...processOverrides },
     require: (id) => dependencies[id] || defaults[id] || localRequire(id),
   };
   vm.runInNewContext(source, context, { filename: sourcePath });
@@ -294,46 +294,63 @@ test('darwin synchronous discovery prefers netstat and never spawns lsof when it
   assert.deepEqual(spawned, ['netstat']);
 });
 
-test('Windows discovery retains netstat/PowerShell output without detached children', async () => {
-  const windows = isolatedSupervision({ platform: 'win32' });
-  const commandResult = (command, args, options) => windows.commandResultAsync(command, args, {
+// SQ-36 retired the win32 legs of the two tests below. Both only ever used a
+// simulated platform to reach platform-independent code -- how a probe child is
+// spawned, how its piped stdout is collected, and how the registry reaps one --
+// so the assertions stay and the simulation is gone. They now run the real
+// POSIX probe commands, which is also the only coverage processInfoAsync has.
+test('probe discovery collects piped stdout from a detached, group-killable probe child', async () => {
+  const darwin = isolatedSupervision({ platform: 'darwin' });
+  const psLine = `   42     1 Mon Oct 13 04:00:00 2026 ${localProcess.command}`;
+  // Recorded, not asserted in place: commandResultAsync wraps the spawn in a
+  // try/catch, so an assertion that throws inside this callback is swallowed
+  // into a status-null result instead of failing the test.
+  const spawns = [];
+  const commandResult = (command, args, options) => darwin.commandResultAsync(command, args, {
     ...options,
     spawnProcess: (_command, _args, spawnOptions) => {
-      assert.equal(spawnOptions.detached, false);
-      assert.equal(spawnOptions.windowsHide, true);
+      spawns.push(spawnOptions);
       const child = new EventEmitter();
       child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
       queueMicrotask(() => {
-        child.stdout.emit('data', command === 'netstat'
-          ? ' TCP 127.0.0.1:1234 0.0.0.0:0 LISTENING 42\r\n'
-          : JSON.stringify({ ProcessId: 42, ParentProcessId: 1, CommandLine: localProcess.command }));
+        // Chunked, to prove stdout is accumulated rather than read once.
+        const payload = command === 'netstat' ? darwinNetstatTable : psLine;
+        child.stdout.emit('data', payload.slice(0, 10));
+        child.stdout.emit('data', payload.slice(10));
         child.emit('close', 0);
       });
       return child;
     },
   });
-  assert.equal(await windows.processOwningPortAsync(1234, { commandResult }), 42);
-  assert.equal((await windows.processInfoAsync(42, { commandResult })).command, localProcess.command);
+  assert.equal(await darwin.processOwningPortAsync(1234, { commandResult }), 42);
+  assert.equal((await darwin.processInfoAsync(42, { commandResult })).command, localProcess.command);
+  assert.ok(spawns.length > 0, 'expected the probe to be spawned');
+  for (const spawnOptions of spawns) {
+    // Detached so a timed-out probe can be signalled as a whole process group
+    // and never leaves a grandchild holding the pipe open. Compared as a
+    // primitive: spawnOptions is built in the VM realm, so deepStrictEqual
+    // against a host-realm array fails on the prototype, not the contents.
+    assert.equal(spawnOptions.detached, true);
+    assert.equal(Array.from(spawnOptions.stdio).join(','), 'ignore,pipe,pipe');
+  }
 });
 
-test('Windows probe shutdown taskkills and waits for attached children to close', async () => {
+test('probe shutdown signals the probe process group and waits for the child to close', async () => {
   const probe = new EventEmitter();
   probe.pid = 42; probe.stdout = new EventEmitter(); probe.stderr = new EventEmitter();
-  let killed = false;
-  const windows = isolatedSupervision({ platform: 'win32', dependencies: {
-    'node:child_process': { spawn: (command, args, options) => {
-      assert.equal(command, 'taskkill');
-      assert.deepEqual(Array.from(args), ['/pid', '42', '/T', '/F']);
-      assert.equal(options.windowsHide, true);
-      const taskkill = new EventEmitter();
-      queueMicrotask(() => { killed = true; probe.emit('close', 1); taskkill.emit('close', 0); });
-      return taskkill;
-    } },
+  const signalled = [];
+  // stopProbeChild signals the NEGATED pid so the whole probe group dies, not
+  // just the direct child. Acknowledge the signal by closing the probe.
+  const posix = isolatedSupervision({ platform: 'darwin', processOverrides: {
+    kill: (pid, signal) => {
+      signalled.push([pid, signal]);
+      queueMicrotask(() => probe.emit('close', 1));
+    },
   } });
-  const registry = windows.createProbeChildRegistry();
-  const result = windows.commandResultAsync('powershell.exe', [], { probeChildren: registry, spawnProcess: () => probe });
+  const registry = posix.createProbeChildRegistry();
+  const result = posix.commandResultAsync('ps', [], { probeChildren: registry, spawnProcess: () => probe });
   await new Promise((resolve) => setImmediate(resolve));
   await registry.stop();
   await result;
-  assert.equal(killed, true);
+  assert.deepEqual(signalled, [[-42, 'SIGTERM']]);
 });
