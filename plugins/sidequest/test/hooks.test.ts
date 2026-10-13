@@ -2525,7 +2525,7 @@ test('fail-closed guard: force-exec-bypass denies an executor call it cannot che
   assertBoardContentionDeny(result, 'force-exec-bypass');
 });
 
-test('fail-closed guard: guard-home-delete and read-only git stay unrefused while the board lock is held', async () => {
+test('fail-closed guard: guard-home-delete, guard-process-signal and read-only git stay unrefused while the board lock is held', async () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-fail-closed-read-'));
   gitFixture(['init', '-q', '-b', 'main'], repo);
   const home = failClosedBoardHome();
@@ -2533,6 +2533,7 @@ test('fail-closed guard: guard-home-delete and read-only git stay unrefused whil
   try {
     for (const [script, payload] of [
       [GUARD_HOME_DELETE, executorPayload('Bash', { command: 'rm -rf ./build' }, repo)],
+      [path.join(HOOKS, 'guard-process-signal.js'), executorPayload('Bash', { command: 'kill %1' }, repo)],
       [path.join(HOOKS, 'guard-shared-checkout-git.js'), executorPayload('Bash', { command: 'git status --short' }, repo)],
       [path.join(HOOKS, 'guard-destructive-git.js'), executorPayload('Bash', { command: 'git log --oneline -1' }, repo)],
     ] as const) {
@@ -4481,6 +4482,11 @@ test('ticket filing stays explicit while the Agent gate enforces dispatch and do
     && entry.hooks.some((hook?: any) => hook.command.includes('guard-task-output.js'))), 'the TaskOutput guard must be registered');
   assert.ok(config.hooks.PreToolUse.some((entry?: any) => entry.matcher === 'Bash|PowerShell'
     && entry.hooks.some((hook?: any) => hook.command.includes('repeated-command-warn.js'))), 'the repeated-command warning must run for shell commands');
+  // SQ-224: a pattern-selected kill reaches every worktree on the host, so the guard has to see
+  // PowerShell too, and the description is what tells an agent the guard exists at all.
+  assert.ok(config.hooks.PreToolUse.some((entry?: any) => entry.matcher === 'Bash|PowerShell'
+    && entry.hooks.some((hook?: any) => hook.command.includes('guard-process-signal.js'))), 'the cross-worktree signal guard must run for shell commands');
+  assert.match(config.description, /pattern-selected process signal that would reach a sibling executor's run in another worktree is denied/);
   assert.equal(config.hooks.TeammateIdle, undefined, 'native terminal retirement must not wake completed executors');
 
   const readme = fs.readFileSync(path.join(pluginRoot, 'README.md'), 'utf8');

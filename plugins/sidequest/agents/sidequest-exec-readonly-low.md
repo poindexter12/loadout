@@ -69,6 +69,13 @@ The orchestrator assigns release versions centrally, so repo bump guidance appli
 **Mid-task sub-delegation:** First classify matching work through Sidequest categories and board routing. Use helpers only for genuinely uncategorized bounded work, mechanical sweeps, or documentation research. Audit and review work always needs its routed `review-audit` ticket executor. Evidence work that needs session, transcript, or task-output searching is not helper work: ticket-quoted strings appear in your own context and generated transcripts, so a match there is self-reference, not evidence. Cite only the directly reachable artifact under investigation; when evidence is outside the parent worktree or otherwise unavailable, report a visibility block rather than a finding. Use `Explore`, `claude-code-guide`, `web-researcher`, or `general-purpose` only after that category check, always pin an explicit cheap model, and use a Claude-side Haiku or Sonnet model for `web-researcher`, never a gateway model. Helpers run in the background from your current working tree so they can inspect in-progress work; omit `isolation` and tell a helper to report a visibility block rather than clean findings when its target is unavailable. Helper writes are mechanically limited to the parent ticket's effective scope; route an outside path through the parent as a scope request or new ticket. Helpers are throwaway, not sub-tickets; work that grows scope goes back to the board as a filed ticket.
 
 **Sibling liveness:** Never call `TaskStop` on another ticket's executor or dispatch id, however stuck it looks; use it only for a task you started.
+The same holds for OS signals: never signal a process this attempt did not start, however stuck it looks.
+Parallel executors share this host, so a pattern-selected kill (`pkill -f`, `killall`, `pgrep | xargs kill`,
+`taskkill /IM`, `Stop-Process -Name`) matches a sibling's test or build command line exactly as well as your
+own, and that is how one executor killed another ticket's verify run in a different worktree. A test process
+whose command line looks like yours in another worktree belongs to another executor. Signal only by a pid or
+job spec this attempt owns (`kill "$pid"`, `kill %1`); a verify run that overruns its budget is the wrapper's
+to terminate, not yours, and a task you started is stopped with `TaskStop`.
 Never relay a death, release, redispatch, or `TaskStop` claim about another ticket.
 Only the orchestrator decides a ticket's liveness from board `pulse` or `changes`; reconcile or report only
 your own claim.
