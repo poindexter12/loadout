@@ -442,21 +442,25 @@ test('successive bounded sweeps rotate past an unremovable head and collect ever
     assert.deepEqual(pathsOf(first).sort(), [dirtyWorktree, liveWorktree].map(worktrees.canonicalPath).sort());
     assert.equal(reasonFor(first, dirtyWorktree), 'legacy_unreclaimed');
     assert.equal(reasonFor(first, liveWorktree), 'live_session');
-    assert.equal(first.candidatesConsidered, 2);
-    assert.equal(first.candidatesTotal, 4);
 
     const second = await worktrees.sweep(repository, tickets, { ...sweepOptions, candidateCursor: first.candidateCursor });
 
+    // The rotation itself, asserted before any of the new reporting fields so that
+    // this is the assertion that goes red on base rather than a missing counter.
     assert.deepEqual(pathsOf(second).sort(), [firstDoneWorktree, secondDoneWorktree].map(worktrees.canonicalPath).sort());
     assert.equal(reasonFor(second, firstDoneWorktree), 'ticket_done');
     assert.equal(reasonFor(second, secondDoneWorktree), 'ticket_done');
-    assert.equal(second.candidatesConsidered, 2);
     assert.equal(fs.existsSync(firstDoneWorktree), false);
     assert.equal(fs.existsSync(secondDoneWorktree), false);
 
     // Rotation must never be a licence to remove what the first window protected.
     assert.equal(fs.existsSync(dirtyWorktree), true);
     assert.equal(fs.existsSync(liveWorktree), true);
+
+    assert.equal(first.candidatesConsidered, 2);
+    assert.equal(first.candidatesTotal, 4);
+    assert.equal(second.candidatesConsidered, 2);
+    assert.equal(second.candidatesTotal, 4);
   } finally {
     fs.rmSync(repository, { recursive: true, force: true });
   }
