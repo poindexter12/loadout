@@ -112,6 +112,7 @@ test('Stop resupply decline command uses resolved hook and project paths', () =>
 
   assert.equal(result.status, 0, result.stderr);
   const { hookSpecificOutput } = JSON.parse(result.stdout);
+  assert.ok(hookSpecificOutput, 'Stop offer uses hook-specific output');
   const { additionalContext: reason } = hookSpecificOutput;
   assert.equal(hookSpecificOutput.hookEventName, 'Stop');
   assert.match(reason, new RegExp(`node "${path.join(__dirname, '..', 'bin', 'quartermaster.js')}"`));

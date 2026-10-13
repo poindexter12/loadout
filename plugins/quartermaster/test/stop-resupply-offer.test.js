@@ -65,6 +65,7 @@ test('Stop offer adds context once with the resupply skill and decline escape ha
   recordOverdueTallies(projectDir, stateDir);
 
   const output = JSON.parse(runHook(projectDir, stateDir));
+  assert.ok(output.hookSpecificOutput, 'Stop offer uses hook-specific output');
   assert.equal(output.hookSpecificOutput.hookEventName, 'Stop');
   assert.match(output.hookSpecificOutput.additionalContext, /\/quartermaster:resupply/);
   assert.match(output.hookSpecificOutput.additionalContext, /decline-resupply/);
