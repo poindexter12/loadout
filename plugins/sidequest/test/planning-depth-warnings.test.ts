@@ -1108,4 +1108,88 @@ test('SQ-2200: verify preflight looks up each npm script in the package its own 
   );
 });
 
+// SQ-342. `cd plugins/sidequest && node --test "test/foo.test.ts"` reached two executors and was carried
+// unnoticed by three more tickets. It passes the glob check and then loads zero tests on every machine,
+// because the package is "type": "commonjs" and Node reads the stripped files as CommonJS, where their
+// `import` statements are a SyntaxError. The same bare form drops the `--import` preload that points the
+// suite's state directory at a sandbox, so a gate that did load would write into the operator's real board.
+function verifyRunnerIssueFor(root: string, verify: string): string | null {
+  const { slug } = store.ensureProject(root, 'verify runner base');
+  const ticket = store.createTicket(slug, { title: `verify runner ${verify}`, executorVerify: verify });
+  return store.dispatchVerifyCommandError(ticket, root);
+}
+
+test('SQ-342: verify preflight refuses a node --test gate its package cannot load or sandbox', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-runner-'));
+  spawnSync('git', ['init', '--quiet', '-b', 'main'], { cwd: root, windowsHide: true });
+  for (const directory of ['cjs', 'esm', 'plain']) {
+    fs.mkdirSync(path.join(root, directory, 'test'), { recursive: true });
+  }
+  fs.writeFileSync(path.join(root, 'cjs', 'package.json'), JSON.stringify({
+    name: 'cjs',
+    type: 'commonjs',
+    scripts: {
+      'test:files': 'node --import tsx --import ./test/_home.ts --test',
+      'test:perf': 'node --import tsx --test test/*.perf.test.ts',
+    },
+  }));
+  fs.writeFileSync(path.join(root, 'cjs', 'test', '_home.ts'), 'export {};\n');
+  fs.writeFileSync(path.join(root, 'cjs', 'test', 'suite.test.ts'), 'export {};\n');
+  fs.writeFileSync(path.join(root, 'cjs', 'test', 'suite.perf.test.ts'), 'export {};\n');
+  fs.writeFileSync(path.join(root, 'esm', 'package.json'), JSON.stringify({
+    name: 'esm', type: 'module', scripts: { 'test:files': 'node --test' },
+  }));
+  fs.writeFileSync(path.join(root, 'esm', 'test', 'suite.test.ts'), 'export {};\n');
+  fs.writeFileSync(path.join(root, 'plain', 'package.json'), JSON.stringify({
+    name: 'plain', scripts: { 'test:files': 'node --test' },
+  }));
+  fs.writeFileSync(path.join(root, 'plain', 'test', 'suite.test.js'), '');
+
+  const stripped = verifyRunnerIssueFor(root, 'cd cjs && node --test "test/suite.test.ts"');
+  assert.match(String(stripped), /TypeScript test files \(test\/suite\.test\.ts\) with no type-stripping loader/);
+  assert.match(String(stripped), /cjs\/package\.json is not `"type": "module"`/);
+  assert.match(String(stripped), /`npm run test:files -- "test\/suite\.test\.ts"` from cjs/);
+
+  const rootRelative = verifyRunnerIssueFor(root, 'node --test "cjs/test/suite.test.ts"');
+  assert.match(String(rootRelative), /no type-stripping loader/, 'the package is resolved from the files the operands match, with or without a cd');
+
+  const unsandboxed = verifyRunnerIssueFor(root, 'cd cjs && node --import tsx --test "test/suite.test.ts"');
+  assert.match(String(unsandboxed), /omits the `--import \.\/test\/_home\.ts` preload that cjs\/package\.json's `test:files` script loads/);
+  assert.match(String(unsandboxed), /can write outside the sandbox/);
+
+  const discovery = verifyRunnerIssueFor(root, 'cd cjs && node --import tsx --test');
+  assert.match(String(discovery), /omits the `--import \.\/test\/_home\.ts` preload/, 'a gate that names no files still has to carry the preloads');
+
+  assert.strictEqual(
+    verifyRunnerIssueFor(root, 'cd cjs && npm run test:files -- "test/suite.test.ts"'),
+    null,
+    'the form the refusal recommends is accepted, so the fix is not a blanket refusal of node --test',
+  );
+  assert.strictEqual(
+    verifyRunnerIssueFor(root, 'cd cjs && node --import tsx --import ./test/_home.ts --test "test/suite.test.ts"'),
+    null,
+    'a raw invocation carrying the loader and the preload runs the suite, so it is accepted',
+  );
+  assert.strictEqual(
+    verifyRunnerIssueFor(root, 'cd cjs && node --import tsx --test "test/*.perf.test.ts"'),
+    null,
+    'a script that pins its own operands vouches for exactly those, preload set included',
+  );
+  assert.strictEqual(
+    verifyRunnerIssueFor(root, 'cd esm && node --test "test/suite.test.ts"'),
+    null,
+    'Node strips types into ESM for a "type": "module" package, so no loader is needed',
+  );
+  assert.strictEqual(
+    verifyRunnerIssueFor(root, 'cd plain && node --test "test/suite.test.js"'),
+    null,
+    'JavaScript tests under a package whose runner carries no preloads stay accepted',
+  );
+  assert.strictEqual(
+    verifyRunnerIssueFor(root, 'node --test "cjs/test/missing.test.ts"'),
+    null,
+    'without a cd an operand matching nothing stays greenfield work that verifyPathWarning reports',
+  );
+});
+
 export {};
