@@ -56,14 +56,21 @@ function captures(slug: string, ref: string) {
   return store.getTicket(slug, ref)?.verificationCaptures || [];
 }
 
+// SQ-341: the no-pin case omits the verify kind rather than declaring it, because SQ-319
+// refuses an EXPLICIT `command` kind with an empty command at the source (`store/tickets.ts`).
+// That is not a way around the refusal: `normalizeVerifyOracleKind` defaults an omitted kind
+// to `command`, so the filed ticket still carries kind `command` with an empty `executorVerify`
+// (`verify-oracle.test.ts`, 'an omitted verify kind still files a ticket with no command') --
+// byte for byte the stored state the recorder's no-pin branch exists for, and the ordinary one
+// for a ticket filed before its verifier is known. SQ-319 guards what the caller declares, not
+// what the store holds, so that branch stays reachable and keeps its coverage here.
 function dispatchedTicket(project: string, title: string, executorVerify?: string) {
   const board = store.ensureProject(project);
   const ticket = store.createTicket(board.slug, {
     title,
     files: ['README.md'],
     category: 'coding.normal',
-    executorVerifyKind: 'command',
-    ...(executorVerify === undefined ? {} : { executorVerify }),
+    ...(executorVerify === undefined ? {} : { executorVerifyKind: 'command', executorVerify }),
   });
   return { slug: board.slug, ref: ticket.ref };
 }
@@ -114,6 +121,11 @@ test('a recorder refusal after the run prints its detail, not just the reason', 
   const project = fixtureProject('sq-203-no-pin-');
   const { slug, ref } = dispatchedTicket(project, 'no pinned command');
   try {
+    // The state under test, asserted so a change to the default kind cannot quietly turn
+    // this into a no-pin-for-some-other-reason test: kind `command` with no command at all.
+    const filed = store.getTicket(slug, ref);
+    assert.equal(filed.executorVerifyKind, 'command', 'the omitted kind still defaults to command');
+    assert.equal(filed.executorVerify, '', 'and the ticket holds no command to pin');
     const { status, output } = await runWrapper(Buffer.from('node suite.js').toString('base64'), project, ref);
     assert.equal(status, 2, output);
     assert.match(output, /^verify=passed exit=0/m, 'with no pinned command the run is not preflighted away');
