@@ -291,11 +291,33 @@ function samePath(left, right) {
   const normalizedRight = canonicalPath(right);
   return process.platform === "win32" ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase() : normalizedLeft === normalizedRight;
 }
-function gitInvocation(command) {
-  const match = /(?:^|[;&|\n]\s*)git\s+(?:-C\s+("[^"]+"|'[^']+'|\S+)\s+)?([a-z-]+)/i.exec(command);
-  if (!match?.[2]) return null;
-  const target = match[1] ? match[1].replace(/^["']|["']$/g, "") : ".";
-  return { target, subcommand: match[2].toLowerCase() };
+var GIT_INVOCATION = /(?:^|[;&|\n]\s*|\$\(\s*)git\s+(?:-C\s+("[^"]+"|'[^']+'|\S+)\s+)?([a-z-]+)/gi;
+var CD_PREFIX = /(?:^|[;&|\n]|\$\()\s*cd\s+("[^"]+"|'[^']+'|\S+)/gi;
+function unquote(value) {
+  return value.replace(/^["']|["']$/g, "");
+}
+function quotedAt(command, index) {
+  let quote = "";
+  for (let cursor = 0; cursor < index; cursor += 1) {
+    const character = command[cursor];
+    if (character === "\\") cursor += 1;
+    else if (quote) {
+      if (character === quote) quote = "";
+    } else if (character === '"' || character === "'") quote = character;
+  }
+  return Boolean(quote);
+}
+function gitInvocations(command) {
+  const invocations = [];
+  for (const match of command.matchAll(GIT_INVOCATION)) {
+    const index = match.index || 0;
+    if (!match[2] || quotedAt(command, index)) continue;
+    const before = command.slice(0, index);
+    const cd = Array.from(before.matchAll(CD_PREFIX)).filter((entry) => !quotedAt(command, entry.index || 0)).at(-1);
+    const target = match[1] ? unquote(match[1]) : cd?.[1] ? unquote(cd[1]) : ".";
+    invocations.push({ target, subcommand: match[2].toLowerCase() });
+  }
+  return invocations;
 }
 function targetRoot(target, cwd) {
   const directory = import_node_path6.default.resolve(cwd || ".", target);
@@ -311,7 +333,7 @@ function targetRoot(target, cwd) {
   }
 }
 function refusal() {
-  return "sidequest: refusing a mutating git command against the shared checkout from an isolated worktree. Read-only git commands such as log, diff, show, rev-parse, and ls-files are allowed for review; make repository changes only in the assigned worktree.";
+  return "sidequest: refusing a mutating git command against the shared checkout from an isolated worktree. Read-only git commands such as log, diff, show, rev-parse, and ls-files are allowed for review; make repository changes only in the assigned worktree. Passing that checkout path as an ordinary argument, such as --project <path> or git fetch <path>, is not refused.";
 }
 function main() {
   const input = readStdin();
@@ -319,12 +341,16 @@ function main() {
   const agentId = stringField(input, "agent_id", "agentId");
   const executor = stringField(input, "agent_type", "agentType", "subagent_type");
   if (!agentId || !executorAgent(executor)) return;
-  const invocation = gitInvocation(commandText(input));
-  if (!invocation || !MUTATING_SUBCOMMANDS.has(invocation.subcommand)) return;
+  const invocations = gitInvocations(commandText(input)).filter((entry) => MUTATING_SUBCOMMANDS.has(entry.subcommand));
+  if (!invocations.length) return;
   const found = isolationExpectation(input, agentId, executor, false);
   if (!found || found.sharedTree || found.terminal || !found.projectPath) return;
-  if (samePath(targetRoot(invocation.target, stringField(input, "cwd")), found.projectPath)) {
-    writeDeny("PreToolUse", refusal());
+  const cwd = stringField(input, "cwd");
+  for (const invocation of invocations) {
+    if (samePath(targetRoot(invocation.target, cwd), found.projectPath)) {
+      writeDeny("PreToolUse", refusal());
+      return;
+    }
   }
 }
 try {

@@ -62,6 +62,7 @@ const BOARD_RECONCILIATION_REMINDER = path.join(HOOKS, 'board-reconciliation-rem
 const STOP = path.join(HOOKS, 'stop.js');
 const POST_COMPACT = path.join(HOOKS, 'post-compact.js');
 const GUARD_TASK_OUTPUT = path.join(HOOKS, 'guard-task-output.js');
+const GUARD_SHARED_CHECKOUT_GIT = path.join(HOOKS, 'guard-shared-checkout-git.js');
 const GUARD_SHARED_TREE_COMMIT = path.join(HOOKS, 'guard-shared-tree-commit.js');
 const WORKTREE_CREATE = path.join(HOOKS, 'worktree-create.js');
 
@@ -1246,6 +1247,99 @@ test('pre-tool hook: external linked worktrees preserve helper scope enforcement
   } finally {
     gitFixture(['worktree', 'remove', '--force', assignedWorktree], projectPath);
     fs.rmSync(projectPath, { recursive: true, force: true });
+  }
+});
+
+// SQ-128/SQ-227: the guard must key on git as the INVOCATION, never on `git` or the project path as a
+// substring. The fixture checkout deliberately sits under a `Code/github.com/...` path so every allowed
+// case below passes the real shared-checkout path as an ordinary argument: a substring matcher would
+// resolve it to the shared checkout and refuse.
+test('shared-checkout git guard: a checkout path used as an argument is allowed while git targets in it are refused', () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-shared-checkout-'));
+  const projectPath = path.join(sandbox, 'Code', 'github.com', 'poindexter12', 'loadout');
+  fs.mkdirSync(projectPath, { recursive: true });
+  gitFixture(['init', '-b', 'main', '--quiet'], projectPath);
+  gitFixture(['config', 'user.email', 'sidequest@example.invalid'], projectPath);
+  gitFixture(['config', 'user.name', 'Sidequest Tests'], projectPath);
+  fs.writeFileSync(path.join(projectPath, 'fixture.txt'), 'fixture\n');
+  gitFixture(['add', '.'], projectPath);
+  gitFixture(['commit', '--quiet', '-m', 'fixture'], projectPath);
+
+  const projectSlug = store.ensureProject(projectPath).slug;
+  const ticket = addStopTicket('shared checkout git guard', undefined, projectSlug);
+  const sessionId = `shared-checkout-${++sqSeq}`;
+  const prepared = store.prepareDispatch(projectSlug, ticket.ref, { allowUnscoped: true, sessionId, sharedTree: false });
+  const agentId = `shared-checkout-agent-${sqSeq}`;
+  const agentName = `shared-checkout-parent-${sqSeq}`;
+  assert.equal(store.recordDispatchLaunch(projectSlug, ticket.ref, {
+    sessionId,
+    token: prepared.token,
+    executor: prepared.ticket.dispatchExecutor,
+    agentName,
+  }).ok, true);
+  const assignedWorktree = worktrees.namedWorktreePath(projectPath, agentId);
+  assert.equal(store.bindDispatchWorktreeCreation(projectSlug, sessionId, assignedWorktree).ok, true);
+  gitFixture(['worktree', 'add', '--detach', assignedWorktree], projectPath);
+  completeCheckoutCreation(projectSlug, sessionId, assignedWorktree);
+  assert.equal(store.bindDispatchAgent(sessionId, prepared.ticket.dispatchExecutor, agentId, agentName, assignedWorktree).ok, true);
+  assert.equal(store.claimTicket(projectSlug, ticket.ref, 'shared-checkout-parent', {
+    sessionId,
+    token: prepared.token,
+    executor: prepared.ticket.dispatchExecutor,
+  }).ok, true);
+
+  try {
+    const payload = {
+      session_id: sessionId,
+      agent_type: prepared.ticket.dispatchExecutor,
+      agent_id: agentId,
+      agent_name: agentName,
+      tool_name: 'Bash',
+      cwd: assignedWorktree,
+    };
+    const run = (command: string) => runHookOutput(GUARD_SHARED_CHECKOUT_GIT, { ...payload, tool_input: { command } });
+    // Every case is recorded rather than asserted one at a time: a false refusal and a missed refusal are
+    // different defects, and stopping at the first one hides whichever cases come after it.
+    const wrong: string[] = [];
+
+    for (const [label, command] of [
+      // The original SQ-128 report: the exact --project form the briefing tells executors to use.
+      ['--project argument', `node ${path.join(sandbox, 'sidequest-launcher.js')} verify ${ticket.ref} --project ${projectPath}`],
+      // SQ-227: a scratchpad path encodes `github` for every repo under ~/Code/github.com/.
+      ['github scratchpad path', `ls ${path.join(sandbox, 'claude-503', '-Users-joese-Code-github-com-poindexter12-loadout')}`],
+      // SQ-227: an install path containing `github` (aqua-github-copilot-cli).
+      ['github install path', `ls ${path.join(sandbox, 'installs', 'aqua-github-copilot-cli')} ${projectPath}`],
+      // Read-only git against the shared checkout stays available for review.
+      ['read-only git -C', `git -C ${projectPath} log --oneline -1`],
+      // The briefing's own sync step passes the shared checkout to a non-mutating git subcommand.
+      ['git fetch argument', `git fetch ${projectPath} main`],
+      // A command-looking string inside a quoted argument is text, not an invocation.
+      ['quoted pseudo-command', `node note.js --message "cleanup; git -C ${projectPath} reset --hard"`],
+      // Mutating git in the executor's own worktree is the whole point of the dispatch.
+      ['own worktree commit', 'git commit -m scoped'],
+      ['own worktree update-ref', `git update-ref refs/sidequest/${ticket.ref} HEAD`],
+    ] as const) {
+      if (run(command) !== null) wrong.push(`falsely refused - ${label}: ${command}`);
+    }
+
+    for (const [label, command] of [
+      ['git -C the shared checkout', `git -C ${projectPath} commit -m forbidden`],
+      ['cd into the shared checkout', `cd ${projectPath} && git reset --hard`],
+      ['cd with an intervening command', `cd ${projectPath} && echo staged && git commit -m forbidden`],
+      ['a later invocation after a read-only one', `cd ${projectPath} && git status --short && git clean -fd`],
+    ] as const) {
+      const blocked = run(command);
+      const reason = String(blocked?.hookSpecificOutput?.permissionDecisionReason || '');
+      if (blocked?.hookSpecificOutput?.permissionDecision !== 'deny') wrong.push(`not refused - ${label}: ${command}`);
+      else if (!/refusing a mutating git command against the shared checkout/.test(reason)
+        || !/ordinary argument, such as --project <path> or git fetch <path>, is not refused/.test(reason)) {
+        wrong.push(`inaccurate refusal text - ${label}: ${reason}`);
+      }
+    }
+    assert.deepEqual(wrong, [], `shared-checkout git guard misjudged ${wrong.length} case(s):\n${wrong.join('\n')}`);
+  } finally {
+    gitFixture(['worktree', 'remove', '--force', assignedWorktree], projectPath);
+    fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
 
