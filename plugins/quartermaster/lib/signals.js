@@ -32,6 +32,23 @@ const CORRECTION_THEMES = [
 // decision, so it is tallied as a denial but never attributed to the rule.
 const PERMISSION_DENIAL_KIND = 'permission-rule';
 
+// A gate refusing a call because it does not apply to this project is not developer friction.
+// The known case is Sidequest's unregistered-project deny: in a project with no board, every
+// dispatch attempt comes back with the same line, and the only improvement it could ever justify
+// is registering a board the user deliberately does not want there. Four of those once carried a
+// project over the resupply threshold on their own, so they are counted apart and weighted zero.
+const NOT_APPLICABLE_GATES = [
+  ['sidequest:unregistered-project', /not registered on a Sidequest board/i],
+];
+
+/** Names the not-applicable gate a refusal came from, or null when the denial is real friction. */
+function notApplicableGateOf(denialReason) {
+  const text = String(denialReason ?? '');
+  if (!text) return null;
+  for (const [gate, pattern] of NOT_APPLICABLE_GATES) if (pattern.test(text)) return gate;
+  return null;
+}
+
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
 const SUBCOMMAND_EXECUTABLES = new Set([
   'git', 'gh', 'npm', 'pnpm', 'yarn', 'npx', 'cargo', 'docker', 'kubectl', 'claude',
@@ -138,6 +155,8 @@ function emptyTally() {
     denials: 0,
     denialsByFingerprint: {},
     permissionDenialsByFingerprint: {},
+    // Kept so the evidence survives, never summed into friction: see NOT_APPLICABLE_GATES.
+    notApplicableRefusals: 0,
     interrupts: 0,
     corrections: 0,
   };
@@ -154,6 +173,7 @@ function createSignalCollector() {
   const denialTargets = [];
   const denialsByKind = new Map();
   const denialsByTool = new Map();
+  const notApplicableByGate = new Map();
   const errorsByTool = new Map();
   const hookErrorsByHook = new Map();
   const hookTimeoutsByHook = new Map();
@@ -164,7 +184,7 @@ function createSignalCollector() {
   const webFetchDomains = new Map();
   const areas = new Map();
   const goalsByCondition = new Map();
-  const totals = { interrupts: 0, apiErrors: 0, toolErrors: 0, denials: 0, webSearches: 0 };
+  const totals = { interrupts: 0, apiErrors: 0, toolErrors: 0, denials: 0, notApplicable: 0, webSearches: 0 };
   let lastAction = null;
 
   const sessionTally = (sessionId) => {
@@ -224,6 +244,16 @@ function createSignalCollector() {
           return;
         }
         case 'tool_result': {
+          // Weighed before anything is counted: a refusal from a gate this project never opted into
+          // is neither a denial nor a tool error. Counting it as either advances the resupply
+          // threshold and aims the round at machinery the user does not want here.
+          const gate = event.denial ? notApplicableGateOf(event.denialReason) : null;
+          if (gate) {
+            totals.notApplicable += 1;
+            tally.notApplicableRefusals += 1;
+            bump(notApplicableByGate, gate, event.sessionId);
+            return;
+          }
           if (event.isError) {
             totals.toolErrors += 1;
             tally.toolErrors += 1;
@@ -299,6 +329,7 @@ function createSignalCollector() {
           denials: tally.denials,
           denialsByFingerprint: tally.denialsByFingerprint,
           permissionDenialsByFingerprint: tally.permissionDenialsByFingerprint,
+          notApplicableRefusals: tally.notApplicableRefusals,
           interrupts: tally.interrupts,
           corrections: tally.corrections,
           title: tally.title,
@@ -337,6 +368,10 @@ function createSignalCollector() {
             byKind: countsOf(denialsByKind),
             byTool: countsOf(denialsByTool),
             targets: denialTargets,
+            // Refusals from gates that do not apply to this project, excluded from every count
+            // above and from the resupply threshold. Reported so the evidence stays visible
+            // without weighing on the round.
+            notApplicable: { total: totals.notApplicable, byGate: countsOf(notApplicableByGate) },
           },
           toolErrors: { total: totals.toolErrors, byTool: topOf(errorsByTool, 10) },
           hookErrors: countsOf(hookErrorsByHook),
@@ -372,6 +407,7 @@ function tallyFromSignals(signals) {
     for (const [fingerprint, count] of Object.entries(session.permissionDenialsByFingerprint ?? {})) {
       tally.permissionDenialsByFingerprint[fingerprint] = (tally.permissionDenialsByFingerprint[fingerprint] ?? 0) + count;
     }
+    tally.notApplicableRefusals += session.notApplicableRefusals ?? 0;
     tally.interrupts += session.interrupts;
     tally.corrections += session.corrections;
   }

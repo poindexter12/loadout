@@ -29,6 +29,20 @@ function resultIsError(block, record) {
   return false;
 }
 
+const DENIAL_REASON_CHARS = 1000;
+
+/**
+ * The message a denied call came back with, clipped. A hook deny lands in the tool_result body
+ * ("PreToolUse:Agent hook error: <reason>"), while some denials carry the same text only on the
+ * record's `toolUseResult` string, so both are read, body first. Read for the gate that refused,
+ * which names itself at the front of the message, so a bounded prefix is enough.
+ */
+function denialReasonOf(block, record) {
+  const fromBlock = textOf(block?.content);
+  const reason = fromBlock || (typeof record?.toolUseResult === 'string' ? record.toolUseResult : '');
+  return reason ? String(reason).slice(0, DENIAL_REASON_CHARS) : null;
+}
+
 function mcpServerOf(toolName) {
   const match = /^mcp__(.+?)__[^_]/.exec(String(toolName ?? ''));
   if (!match) return null;
@@ -139,13 +153,17 @@ async function streamTranscript(source, collector) {
         if (block?.type !== 'tool_result') continue;
         const call = pendingTools.get(block.tool_use_id);
         pendingTools.delete(block.tool_use_id);
+        const denial = record.toolDenialKind ?? null;
         collector.onEvent({
           ...base,
           kind: 'tool_result',
           name: call?.name ?? null,
           input: call?.input ?? null,
           isError: resultIsError(block, record),
-          denial: record.toolDenialKind ?? null,
+          denial,
+          // Only a denied call has a refusal to read. Taking a reason off every tool result would
+          // make ordinary output that happens to quote a refusal look like one.
+          denialReason: denial ? denialReasonOf(block, record) : null,
         });
       }
     }

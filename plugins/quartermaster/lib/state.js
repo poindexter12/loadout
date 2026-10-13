@@ -191,6 +191,11 @@ function recordSessionTally(projectDir, sessionId, tally, env = process.env, now
   return state;
 }
 
+/**
+ * What advances the resupply threshold. Refusals from a gate that does not apply to the project
+ * are already excluded upstream in lib/signals.js, and are kept on the tally as
+ * `notApplicableRefusals`, which this deliberately does not count.
+ */
 function frictionOf(tally) {
   return (tally?.denials ?? 0) + (tally?.interrupts ?? 0) + (tally?.corrections ?? 0);
 }

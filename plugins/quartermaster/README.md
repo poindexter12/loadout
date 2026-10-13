@@ -41,6 +41,7 @@ The aggregate is more than counts. It can include:
 - explicit goal conditions, whether each goal was met, and bounded goal samples;
 - the two directory segments nearest touched files, with scratch and opaque paths removed;
 - counts for prompts, tool calls, errors, denials, interrupts, and corrections;
+- refusals from gates that do not apply to the project, counted apart from denials and weighted zero, so a plugin that the project never opted into cannot advance the resupply threshold;
 - repeated command names, plugin, skill, and MCP attribution, and fetched hostnames; and
 - short clipped correction or denial evidence, up to 300 characters per quote.
 
