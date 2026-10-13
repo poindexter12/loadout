@@ -111,7 +111,9 @@ test('Stop resupply decline command uses resolved hook and project paths', () =>
   });
 
   assert.equal(result.status, 0, result.stderr);
-  const { reason } = JSON.parse(result.stdout);
+  const { hookSpecificOutput } = JSON.parse(result.stdout);
+  const { additionalContext: reason } = hookSpecificOutput;
+  assert.equal(hookSpecificOutput.hookEventName, 'Stop');
   assert.match(reason, new RegExp(`node "${path.join(__dirname, '..', 'bin', 'quartermaster.js')}"`));
   assert.match(reason, new RegExp(`--project "${projectDir}"`));
   assert.doesNotMatch(reason, /\$\{CLAUDE_/);

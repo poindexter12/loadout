@@ -109,7 +109,7 @@ The skill checks for missing measurements, manual work, existing capabilities th
 
 ## How the loop closes
 
-A SessionEnd hook tallies each session locally in one streamed pass. Once enough unreviewed sessions or friction accumulates, the SessionStart nudge records that an offer is due and a Stop hook holds one real pause open for Claude to offer a focused optimization round. It blocks once per session, ignores its own continuation, and uses a separate 24-hour cross-session offer cooldown. Declining the whole round resets the evidence window until new sessions or friction accumulate. Applied recommendations record their targets, and later checks compare the signal before and after. Recommendations still need separate approval unless standing permission covers their exact class.
+A SessionEnd hook tallies each session locally in one streamed pass. Once enough unreviewed sessions or friction accumulates, the SessionStart nudge records that an offer is due and a Stop hook adds context at one real pause so Claude can offer a focused optimization round. It adds context once per session, ignores its own continuation, and uses a separate 24-hour cross-session offer cooldown. Declining the whole round resets the evidence window until new sessions or friction accumulate. Applied recommendations record their targets, and later checks compare the signal before and after. Recommendations still need separate approval unless standing permission covers their exact class.
 
 ## What it stores
 
