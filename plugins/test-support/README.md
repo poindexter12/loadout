@@ -7,6 +7,13 @@ plugin and has no `.claude-plugin/plugin.json`, skills, hooks, or release versio
 
 Test-support is project-scoped internal tooling, not a user-installable plugin. It travels with the repository and is not installed separately.
 
+## `tmp-fixture.js`
+
+`tmpFixture(prefix)` creates a temporary directory with `fs.mkdtempSync()` and returns its
+canonical path via `fs.realpathSync()`. Tests use it when the path can be compared with a child
+process's `process.cwd()`: on macOS, `os.tmpdir()` can use the `/var` symlink while child processes
+report `/private/var`.
+
 ## `windows-hide.js`
 
 The helper scans JavaScript production files for `child_process` calls and reports whether each call hides
@@ -23,8 +30,9 @@ text for a process call.
 
 ## Used by tests
 
-Plugin test suites import this helper with a relative path. Current consumers include:
+Plugin test suites import these helpers with relative paths. Current consumers include:
 
+- `plugins/sidequest/test/_sidequest-test-home.ts` for canonical test-home paths.
 - `plugins/model-gateway/test/windows-hide.test.js`
 - `plugins/observability/test/windows-hide.test.js`
 - `plugins/sidequest/test/windows-hide.test.ts`
