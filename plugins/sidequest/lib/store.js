@@ -608,6 +608,7 @@ const {
   recordSanctionedCommit,
   dispatchWorkspace,
   dispatchDelta,
+  postDispatchWorkingState,
   activeSharedTreeClaim,
   dispatchIdentityAmbiguous,
   dispatchCanBindRuntimeIdentity,
@@ -989,6 +990,58 @@ function negativeControlRefusal(ticket, result) {
     reason: "negative_control_required",
     message: `${ticket.ref} completion refused: changed scoped paths include both test-side and non-test-side files, but the claim holder has not recorded a negative control. ${recipe}`
   };
+}
+function foreignCommitPaths(slug, ticket, root) {
+  const state = dispatchState(ticket);
+  if (state && state.sharedTree === false) return { paths: [], owners: {} };
+  const owners = /* @__PURE__ */ new Map();
+  const note = (file, owner) => {
+    if (!owners.has(file)) owners.set(file, /* @__PURE__ */ new Set());
+    owners.get(file).add(owner);
+  };
+  const projectPath = readMeta(slug)?.path || "";
+  const treeKey = (value) => {
+    const resolved = path.resolve(value);
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+  const sameTree = !root || !projectPath || treeKey(projectPath) === treeKey(root);
+  let changed = [];
+  let inherited = [];
+  try {
+    if (sameTree) {
+      const observed = postDispatchWorkingState(slug, state);
+      changed = observed.working;
+      inherited = observed.preExisting;
+    } else {
+      changed = commitScope.workingPaths(root);
+    }
+  } catch (_) {
+    return { paths: [], owners: {} };
+  }
+  for (const file of inherited) note(file, "pre-existing since dispatch base");
+  const exact = new Set(executionScope(slug, ticket).map((scope) => commitScope.scopeKey(scope)));
+  const widened = changed.filter((file) => !exact.has(commitScope.scopeKey(file)));
+  if (widened.length) {
+    let siblings = [];
+    try {
+      siblings = listActive(slug).filter((other) => other?.claim && other.ref !== ticket?.ref);
+    } catch (_) {
+      siblings = [];
+    }
+    for (const other of siblings) {
+      const scope = executionScope(slug, other);
+      if (!scope.length) continue;
+      for (const file of widened) if (commitScope.isInScope(file, scope)) note(file, other.ref);
+    }
+  }
+  return {
+    paths: Array.from(owners.keys()).sort(),
+    owners: Object.fromEntries(Array.from(owners.entries()).map(([file, refs]) => [file, Array.from(refs).sort()]))
+  };
+}
+function foreignCommitPathsMessage(foreign) {
+  const owners = foreign?.owners || {};
+  return Object.keys(owners).sort().map((file) => `${file} (${(owners[file] || []).join(", ")})`).join("; ");
 }
 function completionScope(slug, ticket) {
   const relatedFragments = Array.isArray(ticket?.links) ? ticket.links.flatMap((link) => {
@@ -3369,6 +3422,8 @@ module.exports = {
   verifyIntegration,
   effectiveScope,
   executionScope,
+  foreignCommitPaths,
+  foreignCommitPathsMessage,
   VERIFY_ORACLE_KINDS,
   normalizeVerifyOracleKind,
   attestationErrors,

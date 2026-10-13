@@ -505,6 +505,7 @@ const {
   recordSanctionedCommit,
   dispatchWorkspace,
   dispatchDelta,
+  postDispatchWorkingState,
   activeSharedTreeClaim,
   dispatchIdentityAmbiguous,
   dispatchCanBindRuntimeIdentity,
@@ -957,6 +958,71 @@ function negativeControlRefusal(ticket?: any, result?: any) {
     reason: 'negative_control_required',
     message: `${ticket.ref} completion refused: changed scoped paths include both test-side and non-test-side files, but the claim holder has not recorded a negative control. ${recipe}`,
   };
+}
+
+// Which changed paths inside this ticket's commit scope are demonstrably not its work?
+// Two answers the board can already give, and they are the two the SQ-42 sweep needed:
+// a path another live claim's execution scope covers, and a path whose dirty-baseline
+// identity has not moved since this dispatch launched. Both only matter in a shared
+// tree, and only for paths that entered scope through a directory or glob entry rather
+// than being named outright: an exactly-declared path is what the ticket was dispatched
+// to change, so a sibling's overlapping declaration must not strip it from the commit.
+// Residual limitation: a human editing a file in the widened directory mid-run is
+// invisible here, because the board records no per-executor write log (SQ-276).
+function foreignCommitPaths(slug?: any, ticket?: any, root?: any) {
+  const state = dispatchState(ticket);
+  // An isolated worktree belongs to one executor: nothing in it is another ticket's
+  // uncommitted work, and the shared-tree dirty baseline does not describe it.
+  if (state && state.sharedTree === false) return { paths: [], owners: {} };
+  const owners = new Map<string, Set<string>>();
+  const note = (file: string, owner: string) => {
+    if (!owners.has(file)) owners.set(file, new Set());
+    owners.get(file)!.add(owner);
+  };
+  const projectPath = readMeta(slug)?.path || '';
+  const treeKey = (value: string) => {
+    const resolved = path.resolve(value);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  const sameTree = !root || !projectPath || treeKey(projectPath) === treeKey(root);
+  let changed: string[] = [];
+  let inherited: string[] = [];
+  try {
+    if (sameTree) {
+      const observed = postDispatchWorkingState(slug, state);
+      changed = observed.working;
+      inherited = observed.preExisting;
+    } else {
+      changed = commitScope.workingPaths(root);
+    }
+  } catch (_: any) {
+    return { paths: [], owners: {} };
+  }
+  for (const file of inherited) note(file, 'pre-existing since dispatch base');
+  const exact = new Set(executionScope(slug, ticket).map((scope: string) => commitScope.scopeKey(scope)));
+  const widened = changed.filter((file) => !exact.has(commitScope.scopeKey(file)));
+  if (widened.length) {
+    let siblings: any[] = [];
+    try {
+      siblings = listActive(slug).filter((other: any) => other?.claim && other.ref !== ticket?.ref);
+    } catch (_: any) {
+      siblings = [];
+    }
+    for (const other of siblings) {
+      const scope = executionScope(slug, other);
+      if (!scope.length) continue;
+      for (const file of widened) if (commitScope.isInScope(file, scope)) note(file, other.ref);
+    }
+  }
+  return {
+    paths: Array.from(owners.keys()).sort(),
+    owners: Object.fromEntries(Array.from(owners.entries()).map(([file, refs]) => [file, Array.from(refs).sort()])),
+  };
+}
+
+function foreignCommitPathsMessage(foreign?: any): string {
+  const owners = foreign?.owners || {};
+  return Object.keys(owners).sort().map((file) => `${file} (${(owners[file] || []).join(', ')})`).join('; ');
 }
 
 function completionScope(slug?: any, ticket?: any) {
@@ -3728,6 +3794,8 @@ module.exports = {
   verifyIntegration,
   effectiveScope,
   executionScope,
+  foreignCommitPaths,
+  foreignCommitPathsMessage,
   VERIFY_ORACLE_KINDS,
   normalizeVerifyOracleKind,
   attestationErrors,

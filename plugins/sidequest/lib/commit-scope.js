@@ -30,6 +30,7 @@ var commit_scope_exports = {};
 __export(commit_scope_exports, {
   commitPaths: () => commitPaths,
   commitScoped: () => commitScoped,
+  commitScopedExclusions: () => commitScopedExclusions,
   foreignReleaseFragmentDiagnosis: () => foreignReleaseFragmentDiagnosis,
   foreignReleaseFragmentPaths: () => foreignReleaseFragmentPaths,
   foreignReleaseFragmentRefusalMessage: () => foreignReleaseFragmentRefusalMessage,
@@ -41,6 +42,7 @@ __export(commit_scope_exports, {
   rangePaths: () => rangePaths,
   releaseFragmentOwner: () => releaseFragmentOwner,
   repoRoot: () => repoRoot,
+  scopeKey: () => import_scope_match2.scopeKey,
   scopedPaths: () => import_scope_match2.scopedPaths,
   scopedWorkPending: () => scopedWorkPending,
   submissionCommitReachedIntegrationBranch: () => submissionCommitReachedIntegrationBranch,
@@ -674,7 +676,10 @@ function validateStoredSubmissionRange(cwd, submissionValue, ticketRef, integrat
     ...reconciled ? { reconciled: true } : {}
   });
 }
-function commitScoped(cwd, message, files) {
+function commitScopedExclusions(scopes, excludePaths) {
+  return (0, import_scope_match.scopedPaths)(excludePaths).filter((file) => (0, import_scope_match.isInScope)(file, scopes));
+}
+function commitScoped(cwd, message, files, options) {
   const scopes = (0, import_scope_match.scopedPaths)(files);
   if (!scopes.length) return { ok: false, reason: "missing_scope" };
   try {
@@ -685,9 +690,17 @@ function commitScoped(cwd, message, files) {
     const commitScopes = commitScopedPaths(root, canonicalScopes);
     const missingScopes = canonicalScopes.filter((scope) => !commitScopes.includes(scope));
     const unscopedPaths = unscopedWorkingPaths(root, scopes);
+    const excludedPaths = commitScopedExclusions(canonicalScopes, options?.excludePaths);
     if (!commitScopes.length) {
-      return { ok: false, reason: "no_existing_scope", missingScopes, unscopedPaths };
+      return { ok: false, reason: "no_existing_scope", missingScopes, unscopedPaths, excludedPaths };
     }
+    if (excludedPaths.length) {
+      const ownChanges = workingPaths(root).filter((file) => (0, import_scope_match.isInScope)(file, commitScopes) && !(0, import_scope_match.isInScope)(file, excludedPaths));
+      if (!ownChanges.length) {
+        return { ok: false, reason: "no_own_changes", missingScopes, unscopedPaths, excludedPaths };
+      }
+    }
+    const excludePathspecs = excludedPaths.map((file) => `:(exclude)${file}`);
     const concreteGlobPaths = globScopedWorkingPaths(root, commitScopes);
     const directScopes = commitScopes.filter((scope) => !(0, import_scope_match.hasGlob)(scope));
     const stageableScopes = [.../* @__PURE__ */ new Set([...stageableScopedPaths(root, directScopes), ...concreteGlobPaths])];
@@ -695,13 +708,13 @@ function commitScoped(cwd, message, files) {
       ...directScopes.filter((scope) => !ignoredUntrackedScope(root, scope)),
       ...concreteGlobPaths.filter((scope) => !ignoredUntrackedScope(root, scope))
     ])];
-    if (stageableScopes.length) git(root, ["add", "--all", "--", ...stageableScopes]);
+    if (stageableScopes.length) git(root, ["add", "--all", "--", ...stageableScopes, ...excludePathspecs]);
     const commitArgs = ["commit", "--only"];
     if (repoRequestsSignoff(root)) commitArgs.push("--signoff");
-    git(root, [...commitArgs, "-m", String(message || ""), "--", ...committableScopes]);
+    git(root, [...commitArgs, "-m", String(message || ""), "--", ...committableScopes, ...excludePathspecs]);
     const commit = git(root, ["rev-parse", "HEAD"]).trim();
     const validation = validateCommitScope(root, commit, scopes);
-    return Object.assign({ commit, missingScopes, unscopedPaths }, validation);
+    return Object.assign({ commit, missingScopes, unscopedPaths, excludedPaths }, validation);
   } catch (error) {
     return { ok: false, reason: "git_error", message: errorMessage(error) };
   }
@@ -710,6 +723,7 @@ function commitScoped(cwd, message, files) {
 0 && (module.exports = {
   commitPaths,
   commitScoped,
+  commitScopedExclusions,
   foreignReleaseFragmentDiagnosis,
   foreignReleaseFragmentPaths,
   foreignReleaseFragmentRefusalMessage,
@@ -721,6 +735,7 @@ function commitScoped(cwd, message, files) {
   rangePaths,
   releaseFragmentOwner,
   repoRoot,
+  scopeKey,
   scopedPaths,
   scopedWorkPending,
   submissionCommitReachedIntegrationBranch,
