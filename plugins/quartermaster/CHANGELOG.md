@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.10.1 (2026-10-13)
+
+Released in v4.13.0, up from 0.10.0.
+
+### Fixes
+
+- Resolve Quartermaster resupply decline path (SQ-170)
+  The resupply decline command now uses the installed Quartermaster CLI path and the active project directory.
+- quartermaster: judge an allowlist candidate destructive only where a shell would run the verb (SQ-174)
+  `quartermaster allowlist` matched its destructive verbs against the command body as text. It split a command on whitespace and on every shell metacharacter, then tested each resulting word, so a verb that was never in a command position condemned the fingerprint anyway. An allowlist scan of one project blocked 43 Bash fingerprints this way, and the worst of them was `permission:Bash:grep`: `grep -n "struct TestRedirect\|impl TestRedirect\|impl Drop for TestRedirect" baude-core/src/testing.rs` was reported as a "sighted destructive command" after 702 clean approvals, because the `\|` alternation inside the quoted regex split `impl Drop for TestRedirect` into bare words and `Drop` is the SQL verb on the list. The phrase half of the check had the same shape: `rg -n "docker rm" docs/` searching for a string was read as running `docker rm`.
+
+  The classifier now parses the command before it judges it. A small quote-aware tokenizer splits the body into the simple commands a shell would run, at `;`, `&&`, `||`, a pipe, a newline, a command substitution, and a standalone group brace or paren, and records for each word whether any of its text was quoted. Only command positions are tested: the head of each simple command after its leading `FOO=bar` assignments, every unquoted word of a wrapper that runs what follows it (`sudo rm`, `timeout 30 rm`, `xargs -0 rm`), and the word after `find`'s `-exec`. The destructive phrases are matched per simple command with quoted words collapsed, so a phrase can no longer be read out of one argument or spliced across two. Quoted text that something genuinely reads back as code is still followed: the argument after an inline-code flag of a shell, interpreter, or database client (`psql -c "drop table users"`) and a quoted argument to `ssh` are each analyzed as a command in their own right, three levels deep.
+
+  Nothing that actually runs a destructive command became allowlistable. `rg -n foo src/ | xargs rm`, `npm test && sudo rm -rf /tmp/build`, `find . -name "*.o" -exec rm {} \;` and `psql -c "drop table users"` are all still blocked by a sighting, and the regression test asserts that alongside the two false positives, so a later loosening of the parser cannot quietly trade one for the other.
+
+  The second fingerprint in the report, a `cd <repo>` prefix with a shell function definition after it, no longer reaches the destructive classifier at all: it is vetoed as too broad a rule (`arbitrary execution`), which is the correct and correctly worded outcome, so only the text-matching half of the ticket was still live.
+- quartermaster: verify grades a permission rule only on the denials that rule actually caused (SQ-280)
+  `quartermaster verify` counted every denial that shared an applied `permission:*` rule's fingerprint, whatever had blocked the call. A tool call the user interrupted, one they rejected at the prompt, or one another layer intercepted all counted as that rule failing, so a rule could be graded "worse" on evidence it had nothing to do with. In the 2026-10-07 pass on one project this graded `permission:ToolSearch` worse on a single `interrupted` call and `permission:Agent` worse on six denials the allowlist itself attributes to Sidequest routing. SQ-127 had stopped a rule being blamed for denials on *other* fingerprints; denial kind was never part of that fix.
+
+  The session tally now records which denials the permission system itself raised, kept separately from the all-kinds total per fingerprint, and verify scores a permission decision off that. A fingerprint with no permission-rule denials on either side reports `insufficient-data`, which is silence rather than a bad result. Sessions tallied before the kind was recorded hold a mixed-kind count, so verify declines to judge against those too rather than guess: reading them as permission blocks would keep the old defect, and reading them as zero would invent a clean "before" that makes any later denial look like a regression. Verdicts recorded from here on are earned; a rule whose history predates this change goes quiet until it has sessions that can be attributed.
+- Clarify permission denial scoring (SQ-325)
+  Clarify that resupply evaluates permission-allowlist rules using only permission-rule denials matching the rule fingerprint.
+- quartermaster: deliver resupply reminders as Stop additional context (SQ-328)
+  Quartermaster's overdue-resupply Stop hook now emits Claude Code's `hookSpecificOutput.additionalContext` shape instead of blocking the stop. The once-per-session and cross-session cooldown behavior remains unchanged, but the reminder now appears as informational Stop context rather than a hook error.
+- quartermaster: stop counting not-applicable gate refusals as friction (SQ-329)
+  A refusal from a gate that does not apply to the project, such as Sidequest declining an `Agent` dispatch in a project with no board, no longer counts as a permission denial or a tool error. Four of them used to reach the six-event resupply threshold on their own and fire the nudge in a project whose only possible improvement was adopting machinery the user left out. They are now reported as `friction.denials.notApplicable` and weighted zero.
+
 ## 0.10.0 (2026-10-10)
 
 Released in v4.10.0, up from 0.9.0.
