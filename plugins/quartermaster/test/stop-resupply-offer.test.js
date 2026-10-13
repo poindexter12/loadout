@@ -60,15 +60,16 @@ test('Stop offer stays silent below the resupply thresholds', () => {
   assert.equal(runHook(projectDir, stateDir), '');
 });
 
-test('Stop offer blocks once with the resupply skill and decline escape hatch', () => {
+test('Stop offer adds context once with the resupply skill and decline escape hatch', () => {
   const { projectDir, stateDir } = overdueProject();
   recordOverdueTallies(projectDir, stateDir);
 
   const output = JSON.parse(runHook(projectDir, stateDir));
-  assert.equal(output.decision, 'block');
-  assert.match(output.reason, /\/quartermaster:resupply/);
-  assert.match(output.reason, /decline-resupply/);
-  assert.match(output.reason, /4 sessions/);
+  assert.ok(output.hookSpecificOutput, 'Stop offer uses hook-specific output');
+  assert.equal(output.hookSpecificOutput.hookEventName, 'Stop');
+  assert.match(output.hookSpecificOutput.additionalContext, /\/quartermaster:resupply/);
+  assert.match(output.hookSpecificOutput.additionalContext, /decline-resupply/);
+  assert.match(output.hookSpecificOutput.additionalContext, /4 sessions/);
   assert.ok(Buffer.byteLength(JSON.stringify(output)) <= 512, 'Stop guidance stays inside the hook output budget');
 });
 
@@ -83,7 +84,7 @@ test('Stop offer runs once per session', () => {
   const { projectDir, stateDir } = overdueProject();
   recordOverdueTallies(projectDir, stateDir);
 
-  assert.equal(JSON.parse(runHook(projectDir, stateDir)).decision, 'block');
+  assert.equal(JSON.parse(runHook(projectDir, stateDir)).hookSpecificOutput.hookEventName, 'Stop');
   assert.equal(runHook(projectDir, stateDir), '');
 });
 
@@ -91,7 +92,7 @@ test('Stop offer observes its cross-session cooldown', () => {
   const { projectDir, stateDir } = overdueProject();
   recordOverdueTallies(projectDir, stateDir);
 
-  assert.equal(JSON.parse(runHook(projectDir, stateDir)).decision, 'block');
+  assert.equal(JSON.parse(runHook(projectDir, stateDir)).hookSpecificOutput.hookEventName, 'Stop');
   assert.equal(runHook(projectDir, stateDir, { session_id: 'next-stop-session' }), '');
 });
 
@@ -101,14 +102,14 @@ test('a SessionStart nudge does not suppress its first Stop offer', () => {
   recordOverdueTallies(projectDir, stateDir);
   markNudged(projectDir, environment);
 
-  assert.equal(JSON.parse(runHook(projectDir, stateDir)).decision, 'block');
+  assert.equal(JSON.parse(runHook(projectDir, stateDir)).hookSpecificOutput.hookEventName, 'Stop');
 });
 
 test('declining a resupply round resets the offer accumulation window', () => {
   const { projectDir, stateDir } = overdueProject();
   recordOverdueTallies(projectDir, stateDir);
 
-  assert.equal(JSON.parse(runHook(projectDir, stateDir)).decision, 'block');
+  assert.equal(JSON.parse(runHook(projectDir, stateDir)).hookSpecificOutput.hookEventName, 'Stop');
   const result = runDecline(projectDir, stateDir);
   assert.ok(result.lastDeclinedAt);
   assert.equal(runHook(projectDir, stateDir, { session_id: 'after-decline' }), '');

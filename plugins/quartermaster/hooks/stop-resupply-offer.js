@@ -17,7 +17,7 @@ function readStdin() {
 
 function offerReason(status, projectDir) {
   const cli = path.resolve(__dirname, '..', 'bin', 'quartermaster.js');
-  return `quartermaster: ${status.unanalyzedSessions} sessions and ${status.frictionEvents} friction events since the last resupply. Offer an optimization round. If they say yes or gave standing permission, run /quartermaster:resupply. If they decline, run node "${cli}" decline-resupply --project "${projectDir}" to reset the evidence window.`;
+  return `quartermaster: ${status.unanalyzedSessions} sessions and ${status.frictionEvents} friction events since last resupply. Offer an optimization round. With user or standing permission, run /quartermaster:resupply. If declined, run node "${cli}" decline-resupply --project "${projectDir}" to reset.`;
 }
 
 function main() {
@@ -29,7 +29,12 @@ function main() {
   if (!status.shouldOffer || status.offeredSessionIds.includes(data.session_id)) return;
 
   markOffered(projectDir, data.session_id);
-  process.stdout.write(JSON.stringify({ decision: 'block', reason: offerReason(status, projectDir) }));
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'Stop',
+      additionalContext: offerReason(status, projectDir),
+    },
+  }));
 }
 
 try {
