@@ -929,18 +929,113 @@ ${String(ticket?.description || "")}`;
     "--test-skip-pattern",
     "--test-timeout"
   ]);
-  function nodeTestGlob(command) {
-    const prefix = /^node\s+--test(?:\s|$)/.exec(String(command || ""));
-    if (!prefix) return null;
-    const argumentsText = String(command).slice(prefix[0].length);
-    const tokens = [...argumentsText.matchAll(/(?:["']([^"']*)["']|([^\s;&|]+))/g)].map((match) => match[1] ?? match[2]);
+  const NODE_FLAGS_WITH_VALUES = /* @__PURE__ */ new Set([
+    ...NODE_TEST_FLAGS_WITH_VALUES,
+    "--conditions",
+    "-C",
+    "--env-file",
+    "--experimental-loader",
+    "--import",
+    "--loader",
+    "--require",
+    "-r"
+  ]);
+  function nodeTestArguments(command) {
+    const text = String(command || "").trim();
+    if (!/^node(?:\.exe)?(?:\s|$)/.test(text)) return null;
+    const tokens = [...text.matchAll(/(?:["']([^"']*)["']|([^\s;&|]+))/g)].map((match) => match[1] ?? match[2]).slice(1);
+    const operands = [];
+    let test = false;
     for (let index = 0; index < tokens.length; index += 1) {
       const token = tokens[index];
       if (token == null) continue;
-      if (!token.startsWith("-")) return token;
-      if (!token.includes("=") && NODE_TEST_FLAGS_WITH_VALUES.has(token)) index += 1;
+      if (token === "--test") {
+        test = true;
+        continue;
+      }
+      if (token.startsWith("-")) {
+        if (!token.includes("=") && NODE_FLAGS_WITH_VALUES.has(token)) index += 1;
+        continue;
+      }
+      if (!test) return null;
+      operands.push(token);
     }
-    return null;
+    return test ? operands : null;
+  }
+  function nodeTestGlob(command) {
+    const operands = nodeTestArguments(command);
+    return operands && operands.length ? operands[0] : null;
+  }
+  const TYPESCRIPT_TEST_FILE = /\.(?:[cm]?ts|tsx)$/i;
+  const TYPESCRIPT_LOADER_FLAG = /(?:^|\s)--(?:experimental-)?loader(?:[=\s]|$)|(?:^|\s)--experimental-(?:strip|transform)-types(?:[=\s]|$)/;
+  function nodePreloadSpecifiers(command) {
+    return [...String(command || "").matchAll(/(?:^|\s)--(?:import|require)(?:=|\s+)(?:["']([^"']*)["']|([^\s;&|]+))/g)].map((match) => match[1] ?? match[2]).filter(Boolean);
+  }
+  function pathSpecifier(specifier) {
+    return /^\.{1,2}[\\/]/.test(specifier) || specifier.startsWith("/") || /^[A-Za-z]:[\\/]/.test(specifier);
+  }
+  function stripsTypeScript(command) {
+    return TYPESCRIPT_LOADER_FLAG.test(String(command || "")) || nodePreloadSpecifiers(command).some((specifier) => !pathSpecifier(specifier));
+  }
+  function nearestPackageRoot(projectPath, directory) {
+    let current = path.resolve(String(directory));
+    for (; ; ) {
+      if (!relativePathWithin(projectPath, current)) return null;
+      if (fs.existsSync(path.join(current, "package.json"))) return current;
+      const parent = path.dirname(current);
+      if (parent === current) return null;
+      current = parent;
+    }
+  }
+  function nodeTestRunners(manifest) {
+    const scripts = manifest && typeof manifest.scripts === "object" && manifest.scripts ? manifest.scripts : {};
+    return Object.entries(scripts).filter(([, script]) => typeof script === "string" && nodeTestArguments(script)).map(([name, script]) => ({
+      name: String(name),
+      operands: nodeTestArguments(script),
+      preloads: nodePreloadSpecifiers(script).filter(pathSpecifier)
+    }));
+  }
+  function nodeTestRunnerIssue(command, directory, projectPath) {
+    const operands = nodeTestArguments(command);
+    if (!operands || !fs.existsSync(directory)) return null;
+    const matches = [];
+    for (const operand of operands) {
+      try {
+        matches.push(...fs.globSync(operand, { cwd: directory }));
+      } catch (_) {
+      }
+    }
+    const typescriptMatch = matches.find((match) => TYPESCRIPT_TEST_FILE.test(match));
+    const anchor = typescriptMatch || matches[0];
+    const packageDirectory = nearestPackageRoot(
+      projectPath,
+      anchor ? path.dirname(path.resolve(directory, anchor)) : directory
+    );
+    if (!packageDirectory) return null;
+    let manifest;
+    try {
+      manifest = JSON.parse(fs.readFileSync(path.join(packageDirectory, "package.json"), "utf8"));
+    } catch (_) {
+      return null;
+    }
+    const packageRelative = relativePathWithin(projectPath, packageDirectory) || ".";
+    const manifestPath = path.join(packageRelative, "package.json").replace(/\\/g, "/");
+    const runners = nodeTestRunners(manifest);
+    const fileRunner = runners.find((runner) => !runner.operands.length);
+    const hint = fileRunner ? ` Record \`npm run ${fileRunner.name}${operands.length ? ` -- ${operands.map((operand) => `"${operand}"`).join(" ")}` : ""}\` from ${packageRelative} instead.` : "";
+    if (typescriptMatch && !stripsTypeScript(command) && manifest?.type !== "module") {
+      return `\`${command}\` runs TypeScript test files (${typescriptMatch}) with no type-stripping loader, and ${manifestPath} is not \`"type": "module"\`, so Node reads the stripped files as CommonJS and their \`import\` statements are a SyntaxError: the suite loads zero tests.${hint || ` Run them through the loader ${manifestPath} declares.`}`;
+    }
+    const applicable = runners.filter((runner) => !runner.operands.length || runner.operands.some((operand) => operands.includes(operand)));
+    if (!applicable.length) return null;
+    const pinned = new Set(nodePreloadSpecifiers(command).filter(pathSpecifier).map((specifier) => path.resolve(directory, specifier)));
+    const shortfalls = applicable.map((runner) => ({
+      runner,
+      missing: runner.preloads.filter((specifier) => !pinned.has(path.resolve(packageDirectory, specifier)))
+    })).sort((left, right) => left.missing.length - right.missing.length);
+    const shortfall = shortfalls[0];
+    if (!shortfall || !shortfall.missing.length) return null;
+    return `\`${command}\` omits the ${shortfall.missing.map((specifier) => `\`--import ${specifier}\``).join(" and ")} preload that ${manifestPath}'s \`${shortfall.runner.name}\` script loads before \`--test\`. That preload sets the suite's environment up, so running without it can write outside the sandbox and into real state.${hint}`;
   }
   function declaresGreenfieldPackage(ticket, projectPath, packageDirectory) {
     const packageJson = path.join(String(packageDirectory), "package.json");
@@ -1000,14 +1095,17 @@ ${String(ticket?.description || "")}`;
         }
         continue;
       }
-      if (!changedDirectory) continue;
-      if (!fs.existsSync(directory)) {
-        return "the recorded verify command changes to a directory that does not exist in this repo or this ticket's declared greenfield package scope. Run the exact string you record before submitting.";
+      if (changedDirectory) {
+        if (!fs.existsSync(directory)) {
+          return "the recorded verify command changes to a directory that does not exist in this repo or this ticket's declared greenfield package scope. Run the exact string you record before submitting.";
+        }
+        const glob = nodeTestGlob(command);
+        if (glob && !fs.globSync(glob, { cwd: directory }).length) {
+          return `\`node --test ${glob}\` matches no files under ${relativePathWithin(projectPath, directory) || "."}.`;
+        }
       }
-      const glob = nodeTestGlob(command);
-      if (glob && !fs.globSync(glob, { cwd: directory }).length) {
-        return `\`node --test ${glob}\` matches no files under ${relativePathWithin(projectPath, directory) || "."}.`;
-      }
+      const runnerIssue = nodeTestRunnerIssue(command, directory, projectPath);
+      if (runnerIssue) return runnerIssue;
     }
     return deferredWarning;
   }

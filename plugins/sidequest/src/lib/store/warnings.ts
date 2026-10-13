@@ -1041,18 +1041,147 @@ const NODE_TEST_FLAGS_WITH_VALUES = new Set([
   '--test-shard', '--test-skip-pattern', '--test-timeout',
 ]);
 
-function nodeTestGlob(command?: any) {
-  const prefix = /^node\s+--test(?:\s|$)/.exec(String(command || ''));
-  if (!prefix) return null;
-  const argumentsText = String(command).slice(prefix[0].length);
-  const tokens = [...argumentsText.matchAll(/(?:["']([^"']*)["']|([^\s;&|]+))/g)].map((match) => match[1] ?? match[2]);
+// Node flags also precede `--test`, and every corrected form of these gates puts its loader and preloads
+// there: `node --import tsx --import ./test/_home.ts --test <files>` (SQ-342). Reading the operands as
+// whatever follows the literal `node --test` missed all of them.
+const NODE_FLAGS_WITH_VALUES = new Set([
+  ...NODE_TEST_FLAGS_WITH_VALUES,
+  '--conditions', '-C', '--env-file', '--experimental-loader', '--import', '--loader', '--require', '-r',
+]);
+
+// The operands of a `node --test` invocation, or null when the command is not one. An empty array is a
+// `node --test` that names no files and leaves discovery to Node, which is a meaningful case here: it is
+// the form that runs the whole suite with none of the package's own preloads.
+function nodeTestArguments(command?: any) {
+  const text = String(command || '').trim();
+  if (!/^node(?:\.exe)?(?:\s|$)/.test(text)) return null;
+  const tokens = [...text.matchAll(/(?:["']([^"']*)["']|([^\s;&|]+))/g)].map((match) => match[1] ?? match[2]).slice(1);
+  const operands: string[] = [];
+  let test = false;
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token == null) continue;
-    if (!token.startsWith('-')) return token;
-    if (!token.includes('=') && NODE_TEST_FLAGS_WITH_VALUES.has(token)) index += 1;
+    if (token === '--test') {
+      test = true;
+      continue;
+    }
+    if (token.startsWith('-')) {
+      if (!token.includes('=') && NODE_FLAGS_WITH_VALUES.has(token)) index += 1;
+      continue;
+    }
+    // A bare operand ahead of `--test` is the script Node runs, so `node build.js --test` is not a test run.
+    if (!test) return null;
+    operands.push(token);
   }
-  return null;
+  return test ? operands : null;
+}
+
+function nodeTestGlob(command?: any) {
+  const operands = nodeTestArguments(command);
+  return operands && operands.length ? operands[0] : null;
+}
+
+// SQ-342. A pinned `cd plugins/sidequest && node --test "test/foo.test.ts"` passed every check here and then
+// loaded zero tests on every machine: the package is `"type": "commonjs"`, so once Node has stripped the
+// types it reads those files as CommonJS, where their `import` statements are a SyntaxError. The same bare
+// form drops the `--import ./test/_sidequest-test-home.ts` preload that redirects SIDEQUEST_HOME, so a gate
+// that did load would have written fixture projects and tickets into the operator's real board. Both are
+// decidable from the package manifest this preflight already reads for `npm run`.
+const TYPESCRIPT_TEST_FILE = /\.(?:[cm]?ts|tsx)$/i;
+const TYPESCRIPT_LOADER_FLAG = /(?:^|\s)--(?:experimental-)?loader(?:[=\s]|$)|(?:^|\s)--experimental-(?:strip|transform)-types(?:[=\s]|$)/;
+
+function nodePreloadSpecifiers(command?: any) {
+  return [...String(command || '').matchAll(/(?:^|\s)--(?:import|require)(?:=|\s+)(?:["']([^"']*)["']|([^\s;&|]+))/g)]
+    .map((match) => match[1] ?? match[2])
+    .filter(Boolean) as string[];
+}
+
+// A bare specifier names an installed hook (`tsx`, `ts-node/esm`, `@swc-node/register`); a path names a file
+// in the package, which is a project preload that sets the suite's environment up rather than a loader.
+function pathSpecifier(specifier: string) {
+  return /^\.{1,2}[\\/]/.test(specifier) || specifier.startsWith('/') || /^[A-Za-z]:[\\/]/.test(specifier);
+}
+
+function stripsTypeScript(command?: any) {
+  return TYPESCRIPT_LOADER_FLAG.test(String(command || ''))
+    || nodePreloadSpecifiers(command).some((specifier) => !pathSpecifier(specifier));
+}
+
+// Node reads `type`, and so the module format of a stripped `.ts` file, from the nearest package.json above
+// that file rather than from the directory the command changed to.
+function nearestPackageRoot(projectPath?: any, directory?: any) {
+  let current = path.resolve(String(directory));
+  for (;;) {
+    if (!relativePathWithin(projectPath, current)) return null;
+    if (fs.existsSync(path.join(current, 'package.json'))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+function nodeTestRunners(manifest?: any) {
+  const scripts = manifest && typeof manifest.scripts === 'object' && manifest.scripts ? manifest.scripts : {};
+  return Object.entries(scripts)
+    .filter(([, script]) => typeof script === 'string' && nodeTestArguments(script))
+    .map(([name, script]) => ({
+      name: String(name),
+      operands: nodeTestArguments(script) as string[],
+      preloads: nodePreloadSpecifiers(script).filter(pathSpecifier),
+    }));
+}
+
+function nodeTestRunnerIssue(command: any, directory: string, projectPath: any) {
+  const operands = nodeTestArguments(command);
+  if (!operands || !fs.existsSync(directory)) return null;
+  const matches: string[] = [];
+  for (const operand of operands) {
+    try {
+      matches.push(...fs.globSync(operand, { cwd: directory }));
+    } catch (_) { /* an operand the glob engine rejects is not a file set this check can read */ }
+  }
+  const typescriptMatch = matches.find((match) => TYPESCRIPT_TEST_FILE.test(match));
+  const anchor = typescriptMatch || matches[0];
+  const packageDirectory = nearestPackageRoot(
+    projectPath,
+    anchor ? path.dirname(path.resolve(directory, anchor)) : directory,
+  );
+  if (!packageDirectory) return null;
+  let manifest: any;
+  try {
+    manifest = JSON.parse(fs.readFileSync(path.join(packageDirectory, 'package.json'), 'utf8'));
+  } catch (_) {
+    return null;
+  }
+  const packageRelative = relativePathWithin(projectPath, packageDirectory) || '.';
+  const manifestPath = path.join(packageRelative, 'package.json').replace(/\\/g, '/');
+  const runners = nodeTestRunners(manifest);
+  // A runner that pins its own operands vouches only for those; one that ends at `--test` takes the files it
+  // is handed, which is the form a pinned gate reuses with `npm run <script> -- <files>`.
+  const fileRunner = runners.find((runner) => !runner.operands.length);
+  const hint = fileRunner
+    ? ` Record \`npm run ${fileRunner.name}${operands.length ? ` -- ${operands.map((operand) => `"${operand}"`).join(' ')}` : ''}\` from ${packageRelative} instead.`
+    : '';
+
+  if (typescriptMatch && !stripsTypeScript(command) && manifest?.type !== 'module') {
+    return `\`${command}\` runs TypeScript test files (${typescriptMatch}) with no type-stripping loader, and ${manifestPath} is not \`"type": "module"\`, so Node reads the stripped files as CommonJS and their \`import\` statements are a SyntaxError: the suite loads zero tests.${hint || ` Run them through the loader ${manifestPath} declares.`}`;
+  }
+
+  const applicable = runners.filter((runner) => !runner.operands.length
+    || runner.operands.some((operand) => operands.includes(operand)));
+  if (!applicable.length) return null;
+  const pinned = new Set(nodePreloadSpecifiers(command)
+    .filter(pathSpecifier)
+    .map((specifier) => path.resolve(directory, specifier)));
+  const shortfalls = applicable
+    .map((runner) => ({
+      runner,
+      missing: runner.preloads.filter((specifier) => !pinned.has(path.resolve(packageDirectory, specifier))),
+    }))
+    .sort((left, right) => left.missing.length - right.missing.length);
+  const shortfall = shortfalls[0];
+  if (!shortfall || !shortfall.missing.length) return null;
+  return `\`${command}\` omits the ${shortfall.missing.map((specifier) => `\`--import ${specifier}\``).join(' and ')} preload that ${manifestPath}'s \`${shortfall.runner.name}\` script loads before \`--test\`. That preload sets the suite's environment up, so running without it can write outside the sandbox and into real state.${hint}`;
 }
 
 function declaresGreenfieldPackage(ticket?: any, projectPath?: any, packageDirectory?: any) {
@@ -1126,14 +1255,22 @@ function verifyCommandIssue(ticket?: any, projectPath?: any) {
       continue;
     }
 
-    if (!changedDirectory) continue;
-    if (!fs.existsSync(directory)) {
-      return 'the recorded verify command changes to a directory that does not exist in this repo or this ticket\'s declared greenfield package scope. Run the exact string you record before submitting.';
+    // The directory-existence and empty-glob refusals stay behind `changedDirectory` deliberately: without a
+    // `cd` the base is the repository root, which always exists, and a root-relative operand naming a file
+    // the ticket has yet to create is greenfield work that verifyPathWarning reports as a warning rather than
+    // refusing. Dozens of recorded verifies take that form (SQ-342). The runner check below needs neither
+    // assumption: it resolves the package from the files the operands actually match, so it runs either way.
+    if (changedDirectory) {
+      if (!fs.existsSync(directory)) {
+        return 'the recorded verify command changes to a directory that does not exist in this repo or this ticket\'s declared greenfield package scope. Run the exact string you record before submitting.';
+      }
+      const glob = nodeTestGlob(command);
+      if (glob && !fs.globSync(glob, { cwd: directory }).length) {
+        return `\`node --test ${glob}\` matches no files under ${relativePathWithin(projectPath, directory) || '.'}.`;
+      }
     }
-    const glob = nodeTestGlob(command);
-    if (glob && !fs.globSync(glob, { cwd: directory }).length) {
-      return `\`node --test ${glob}\` matches no files under ${relativePathWithin(projectPath, directory) || '.'}.`;
-    }
+    const runnerIssue = nodeTestRunnerIssue(command, directory, projectPath);
+    if (runnerIssue) return runnerIssue;
   }
   return deferredWarning;
 }
