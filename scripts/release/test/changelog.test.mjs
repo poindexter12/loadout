@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   releasedFragmentFingerprints,
+  releasedRefTitles,
   releasedRefs,
   renderPluginSection,
   renderRepoSection,
@@ -106,6 +107,37 @@ test('the changelog is the ledger of what has already shipped', () => {
   assert.deepEqual([...releasedRefs(text)].sort(), ['SQ-800', 'SQ-817', 'SQ-823', 'SQ-834']);
   assert.equal(releasedRefs('').size, 0);
   assert.equal(releasedRefs('- not an entry SQ-1').size, 0, 'a ref needs its parentheses to count');
+});
+
+test('the changelog says which titles each ref shipped under', () => {
+  const text = upsertSection('', repoSectionHeading(PLAN), renderRepoSection(PLAN), repoChangelogHeader());
+  const titles = releasedRefTitles(text);
+
+  // Every ref releasedRefs finds is here, mapped to the title it shipped with. SQ-800 carries a
+  // commit link and SQ-817 does not, so both renderings have to parse.
+  assert.deepEqual([...titles.keys()].sort(), ['SQ-800', 'SQ-817', 'SQ-823', 'SQ-834']);
+  assert.deepEqual([...titles.get('SQ-800')], ['Lean default board reads']);
+  assert.deepEqual([...titles.get('SQ-817')], ['Fix the Bash path guard']);
+
+  // A ref that shipped twice under different titles is the collision this reader exists to
+  // expose: SQ-1812 and SQ-21 both look like this in the repo's own changelog today.
+  const reused = releasedRefTitles([
+    '- Retire Codegraph (SQ-1812)',
+    '- Keep observer hook-spool failures visible (SQ-1812) [`cd759f1`](https://example.test/c)',
+  ].join('\n'));
+  assert.deepEqual(
+    [...reused.get('SQ-1812')].sort(),
+    ['Keep observer hook-spool failures visible', 'Retire Codegraph'],
+  );
+
+  assert.equal(releasedRefTitles('').size, 0);
+  assert.equal(releasedRefTitles(null).size, 0);
+  assert.equal(releasedRefTitles('- not an entry SQ-1').size, 0, 'a ref needs its parentheses to count');
+  assert.equal(
+    releasedRefTitles('  - An indented body line (SQ-2)').size,
+    0,
+    'a fragment body cannot forge a shipped entry',
+  );
 });
 
 test('the changelog identifies exact fragment content', () => {

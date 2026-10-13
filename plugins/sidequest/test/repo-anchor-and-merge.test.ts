@@ -9,7 +9,9 @@ import './_temp-cleanup.js';
  *   - store.nearestRepoRoot() walks up to the enclosing .git so any subfolder
  *     resolves to the one repo board.
  *   - store.mergeProject() folds an existing duplicate board back into its
- *     parent, renumbering refs and remapping links so nothing collides.
+ *     parent, remapping links so nothing collides. Since SQ-32 it re-mints only
+ *     a ref that genuinely collides with the destination and keeps the rest, so
+ *     a merge no longer renames tickets that had no conflict at all.
  *
  * Run: node --test plugins/sidequest/test/repo-anchor-and-merge.test.js
  * (the directory form of `node --test` is broken on this Node v22/Windows setup)
@@ -143,12 +145,12 @@ function assetFilesFor(slug?: any, ticketId?: any) {
   }
 }
 
-test('mergeProject: folds a board into another, renumbering refs above the destination', () => {
+test('mergeProject: folds a board into another, re-minting only the refs that collide', () => {
   const dest = store.ensureProject(path.join(os.tmpdir(), 'sq-fx', 'contractify'), 'contractify');
   const src = store.ensureProject(path.join(os.tmpdir(), 'sq-fx', 'contractify', 'bin', 'docai'), 'docai_refactored');
 
-  // Give dest an existing ticket + story so its counters are non-zero: the
-  // merged refs must land strictly above these.
+  // Give dest an existing ticket so its counters are non-zero and SQ-1 is taken: only the
+  // source ticket that wants SQ-1 has to move.
   const destTicket = store.createTicket(dest.slug, { title: 'existing dest ticket', complexity: 1 });
   assert.strictEqual(destTicket.ref, 'SQ-1');
 
@@ -168,16 +170,18 @@ test('mergeProject: folds a board into another, renumbering refs above the desti
   // Source board is gone.
   assert.ok(!fs.existsSync(path.join(SIDEQUEST_HOME, 'projects', src.slug)), 'source project dir should be deleted');
 
-  // Dest holds the original + both merged tickets, with fresh refs above SQ-1.
+  // Dest holds the original + both merged tickets. A wanted SQ-1, which dest already owns, so
+  // it is the only one re-minted; B keeps SQ-2 because nothing in dest holds it. The re-mint
+  // lands above SQ-2 rather than on it, since B is keeping that number.
   const destTickets = store.listTickets(dest.slug);
   assert.strictEqual(destTickets.length, 3);
   const movedA = destTickets.find((t?: any) => t.id === a.id);
   const movedB = destTickets.find((t?: any) => t.id === b.id);
   assert.ok(movedA && movedB, 'both source tickets should now live in dest');
-  assert.strictEqual(movedA.ref, 'SQ-2');
-  assert.strictEqual(movedB.ref, 'SQ-3');
+  assert.strictEqual(movedA.ref, 'SQ-3', 'SQ-1 collided with dest, so A re-mints past every kept ref');
+  assert.strictEqual(movedB.ref, 'SQ-2', 'SQ-2 was free in dest, so B keeps the ref it already had');
 
-  // The A→B link followed the renumber (its ref points at B's NEW ref).
+  // The A→B link followed the remap (its ref points at B's new ref).
   const linkToB = movedA.links.find((l?: any) => l.type === 'blocks');
   assert.ok(linkToB, 'the blocks link should survive the merge');
   assert.strictEqual(linkToB.ref, movedB.ref, 'link ref must be remapped to B\'s new ref');

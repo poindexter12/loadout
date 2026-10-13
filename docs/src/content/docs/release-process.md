@@ -9,7 +9,7 @@ Loadout publishes from `main`. A release cut creates a marketplace tag, `v<marke
 
 ## Prepare a release
 
-1. Add a fragment under `.release/unreleased/` with the plugin, change type, and user-facing summary.
+1. Add a fragment under `.release/unreleased/` with the plugin, change type, and user-facing summary. Give it the ref the board minted for the work: `note.mjs` refuses a ref `CHANGELOG.md` already shipped under a different title, because the cut dedups fragments by content fingerprint and would otherwise ship that ref a second time for unrelated work. Re-noting the same title is an amend and stays allowed, and `--allow-shipped-ref` overrides the refusal deliberately.
 2. Check the queue and preview the release. Normal windows advance the marketplace minor version by default. For a deliberate fork-line version move, add `--marketplace-level major`; the dry-run shows the resulting marketplace version and `v<version>` tag. Hotfix windows always patch the marketplace version and do not accept this override:
 
    ```text

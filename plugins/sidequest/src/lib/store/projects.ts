@@ -1,5 +1,16 @@
 'use strict';
 
+// The ticket-ref prefix is per board, stored as `meta.refPrefix`. Every board filed before
+// SQ-32 has no refPrefix at all and must keep minting SQ-n, so an absent, blank or malformed
+// value grandfathers to SQ rather than failing. Shared with tickets.ts, which builds the ref
+// from the seq `nextSeq` returns, so there is one definition of the default (SQ-32).
+const DEFAULT_REF_PREFIX = 'SQ';
+
+function refPrefixOf(meta?: any) {
+  const raw = String(meta?.refPrefix ?? '').trim().toUpperCase();
+  return /^[A-Z][A-Z0-9]*$/.test(raw) ? raw : DEFAULT_REF_PREFIX;
+}
+
 function createProjects({ acquireLock, assetsDir, claimReclaimable, cloneCached, database, db, defaultAlwaysInScope, defaultProjectName, deleteCachedRow, ensureDir, fs, invalidateStoreCaches, listStories, listTickets, normalizeForHash, path, projectDir, putProject, putStory, putTicket, releaseLock, residentCache, slugify, sourceRevisionAdapterForPath, ticketsDir, transaction }: any) {
   // A directory can be spelled several ways on Windows — an 8.3 alias, a junction —
   // and each spelling hashes to its own slug. Callers hold whichever spelling they
@@ -82,10 +93,54 @@ function createProjects({ acquireLock, assetsDir, claimReclaimable, cloneCached,
     }
   }
 
+  // A board ref and a release-fragment ref are two minters over one number space, and nothing
+  // used to tell them apart: v3.539.0 shipped fragment refs SQ-21..SQ-25 that no board ticket
+  // ever owned, and this repo's board counter sits far below the highest ref CHANGELOG.md
+  // already names. Minting blind therefore walks into refs that are shipped history, after
+  // which a ticket and a released changelog entry share one ref forever.
+  //
+  // Collect the taken numbers so the mint can step over them. Deliberately permissive: any
+  // `PREFIX-123` token anywhere in the changelog counts, not only a rendered entry line, and a
+  // fragment counts by filename. Over-matching only skips a number that was free, while
+  // under-matching hands out a ref that already shipped, which is the bug being fixed.
+  //
+  // Never throws: most boards are not release repos at all. An absent path, an unreadable
+  // changelog or no fragment queue each yield an empty set, which leaves the bare counter.
+  // `prefix` comes from refPrefixOf, so it is `[A-Z][A-Z0-9]*` and safe to interpolate.
+  function releasedRefNumbers(meta?: any, prefix?: any) {
+    const taken = new Set<number>();
+    const root = typeof meta?.path === 'string' ? meta.path : null;
+    if (!root) return taken;
+    try {
+      const text = String(fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8'));
+      for (const match of text.matchAll(new RegExp(`\\b${prefix}-(\\d+)\\b`, 'g'))) {
+        taken.add(parseInt(match[1]!, 10));
+      }
+    } catch (_: any) {
+      // No changelog, or unreadable: the fragment queue may still name refs.
+    }
+    try {
+      const fragmentRef = new RegExp(`^${prefix}-(\\d+)\\.md$`);
+      for (const name of fs.readdirSync(path.join(root, '.release', 'unreleased'))) {
+        const match = fragmentRef.exec(String(name));
+        if (match) taken.add(parseInt(match[1]!, 10));
+      }
+    } catch (_: any) {
+      // No fragment queue.
+    }
+    return taken;
+  }
+
+  // Skip forward over taken numbers rather than flooring to the highest one: a floor would jump
+  // this repo's counter from 327 to 2597 and abandon 2270 free refs in a single mint, where
+  // skipping keeps refs dense and is equally safe. The counter only ever rises (SQ-32).
   function nextSeq(slug?: any) {
     return withMetaLock(slug, () => {
       const meta = readMeta(slug) || { seq: 0 };
-      meta.seq = (typeof meta.seq === 'number' ? meta.seq : 0) + 1;
+      const taken = releasedRefNumbers(meta, refPrefixOf(meta));
+      let seq = (typeof meta.seq === 'number' ? meta.seq : 0) + 1;
+      while (taken.has(seq)) seq += 1;
+      meta.seq = seq;
       putProject(slug, meta);
       return meta.seq;
     });
@@ -286,10 +341,45 @@ function createProjects({ acquireLock, assetsDir, claimReclaimable, cloneCached,
       throw new Error(`refusing to merge board "${srcSlug}": ${liveClaimed.length} live-claimed ticket(s): ${refs}. Release the claims first; merge cannot move a ticket its executor is still working under.`);
     }
     const stories = listStories(srcSlug);
+
+    // A merge used to re-mint every source ref, which renamed tickets that had no conflict at
+    // all: every comment, commit message, branch name and handoff naming the old ref went stale
+    // for nothing. Keep a ref whose number is free on the destination and re-mint only a
+    // genuine collision (SQ-32). `listTickets` is unfiltered, so an ARCHIVED destination ticket
+    // counts as occupied too -- unarchiving one later must not surface two tickets under one
+    // ref. A source ref outside the destination's prefix is always re-minted: folding SQ-7 into
+    // an ABC board would leave it outside the namespace every later mint uses.
+    const destPrefix = refPrefixOf(readMeta(destSlug));
+    const occupied = new Set(listTickets(destSlug).map((ticket?: any) => String(ticket.ref || '').toUpperCase()));
+    const keptRefs = new Map<any, string>();
+    let maxKept = 0;
+    for (const ticket of tickets) {
+      const ref = String(ticket.ref || '').toUpperCase();
+      const seq = seqOfRef(ref);
+      if (!ref || seq === Number.MAX_SAFE_INTEGER) continue;
+      if (ref !== `${destPrefix}-${seq}` || occupied.has(ref)) continue;
+      occupied.add(ref);
+      keptRefs.set(ticket.id, ref);
+      if (seq > maxKept) maxKept = seq;
+    }
+
+    // A re-minted ref must not land on a ref one of its own siblings is keeping, so lift the
+    // destination counter above every kept number before any minting happens.
+    if (!dryRun && maxKept > 0) {
+      withMetaLock(destSlug, () => {
+        const meta = readMeta(destSlug);
+        if (meta && (typeof meta.seq !== 'number' || meta.seq < maxKept)) {
+          meta.seq = maxKept;
+          putProject(destSlug, meta);
+        }
+      });
+    }
+
     const refMap: Record<string, any> = {};
     const ticketPlan: any[] = [];
     for (const ticket of tickets) {
-      const newRef = dryRun ? `SQ-?` : `SQ-${nextSeq(destSlug)}`;
+      const kept = keptRefs.get(ticket.id);
+      const newRef = kept || (dryRun ? `${destPrefix}-?` : `${destPrefix}-${nextSeq(destSlug)}`);
       if (ticket.ref) refMap[String(ticket.ref).toUpperCase()] = newRef;
       ticketPlan.push({ ticket, newRef });
     }
@@ -334,4 +424,4 @@ function createProjects({ acquireLock, assetsDir, claimReclaimable, cloneCached,
   return { archiveProject, deleteProjectExact, ensureProject, findProject, listProjects, mergeProject, metaLockPath, nextSeq, nextStorySeq, projectRoutingEnabled, readMeta, setProjectNotify, setProjectRouting, unarchiveProject, withMetaLock };
 }
 
-module.exports = { createProjects };
+module.exports = { createProjects, refPrefixOf };

@@ -144,6 +144,28 @@ export function releasedRefs(text) {
   return refs;
 }
 
+/**
+ * Maps every ref the changelog has shipped to the set of titles it shipped under, reusing the
+ * same rendered-entry grammar as the fingerprint reader so there is one copy of it.
+ *
+ * A ref with more than one title is the dedup hole this exists to close: the cut skips a
+ * fragment only on an exact content fingerprint of {ref,title,commit,body}, so editing the
+ * title mints a new fingerprint and the same ref ships a second time for unrelated work. Six
+ * refs in this repo's own changelog already carry two distinct titles. `note.mjs` reads this at
+ * the point a fragment is written, which is the only place that can still refuse (SQ-32).
+ */
+export function releasedRefTitles(text) {
+  const titles = new Map();
+  for (const line of (text ?? '').split('\n')) {
+    const match = RENDERED_ENTRY_DETAILS.exec(line.replace(/\r$/, ''));
+    if (!match) continue;
+    const existing = titles.get(match[2]);
+    if (existing) existing.add(match[1]);
+    else titles.set(match[2], new Set([match[1]]));
+  }
+  return titles;
+}
+
 export function releasedFragmentFingerprints(text) {
   const fingerprints = new Set();
   const lines = (text ?? '').split('\n').map((line) => line.replace(/\r$/, ''));

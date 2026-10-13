@@ -1,5 +1,6 @@
 'use strict';
 
+const { refPrefixOf } = require('./projects.js');
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationRef } = require('../kernel/review-binding');
 const { classifyVerificationKind, verificationRequirement } = require('../kernel/verification.js');
 
@@ -208,8 +209,11 @@ function createTicket(slug?: any, fields?: any, reviewTarget?: any) {
   }
   const status = fields.status === undefined ? 'todo' : requireStatus(fields.status);
   const id = newTicketId();
+  // `nextSeq` has already stepped over any number whose ref is shipped history, and it read the
+  // same prefix to do it, so the two must agree on how a board's prefix is resolved: both go
+  // through refPrefixOf, which grandfathers a board with no meta.refPrefix to SQ (SQ-32).
   const seq = nextSeq(slug);
-  const ref = `SQ-${seq}`;
+  const ref = `${refPrefixOf(readMeta(slug))}-${seq}`;
   const now = new Date().toISOString();
 
   const assets: any[] = [];
