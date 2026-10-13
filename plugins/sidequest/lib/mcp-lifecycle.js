@@ -228,7 +228,16 @@ function sharedTreeSubmissionBoundaries(slug, ticket) {
     const commit = String(submission?.commit || "").trim();
     const liveSubmission = Boolean(commit) && !submission.integratedAt && candidate.status !== "done";
     const integratedSubmission = Boolean(commit) && Boolean(submission.integratedAt);
-    return liveSubmission || integratedSubmission ? [{ ref: candidate.ref, commit }] : [];
+    const boundaries = liveSubmission || integratedSubmission ? [{ ref: candidate.ref, commit }] : [];
+    const seen = new Set(boundaries.map((boundary) => boundary.commit.toLowerCase()));
+    const sanctioned = candidate.dispatch?.sanctionedCommits;
+    for (const recorded of Array.isArray(sanctioned) ? sanctioned : []) {
+      const sanctionedCommit = String(recorded || "").trim();
+      if (!sanctionedCommit || seen.has(sanctionedCommit.toLowerCase())) continue;
+      seen.add(sanctionedCommit.toLowerCase());
+      boundaries.push({ ref: candidate.ref, commit: sanctionedCommit });
+    }
+    return boundaries;
   });
 }
 function submissionRangeRemedy(ticket, range, gitRef) {
@@ -321,14 +330,25 @@ function collectGitSubmissionFacts(options) {
   const scope = ticketCommitScope(slug, ticket);
   const requirements = targetFailure ? [targetFailure] : [];
   const surfaces = { declared: scope, admitted: scope, changed: range?.ok ? range.changedPaths : [], pending: [] };
+  const excludedScopePaths = [];
   if (!range?.ok) {
     surfaces.diagnostic = { code: range?.reason || "integration_target_unavailable", message: range ? submissionRangeFailureMessage(ticket, range, gitRef) : targetFailure.message, retryable: true };
   } else {
     const pending = commitScope.scopedWorkPending(root, scope, { base: range.base });
     if (!pending.ok) {
       requirements.push({ code: pending.reason, message: `submit: could not inspect the declared scope in ${root}: ${pending.message || pending.reason}`, retryable: true });
-    } else {
+    } else if (ticket.dispatch?.sharedTree !== true) {
       surfaces.pending = pending.working;
+    } else {
+      const foreign = store.foreignCommitPaths(slug, ticket, root);
+      const foreignOwners = new Map(Object.entries(foreign.owners || {}).map(([file, owners]) => [commitScope.scopeKey(file), Array.isArray(owners) ? owners : []]));
+      const retained = [];
+      for (const file of pending.working) {
+        const owners = foreignOwners.get(commitScope.scopeKey(file));
+        if (owners) excludedScopePaths.push({ path: file, owners });
+        else retained.push(file);
+      }
+      surfaces.pending = retained;
     }
     const scopedRange = commitScope.validateCommitRangeScope(root, range.commits, scope);
     if (!scopedRange.ok) {
@@ -359,7 +379,8 @@ function collectGitSubmissionFacts(options) {
           retryable: false
         }
       } : { identity: null },
-      requirements
+      requirements,
+      excludedScopePaths
     }
   };
 }
