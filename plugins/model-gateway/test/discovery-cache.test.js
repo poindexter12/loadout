@@ -55,7 +55,7 @@ function runGatewayCommand(testContext, command, environment, isolatedOverrides)
 }
 
 function installProxyStub(home) {
-  const proxyBinary = path.join(home, '.claude', 'model-gateway', 'bin', process.platform === 'win32' ? 'claude-code-proxy.exe' : 'claude-code-proxy');
+  const proxyBinary = path.join(home, '.claude', 'model-gateway', 'bin', 'claude-code-proxy');
   fs.mkdirSync(path.dirname(proxyBinary), { recursive: true });
   try {
     fs.linkSync(process.execPath, proxyBinary);
@@ -120,7 +120,7 @@ test('writes Claude Code discovery cache schema from the shim model list', () =>
       { id: 'anthropic-custom', display_name: 'Anthropic Custom' },
     ],
   });
-  if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
 });
 
 test('does not rewrite an unchanged discovery cache', () => {
@@ -253,6 +253,11 @@ test('ensure writes the discovery cache before reporting missing ChatGPT auth', 
 
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stderr, /ChatGPT sign-in is required/);
+  // SQ-23's regression guard, kept from the simulated-Windows test SQ-36
+  // retired: the missing-auth precondition must be what surfaces, never the
+  // ownership gate's "could not confirm the owner" refusal firing ahead of it.
+  // See the note below this test for why that ordering was ever at risk.
+  assert.doesNotMatch(result.stderr, /could not confirm the owner/);
   await waitUntil(() => fs.existsSync(cache), 'ensure did not write the discovery cache');
   assert.match(result.stdout, /discovery cache: (?:wrote \d+ models?|unchanged)/);
 
@@ -260,112 +265,25 @@ test('ensure writes the discovery cache before reporting missing ChatGPT auth', 
   assert.equal(stopped.status, 0, stopped.stderr);
 });
 
-// SQ-23 gated startAll()'s lifecycle mutations on confirming who owns the
-// shim's public port. On a Windows CI runner that confirmation can itself
-// come back unconfirmable (process inspection times out or fails), and
-// unpatched `ensure` called startAll() unconditionally, so the ownership
-// refusal ("could not confirm the owner...") fired *before* ensure ever
-// reached the missing-ChatGPT-auth precondition check below it, masking the
-// real, unrelated failure. The fix (lib/commands.js `ensure`) skips
-// startAll() entirely when a direct, cheap health probe already shows the
-// shim running on the current version — nothing to start or restart, so
-// there is nothing for the ownership gate to arbitrate.
+// Why the doesNotMatch assertion above exists. SQ-23 gated startAll()'s
+// lifecycle mutations on confirming who owns the shim's public port. That
+// confirmation can itself come back unconfirmable (process inspection times
+// out or fails), and unpatched `ensure` called startAll() unconditionally, so
+// the ownership refusal ("could not confirm the owner...") fired *before*
+// ensure ever reached the missing-ChatGPT-auth precondition, masking the real,
+// unrelated failure. The fix (lib/commands.js `ensure`) skips startAll()
+// entirely when a direct, cheap health probe already shows the shim running on
+// the current version -- nothing to start or restart, so there is nothing for
+// the ownership gate to arbitrate.
 //
-// This process can't actually run on Windows, so it borrows the module-
-// cache-eviction + process.platform override technique from
-// test/rc-compat-mode.test.js's loadGatewayWithCurrentHome (fresh require
-// picks up a redefined process.platform) and test/windows-detached.test.js's
-// WIN-gated code paths: rather than reload in *this* process (which would
-// leak a still-"win32" require cache into every other test in the file),
-// it runs the override in a brand-new child process, whose require cache
-// starts empty, so lib/runtime.js's WIN constant computes true for every
-// module the child loads. On that simulated-Windows child, startAll()'s
-// default ownership resolution genuinely comes back unconfirmable too —
-// not because of a Windows-specific timeout, but because its netstat/
-// PowerShell probes are real commands that fail outright on this host —
-// which reproduces the same "unknown owner" shape the real Windows CI leg
-// hit, without needing an actual Windows machine.
-function windowsSimulationWrapperPath(testContext) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-win-sim-'));
-  testContext.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const wrapperPath = path.join(directory, 'run-on-simulated-windows.js');
-  // Mirrors bin/model-gateway.js's own dispatch: that file only self-invokes
-  // under `require.main === module`, which does not hold when required from
-  // here, so the dispatch is reproduced explicitly after the platform
-  // override, before lib/commands.js (and, transitively, lib/runtime.js and
-  // lib/process-supervision.js) is first required in this process.
-  fs.writeFileSync(wrapperPath, [
-    "'use strict';",
-    "Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });",
-    `const { commands, usage } = require(${JSON.stringify(CLI)});`,
-    'const cmd = process.argv[2];',
-    'Promise.resolve(commands[cmd]?.()).then(() => {',
-    '  if (commands[cmd]) return;',
-    '  console.log(usage);',
-    '  process.exit(cmd ? 1 : 0);',
-    '}).catch((error) => {',
-    "  console.error('model-gateway: ' + error.message);",
-    '  process.exit(1);',
-    '});',
-  ].join('\n'));
-  return wrapperPath;
-}
-
-function runGatewayCommandOnSimulatedWindows(testContext, command, environment, isolatedOverrides) {
-  const wrapperPath = windowsSimulationWrapperPath(testContext);
-  return new Promise((resolve) => {
-    const child = spawnGatewayProcess(testContext, process.execPath, [wrapperPath, command], {
-      cwd: environment.HOME,
-      env: environment,
-      isolatedOverrides,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.once('close', (status) => resolve({ status, stdout, stderr }));
-  });
-}
-
-test('simulated-Windows ensure surfaces missing ChatGPT auth instead of an unconfirmed-owner refusal', async (testContext) => {
-  const proxy = http.createServer((request, response) => {
-    if (request.url !== '/v1/models') return response.end();
-    response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify({ data: [{ id: 'gpt-6-astra' }] }));
-  });
-  const proxyPort = await listen(proxy);
-  testContext.after(() => new Promise((resolve) => proxy.close(resolve)));
-  const baseUrl = 'http://127.0.0.1:0';
-  const environment = discoveryEnvironment(testContext, baseUrl, proxyPort);
-  const cache = path.join(environment.CLAUDE_CONFIG_DIR, 'cache', 'gateway-models.json');
-  installProxyStub(environment.HOME);
-  // installProxyStub names the fixture for *this* process's real platform.
-  // The simulated-Windows child computes PROXY_BIN from its own WIN=true
-  // lib/runtime.js, which expects the .exe-suffixed name regardless of what
-  // this test process is actually running on.
-  const exeStub = path.join(environment.HOME, '.claude', 'model-gateway', 'bin', 'claude-code-proxy.exe');
-  if (!fs.existsSync(exeStub)) {
-    try { fs.linkSync(process.execPath, exeStub); } catch { fs.copyFileSync(process.execPath, exeStub); }
-  }
-  const shim = await startGateway(testContext, 'serve-shim', environment);
-
-  await waitUntil(() => fs.existsSync(cache), 'initial refresh did not write the discovery cache');
-  fs.rmSync(cache);
-
-  pinDiscoveredShim(environment, shim.port);
-
-  // The real shim above is already running and healthy on this process's
-  // actual platform. The `ensure` invocation below runs in a separate,
-  // simulated-Windows process against that same, already-healthy shim.
-  const result = await runGatewayCommandOnSimulatedWindows(testContext, 'ensure', environment);
-
-  assert.equal(result.status, 1, result.stderr);
-  assert.match(result.stderr, /ChatGPT sign-in is required/);
-  assert.doesNotMatch(result.stderr, /could not confirm the owner/);
-  await waitUntil(() => fs.existsSync(cache), 'simulated-Windows ensure did not write the discovery cache');
-  assert.match(result.stdout, /discovery cache: (?:wrote \d+ models?|unchanged)/);
-
-  const stopped = await runGatewayCommand(testContext, 'stop', environment);
-  assert.equal(stopped.status, 0, stopped.stderr);
-});
+// A Windows CI runner is where this was first seen, and SQ-36 retired the
+// simulated-Windows child that used to reproduce it in a second test here.
+// Nothing about the bug is Windows-specific -- the simulation's only purpose
+// was to make discovery probes fail, by running them as netstat/PowerShell
+// commands absent on this host, and any host whose process inspection
+// overruns the probe budget reaches the same "unknown owner" state. So the
+// guard moved onto the real-platform test above rather than being deleted
+// with the simulation. Note it is a one-way guard: it proves the refusal does
+// not pre-empt the auth error, and it is load-sensitive in the other
+// direction, because a host slow enough to make ownership unconfirmable will
+// fail this test on the status assertion first.

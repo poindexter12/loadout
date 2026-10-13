@@ -1010,7 +1010,7 @@ test('env wiring preserves Claude 1M aliases and removes the unsafe global thres
 function installFakeClaude(home) {
   const bin = path.join(home, 'bin');
   const fake = path.join(bin, 'fake-claude.js');
-  const command = path.join(bin, process.platform === 'win32' ? 'claude.cmd' : 'claude');
+  const command = path.join(bin, 'claude');
   fs.mkdirSync(bin, { recursive: true });
   fs.writeFileSync(fake, [
     "'use strict';",
@@ -1046,11 +1046,8 @@ function installFakeClaude(home) {
     "  printInit();",
     "});",
   ].join('\n'));
-  if (process.platform === 'win32') fs.writeFileSync(command, `@"${process.execPath}" "${fake}" %*\r\n`);
-  else {
-    fs.writeFileSync(command, `#!/bin/sh\nexec "${process.execPath}" "${fake}" "$@"\n`);
-    fs.chmodSync(command, 0o755);
-  }
+  fs.writeFileSync(command, `#!/bin/sh\nexec "${process.execPath}" "${fake}" "$@"\n`);
+  fs.chmodSync(command, 0o755);
   return { bin, command, logFile: path.join(home, 'probes.jsonl') };
 }
 

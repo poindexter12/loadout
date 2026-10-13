@@ -175,22 +175,6 @@ async function waitForReplacementPidRecord(filePath, retiredPid) {
   throw new Error(`replacement pid record was not written: ${filePath}`);
 }
 
-function descendantPids(parentPid) {
-  if (process.platform === 'win32') {
-    const result = spawnSync('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
-      `Get-CimInstance Win32_Process -Filter "ParentProcessId = ${parentPid}" | Select-Object ProcessId | ConvertTo-Json -Compress`,
-    ], { encoding: 'utf8', windowsHide: true });
-    try {
-      const entries = JSON.parse(result.stdout || '[]');
-      return (Array.isArray(entries) ? entries : [entries]).map((entry) => Number(entry.ProcessId)).filter(Boolean);
-    } catch { return []; }
-  }
-  const result = spawnSync('ps', ['-eo', 'pid=,ppid='], { encoding: 'utf8' });
-  return String(result.stdout).split(/\r?\n/).map((line) => line.trim().split(/\s+/).map(Number))
-    .filter(([pid, processParentPid]) => pid && processParentPid === parentPid).map(([pid]) => pid);
-}
-
 // Probe children are spawned detached, so on POSIX they lead their own process
 // group and only the parent pid links them to the supervisor.
 function childPidsOf(parentPid) {
@@ -261,10 +245,10 @@ async function waitForGatewayFixturePids(home) {
 }
 
 function installNodeProxy(home) {
-  const proxyBinary = path.join(home, '.claude', 'model-gateway', 'bin', process.platform === 'win32' ? 'claude-code-proxy.exe' : 'claude-code-proxy');
+  const proxyBinary = path.join(home, '.claude', 'model-gateway', 'bin', 'claude-code-proxy');
   fs.mkdirSync(path.dirname(proxyBinary), { recursive: true });
   fs.copyFileSync(process.execPath, proxyBinary);
-  if (process.platform !== 'win32') fs.chmodSync(proxyBinary, 0o755);
+  fs.chmodSync(proxyBinary, 0o755);
 }
 
 function runGatewayCli(cliPath, command, environment, { arguments: commandArguments = [], cwd } = {}) {
@@ -295,7 +279,7 @@ function installCachedGatewayCliVersions(home) {
 }
 
 function linkDirectory(targetDirectory, linkPath) {
-  fs.symlinkSync(targetDirectory, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
+  fs.symlinkSync(targetDirectory, linkPath, 'dir');
 }
 
 function pause(milliseconds) {
@@ -504,7 +488,7 @@ function spawnDetachedFixtureReaper(registryPath) {
 }
 
 function spawnFixtureReaper() {
-  if (fixtureReaper || process.platform === 'win32') return;
+  if (fixtureReaper) return;
   fixtureReaperRegistry = path.join(os.tmpdir(), `${FIXTURE_PREFIX}fixture-reaper-${process.pid}-${Date.now()}.json`);
   writeFixtureReaperRegistry();
   fixtureReaper = spawnDetachedFixtureReaper(fixtureReaperRegistry);
@@ -534,7 +518,6 @@ function trackFixturePid(pid) {
 // process's inherited stdout pipe -- is what kept a finished run from exiting.
 // Being a descendant of the harness is the property they all share.
 function survivingTestChildren() {
-  if (process.platform === 'win32') return [];
   const entries = new Map();
   const output = String(spawnSync('ps', ['-Ao', 'pid=,ppid=,command='], { encoding: 'utf8' }).stdout || '');
   for (const line of output.split(/\r?\n/)) {
@@ -591,12 +574,10 @@ function fixturePidsForHome(home, seeded = []) {
   const roots = new Set([home]);
   try { roots.add(fs.realpathSync(home)); } catch {}
   const pids = new Set([...seeded.filter(Boolean), ...recordedGatewayFixturePids(home)]);
-  if (process.platform !== 'win32') {
-    const table = String(spawnSync('ps', ['-Ao', 'pid=,command='], { encoding: 'utf8' }).stdout || '');
-    for (const line of table.split(/\r?\n/)) {
-      const match = line.trim().match(/^(\d+)\s+(.+)$/);
-      if (match && [...roots].some((root) => match[2].includes(root))) pids.add(Number(match[1]));
-    }
+  const table = String(spawnSync('ps', ['-Ao', 'pid=,command='], { encoding: 'utf8' }).stdout || '');
+  for (const line of table.split(/\r?\n/)) {
+    const match = line.trim().match(/^(\d+)\s+(.+)$/);
+    if (match && [...roots].some((root) => match[2].includes(root))) pids.add(Number(match[1]));
   }
   pids.delete(process.pid);
   return [...pids].filter(Boolean);
@@ -682,9 +663,7 @@ test.after(async () => {
 });
 
 function outerSocketPath(home) {
-  return process.platform === 'win32'
-    ? `\\\\.\\pipe\\model-gateway-outer-${process.pid}-${Date.now()}`
-    : path.join(home, 'outer-gateway.sock');
+  return path.join(home, 'outer-gateway.sock');
 }
 
 function socketIsListening(socketPath) {
@@ -789,7 +768,6 @@ test('cache ownership resolves physical install roots before accepting sibling v
   assert.equal(installBelongsToThisPlugin(olderSibling, currentSibling), true);
   assert.equal(installBelongsToThisPlugin(olderSibling.replace('loadout', 'LOADOUT'), currentSibling), true);
   assert.equal(installBelongsToThisPlugin(`${olderSibling}${path.sep}`, currentSibling), true);
-  if (process.platform === 'win32') assert.equal(installBelongsToThisPlugin(olderSibling.replaceAll('\\', '/'), currentSibling), true);
   assert.equal(installBelongsToThisPlugin(foreignLinkedSibling, currentSibling), false);
   assert.equal(installBelongsToThisPlugin(foreignMarketplace, currentSibling), false);
 });
@@ -878,12 +856,12 @@ test('sync gateway fixture cleanup removes helper-owned homes and preserves supp
 test('isolated ensure preserves a foreign serve-shim process and cleans its own supervisor', async (t) => {
   const home = trackFixtureHome(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-ensure-isolation-')));
   const foreignScript = path.join(home, 'foreign-install', 'model-gateway', 'bin', 'model-gateway.js');
-  const proxyBinary = path.join(home, '.claude', 'model-gateway', 'bin', process.platform === 'win32' ? 'claude-code-proxy.exe' : 'claude-code-proxy');
+  const proxyBinary = path.join(home, '.claude', 'model-gateway', 'bin', 'claude-code-proxy');
   fs.mkdirSync(path.dirname(foreignScript), { recursive: true });
   fs.mkdirSync(path.dirname(proxyBinary), { recursive: true });
   fs.writeFileSync(foreignScript, "process.stdout.write('ready\\n'); setInterval(() => {}, 1000);\n");
   fs.copyFileSync(process.execPath, proxyBinary);
-  if (process.platform !== 'win32') fs.chmodSync(proxyBinary, 0o755);
+  fs.chmodSync(proxyBinary, 0o755);
   const foreign = spawn(process.execPath, [foreignScript, 'serve-shim'], { stdio: ['ignore', 'pipe', 'ignore'] });
   t.after(async () => {
     await stopSpawnedProcess(foreign);
@@ -913,7 +891,7 @@ test('sibling ensure retires dead records without deleting replacement worker an
   // tmpdir home would never match the /private/var/... it logs.
   const home = trackFixtureHome(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-sibling-record-replacement-'))));
   const { olderCli, newerCli } = installCachedGatewayCliVersions(home);
-  const proxyBinary = path.join(home, '.claude', 'model-gateway', 'bin', process.platform === 'win32' ? 'claude-code-proxy.exe' : 'claude-code-proxy');
+  const proxyBinary = path.join(home, '.claude', 'model-gateway', 'bin', 'claude-code-proxy');
   installNodeProxy(home);
   fs.writeFileSync(path.join(home, 'serve'), "require('node:http').createServer((request, response) => request.url === '/v1/models' ? response.end(JSON.stringify({ data: [] })) : response.end('{}')).listen(process.env.PORT, '127.0.0.1'); setInterval(() => {}, 1000);\n");
   // CODEX_GATEWAY_PORT starts at '0' (the environment default) so the older shim
@@ -1049,7 +1027,7 @@ function parentPidOf(pid) {
   return Number(spawnSync('ps', ['-o', 'ppid=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim()) || null;
 }
 
-test('a supervisor launched from the SessionStart hook survives the hook timeout killing its process tree', { skip: process.platform === 'win32' }, async (t) => {
+test('a supervisor launched from the SessionStart hook survives the hook timeout killing its process tree', async (t) => {
   const home = trackFixtureHome(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-hook-tree-'))));
   const configDir = path.join(home, '.claude');
   const state = path.join(configDir, 'model-gateway');
@@ -1704,7 +1682,7 @@ test('supervisor shutdown reaps a timed probe child before fixture cleanup', asy
   `;
   const supervisor = spawn(process.execPath, ['-e', supervisorScript], {
     cwd: home,
-    detached: process.platform !== 'win32',
+    detached: true,
     stdio: ['ignore', 'pipe', 'ignore', 'ipc'],
   });
   t.after(async () => {
@@ -1714,12 +1692,9 @@ test('supervisor shutdown reaps a timed probe child before fixture cleanup', asy
   await waitForReady(supervisor);
   await pause(50);
 
-  const probePids = process.platform === 'win32'
-    ? descendantPids(supervisor.pid)
-    : childPidsOf(supervisor.pid);
+  const probePids = childPidsOf(supervisor.pid);
   assert.ok(probePids.length > 0, `no timed probe child found for ${supervisionPath}`);
-  if (process.platform === 'win32') supervisor.send('stop');
-  else supervisor.kill('SIGTERM');
+  supervisor.kill('SIGTERM');
   await waitForExit(supervisor);
   await waitForProcessesToExit(probePids);
   assert.doesNotThrow(() => fs.rmSync(home, { recursive: true, force: true }));
@@ -1732,7 +1707,7 @@ test('supervisor shutdown reaps a timed probe child before fixture cleanup', asy
 function spawnIdleProcess(executable, cwd) {
   return spawn(executable, ['-e', 'setInterval(() => {}, 1000);'], {
     cwd,
-    detached: process.platform !== 'win32',
+    detached: true,
     stdio: 'ignore',
   });
 }
@@ -1746,7 +1721,7 @@ async function waitUntil(condition, message, timeout = 20000) {
   assert.fail(message);
 }
 
-test('fixture teardown reaps every process spawned into a fixture home', { skip: process.platform === 'win32' }, async (t) => {
+test('fixture teardown reaps every process spawned into a fixture home', async (t) => {
   const home = trackFixtureHome(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-teardown-reaping-'))));
   installNodeProxy(home);
   const proxyBinary = path.join(home, '.claude', 'model-gateway', 'bin', 'claude-code-proxy');
@@ -1783,7 +1758,7 @@ test('fixture teardown reaps every process spawned into a fixture home', { skip:
   assert.equal(fs.existsSync(home), false, 'teardown left the fixture home behind');
 });
 
-test('the detached reaper reaps fixture processes when the harness dies before teardown', { skip: process.platform === 'win32' }, async (t) => {
+test('the detached reaper reaps fixture processes when the harness dies before teardown', async (t) => {
   const home = trackFixtureHome(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-abort-reaping-'))));
   installNodeProxy(home);
   const proxyBinary = path.join(home, '.claude', 'model-gateway', 'bin', 'claude-code-proxy');

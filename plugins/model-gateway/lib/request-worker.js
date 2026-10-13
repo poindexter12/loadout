@@ -22,7 +22,7 @@ const {
   ANTHROPIC_UPSTREAM, ANTIGRAVITY_ENDPOINT, AUTH_HEADERS, CODEX_FAMILY_RE, CODEX_UPSTREAM_BLOCK_PATH, COMPAT_HOST,
   COMPAT_PORT, DISPATCH_ROUTE_CACHE_PATH, GEMINI_PREFIX, GROK_ENDPOINT, GROK_PREFIX, LIST_DISPATCH_MODEL,
   LOGS, PLUGIN_VERSION, PREFIX, PROXY_BIN, PROXY_PORT, PUBLIC_SHIM_PORT, REQUEST_ROUTE_LOG,
-  REQUEST_ROUTE_LOG_PATH, ROUTE_TELEMETRY_ENABLED, ROUTE_TELEMETRY_TIMEOUT_MS, SHIM_PORT, SOCKET_PATH, WIN,
+  REQUEST_ROUTE_LOG_PATH, ROUTE_TELEMETRY_ENABLED, ROUTE_TELEMETRY_TIMEOUT_MS, SHIM_PORT, SOCKET_PATH,
   MODEL_WINDOW_POLICY, STATE, syncGatewayDiscoveryCache, TRACE_HEADERS,
   codexContextWindow, codexContextWindowModelId, mkdirs,
   resolveGatewayModelPolicy, resolveNewestInstalledCliPath,
@@ -955,7 +955,6 @@ function probeUnixSocketLive(socketPath, { timeoutMs = 300 } = {}) {
 // inconclusive, the conservative choice is to leave the file alone and let
 // listen() fail and report why.
 async function reclaimStaleUnixSocket(socketPath) {
-  if (WIN) return 'skipped-windows'; // named pipes leave no filesystem entry to leak
   let stat;
   try {
     stat = fs.statSync(socketPath);

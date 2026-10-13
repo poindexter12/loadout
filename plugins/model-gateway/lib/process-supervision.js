@@ -6,7 +6,7 @@ const http = require('node:http');
 const https = require('node:https');
 const net = require('node:net');
 const path = require('node:path');
-const { CLI_PATH, LOGS, PROXY_BIN, PROXY_PORT, PUBLIC_SHIM_PORT, resolveNewestInstalledCliPath, SHIM_PORT, STATE, WIN } = require('./runtime.js');
+const { CLI_PATH, LOGS, PROXY_BIN, PROXY_PORT, PUBLIC_SHIM_PORT, resolveNewestInstalledCliPath, SHIM_PORT, STATE } = require('./runtime.js');
 const { recordGatewayLifecycle } = require('./lifecycle-diagnostics.js');
 
 // Every rejection carries the three facts a caller needs to tell one failure from
@@ -212,12 +212,10 @@ function recordedGatewayPids(options) {
   return [...new Set(['guardian', 'shim', 'proxy'].map((name) => recordedGatewayPid(name, options)).filter(Boolean))];
 }
 // `signal` escalates a stop this process already asked for politely (SIGKILL after a
-// SIGTERM that ran over its budget). Windows has no softer form than the taskkill /F
-// the default branch already sends, so it ignores the signal.
+// SIGTERM that ran over its budget).
 function killPid(pid, options = {}) {
   if (!pid || !processIsOwnedByThisInstall(pid, options)) return false;
-  if (WIN) spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-  else { try { process.kill(pid, options.signal || 'SIGTERM'); } catch {} }
+  try { process.kill(pid, options.signal || 'SIGTERM'); } catch {}
   return true;
 }
 function stopProcess(name, options) {
@@ -233,7 +231,7 @@ function recordStopRequest(operation, name) {
     component: 'controller',
     pid: process.pid,
     child: { component, pid },
-    signal: WIN ? 'TASKKILL' : 'SIGTERM',
+    signal: 'SIGTERM',
   });
 }
 function commandResultSync(command, commandArgs) {
@@ -274,14 +272,10 @@ function processOwningPortInProc(port) {
     for (const entry of fs.readdirSync('/proc')) {
       if (!/^\d+$/.test(entry)) continue;
       try {
-        // /proc is always POSIX-shaped, even for a process running on a
-        // win32 build of Node under a Linux-behavior simulation (see the
-        // WIN-override technique in test/gateway-ownership.test.js). This
-        // function only ever runs for real when process.platform === 'linux'
-        // (checked in the async twin below and by listeningSocketInodesInProc
-        // above), where path.join already produces '/'; path.posix.join keeps
-        // that true under the simulation too, instead of emitting backslashes
-        // that never match a '/proc/.../fd/N' layout.
+        // /proc is always POSIX-shaped. This function only ever runs when
+        // process.platform === 'linux' (checked in the async twin below and by
+        // listeningSocketInodesInProc above), and path.posix.join states that
+        // layout outright rather than depending on the host's path flavor.
         for (const descriptor of fs.readdirSync(path.posix.join('/proc', entry, 'fd'))) {
           const target = fs.readlinkSync(path.posix.join('/proc', entry, 'fd', descriptor));
           if (inodes.has(target.match(/^socket:\[(\d+)\]$/)?.[1])) return Number(entry);
@@ -298,63 +292,27 @@ function processOwningPortSync(port) {
     const pid = netstat.status === 0 ? listenerPidFromDarwinNetstat(netstat.stdout, port) : null;
     if (pid) return pid;
   }
-  const result = WIN
-    ? commandResultSync('netstat', ['-ano', '-p', 'tcp'])
-    : commandResultSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t']);
-  if (!WIN) {
-    const ownerPid = result.status === 0 ? Number(String(result.stdout).trim().split(/\s+/)[0]) || null : null;
-    return ownerPid || processOwningPortInProc(port);
-  }
-  if (result.status !== 0) return null;
-  const portPattern = new RegExp(`^\\s*TCP\\s+[^\\s]*:${port}\\s+[^\\s]+\\s+LISTENING\\s+(\\d+)\\s*$`, 'im');
-  return Number(String(result.stdout).match(portPattern)?.[1]) || null;
+  const result = commandResultSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t']);
+  const ownerPid = result.status === 0 ? Number(String(result.stdout).trim().split(/\s+/)[0]) || null : null;
+  return ownerPid || processOwningPortInProc(port);
 }
 function processInfoFromOutput(output) {
-  if (WIN) {
-    try {
-      const entry = JSON.parse(String(output) || 'null');
-      if (!entry?.ProcessId) return null;
-      return {
-        command: entry.CommandLine || '',
-        parentPid: Number(entry.ParentProcessId) || null,
-        pid: Number(entry.ProcessId),
-        startedAt: entry.CreationDate || null,
-      };
-    } catch { return null; }
-  }
   const match = String(output).match(/^\s*(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d+:\d+:\d+\s+\d{4})\s+(.*)$/m);
   return match ? { command: match[4], parentPid: Number(match[2]) || null, pid: Number(match[1]), startedAt: match[3] } : null;
 }
 function processInfoSync(pid) {
   if (!pid) return null;
-  const result = WIN
-    ? commandResultSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', `Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" | Select-Object ProcessId,ParentProcessId,CommandLine,CreationDate | ConvertTo-Json -Compress`])
-    : commandResultSync('ps', ['-p', String(pid), '-o', 'pid=,ppid=,lstart=,args=']);
+  const result = commandResultSync('ps', ['-p', String(pid), '-o', 'pid=,ppid=,lstart=,args=']);
   return result.status === 0 ? processInfoFromOutput(result.stdout) : null;
 }
 function processTableFromOutput(output) {
-  if (WIN) {
-    try {
-      const entries = JSON.parse(String(output) || '[]');
-      return new Map((Array.isArray(entries) ? entries : [entries])
-        .filter((entry) => entry?.ProcessId)
-        .map((entry) => [Number(entry.ProcessId), {
-          command: entry.CommandLine || '',
-          parentPid: Number(entry.ParentProcessId) || null,
-          pid: Number(entry.ProcessId),
-          startedAt: entry.CreationDate || null,
-        }]));
-    } catch { return null; }
-  }
   return new Map(String(output).trim().split(/\r?\n/).map((line) => {
     const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d+:\d+:\d+\s+\d{4})\s+(.*)$/);
     return match ? [Number(match[1]), { command: match[4], parentPid: Number(match[2]) || null, pid: Number(match[1]), startedAt: match[3] }] : null;
   }).filter(Boolean));
 }
 function processTableSync() {
-  const result = WIN
-    ? commandResultSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', 'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine,CreationDate | ConvertTo-Json -Compress'])
-    : commandResultSync('ps', ['-eo', 'pid=,ppid=,lstart=,args=']);
+  const result = commandResultSync('ps', ['-eo', 'pid=,ppid=,lstart=,args=']);
   return result.status === 0 ? processTableFromOutput(result.stdout) : null;
 }
 function probeTimeoutMs() {
@@ -373,19 +331,6 @@ function waitForProbeChildClose(child) {
     if (child.exitCode != null || child.signalCode != null) finish();
   });
 }
-function waitForTaskkill(pid) {
-  return new Promise((resolve) => {
-    let taskkill;
-    try {
-      taskkill = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-    } catch {
-      resolve();
-      return;
-    }
-    taskkill.once('close', resolve);
-    taskkill.once('error', resolve);
-  });
-}
 function probeChildClosedWithin(closed, timeout = 250) {
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve(false), timeout);
@@ -398,20 +343,16 @@ function probeChildClosedWithin(closed, timeout = 250) {
 }
 async function stopProbeChild(child, closed) {
   if (child?.pid) {
-    if (WIN) await waitForTaskkill(child.pid);
-    else {
-      try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch {} }
-      if (!(await probeChildClosedWithin(closed))) {
-        try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch {} }
-      }
+    try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch {} }
+    if (!(await probeChildClosedWithin(closed))) {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch {} }
     }
   }
   await closed;
 }
 function stopProbeChildSync(child) {
   if (!child?.pid) return;
-  if (WIN) spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-  else { try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch {} } }
+  try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch {} }
 }
 function createProbeChildRegistry() {
   const children = new Map();
@@ -460,8 +401,9 @@ function commandResultAsync(command, commandArgs, { timeout = probeTimeoutMs(), 
     let child;
     let closed;
     try {
-      // Windows detached discovery children can lose their piped probe output.
-      child = spawnProcess(command, commandArgs, { detached: !WIN, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      // Detached, so a timed-out probe can be signalled as a process group
+      // (stopProbeChild) and never leave a grandchild holding the pipe open.
+      child = spawnProcess(command, commandArgs, { detached: true, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
       closed = probeChildren ? probeChildren.track(child) : waitForProbeChildClose(child);
     } catch (error) {
       finish({ status: null, stdout, stderr: String(error), timedOut: false });
@@ -504,11 +446,8 @@ async function processOwningPortInProcAsync(port, { timeout = probeTimeoutMs(), 
       if (now() >= deadline) return undefined;
       if (!/^\d+$/.test(entry)) continue;
       try {
-        // See the sync twin above: /proc is always POSIX-shaped, so use
-        // path.posix.join even when Node's own path module is win32-flavored
-        // (real Linux hosts, and the WIN-override test simulation, both stay
-        // correct; only a bare path.join broke under that simulation on a
-        // real Windows host, where it emits backslashes /proc never has).
+        // See the sync twin above: /proc is always POSIX-shaped, so the layout
+        // is stated with path.posix.join rather than the host's path flavor.
         for (const descriptor of await fsImpl.readdir(path.posix.join('/proc', entry, 'fd'))) {
           if (now() >= deadline) return undefined;
           const target = await fsImpl.readlink(path.posix.join('/proc', entry, 'fd', descriptor));
@@ -528,30 +467,21 @@ async function processOwningPortAsync(port, { commandResult = commandResultAsync
     if (pid) return pid;
     if (now() >= deadline) return undefined;
   }
-  const result = await commandResult(WIN ? 'netstat' : 'lsof', WIN ? ['-ano', '-p', 'tcp'] : ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { probeChildren, timeout: Math.max(1, deadline - now()) });
+  const result = await commandResult('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { probeChildren, timeout: Math.max(1, deadline - now()) });
   if (result.timedOut) return undefined;
-  if (!WIN) {
-    const pid = result.status === 0 ? Number(String(result.stdout).trim().split(/\s+/)[0]) || null : null;
-    if (pid) return pid;
-    if (now() >= deadline) return undefined;
-    return procOwner(port, { timeout: deadline - now(), now });
-  }
-  if (result.status !== 0) return null;
-  const portPattern = new RegExp(`^\\s*TCP\\s+[^\\s]*:${port}\\s+[^\\s]+\\s+LISTENING\\s+(\\d+)\\s*$`, 'im');
-  return Number(String(result.stdout).match(portPattern)?.[1]) || null;
+  const pid = result.status === 0 ? Number(String(result.stdout).trim().split(/\s+/)[0]) || null : null;
+  if (pid) return pid;
+  if (now() >= deadline) return undefined;
+  return procOwner(port, { timeout: deadline - now(), now });
 }
 async function processInfoAsync(pid, { commandResult = commandResultAsync, probeChildren = null, timeout } = {}) {
   if (!pid) return null;
-  const result = await commandResult(WIN ? 'powershell.exe' : 'ps', WIN
-    ? ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', `Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" | Select-Object ProcessId,ParentProcessId,CommandLine,CreationDate | ConvertTo-Json -Compress`]
-    : ['-p', String(pid), '-o', 'pid=,ppid=,lstart=,args='], { probeChildren, timeout });
+  const result = await commandResult('ps', ['-p', String(pid), '-o', 'pid=,ppid=,lstart=,args='], { probeChildren, timeout });
   if (result.timedOut) return undefined;
   return result.status === 0 ? processInfoFromOutput(result.stdout) : null;
 }
 async function processTableAsync({ commandResult = commandResultAsync, probeChildren = null } = {}) {
-  const result = await commandResult(WIN ? 'powershell.exe' : 'ps', WIN
-    ? ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', 'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine,CreationDate | ConvertTo-Json -Compress']
-    : ['-eo', 'pid=,ppid=,lstart=,args='], { probeChildren });
+  const result = await commandResult('ps', ['-eo', 'pid=,ppid=,lstart=,args='], { probeChildren });
   if (result.timedOut) return undefined;
   return result.status === 0 ? processTableFromOutput(result.stdout) : null;
 }
@@ -707,15 +637,7 @@ async function processIsOwnedByThisInstallAsync(pid, { record = null, name = nul
 async function killPidAsync(pid, { trusted = false, ...ownershipOptions } = {}) {
   const owned = trusted ? true : await processIsOwnedByThisInstallAsync(pid, ownershipOptions);
   if (owned !== true) return owned;
-  if (WIN) {
-    if (trusted) await waitForTaskkill(pid);
-    else {
-      const child = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-      child.once('error', () => {});
-    }
-  } else {
-    try { process.kill(pid, 'SIGTERM'); } catch {}
-  }
+  try { process.kill(pid, 'SIGTERM'); } catch {}
   return true;
 }
 function reapGatewayOrphans(supervisorPid = null) {
@@ -788,7 +710,7 @@ async function supervisorStopPending(targetPid, budgetMs, { awaitProcessExit, aw
 }
 function supervisorStopPendingReason(pending, { pid, waitedMs, escalated, port = PUBLIC_SHIM_PORT }) {
   const who = pid ? ` (PID ${pid})` : '';
-  const sent = WIN ? 'TASKKILL /F' : (escalated ? 'SIGTERM and then SIGKILL' : 'SIGTERM');
+  const sent = escalated ? 'SIGTERM and then SIGKILL' : 'SIGTERM';
   const state = pending === 'running' ? 'has not exited yet' : `exited, but :${port} is still bound`;
   return `the shim supervisor on :${port}${who} ${state} ${Math.round(waitedMs / 1000)}s after ${sent}; that stop is still in flight rather than failed, and nothing was started in its place. Nothing needs stopping by hand: run ensure again, which starts a successor as soon as the port is free`;
 }
@@ -818,7 +740,7 @@ async function stopRunningSupervisor({
       component: 'controller',
       pid: process.pid,
       child: { component: 'supervisor', pid: targetPid },
-      signal: WIN ? 'TASKKILL' : 'SIGTERM',
+      signal: 'SIGTERM',
     });
   }
   if (pid) killPid(pid);
@@ -833,7 +755,7 @@ async function stopRunningSupervisor({
       component: 'controller',
       pid: process.pid,
       child: { component: 'supervisor', pid: targetPid },
-      signal: WIN ? 'TASKKILL' : 'SIGKILL',
+      signal: 'SIGKILL',
       pending,
       waitedMs: Date.now() - startedAt,
       sent: escalated,
@@ -926,14 +848,6 @@ async function restartWorkerWithDrain({ quiet = false, timeout = drainTimeoutMs(
   } catch (error) { return { ok: false, reason: error.message }; }
 }
 function spawnDetached(name, command, cmdArgs, env) {
-  if (WIN) {
-    const { spawnWindowsDetached } = require('./windows-detached.js');
-    const pid = spawnWindowsDetached(command, cmdArgs, {
-      env: { ...process.env, ...env }, logPath: path.join(LOGS, name + '.log'), state: STATE,
-    });
-    writePidRecord(name, pid);
-    return pid;
-  }
   const out = fs.openSync(path.join(LOGS, name + '.log'), 'a');
   const child = spawn(command, cmdArgs, { detached: true, stdio: ['ignore', out, out], env: { ...process.env, ...env }, windowsHide: true });
   writePidRecord(name, child.pid);
@@ -1161,7 +1075,7 @@ function createProxyRecovery({
           component: 'supervisor',
           pid: process.pid,
           child: { component: 'proxy', pid },
-          signal: WIN ? 'TASKKILL' : 'SIGTERM',
+          signal: 'SIGTERM',
         });
         await stop(pid);
         if (!(await waitForRelease(proxyPort, { listening }))) {

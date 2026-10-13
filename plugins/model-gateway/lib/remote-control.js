@@ -2,19 +2,15 @@
 
 const dns = require('node:dns');
 const fs = require('node:fs');
-const path = require('node:path');
-const { COMPAT_BASE_URL, COMPAT_HOST, COMPAT_PORT, HOSTS_BLOCK_END, HOSTS_BLOCK_LINE, HOSTS_BLOCK_START, WIN } = require('./runtime.js');
+const { COMPAT_BASE_URL, COMPAT_HOST, COMPAT_PORT, HOSTS_BLOCK_END, HOSTS_BLOCK_LINE, HOSTS_BLOCK_START } = require('./runtime.js');
 
 const LOOPBACK_IPS = new Set(['127.0.0.1', '::1']);
 
 function hostsFilePath() {
-  if (process.env.CODEX_GATEWAY_HOSTS_FILE) return process.env.CODEX_GATEWAY_HOSTS_FILE;
-  return WIN
-    ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts')
-    : '/etc/hosts';
+  return process.env.CODEX_GATEWAY_HOSTS_FILE || '/etc/hosts';
 }
 
-// Cross-platform hosts syntax is identical on Windows/macOS/Linux: one entry
+// Hosts syntax is identical on macOS and Linux: one entry
 // per line, "<ip> <hostname> [alias...]", '#' starts a trailing comment,
 // fields are whitespace-separated. Only an EXACT loopback mapping for
 // api.anthropic.com counts — anything mapping to a non-loopback address is
@@ -110,7 +106,7 @@ function hostsWriteStatus(file) {
   try {
     fs.accessSync(file, fs.constants.W_OK);
     return 'available';
-  } catch { return 'missing (run from an elevated terminal)'; }
+  } catch { return 'missing (needs sudo)'; }
 }
 
 async function lookupCompatHost() {
@@ -119,9 +115,6 @@ async function lookupCompatHost() {
 }
 
 function elevatedHostsInstructions(action) {
-  if (WIN) {
-    return `Open Notepad as Administrator, then ${action} the plugin-marked block in ${hostsFilePath()}.`;
-  }
   return `Use sudo to ${action} the plugin-marked block in ${hostsFilePath()}.`;
 }
 

@@ -311,10 +311,6 @@ test('supervisor keeps its listener available while a hard-killed worker restart
 });
 
 test('supervisor records an orderly signal before it exits', async (t) => {
-  if (process.platform === 'win32') {
-    t.skip('Windows process signals terminate child processes before JavaScript can record a final supervisor event');
-    return;
-  }
   const environment = gatewayTestEnvironment(t);
   const home = environment.HOME;
   const proxy = http.createServer((req, res) => {

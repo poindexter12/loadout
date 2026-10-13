@@ -18,7 +18,6 @@ const { createWakeDetector, dropPooledSockets, fetchUrl } = require('../lib/proc
 const { createAuthStatusCache, getCodexReadiness, isAuthedAsync } = require('../lib/request-worker.js');
 
 const CLI = path.join(__dirname, '..', 'bin', 'model-gateway.js');
-const POSIX = process.platform !== 'win32';
 
 function listen(server) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
@@ -219,7 +218,7 @@ test('getCodexReadiness awaits an asynchronous auth status', async () => {
   assert.equal(signedOut.checks.codexAuth, false);
 });
 
-test('a slow auth status check does not stall the worker event loop', { skip: !POSIX && 'needs a POSIX fake proxy binary' }, async (t) => {
+test('a slow auth status check does not stall the worker event loop', async (t) => {
   const environment = gatewayTestEnvironment(t);
   const home = environment.HOME;
   const binDir = path.join(home, '.claude', 'model-gateway', 'bin');
@@ -265,7 +264,7 @@ test('a slow auth status check does not stall the worker event loop', { skip: !P
   assert.ok(second.ms < 1000, `a /healthz after the first answer used the cached auth status (${second.ms}ms)`);
 });
 
-test('supervisor answers /healthz with 503 when its worker is stopped, and recovers on resume', { skip: !POSIX && 'uses SIGSTOP/SIGCONT', timeout: 30000 }, async (t) => {
+test('supervisor answers /healthz with 503 when its worker is stopped, and recovers on resume', { timeout: 30000 }, async (t) => {
   const environment = gatewayTestEnvironment(t);
   const home = environment.HOME;
   const proxy = http.createServer((req, res) => {

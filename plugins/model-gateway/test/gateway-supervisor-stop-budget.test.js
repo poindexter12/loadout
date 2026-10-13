@@ -52,7 +52,7 @@ function isolatedSupervision({ processes = '', kill = null } = {}) {
       'node:fs': { ...fs, writeFileSync: forbidden, rmSync: forbidden, openSync: forbidden, readFileSync: () => { throw new Error('no pid files in this fixture'); } },
       'node:http': { get: forbidden, request: forbidden },
       './lifecycle-diagnostics.js': { recordGatewayLifecycle: (event, detail) => lifecycle.push({ event, detail }) },
-      './runtime.js': { ...localRequire('./runtime.js'), WIN: false },
+      './runtime.js': { ...localRequire('./runtime.js') },
     })[id] || localRequire(id),
   };
   vm.runInNewContext(source, context, { filename: sourcePath });
