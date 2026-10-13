@@ -1,6 +1,7 @@
 'use strict';
 
 const { canonicalPreparedDispatchExecutor } = require('../prepared-dispatch.js');
+const { forcedClaimReleaseGuidance } = require('../refusal-guidance.js');
 const { classifyVerificationKind, verificationRequirement } = require('../kernel/verification.js');
 const { resolveSuite } = require('../suite-resolver.js');
 const { FILESYSTEM_SNAPSHOT_SOURCE, withPrecomputedFilesystemSnapshot } = require('../source-revision-capability.js');
@@ -754,7 +755,7 @@ function supersedeUnboundAttempt(slug?: any, idOrRef?: any, opts?: any) {
         ok: false,
         reason: 'unclaimed_launch_not_supersedable',
         ticket,
-        message: `${ticket?.ref || idOrRef} cannot be superseded on recovery evidence because its dispatch is ${evidenceSupersessionBlocker(ticket, state, taskId)}. Evidence retires an attempt whose runtime is gone: one that minted a token and never reached a runtime, one bound and unclaimed past the claim-idle backstop, or one whose own bound runtime is the failed task in a host task-failure notification, passed as recoveryTaskId. Anything past that waits for its own terminal record.`,
+        message: `${ticket?.ref || idOrRef} cannot be superseded on recovery evidence because its dispatch is ${evidenceSupersessionBlocker(ticket, state, taskId)}. Evidence retires an attempt whose runtime is gone: one that minted a token and never reached a runtime, one bound and unclaimed past the claim-idle backstop, or one whose own bound runtime is the failed task in a host task-failure notification, passed as recoveryTaskId.${ticket?.claim?.by && hostTaskFailureRuntime(state, taskId) ? ` ${forcedClaimReleaseGuidance(String(ticket?.ref || idOrRef), ticket.claim.by)}` : ' Anything past that waits for its own terminal record.'}`,
       };
     }
     // Precedence is load-bearing and matches the pre-SQ-302 order. An incomplete WorktreeCreate checkout

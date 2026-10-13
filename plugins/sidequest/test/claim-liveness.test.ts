@@ -1152,7 +1152,7 @@ test('SQ-302: a host task-failure id for this attempt\'s own bound runtime retir
   }).ok, true);
   assert.throws(
     () => store.prepareDispatch(slug, claimed.ref, { sharedTree: true, recoveryEvidence: evidence, recoveryTaskId: 'claimed-task-id' }),
-    /cannot be superseded on recovery evidence because its dispatch is claimed by host-task-failure-executor/,
+    /cannot be superseded on recovery evidence because its dispatch is claimed by host-task-failure-executor[\s\S]*Do NOT release under "host-task-failure-executor"'s identity to get around this/,
   );
 });
 
