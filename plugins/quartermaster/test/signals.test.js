@@ -7,6 +7,7 @@ const path = require('node:path');
 const { test } = require('node:test');
 
 const { createSignalCollector, normalizeCommand, tallyFromSignals } = require('../lib/signals.js');
+const { frictionOf } = require('../lib/state.js');
 const { streamTranscript } = require('../lib/stream.js');
 
 function writeTranscript(records) {
@@ -171,6 +172,89 @@ test('only permission-rule denials are tallied against the fingerprint of a perm
   const tally = tallyFromSignals(signals);
   assert.equal(tally.permissionDenialsByFingerprint['permission:Bash:npm test'], 1);
   assert.equal(tally.permissionDenialsByFingerprint['permission:ToolSearch'], undefined);
+});
+
+// Verbatim refusal text recorded by Claude Code for an Agent dispatch in a project with no
+// Sidequest board, taken from a real transcript: the whole defect was this advancing the resupply
+// threshold in a project the user never wanted a board in.
+const UNREGISTERED_BOARD_REFUSAL = 'PreToolUse:Agent hook error: sidequest: this project is not registered on a Sidequest board, so there is no executor route. Continue bounded inline work with direct tools; do not create a fake Sidequest or raw Agent lifecycle fallback.';
+
+test('an unregistered-project gate refusal does not advance the friction count', async () => {
+  const dispatches = [0, 1, 2, 3].map(() => assistantToolUse('Agent', { description: 'do the work' }));
+  const records = [];
+  for (const use of dispatches) {
+    records.push(use, {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: use.message.content[0].id, content: UNREGISTERED_BOARD_REFUSAL, is_error: true }],
+      },
+      toolUseResult: `Error: ${UNREGISTERED_BOARD_REFUSAL}`,
+      toolDenialKind: 'permission-rule',
+      timestamp: '2026-08-01T10:02:00Z',
+    });
+  }
+  const signals = await collect(records);
+
+  assert.equal(signals.friction.denials.total, 0, 'a gate that does not apply to the project is not a denial');
+  assert.deepEqual(signals.friction.denials.byKind, {});
+  assert.deepEqual(signals.friction.denials.byTool, {});
+  assert.deepEqual(signals.friction.denials.targets, []);
+  assert.equal(signals.friction.toolErrors.total, 0, 'nor is it a tool error concentrated in Agent');
+  assert.equal(signals.friction.denials.notApplicable.total, 4, 'the evidence is still reported');
+  assert.deepEqual(signals.friction.denials.notApplicable.byGate, { 'sidequest:unregistered-project': 4 });
+
+  const [session] = signals.sessions;
+  assert.equal(session.denials, 0);
+  assert.deepEqual(session.denialsByFingerprint, {}, 'permission:Agent must not collect a fingerprint no rule can fix');
+  assert.deepEqual(session.permissionDenialsByFingerprint, {});
+  assert.equal(session.notApplicableRefusals, 4);
+
+  const tally = tallyFromSignals(signals);
+  assert.equal(tally.denials, 0);
+  assert.equal(tally.notApplicableRefusals, 4);
+  assert.equal(frictionOf(tally), 0, 'four of these must not reach the six-event resupply threshold');
+});
+
+test('a real denial still counts in a session that also hit the unregistered-project gate', async () => {
+  const gated = assistantToolUse('Agent', { description: 'dispatch a ticket' });
+  const blocked = assistantToolUse('Bash', { command: 'git push origin main' });
+  const quoting = assistantToolUse('Bash', { command: 'npm test' });
+  const signals = await collect([
+    gated,
+    {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: gated.message.content[0].id, content: UNREGISTERED_BOARD_REFUSAL, is_error: true }] },
+      toolUseResult: `Error: ${UNREGISTERED_BOARD_REFUSAL}`,
+      toolDenialKind: 'permission-rule',
+      timestamp: '2026-08-01T10:02:00Z',
+    },
+    blocked,
+    {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: blocked.message.content[0].id, content: 'denied' }] },
+      toolUseResult: 'denied',
+      toolDenialKind: 'permission-rule',
+      timestamp: '2026-08-01T10:03:00Z',
+    },
+    // A failing test run whose output quotes the refusal is not a refusal: nothing denied the call,
+    // so it stays an ordinary tool error.
+    quoting,
+    {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: quoting.message.content[0].id, content: `not ok 1 - expected ${UNREGISTERED_BOARD_REFUSAL}`, is_error: true }] },
+      toolUseResult: 'failing suite',
+      timestamp: '2026-08-01T10:04:00Z',
+    },
+  ]);
+
+  assert.equal(signals.friction.denials.total, 1);
+  assert.deepEqual(signals.friction.denials.byTool, { Bash: 1 });
+  assert.deepEqual(signals.sessions[0].permissionDenialsByFingerprint, { 'permission:Bash:git push': 1 });
+  assert.equal(signals.friction.denials.notApplicable.total, 1);
+  assert.equal(signals.friction.toolErrors.total, 1, 'the quoting test failure is still a tool error');
+  assert.deepEqual(signals.friction.toolErrors.byTool.map((entry) => entry.name), ['Bash']);
+  assert.equal(frictionOf(tallyFromSignals(signals)), 1);
 });
 
 test('captures session purpose from title, opening ask, and area touched', async () => {

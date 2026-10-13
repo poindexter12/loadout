@@ -225,6 +225,12 @@ cap out at restoring the speed the user already expected. Note the difference be
 `permission-rule` denials (a rule is too strict, so allowlist the pattern) and `user-rejected`
 denials (the user does not want the action at all, so it is a rule about not doing it).
 
+`denials.notApplicable` is not friction and never advanced the session counts or the resupply
+threshold: it is a gate refusing a call because it does not apply to this project, such as
+Sidequest declining a dispatch in a project with no board. The only change it could ever justify is
+adopting the machinery the user left out here, so do not propose one from these counts alone. Raise
+it only if the user's own goal for this project needs that machinery.
+
 ### 5. Route
 
 Map each finding to exactly one destination using [references/routing.md](references/routing.md).
