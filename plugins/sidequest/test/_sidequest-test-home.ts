@@ -1,9 +1,8 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 
-const sidequestTestHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-test-home-'));
+const { tmpFixture } = require('../../test-support/tmp-fixture.js') as { tmpFixture(prefix: string): string };
+const sidequestTestHome = tmpFixture('sq-test-home-');
 Object.assign(process.env, {
   GIT_TERMINAL_PROMPT: '0',
   GIT_CONFIG_NOSYSTEM: '1',
@@ -19,7 +18,7 @@ process.env.SIDEQUEST_HOME = sidequestTestHome;
 // such run would deposit generated executors in the real tree. Before SQ-316 the
 // target followed SIDEQUEST_HOME and was disposable by construction; now it has to be
 // pinned explicitly. Keep this ahead of any suite-local override.
-const sidequestTestAgentsHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-test-agents-'));
+const sidequestTestAgentsHome = tmpFixture('sq-test-agents-');
 process.env.SIDEQUEST_AGENTS_DIR = sidequestTestAgentsHome;
 
 // Discovery reads GET /v1/models off the effective ANTHROPIC_BASE_URL (SQ-298).
