@@ -338,7 +338,7 @@ const HEALTH_RELAY_TIMEOUT_MS = 5000;
 
 const {
   cleanLegacyEnvSettings, cleanLegacyGatewayModelCache, effectiveBaseUrl, foreignBaseUrlForWrite,
-  isForeignBaseUrl, isWired, migrateLegacyProjectSettings,
+  gatewayPluginEnablement, isForeignBaseUrl, isWired, migrateLegacyProjectSettings, projectsStillWired,
   readSettingsForWrite, reconcileRegisteredProjectWirings, recordProjectWiring, registeredProjectWirings,
   selectedWiringScope, retireWiringModeConfig, settingsPath, wiredMode, writeSettings,
 } = require('./settings-wiring.js');
@@ -594,7 +594,21 @@ async function restartProxyIfOutdated({ quiet = false } = {}) {
   return { restarted, onDisk, serving };
 }
 
-async function setup() {
+// SQ-343. What setup says, and does instead of starting anything, when Claude
+// Code has this plugin turned off for the active tree. Pure so tests can pin it.
+function disabledSetupMessage(enablement, stillWired = []) {
+  const lines = [`model-gateway: ${enablement.pluginId} is disabled in ${enablement.file}, so setup left the gateway alone: nothing was downloaded, started, or wired. Set it to true there (or enable it from /plugin) and run setup again to use the gateway.`];
+  if (stillWired.length > 0) {
+    lines.push(`model-gateway: ${stillWired.length} recorded project(s) still route ANTHROPIC_BASE_URL through this gateway and cannot reach the API while it is off, starting with ${stillWired[0].file}. Run \`node "${CLI_PATH}" env --remove\` from each such project to unwire it.`);
+  }
+  return lines.join('\n');
+}
+
+async function setup({ enablement = gatewayPluginEnablement(), stillWired = projectsStillWired } = {}) {
+  if (!enablement.enabled) {
+    log(disabledSetupMessage(enablement, stillWired()));
+    return { skipped: 'plugin-disabled', enablement };
+  }
   mkdirs();
   sweepOldProxyBinaries();
   const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
@@ -1966,6 +1980,7 @@ function writeGatewayDiscoveryCache(models) {
   const result = syncGatewayDiscoveryCache({ models, baseUrl: discoveryCacheBaseUrl() });
   if (result.state === 'wrote') log(`discovery cache: wrote ${result.modelCount} models`);
   else if (result.state === 'unchanged') log('discovery cache: unchanged');
+  else if (result.reason === 'foreign-cache') log(`discovery cache: left alone; it belongs to ${result.foreignBaseUrl}, not this gateway`);
   return result;
 }
 
@@ -2605,6 +2620,17 @@ const commands = {
       flushHookOutput();
       process.exit(quiet ? 0 : code);
     };
+    // SQ-343: run by hand (or by any caller other than this plugin's own hook,
+    // which Claude Code never fires for a disabled plugin), ensure used to start
+    // the shim and rewrite the picker cache on a tree that turned the plugin off.
+    // This returns before the lock, recovery, and every cache write.
+    const enablement = gatewayPluginEnablement();
+    if (!enablement.enabled) {
+      const message = `model-gateway: ${enablement.pluginId} is disabled in ${enablement.file}; ensure left the gateway alone and started nothing.`;
+      noticeForUser(message);
+      finish(0, message);
+      return;
+    }
     // Cross-process serialization: only one `ensure` may decide the gateway needs
     // recovery at a time (see acquireEnsureLock above; SQ-23). A second, concurrent
     // `ensure` neither races the winner nor duplicates its work: it waits briefly and
@@ -2747,6 +2773,8 @@ module.exports = {
   effectiveBaseUrl,
   sessionStartWiringNotice,
   loginSuccessMessage,
+  disabledSetupMessage,
+  gatewayPluginEnablement,
   startupWaitMsFor,
   startAll,
   spawnReparented,

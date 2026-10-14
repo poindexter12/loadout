@@ -25,7 +25,10 @@ a changelog. Gateway wiring stays at its recorded scope: the stable updater dele
 preserves per-project `.claude/settings.local.json` or user-level `~/.claude/settings.json` wiring and
 never escalates scope. Remote Control compatibility points the base URL at `api.anthropic.com`, so the
 Codex/Grok rows disappear from `/model`; an explicit id such as `/model claude-gpt-5.6-terra` still works.
-Gateway wiring changes apply to new Claude Code sessions, so restart affected sessions. It continues after
+Gateway wiring changes apply to new Claude Code sessions, so restart affected sessions. On a tree that sets
+`"model-gateway@loadout": false` in `enabledPlugins` (project-local, project, or the active config dir's
+user settings, first match wins), the updater still updates the plugin files but skips the gateway updater,
+so it never starts the daemon there; it prints `Gateway update skipped` naming the file. It continues after
 individual failures and prints the failing commands.
 
 ## graphify, when it is already installed

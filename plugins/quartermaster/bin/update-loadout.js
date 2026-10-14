@@ -374,6 +374,27 @@ function gatewayUpdateCommand(home = os.homedir(), env = process.env) {
   };
 }
 
+// SQ-343. Where Claude Code turned model-gateway off for this tree, or null when
+// it is on. Claude Code resolves enabledPlugins with the same precedence as env
+// (project-local, project-shared, then the active config dir's user settings),
+// so the first file naming the plugin with a boolean decides. Only an explicit
+// `false` disables: a tree that never mentions the plugin keeps the old
+// behaviour. Mirrors gatewayPluginEnablement() in model-gateway's
+// settings-wiring.js, which gates `setup` itself for an older updater.
+function gatewayPluginDisabled({ env = process.env, home = os.homedir(), cwd = process.cwd() } = {}) {
+  const sources = [
+    ['project-local', path.join(cwd, '.claude', 'settings.local.json')],
+    ['project-shared', path.join(cwd, '.claude', 'settings.json')],
+    ['user', path.join(gatewayConfigDir(env, home), 'settings.json')],
+  ];
+  for (const [source, file] of sources) {
+    let value;
+    try { value = JSON.parse(fs.readFileSync(file, 'utf8'))?.enabledPlugins?.[MODEL_GATEWAY_PLUGIN]; } catch { continue; }
+    if (typeof value === 'boolean') return value ? null : { source, file };
+  }
+  return null;
+}
+
 function installGatewayUpdateLauncher(instances, home = os.homedir()) {
   const gateways = activeProjectInstances(instances)
     .filter((instance) => instance.id === MODEL_GATEWAY_PLUGIN && instance.installPath)
@@ -553,7 +574,7 @@ function runModelGatewayMigration({ env = process.env, registryFile = registryPa
   return { ok: true, failures: [] };
 }
 
-function runUpdate({ env = process.env, registryFile = registryPath(env), home = os.homedir(), options, run = defaultRun, report = console.log, installGatewayLauncher = installGatewayUpdateLauncher }) {
+function runUpdate({ env = process.env, registryFile = registryPath(env), home = os.homedir(), cwd = process.cwd(), options, run = defaultRun, report = console.log, installGatewayLauncher = installGatewayUpdateLauncher }) {
   let registry;
   try {
     registry = readRegistry(registryFile);
@@ -615,7 +636,14 @@ function runUpdate({ env = process.env, registryFile = registryPath(env), home =
   }
 
   const gateways = modelGatewayInstances(instances);
-  const gateway = gateways.length > 0 ? (options.check ? gatewayCommand(instances, 'doctor') : gatewayUpdateCommand(home, env)) : null;
+  // SQ-343: the stable updater runs `model-gateway setup`, which starts the
+  // daemon. A tree that disabled the plugin still gets its files updated above,
+  // but must not get a running gateway. --check's doctor is read-only, so it stays.
+  const gatewayDisabled = gateways.length > 0 && !options.check ? gatewayPluginDisabled({ env, home, cwd }) : null;
+  if (gatewayDisabled) {
+    report(`\nGateway update skipped: ${MODEL_GATEWAY_PLUGIN} is disabled in ${gatewayDisabled.file}, so the updater did not run model-gateway setup and did not start the gateway. Its plugin files were still updated. Enable the plugin and rerun to start it.`);
+  }
+  const gateway = gateways.length > 0 && !gatewayDisabled ? (options.check ? gatewayCommand(instances, 'doctor') : gatewayUpdateCommand(home, env)) : null;
   let gatewaySetupOk = true;
   if (gateway && !options.check && !options.dryRun) {
     const launcher = installGatewayLauncher(instances, home);
@@ -694,6 +722,7 @@ module.exports = {
   // handling as every other updater step instead of a second copy of it.
   execute,
   gatewayCommand,
+  gatewayPluginDisabled,
   gatewayUpdateCommand,
   installGatewayUpdateLauncher,
   gatewayMigrationInstruction,
