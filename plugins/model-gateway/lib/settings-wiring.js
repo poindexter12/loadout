@@ -307,6 +307,56 @@ function isWired() {
   return ourBaseUrls().includes(effectiveBaseUrl().value);
 }
 
+// SQ-343. The plugin's own id in Claude Code's enabledPlugins map. An installed
+// copy lives at <config>/plugins/cache/<marketplace>/model-gateway/<version>, so
+// the marketplace is read from that path; a checkout run from source falls back
+// to the published marketplace name.
+function gatewayPluginId(modulePath = __filename) {
+  const parts = path.resolve(modulePath).split(path.sep);
+  const index = parts.lastIndexOf('model-gateway');
+  const marketplace = index >= 3 && parts[index - 2] === 'cache' ? parts[index - 1] : 'loadout';
+  return `model-gateway@${marketplace}`;
+}
+
+// Whether Claude Code has this plugin turned off for the active tree. Claude Code
+// merges enabledPlugins with the same precedence it uses for env (project-local,
+// then project-shared, then user), so the first file that names the plugin with a
+// boolean decides. Only an explicit `false` counts as disabled: a tree that never
+// mentions the plugin keeps the behaviour it had before this check existed.
+function gatewayPluginEnablement({ pluginId = gatewayPluginId() } = {}) {
+  for (const source of SETTINGS_SOURCES) {
+    const file = settingsPath(scopeForSource(source));
+    let value;
+    try { value = JSON.parse(fs.readFileSync(file, 'utf8'))?.enabledPlugins?.[pluginId]; } catch { continue; }
+    if (typeof value === 'boolean') return { enabled: value, pluginId, source, file };
+  }
+  return { enabled: true, pluginId, source: null, file: null };
+}
+
+// Read-only view of the project wiring registry: every recorded project whose
+// settings.local.json still routes through one of this gateway's base URLs.
+// Unlike registeredProjectWirings() it never rewrites the registry, so a
+// disabled plugin can report stale wiring without touching any gateway state.
+function projectsStillWired() {
+  let recorded;
+  try { recorded = JSON.parse(fs.readFileSync(PROJECT_WIRING_REGISTRY_PATH, 'utf8')).projects; } catch { return []; }
+  if (!Array.isArray(recorded)) return [];
+  const seen = new Set();
+  const wired = [];
+  for (const entry of recorded) {
+    if (typeof entry !== 'string' || !path.isAbsolute(entry)) continue;
+    const project = path.normalize(entry);
+    const key = registryKey(project);
+    if (seen.has(key)) continue;
+    let value;
+    try { value = JSON.parse(fs.readFileSync(projectSettingsFile(project), 'utf8')).env?.ANTHROPIC_BASE_URL; } catch { continue; }
+    if (!ourBaseUrls().includes(value)) continue;
+    seen.add(key);
+    wired.push({ project, file: projectSettingsFile(project), value });
+  }
+  return wired;
+}
+
 // The selected wiring scope owns compatibility switching. A committed project
 // settings.json can still contain legacy wiring, but every new write belongs in
 // settings.local.json.
@@ -344,7 +394,7 @@ function wiredMode() {
 
 module.exports = {
   cleanLegacyEnvSettings, cleanLegacyGatewayModelCache, effectiveBaseUrl, foreignBaseUrlForWrite,
-  isForeignBaseUrl, isWired, migrateLegacyProjectSettings, readSettingsForWrite,
+  gatewayPluginEnablement, gatewayPluginId, isForeignBaseUrl, isWired, projectsStillWired, migrateLegacyProjectSettings, readSettingsForWrite,
   reconcileRegisteredProjectWirings, recordProjectWiring, registeredProjectWirings,
   retireWiringModeConfig, selectedWiringScope, settingsPath, wiredMode, writeSettings,
 };

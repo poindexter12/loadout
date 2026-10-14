@@ -8,6 +8,7 @@ const test = require('node:test');
 
 const {
   gatewayCommand,
+  gatewayPluginDisabled,
   gatewayUpdateCommand,
   installedPlugins,
   marketplacesFor,
@@ -157,6 +158,72 @@ test('dry-run scopes the update plan to Loadout and does not enumerate third-par
   assert.match(lines.join('\n'), /Other marketplaces are managed by Claude Code auto-update — not touched\./);
   assert.ok(lines.some((line) => line.includes(`sidequest@loadout (project, ${registry.plugins['sidequest@loadout'][1].projectPath})`)));
   assert.match(lines.join('\n'), /model-gateway update/);
+}));
+
+// --- a tree that disabled model-gateway (SQ-343) ---
+
+function disabledGatewayTree(t, { projectLocal } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-gateway-disabled-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configDir = path.join(root, 'config');
+  const cwd = path.join(root, 'project');
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.mkdirSync(path.join(cwd, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(configDir, 'settings.json'), JSON.stringify({ enabledPlugins: { 'model-gateway@loadout': false } }));
+  if (projectLocal !== undefined) {
+    fs.writeFileSync(path.join(cwd, '.claude', 'settings.local.json'), JSON.stringify({ enabledPlugins: { 'model-gateway@loadout': projectLocal } }));
+  }
+  return { root, configDir, cwd };
+}
+
+function updateAgainst(tree, registryFile) {
+  const calls = [];
+  const lines = [];
+  let launcherWrites = 0;
+  const result = runUpdate({
+    registryFile,
+    home: tree.root,
+    cwd: tree.cwd,
+    env: { CLAUDE_CONFIG_DIR: tree.configDir },
+    options: { claude: 'claude', dryRun: false, check: false },
+    run: (command) => { calls.push(command); return { ok: true, stdout: '' }; },
+    report: (line) => lines.push(line),
+    installGatewayLauncher: () => { launcherWrites += 1; return { written: true }; },
+  });
+  return { result, calls, output: lines.join('\n'), launcherWrites };
+}
+
+test('reads model-gateway enablement with Claude Code precedence and only an explicit false disables', (t) => {
+  const tree = disabledGatewayTree(t);
+  const env = { CLAUDE_CONFIG_DIR: tree.configDir };
+  assert.deepEqual(gatewayPluginDisabled({ env, home: tree.root, cwd: tree.cwd }), { source: 'user', file: path.join(tree.configDir, 'settings.json') });
+
+  fs.writeFileSync(path.join(tree.cwd, '.claude', 'settings.local.json'), JSON.stringify({ enabledPlugins: { 'model-gateway@loadout': true } }));
+  assert.equal(gatewayPluginDisabled({ env, home: tree.root, cwd: tree.cwd }), null, 'project-local true outranks user false');
+
+  fs.rmSync(path.join(tree.cwd, '.claude', 'settings.local.json'));
+  fs.writeFileSync(path.join(tree.configDir, 'settings.json'), JSON.stringify({ enabledPlugins: { 'sidequest@loadout': false } }));
+  assert.equal(gatewayPluginDisabled({ env, home: tree.root, cwd: tree.cwd }), null, 'a tree that never names the plugin stays enabled');
+});
+
+test('update on a tree with model-gateway disabled never runs the gateway updater or rewrites its launcher', (t) => withRegistry(registry, (registryFile) => {
+  const tree = disabledGatewayTree(t);
+  const { result, calls, output, launcherWrites } = updateAgainst(tree, registryFile);
+
+  assert.equal(result.ok, true, output);
+  assert.equal(launcherWrites, 0);
+  assert.ok(!calls.some((command) => command.label === 'model-gateway update' || command.args.some((arg) => /model-gateway[\\/]update\.js$/.test(String(arg)))), 'the gateway updater (model-gateway setup) must not run');
+  assert.ok(calls.some((command) => command.label === 'sidequest@loadout (user)' || command.args.includes('sidequest@loadout')), 'the other Loadout plugins still update');
+  assert.match(output, /Gateway update skipped: model-gateway@loadout is disabled in .*settings\.json, so the updater did not run model-gateway setup and did not start the gateway/);
+}));
+
+test('a project-local enable still runs the gateway updater over a user-level disable', (t) => withRegistry(registry, (registryFile) => {
+  const tree = disabledGatewayTree(t, { projectLocal: true });
+  const { calls, output, launcherWrites } = updateAgainst(tree, registryFile);
+
+  assert.equal(launcherWrites, 1);
+  assert.ok(calls.some((command) => command.label === 'model-gateway update'));
+  assert.doesNotMatch(output, /Gateway update skipped/);
 }));
 
 // --- graphify, wired into the update run (SQ-313) ---

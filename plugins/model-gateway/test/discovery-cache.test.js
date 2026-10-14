@@ -153,6 +153,33 @@ test('leaves a foreign discovery cache alone when its model list is current', ()
   assert.equal(fs.readFileSync(file, 'utf8'), original);
 });
 
+test('never replaces a discovery cache that belongs to another gateway (SQ-343)', () => {
+  const file = cachePath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const original = JSON.stringify({
+    baseUrl: 'http://127.0.0.1:4001',
+    fetchedAt: 1,
+    models: [{ id: 'claude-relay-only', display_name: 'Relay Only' }],
+  });
+  fs.writeFileSync(file, original);
+
+  const result = runtime.syncGatewayDiscoveryCache({ cachePath: file, models: shimModels() });
+
+  assert.deepEqual(result, { state: 'skipped', reason: 'foreign-cache', cachePath: file, modelCount: 0, foreignBaseUrl: 'http://127.0.0.1:4001' });
+  assert.equal(fs.readFileSync(file, 'utf8'), original);
+});
+
+test('still refreshes a stale cache this gateway wrote under its legacy base URL', () => {
+  const file = cachePath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ baseUrl: runtime.LEGACY_DEFAULT_BASE_URL, fetchedAt: 1, models: [] }));
+
+  const result = runtime.syncGatewayDiscoveryCache({ cachePath: file, models: shimModels(), now: () => 2 });
+
+  assert.equal(result.state, 'wrote');
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).baseUrl, runtime.DEFAULT_BASE_URL);
+});
+
 test('does not touch the discovery cache in RC-compatibility mode', () => {
   const file = cachePath();
   fs.mkdirSync(path.dirname(file), { recursive: true });

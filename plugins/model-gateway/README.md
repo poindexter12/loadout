@@ -97,6 +97,10 @@ To get Remote Control without RC-compatibility, remove only `ANTHROPIC_BASE_URL`
 
 That project has no gateway models after the restart: gateway rows disappear from `/model` and typed gateway ids do not work either. A manually exported `ANTHROPIC_BASE_URL` still wins over the file edit, so remove that environment variable before restarting if the project remains wired.
 
+## Disabling the plugin
+
+When `enabledPlugins` sets `"model-gateway@loadout": false` for a Claude Code tree, `setup` (and so update-loadout) and `ensure` leave the gateway alone there: nothing is downloaded, started, or wired. Separately, the gateway never overwrites a `/model` picker cache (`cache/gateway-models.json`) that another gateway wrote. It reads the same settings Claude Code does, project-local first, then project, then the active config dir's user settings, and only an explicit `false` counts. It names any recorded project still wired through the gateway, since those sessions cannot reach the API while it is off; run `env --remove` from each one. Disabling does not stop a gateway that is already running: run `stop` for that.
+
 ## License
 
 MIT

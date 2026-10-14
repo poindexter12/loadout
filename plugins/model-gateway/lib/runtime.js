@@ -288,6 +288,15 @@ function syncGatewayDiscoveryCache({ models, baseUrl = DEFAULT_BASE_URL, cachePa
   if (existing && sameGatewayDiscoveryModels(existing.models, gatewayModels)) {
     return { state: 'unchanged', cachePath, modelCount: gatewayModels.length };
   }
+  // SQ-343: the cache is one file per config dir, but wiring is per project. A
+  // run from a project still wired to this gateway once replaced an account's
+  // cache that belonged to another gateway (a relay on :4001), and that
+  // gateway's rows vanished from /model. Never overwrite a cache whose baseUrl
+  // is not one of this gateway's.
+  if (existing && typeof existing.baseUrl === 'string'
+    && ![DEFAULT_BASE_URL, LEGACY_DEFAULT_BASE_URL, COMPAT_BASE_URL].includes(existing.baseUrl)) {
+    return { state: 'skipped', reason: 'foreign-cache', cachePath, modelCount: 0, foreignBaseUrl: existing.baseUrl };
+  }
 
   const cache = { baseUrl, fetchedAt: now(), models: gatewayModels };
   fs.mkdirSync(path.dirname(cachePath), { recursive: true });
