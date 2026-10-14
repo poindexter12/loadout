@@ -470,9 +470,32 @@ function commandText(command) {
   return [command.command, ...command.args].map((part) => JSON.stringify(part)).join(' ');
 }
 
+// SQ-345. A tree that disabled model-gateway still has projects wired to it, and
+// those are the sessions that fail with ECONNREFUSED once the gateway is down.
+// The installed gateway owns its per-account port and its wiring registry, so
+// ask its read-only `wired-projects` report (the same list doctor prints) rather
+// than re-deriving either here. It runs from this updater's cwd so it reads the
+// same enabledPlugins this updater found disabled, and it starts nothing.
+function reportStaleGatewayWiring({ instances, env, cwd, options, run, report }) {
+  const command = gatewayCommand(instances, 'wired-projects');
+  if (!command) return;
+  const listing = { ...command, cwd, env, label: 'model-gateway wired-projects' };
+  if (options.dryRun) {
+    report(`Would list projects still wired to the disabled gateway: ${commandText(listing)}`);
+    return;
+  }
+  const result = run(listing);
+  if (result.ok) {
+    if (result.output) report(result.output);
+    return;
+  }
+  report(`Could not list projects still wired to the disabled gateway (${result.error || 'the installed model-gateway may predate wired-projects'}). Run ${commandText({ ...command, args: [...command.args.slice(0, -1), 'doctor'] })} to see them.`);
+}
+
 function defaultRun(command) {
   const result = childProcess.spawnSync(command.command, command.args, {
     cwd: command.cwd,
+    env: command.env,
     encoding: 'utf8',
     shell: false,
     windowsHide: true,
@@ -642,6 +665,7 @@ function runUpdate({ env = process.env, registryFile = registryPath(env), home =
   const gatewayDisabled = gateways.length > 0 && !options.check ? gatewayPluginDisabled({ env, home, cwd }) : null;
   if (gatewayDisabled) {
     report(`\nGateway update skipped: ${MODEL_GATEWAY_PLUGIN} is disabled in ${gatewayDisabled.file}, so the updater did not run model-gateway setup and did not start the gateway. Its plugin files were still updated. Enable the plugin and rerun to start it.`);
+    reportStaleGatewayWiring({ instances, env, cwd, options, run, report });
   }
   const gateway = gateways.length > 0 && !gatewayDisabled ? (options.check ? gatewayCommand(instances, 'doctor') : gatewayUpdateCommand(home, env)) : null;
   let gatewaySetupOk = true;

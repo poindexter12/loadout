@@ -333,28 +333,87 @@ function gatewayPluginEnablement({ pluginId = gatewayPluginId() } = {}) {
   return { enabled: true, pluginId, source: null, file: null };
 }
 
-// Read-only view of the project wiring registry: every recorded project whose
-// settings.local.json still routes through one of this gateway's base URLs.
-// Unlike registeredProjectWirings() it never rewrites the registry, so a
-// disabled plugin can report stale wiring without touching any gateway state.
-function projectsStillWired() {
+// SQ-345. The ANTHROPIC_BASE_URL a recorded project's sessions actually get from
+// its own settings: settings.local.json shadows the committed settings.json, so
+// the first of the two that defines it decides, exactly as Claude Code reads them.
+function projectBaseUrl(project) {
+  for (const [source, file] of [
+    ['project-local', projectSettingsFile(project)],
+    ['project-shared', path.join(project, '.claude', 'settings.json')],
+  ]) {
+    let value;
+    try { value = JSON.parse(fs.readFileSync(file, 'utf8')).env?.ANTHROPIC_BASE_URL; } catch { continue; }
+    if (typeof value === 'string') return { source, file, value };
+  }
+  return null;
+}
+
+// SQ-345. Read-only audit of the project wiring registry. `wired` holds every
+// recorded project whose settings still route through one of this gateway's base
+// URLs; `stale` holds the entries that no longer describe a wired project (the
+// directory is gone, its settings point elsewhere, the entry is not an absolute
+// path, or it repeats an earlier one). Unlike registeredProjectWirings() this
+// never rewrites the registry: pruning is pruneProjectWiringRegistry(), which
+// only an explicit flag reaches.
+function projectWiringAudit() {
+  const audit = { registry: PROJECT_WIRING_REGISTRY_PATH, exists: false, unreadable: null, wired: [], stale: [] };
   let recorded;
-  try { recorded = JSON.parse(fs.readFileSync(PROJECT_WIRING_REGISTRY_PATH, 'utf8')).projects; } catch { return []; }
-  if (!Array.isArray(recorded)) return [];
+  try {
+    const parsed = JSON.parse(fs.readFileSync(PROJECT_WIRING_REGISTRY_PATH, 'utf8'));
+    audit.exists = true;
+    recorded = parsed?.projects;
+    if (!Array.isArray(recorded)) audit.unreadable = 'it has no "projects" array';
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      audit.exists = true;
+      audit.unreadable = error.message;
+    }
+    return audit;
+  }
+  if (audit.unreadable) return audit;
   const seen = new Set();
-  const wired = [];
   for (const entry of recorded) {
-    if (typeof entry !== 'string' || !path.isAbsolute(entry)) continue;
+    if (typeof entry !== 'string' || !path.isAbsolute(entry)) {
+      audit.stale.push({ entry, project: null, reason: 'invalid' });
+      continue;
+    }
     const project = path.normalize(entry);
     const key = registryKey(project);
-    if (seen.has(key)) continue;
-    let value;
-    try { value = JSON.parse(fs.readFileSync(projectSettingsFile(project), 'utf8')).env?.ANTHROPIC_BASE_URL; } catch { continue; }
-    if (!ourBaseUrls().includes(value)) continue;
+    if (seen.has(key)) {
+      audit.stale.push({ entry, project, reason: 'duplicate' });
+      continue;
+    }
     seen.add(key);
-    wired.push({ project, file: projectSettingsFile(project), value });
+    let isDirectory = false;
+    try { isDirectory = fs.statSync(project).isDirectory(); } catch {}
+    if (!isDirectory) {
+      audit.stale.push({ entry, project, reason: 'missing' });
+      continue;
+    }
+    const definition = projectBaseUrl(project);
+    if (!definition || !ourBaseUrls().includes(definition.value)) {
+      audit.stale.push({ entry, project, reason: 'not-wired', value: definition?.value ?? null });
+      continue;
+    }
+    audit.wired.push({ project, ...definition });
   }
-  return wired;
+  return audit;
+}
+
+// Every recorded project whose settings still route through this gateway,
+// without rewriting the registry, so a disabled plugin can report stale wiring
+// without touching any gateway state.
+function projectsStillWired() {
+  return projectWiringAudit().wired;
+}
+
+// SQ-345. Drops exactly the entries projectWiringAudit() reports as stale and
+// keeps every wired one. Never called implicitly: doctor and wired-projects run
+// it only for --prune-wired-projects. An unreadable registry is left as it is.
+function pruneProjectWiringRegistry(audit = projectWiringAudit()) {
+  if (!audit.exists || audit.unreadable || audit.stale.length === 0) return { pruned: [] };
+  writeProjectWiringRegistry(audit.wired.map(({ project }) => project));
+  return { pruned: audit.stale };
 }
 
 // The selected wiring scope owns compatibility switching. A committed project
@@ -394,7 +453,8 @@ function wiredMode() {
 
 module.exports = {
   cleanLegacyEnvSettings, cleanLegacyGatewayModelCache, effectiveBaseUrl, foreignBaseUrlForWrite,
-  gatewayPluginEnablement, gatewayPluginId, isForeignBaseUrl, isWired, projectsStillWired, migrateLegacyProjectSettings, readSettingsForWrite,
+  gatewayPluginEnablement, gatewayPluginId, isForeignBaseUrl, isWired, projectsStillWired, projectWiringAudit, pruneProjectWiringRegistry,
+  migrateLegacyProjectSettings, readSettingsForWrite,
   reconcileRegisteredProjectWirings, recordProjectWiring, registeredProjectWirings,
   retireWiringModeConfig, selectedWiringScope, settingsPath, wiredMode, writeSettings,
 };

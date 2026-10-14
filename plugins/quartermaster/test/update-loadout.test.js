@@ -217,6 +217,65 @@ test('update on a tree with model-gateway disabled never runs the gateway update
   assert.match(output, /Gateway update skipped: model-gateway@loadout is disabled in .*settings\.json, so the updater did not run model-gateway setup and did not start the gateway/);
 }));
 
+// SQ-345: the disabled-skip path also prints the projects still wired to the
+// stopped gateway, by asking the installed gateway's read-only wired-projects
+// report from this run's cwd and env so it reads the same enabledPlugins.
+function updateWithListing(tree, registryFile, { dryRun = false, listing }) {
+  const calls = [];
+  const lines = [];
+  const result = runUpdate({
+    registryFile,
+    home: tree.root,
+    cwd: tree.cwd,
+    env: { CLAUDE_CONFIG_DIR: tree.configDir },
+    options: { claude: 'claude', dryRun, check: false },
+    run: (command) => {
+      calls.push(command);
+      return command.label === 'model-gateway wired-projects' ? listing : { ok: true, output: '' };
+    },
+    report: (line) => lines.push(line),
+    installGatewayLauncher: () => ({ written: true }),
+  });
+  return { result, calls, output: lines.join('\n') };
+}
+
+const STALE_LISTING = 'model-gateway: WARN: 1 recorded project(s) still route ANTHROPIC_BASE_URL through this gateway, but model-gateway@loadout is disabled\nmodel-gateway: WARN:   /work/loadout: ... Unwire it: cd "/work/loadout" && node "/cli/model-gateway.js" env --remove';
+
+test('update on a disabled tree prints the stale-wiring list from the gateway wired-projects report', (t) => withRegistry(registry, (registryFile) => {
+  const tree = disabledGatewayTree(t);
+  const { result, calls, output } = updateWithListing(tree, registryFile, { listing: { ok: true, output: STALE_LISTING } });
+
+  assert.equal(result.ok, true, output);
+  const listing = calls.find((command) => command.label === 'model-gateway wired-projects');
+  assert.ok(listing, 'the disabled-skip path runs the read-only wired-projects report');
+  assert.equal(listing.args.at(-1), 'wired-projects');
+  assert.match(String(listing.args[0]), /model-gateway[\\/]0\.2\.0[\\/]bin[\\/]model-gateway\.js$/);
+  assert.equal(listing.cwd, tree.cwd, 'it reads enablement from the same project the updater did');
+  assert.equal(listing.env.CLAUDE_CONFIG_DIR, tree.configDir, 'and from the same account tree');
+  assert.ok(output.indexOf('Gateway update skipped') < output.indexOf('env --remove'), output);
+  assert.ok(output.includes('cd "/work/loadout" && node "/cli/model-gateway.js" env --remove'), output);
+  const gatewayActions = calls
+    .filter((command) => command.args.some((arg) => /[\\/]bin[\\/]model-gateway\.js$|model-gateway[\\/]update\.js$/.test(String(arg))))
+    .map((command) => String(command.args.at(-1)));
+  assert.deepEqual(gatewayActions, ['wired-projects'], 'the only gateway command run on a disabled tree is the read-only report');
+}));
+
+test('update --dry-run on a disabled tree names the wired-projects listing without running it', (t) => withRegistry(registry, (registryFile) => {
+  const tree = disabledGatewayTree(t);
+  const { calls, output } = updateWithListing(tree, registryFile, { dryRun: true, listing: { ok: true, output: STALE_LISTING } });
+
+  assert.ok(!calls.some((command) => command.label === 'model-gateway wired-projects'));
+  assert.match(output, /Would list projects still wired to the disabled gateway: .*model-gateway\.js" "wired-projects"/);
+}));
+
+test('an installed gateway without wired-projects falls back to pointing at doctor and does not fail the update', (t) => withRegistry(registry, (registryFile) => {
+  const tree = disabledGatewayTree(t);
+  const { result, output } = updateWithListing(tree, registryFile, { listing: { ok: false, output: '', error: undefined } });
+
+  assert.equal(result.ok, true, output);
+  assert.match(output, /Could not list projects still wired to the disabled gateway \(the installed model-gateway may predate wired-projects\)\. Run .*model-gateway\.js" "doctor" to see them\./);
+}));
+
 test('a project-local enable still runs the gateway updater over a user-level disable', (t) => withRegistry(registry, (registryFile) => {
   const tree = disabledGatewayTree(t, { projectLocal: true });
   const { calls, output, launcherWrites } = updateAgainst(tree, registryFile);
