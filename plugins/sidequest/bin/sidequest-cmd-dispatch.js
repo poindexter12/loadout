@@ -218,6 +218,22 @@ async function cmdBoardConfig(opts) {
   if (opts["integration-mode"] != null) patch.integrationMode = opts["integration-mode"];
   if (opts["integration-branch"] != null) patch.integrationBranch = opts["integration-branch"];
   if (opts.delivery != null) patch.delivery = opts.delivery;
+  const deliveryChannelMode = opts["delivery-channel"] == null ? null : String(opts["delivery-channel"]).trim().toLowerCase();
+  const deliveryChannelParts = ["delivery-remote", "delivery-target"].filter((flag) => opts[flag] != null);
+  if (deliveryChannelMode === null) {
+    if (deliveryChannelParts.length) {
+      fail(`board-config: ${deliveryChannelParts.map((flag) => `--${flag}`).join(" and ")} ${deliveryChannelParts.length > 1 ? "need" : "needs"} --delivery-channel local|pr in the same command, because a delivery-channel write replaces the whole channel.`);
+    }
+  } else if (deliveryChannelMode === "none") {
+    if (deliveryChannelParts.length) {
+      fail(`board-config: --delivery-channel none clears the channel, so it cannot be combined with ${deliveryChannelParts.map((flag) => `--${flag}`).join(" or ")}.`);
+    }
+    patch.deliveryChannel = null;
+  } else {
+    patch.deliveryChannel = { mode: deliveryChannelMode };
+    if (opts["delivery-remote"] != null) patch.deliveryChannel.remote = opts["delivery-remote"];
+    if (opts["delivery-target"] != null) patch.deliveryChannel.target = opts["delivery-target"];
+  }
   if (opts["integration-verify-timeout-ms"] != null) patch.integrationVerifyTimeoutMs = opts["integration-verify-timeout-ms"];
   if (opts["worktree-isolation"] !== void 0) patch.worktreeIsolation = opts["worktree-isolation"];
   if (opts["worktree-base"] != null) patch.worktreeBase = opts["worktree-base"];
@@ -247,6 +263,7 @@ async function cmdBoardConfig(opts) {
   console.log(`integration mode: ${payload.integrationMode}`);
   console.log(`integration branch: ${payload.integrationBranch}`);
   console.log(`delivery: ${payload.delivery}`);
+  console.log(`delivery channel: ${payload.deliveryChannel.mode} (remote ${payload.deliveryChannel.remote}, base ${payload.deliveryChannel.target})`);
   console.log(`integration verify timeout: ${payload.integrationVerifyTimeoutMs}ms`);
   console.log(`worktree isolation: ${payload.worktreeIsolation ? "enabled" : "disabled"}`);
   console.log(`worktree base: ${payload.worktreeBase}`);
