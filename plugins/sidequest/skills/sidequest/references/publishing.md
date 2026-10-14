@@ -68,6 +68,36 @@ gate covers the newer target content. An assembly refusal leaves every submitted
 Set the board default with `sidequest board-config --delivery merge|replay|apply`. Consumer boards
 usually want `apply` or `replay`; use `merge` where the repository's release flow owns integration.
 
+### Local delivery or pull-request delivery
+
+`--delivery` is the git strategy a wave is applied with. The delivery **channel** is a separate
+setting: where the wave lands. A board defaults to local delivery, where `integrate` advances the
+integration branch in the checkout. Where the repository requires every commit to arrive through a
+review, switch the channel rather than hand-rolling a push:
+
+```
+sidequest board-config --delivery-channel pr
+sidequest board-config --delivery-channel pr --delivery-remote upstream --delivery-target release/next
+sidequest board-config --delivery-channel none
+```
+
+The remote defaults to `origin` and the target to the board's integration branch; `none` clears the
+channel and returns the board to local delivery. `--delivery-remote` and `--delivery-target` are
+modifiers of a mode given in the same command, because a channel write replaces the whole record — a
+destination on its own would reset the mode to local while appearing to set where the work goes.
+Agents write the same thing through the `board_config` MCP tool's `deliveryChannel` property, where
+`null` is the clear.
+
+In `pr` mode `integrate` does not touch the local integration branch. It builds the assembled wave on
+`<remote>/<target>`, pushes it as a wave branch, opens a pull request, enables auto-merge, and returns
+`awaiting-merge` with the PR number and url. Every participant stays `doing` until a later `integrate`
+of that same exact participant set reconciles the merge outcome; re-running it before then returns the
+open PR instead of opening a second one, and a partial participant set refuses. `integrate` never
+force-pushes: a wave branch that already exists on the remote without a board record refuses, and any
+failure after the push withdraws the branch and the PR it opened. A wave that adds no commits over
+`<remote>/<target>` refuses too — if its candidates already landed, record that with
+`integrate --delivery-commit`.
+
 If a repair ticket deliberately delivers an earlier parked submission, do not replay the obsolete range. Use MCP `supersede_submission` with the earlier ref, the later integrated repair ref, concise closure evidence, and `reviewedReplacements` for every original path whose delivered content intentionally differs. The control plane requires the repair's recorded delivery to include every original changed path, preserves the earlier submission and its lineage under `supersededBy`, marks it done, and removes its pending-submission warning. A missing path, an unintegrated repair, or unreviewed divergent content leaves the original submission parked.
 
 ### Filing a repair for a review-rejected candidate
