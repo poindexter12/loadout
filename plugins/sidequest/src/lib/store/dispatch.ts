@@ -1269,6 +1269,35 @@ function completedWorktreeCreationFacts(state?: any) {
   };
 }
 
+// The checkout a dispatch is bound to, with the immutable facts that make the binding checkable. Three
+// things record them, and all three record the same five fields: a WorktreeCreate target when creation
+// completes, a continuation from the released attempt's retained lease at prepare time, and a live-claim
+// recovery from the checkout it rebinds. Each is a reserved path unique to one dispatch that a runtime had
+// to already be standing in to report it, which is what makes an observed checkout evidence of identity.
+//
+// SQ-171: reading this as creation facts alone meant a continuation, and a recovered live claim, had no
+// bindable checkout at all. The hook payload for a dispatched executor carries an `agent_id` and no agent
+// name, and the agent-id route demanded exactly those creation facts to accept an observed checkout, so a
+// continuation executor could claim and then never bind. An unbound identity holds no write lease
+// anywhere, its own retained worktree included, and the only lever that refusal named — dispatch with
+// recoveryEvidence — refuses a dispatch whose claim is still held. That left a live claimed executor able
+// to neither write nor recover.
+function boundIsolatedCheckoutFacts(state?: any) {
+  if (!state || state.sharedTree !== false) return null;
+  const source = String(state.worktreeBindingSource || '');
+  if (source === 'worktree-create') return completedWorktreeCreationFacts(state);
+  if (!['continuation', 'live-claim-recovery'].includes(source)) return null;
+  if (!state.worktree || !state.worktreeGitDirectory || !state.worktreeCommonGitDirectory
+    || !state.worktreeCheckoutInstance || !state.worktreeObservedRevision) return null;
+  return {
+    worktree: canonicalPath(state.worktree),
+    gitDirectory: canonicalPath(state.worktreeGitDirectory),
+    commonGitDirectory: canonicalPath(state.worktreeCommonGitDirectory),
+    checkoutInstance: String(state.worktreeCheckoutInstance),
+    revision: String(state.worktreeObservedRevision),
+  };
+}
+
 function reportsRegisteredProjectCheckout(slug?: any, worktree?: any) {
   const projectPath = String(readMeta(slug)?.path || '').trim();
   const reportedWorktree = String(worktree || '').trim();
@@ -2797,6 +2826,17 @@ function recordDispatchRuntimeIdentity(slug?: any, state?: any, agentId?: any, a
       || canonicalPath(String(state.worktreeCommonGitDirectory || '')) !== worktreeFacts.commonGitDirectory
       || String(state.worktreeCheckoutInstance || '') !== worktreeFacts.checkoutInstance
       || String(state.worktreeObservedRevision || '') !== worktreeFacts.revision)) return false;
+  // A continuation's retained worktree is as reserved as a created one, so the runtime that binds has to be
+  // standing in it. Without this a continuation bound its agent id to whatever checkout the harness happened
+  // to spawn it in, which is the other half of the SQ-171 disagreement: the claim succeeded against the
+  // retained tree while the write lease was asked about a different one. The revision is deliberately not
+  // compared — a continuation's first act is to bring the retained checkpoint forward onto the new baseline,
+  // so HEAD has legitimately moved on by the time anything binds.
+  if (state.sharedTree === false && state.continuation?.sourceWorktree && worktreeFacts
+    && (canonicalPath(String(state.worktree || '')) !== worktreeFacts.worktree
+      || canonicalPath(String(state.worktreeGitDirectory || '')) !== worktreeFacts.gitDirectory
+      || canonicalPath(String(state.worktreeCommonGitDirectory || '')) !== worktreeFacts.commonGitDirectory
+      || String(state.worktreeCheckoutInstance || '') !== worktreeFacts.checkoutInstance)) return false;
   if (agentId) state.agentId = agentId;
   if (agentName) state.agentName = agentName;
   if (state.sharedTree === false && !state.continuation?.sourceWorktree && worktreeFacts) {
@@ -2914,24 +2954,22 @@ function bindDispatchAgent(sessionId?: any, executor?: any, agentId?: any, agent
       matches = [Object.assign({}, reservation, { checkoutIdentityOverride: true })];
     }
   }
-  // A completed creation target is stronger evidence than a name: it is a reserved path, unique to one
+  // A dispatch's bound checkout is stronger evidence than a name: it is a reserved path, unique to one
   // dispatch, and the caller had to already be inside it to report it. Gating this on a missing name left
   // a named bind ambiguous whenever a sibling dispatch had no recorded name to filter on (SQ-2189).
   if (normalizedWorktree) {
-    const completedWorktreeMatches = matches.filter((match) => {
-      const completed = completedWorktreeCreationFacts(match.state);
-      return match.state.sharedTree === false && !match.state.continuation?.sourceWorktree
-        && boundIsolatedWorktree(match.state)
-        && completed && canonicalPath(completed.worktree) === canonicalPath(normalizedWorktree);
+    const boundWorktreeMatches = matches.filter((match) => {
+      const bound = boundIsolatedCheckoutFacts(match.state);
+      return Boolean(bound && bound.worktree === canonicalPath(normalizedWorktree));
     });
-    if (completedWorktreeMatches.length) matches = completedWorktreeMatches;
+    if (boundWorktreeMatches.length) matches = boundWorktreeMatches;
   }
   if (normalizedAgentId && !normalizedAgentName) {
     matches = matches.filter((match) => {
       if (String(match.state.agentId || '') === normalizedAgentId) return true;
-      const completed = completedWorktreeCreationFacts(match.state);
-      return match.sharedTree === false && Boolean(normalizedWorktree) && completed
-        && canonicalPath(completed.worktree) === canonicalPath(normalizedWorktree);
+      const bound = boundIsolatedCheckoutFacts(match.state);
+      return Boolean(normalizedWorktree && bound
+        && bound.worktree === canonicalPath(normalizedWorktree));
     });
   }
   if (!matches.length || dispatchIdentityAmbiguous(matches, normalizedAgentName)) {

@@ -1028,6 +1028,20 @@ function createDispatch(dependencies) {
       revision: String(state.worktreeObservedRevision)
     };
   }
+  function boundIsolatedCheckoutFacts(state) {
+    if (!state || state.sharedTree !== false) return null;
+    const source = String(state.worktreeBindingSource || "");
+    if (source === "worktree-create") return completedWorktreeCreationFacts(state);
+    if (!["continuation", "live-claim-recovery"].includes(source)) return null;
+    if (!state.worktree || !state.worktreeGitDirectory || !state.worktreeCommonGitDirectory || !state.worktreeCheckoutInstance || !state.worktreeObservedRevision) return null;
+    return {
+      worktree: canonicalPath(state.worktree),
+      gitDirectory: canonicalPath(state.worktreeGitDirectory),
+      commonGitDirectory: canonicalPath(state.worktreeCommonGitDirectory),
+      checkoutInstance: String(state.worktreeCheckoutInstance),
+      revision: String(state.worktreeObservedRevision)
+    };
+  }
   function reportsRegisteredProjectCheckout(slug, worktree) {
     const projectPath = String(readMeta(slug)?.path || "").trim();
     const reportedWorktree = String(worktree || "").trim();
@@ -2299,6 +2313,7 @@ function createDispatch(dependencies) {
   function recordDispatchRuntimeIdentity(slug, state, agentId, agentName, now, worktreeFacts) {
     if (state.sharedTree === false && !state.continuation?.sourceWorktree && worktreeFacts && (!boundIsolatedWorktree(state) || canonicalPath(state.worktree) !== worktreeFacts.worktree)) return false;
     if (state.sharedTree === false && !state.continuation?.sourceWorktree && worktreeFacts && state.worktreeCreationCompletedAt && (canonicalPath(String(state.worktreeGitDirectory || "")) !== worktreeFacts.gitDirectory || canonicalPath(String(state.worktreeCommonGitDirectory || "")) !== worktreeFacts.commonGitDirectory || String(state.worktreeCheckoutInstance || "") !== worktreeFacts.checkoutInstance || String(state.worktreeObservedRevision || "") !== worktreeFacts.revision)) return false;
+    if (state.sharedTree === false && state.continuation?.sourceWorktree && worktreeFacts && (canonicalPath(String(state.worktree || "")) !== worktreeFacts.worktree || canonicalPath(String(state.worktreeGitDirectory || "")) !== worktreeFacts.gitDirectory || canonicalPath(String(state.worktreeCommonGitDirectory || "")) !== worktreeFacts.commonGitDirectory || String(state.worktreeCheckoutInstance || "") !== worktreeFacts.checkoutInstance)) return false;
     if (agentId) state.agentId = agentId;
     if (agentName) state.agentName = agentName;
     if (state.sharedTree === false && !state.continuation?.sourceWorktree && worktreeFacts) {
@@ -2398,17 +2413,17 @@ function createDispatch(dependencies) {
       }
     }
     if (normalizedWorktree) {
-      const completedWorktreeMatches = matches.filter((match) => {
-        const completed = completedWorktreeCreationFacts(match.state);
-        return match.state.sharedTree === false && !match.state.continuation?.sourceWorktree && boundIsolatedWorktree(match.state) && completed && canonicalPath(completed.worktree) === canonicalPath(normalizedWorktree);
+      const boundWorktreeMatches = matches.filter((match) => {
+        const bound = boundIsolatedCheckoutFacts(match.state);
+        return Boolean(bound && bound.worktree === canonicalPath(normalizedWorktree));
       });
-      if (completedWorktreeMatches.length) matches = completedWorktreeMatches;
+      if (boundWorktreeMatches.length) matches = boundWorktreeMatches;
     }
     if (normalizedAgentId && !normalizedAgentName) {
       matches = matches.filter((match) => {
         if (String(match.state.agentId || "") === normalizedAgentId) return true;
-        const completed = completedWorktreeCreationFacts(match.state);
-        return match.sharedTree === false && Boolean(normalizedWorktree) && completed && canonicalPath(completed.worktree) === canonicalPath(normalizedWorktree);
+        const bound = boundIsolatedCheckoutFacts(match.state);
+        return Boolean(normalizedWorktree && bound && bound.worktree === canonicalPath(normalizedWorktree));
       });
     }
     if (!matches.length || dispatchIdentityAmbiguous(matches, normalizedAgentName)) {
