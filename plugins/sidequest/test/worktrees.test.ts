@@ -465,3 +465,37 @@ test('successive bounded sweeps rotate past an unremovable head and collect ever
     fs.rmSync(repository, { recursive: true, force: true });
   }
 });
+
+// SQ-344: git prints `prunable` and `locked` AFTER the `branch` line, so any consumer that
+// answers at the branch line never sees them and reports a dead checkout as live. Both flags
+// also carry an optional reason, so presence is what the parser records.
+test('parseWorktreeList records the prunable and locked flags git prints after the branch line', () => {
+  const { repository, worktreeRoot } = repositoryFixture();
+  const deleted = path.join(worktreeRoot, 'parse-deleted');
+  const lockedGone = path.join(worktreeRoot, 'parse-locked-gone');
+  const live = path.join(worktreeRoot, 'parse-live');
+  try {
+    const added: Array<[string, string]> = [['parse-deleted', deleted], ['parse-locked-gone', lockedGone], ['parse-live', live]];
+    for (const [branch, worktree] of added) {
+      git(repository, ['worktree', 'add', '-b', branch, worktree, 'HEAD']);
+    }
+    git(repository, ['worktree', 'lock', lockedGone]);
+    fs.rmSync(deleted, { recursive: true, force: true });
+    fs.rmSync(lockedGone, { recursive: true, force: true });
+
+    const entries = worktrees.parseWorktreeList(git(repository, ['worktree', 'list', '--porcelain']));
+    const entryFor = (branch: string) => entries.find((entry: any) => entry.branch === `refs/heads/${branch}`);
+
+    assert.equal(entryFor('parse-deleted').prunable, 'true');
+    // Locking suppresses the prunable line, so a locked worktree that is equally gone is only
+    // ever reported as locked.
+    assert.equal(entryFor('parse-locked-gone').locked, 'true');
+    assert.equal(entryFor('parse-locked-gone').prunable, undefined);
+    assert.equal(entryFor('parse-live').prunable, undefined);
+    assert.equal(entryFor('parse-live').locked, undefined);
+    assert.equal(worktrees.canonicalPath(entryFor('parse-live').worktree), worktrees.canonicalPath(live));
+  } finally {
+    git(repository, ['worktree', 'unlock', lockedGone]);
+    fs.rmSync(repository, { recursive: true, force: true });
+  }
+});

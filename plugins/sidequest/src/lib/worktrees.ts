@@ -418,8 +418,11 @@ function parseWorktreeList(output: string): any[] {
   return output.split(/\r?\n\r?\n/).filter(Boolean).map((block) => {
     const entry: Record<string, string> = {};
     for (const line of block.split(/\r?\n/)) {
-      const match = /^(worktree|HEAD|branch|locked)\s*(.*)$/.exec(line);
-      if (match?.[1] && match[2] != null) entry[match[1].toLowerCase()] = match[1] === 'locked' ? 'true' : match[2];
+      const match = /^(worktree|HEAD|branch|locked|prunable)\s*(.*)$/.exec(line);
+      // `locked` and `prunable` carry an optional reason, so record presence rather than the
+      // reason: an absent reason would otherwise read back as an absent flag.
+      const presenceOnly = match?.[1] === 'locked' || match?.[1] === 'prunable';
+      if (match?.[1] && match[2] != null) entry[match[1].toLowerCase()] = presenceOnly ? 'true' : match[2];
     }
     return entry;
   }).filter((entry) => entry.worktree);

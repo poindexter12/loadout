@@ -10,6 +10,7 @@ const { assembleWave, openWave, recordAssembledWaveGate, recordWaveDelivery } = 
 const { AWAITING_MERGE_OUTCOME, isSafeBranchName, isSafeRefComponent, validateWavePullRequest, waveBranchName } = require('../kernel/pr-delivery.js');
 const { createGhPrPort, PrDeliveryUnavailableError } = require('../ports/github-pr.js');
 const { isInScope, scopedPaths } = require('../scope-match');
+const { parseWorktreeList } = require('../worktrees.js');
 const backupRefs = require('../backup-refs');
 const os = require('node:os');
 import type { VerificationResult } from '../kernel/verification.js';
@@ -1537,6 +1538,16 @@ function workingTreeDeliveryMethod(value: any) {
 // canonical project root is not on the target branch, the one place its live state
 // could still be read from is whichever linked worktree (if any) has it checked out.
 // Returns that worktree's absolute path, or null when no worktree of this repo has it.
+//
+// SQ-344: a worktree whose directory was deleted without `git worktree remove` still holds
+// the branch administratively, and git reports it as `prunable` — or, when it was locked,
+// as `locked` with no prunable line at all. Both describe a path that may no longer exist,
+// and git prints either one AFTER the `branch` line, so the record has to be read whole
+// before it can be judged. Returning such a path spawns git into a missing cwd and refuses
+// the delivery as `delivery_evidence_unavailable`, blaming the evidence for a stale
+// registration. Falling through to null leaves the caller on the registered checkout, where
+// targetBranchMergedIntoHead can still accept a legitimate delivery and an illegitimate one
+// earns the accurate `branch_not_checked_out`.
 function integrationWorktreeForBranch(repo: string, branch: string) {
   let listing: string;
   try {
@@ -1545,19 +1556,10 @@ function integrationWorktreeForBranch(repo: string, branch: string) {
     return null;
   }
   const targetRef = `refs/heads/${branch}`;
-  let currentPath: string | null = null;
-  for (const line of listing.split(/\r?\n/)) {
-    if (line.startsWith('worktree ')) {
-      currentPath = line.slice('worktree '.length).trim();
-    } else if (line.startsWith('branch ')) {
-      const matched = currentPath && line.slice('branch '.length).trim() === targetRef;
-      if (matched) return currentPath;
-      currentPath = null;
-    } else if (line === '') {
-      currentPath = null;
-    }
-  }
-  return null;
+  const live = parseWorktreeList(listing).find((entry: any) => (
+    entry.branch === targetRef && !entry.prunable && !entry.locked
+  ));
+  return live ? live.worktree : null;
 }
 
 // Accepts a manual delivery recorded on the checked-out branch once the ticket's target
