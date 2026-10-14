@@ -9,6 +9,10 @@ import { writeDeny } from './shared/output.js';
 // substitution, or another user's home. It may expand to any path, separators included.
 const UNKNOWN = '\u0000';
 
+// Stands in for a home directory on the far side of an ssh connection. It is one path
+// component, and it is not this machine's home: a remote `~` is the remote user's.
+const REMOTE_HOME = '\u0001';
+
 // Braces end a command (`{ rm -rf ~; }`) except inside a `${NAME}` expansion.
 function deleteArguments(command: string): string[] {
   const commands = /(?:^|[;&|{}()\n])\s*(?:[\w.-]+\s+)*(?:remove-item|rm|rmdir|rd|ri|del|erase)\b((?:\$\{[^{}\n]*\}|[^;&|{}\n])*)/gi;
@@ -216,6 +220,7 @@ function patternFor(target: string): RegExp {
   return new RegExp(`^${source}$`, 'i');
 }
 
+// Local decision: the target resolves against this machine's home and filesystem.
 function isProtectedTarget(rawTarget: string): boolean {
   const home = path.resolve(os.homedir());
   const marked = markUnknown(expandHome(rawTarget, home));
@@ -243,11 +248,102 @@ function isProtectedTarget(rawTarget: string): boolean {
   return protectedPaths(home).some((protectedPath) => pattern.test(protectedPath));
 }
 
-function hasProtectedRecursiveDelete(command: string): boolean {
-  return deleteArguments(command).some((argumentsAfterDelete) => {
+// A remote payload's home spellings resolve on the other machine, so they cannot be
+// expanded here; they collapse to the unresolved remote home instead.
+const REMOTE_HOME_SPELLING = /^(?:~|\$\{(?:env:)?(?:home|userprofile)\}|\$env:(?:home|userprofile)|\$(?:home|userprofile)|%userprofile%|%homedrive%%homepath%)(?=[\\/]|$)/i;
+
+// A one-component directory under /home or /Users is somebody's home on the remote host.
+function markRemoteHome(value: string): string {
+  return value.replace(/^(\/(?:home|users)\/)[^/]+(?=\/|$)/i, (_, root: string) => `${root}${REMOTE_HOME}`);
+}
+
+// Every path a recursive remote delete must not reach. This set is deliberately distinct
+// from the local one: the remote home is unresolvable, so the guard protects the remote
+// user's own home, the conventional home roots and the homes under them, the root
+// account's home, and the .claude root inside any of those.
+const REMOTE_PROTECTED = [
+  '/',
+  '/home',
+  '/users',
+  `/${REMOTE_HOME}`,
+  `/${REMOTE_HOME}/.claude`,
+  `/home/${REMOTE_HOME}`,
+  `/home/${REMOTE_HOME}/.claude`,
+  `/users/${REMOTE_HOME}`,
+  `/users/${REMOTE_HOME}/.claude`,
+  '/root',
+  '/root/.claude',
+  '/var/root',
+  '/var/root/.claude',
+];
+
+function isRemoteProtectedTarget(rawTarget: string): boolean {
+  const marked = markUnknown(markRemoteHome(rawTarget.replace(REMOTE_HOME_SPELLING, () => `/${REMOTE_HOME}`)));
+  if (!marked) return false;
+  const normalized = slashes(marked);
+  let candidate: string;
+  if (normalized.includes(UNKNOWN)) {
+    // `$x/..` can climb anywhere, and a target led by an unknown value can be any path.
+    if (normalized.split('/').some((part) => part === '.' || part === '..')) return true;
+    if (!normalized.startsWith(UNKNOWN) && !normalized.startsWith('/')) return false;
+    candidate = trimTrailingSlashes(normalized);
+  } else {
+    // A relative remote target depends on the remote login directory, which is unknown.
+    if (!normalized.startsWith('/')) return false;
+    // The remote shell resolves with `/`, whatever separator this machine uses.
+    candidate = markRemoteHome(trimTrailingSlashes(path.posix.resolve('/', normalized)));
+  }
+  const pattern = patternFor(candidate);
+  return REMOTE_PROTECTED.some((protectedPath) => pattern.test(protectedPath));
+}
+
+// `ssh [options] destination command...`: everything after the destination is a command
+// string the remote shell runs, so it is scanned as its own command against the remote set.
+// Quoting is what hides it from the local scan, and the tokenizer already strips quotes.
+const SSH_OPTIONS_WITH_ARGUMENT = new Set(['-B', '-b', '-c', '-D', '-E', '-e', '-F', '-I', '-i', '-J', '-L', '-l', '-m', '-O', '-o', '-P', '-p', '-Q', '-R', '-S', '-W', '-w']);
+
+function sshPayloads(command: string, depth = 0): string[] {
+  if (depth > 3) return [];
+  const payloads: string[] = [];
+  const words = tokenize(command);
+  for (let index = 0; index < words.length; index += 1) {
+    if (!/^(?:.*[\\/])?ssh$/i.test(words[index] ?? '')) continue;
+    let destination = index + 1;
+    while ((words[destination] ?? '').startsWith('-')) {
+      destination += SSH_OPTIONS_WITH_ARGUMENT.has(words[destination] ?? '') ? 2 : 1;
+    }
+    const payload = words.slice(destination + 1).join(' ');
+    if (!payload) continue;
+    payloads.push(payload);
+    // `ssh a 'ssh b "rm -rf ~"'` is still a remote wipe, one hop further out.
+    payloads.push(...sshPayloads(payload, depth + 1));
+  }
+  return payloads;
+}
+
+function protectedRecursiveTarget(command: string, isProtected: (target: string) => boolean): string | undefined {
+  for (const argumentsAfterDelete of deleteArguments(command)) {
     const parsed = parseDeleteArguments(argumentsAfterDelete);
-    return parsed.recursive && parsed.targets.some(isProtectedTarget);
-  });
+    if (!parsed.recursive) continue;
+    const target = parsed.targets.find(isProtected);
+    if (target !== undefined) return target;
+  }
+  return undefined;
+}
+
+// Remote payloads are decided first: an unquoted `ssh host rm -rf ~` reaches both scans,
+// and a remote wipe and a local one are not the same event.
+function protectedDeleteReason(command: string): string | undefined {
+  for (const payload of sshPayloads(command)) {
+    const target = protectedRecursiveTarget(payload, isRemoteProtectedTarget);
+    if (target !== undefined) {
+      return `blocked a recursive delete of remote profile root (matched ${JSON.stringify(target)}).`;
+    }
+  }
+  if (protectedRecursiveTarget(command, isProtectedTarget) !== undefined) {
+    return 'blocked a recursive delete aimed at the user profile or .claude root.';
+  }
+  return undefined;
 }
 
 function main(): void {
@@ -257,8 +353,9 @@ function main(): void {
   const command = toolInput !== null && typeof toolInput === 'object' && !Array.isArray(toolInput)
     ? String((toolInput as Record<string, unknown>).command || '')
     : '';
-  if (!hasProtectedRecursiveDelete(command)) return;
-  writeDeny('PreToolUse', 'sidequest: blocked a recursive delete aimed at the user profile or .claude root. Use a specific project or scratchpad path instead.');
+  const reason = protectedDeleteReason(command);
+  if (!reason) return;
+  writeDeny('PreToolUse', `sidequest: ${reason} Use a specific project or scratchpad path instead.`);
 }
 
 try {

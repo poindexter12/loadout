@@ -3,6 +3,7 @@
 // SQ-251: the home-delete guard tokenizes each delete's arguments. A recursive flag must be
 // an option token (not `-r` inside `pr-reviews`), and a protected target must resolve to the
 // home directory, home/.claude, an ancestor of home, or a filesystem root (not any `~/...`).
+// SQ-260: an ssh payload is scanned as a remote shell command against a distinct remote set.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -13,7 +14,10 @@ const { spawnSync } = require('node:child_process');
 const HOOK = path.join(__dirname, '..', 'hooks', 'guard-home-delete.js');
 const HOME = os.homedir();
 
-function decision(command: string, toolName = 'Bash'): 'deny' | 'allow' {
+const LOCAL_REASON = /recursive delete aimed at the user profile or \.claude root/;
+const REMOTE_REASON = /recursive delete of remote profile root \(matched /;
+
+function decision(command: string, toolName = 'Bash', reason: RegExp = LOCAL_REASON): 'deny' | 'allow' {
   const result = spawnSync(process.execPath, [HOOK], {
     input: JSON.stringify({ tool_name: toolName, tool_input: { command } }),
     encoding: 'utf8',
@@ -24,13 +28,13 @@ function decision(command: string, toolName = 'Bash'): 'deny' | 'allow' {
   if (!out) return 'allow';
   const parsed = JSON.parse(out);
   assert.equal(parsed.hookSpecificOutput.permissionDecision, 'deny', out);
-  assert.match(parsed.hookSpecificOutput.permissionDecisionReason, /recursive delete aimed at the user profile or \.claude root/);
+  assert.match(parsed.hookSpecificOutput.permissionDecisionReason, reason, command);
   return 'deny';
 }
 
-function assertDecisions(cases: Array<[string, 'deny' | 'allow', string?]>) {
-  for (const [command, expected, toolName] of cases) {
-    assert.equal(decision(command, toolName), expected, `${expected.toUpperCase()} expected for: ${command}`);
+function assertDecisions(cases: Array<[string, 'deny' | 'allow', string?, RegExp?]>) {
+  for (const [command, expected, toolName, reason] of cases) {
+    assert.equal(decision(command, toolName, reason), expected, `${expected.toUpperCase()} expected for: ${command}`);
   }
 }
 
@@ -87,6 +91,48 @@ test('home-delete guard: recursive deletes of the profile, .claude, a parent, or
     ['Remove-Item -Recurse -Force $home', 'deny', 'PowerShell'],
     ['rd /s %USERPROFILE%', 'deny', 'PowerShell'],
     ['rd /s /q %USERPROFILE%\\', 'deny', 'PowerShell'],
+  ]);
+});
+
+// Ported from SQ-121. Every deny below is allowed by SQ-251's delivered guard except the two
+// unquoted forms, which it denies as a LOCAL wipe; quoting is what hides a payload from the
+// local scan, so these cases fail on the base guard and pass on the port.
+test('home-delete guard scans ssh payloads as remote shell commands', () => {
+  assertDecisions([
+    ["ssh host 'rm -rf ~'", 'deny', 'Bash', REMOTE_REASON],
+    ['ssh host "rm -rf ~"', 'deny', 'Bash', REMOTE_REASON],
+    ['ssh host rm -rf ~', 'deny', 'Bash', REMOTE_REASON],
+    ["ssh host 'rm -rf ~/'", 'deny', 'Bash', REMOTE_REASON],
+    ["ssh host 'rm -rf ~/.claude'", 'deny', 'Bash', REMOTE_REASON],
+    ['ssh host rm -rf ~/.claude', 'deny', 'Bash', REMOTE_REASON],
+    ["ssh host 'rm -rf $HOME'", 'deny', 'Bash', REMOTE_REASON],
+    ["ssh host 'rm -rf /'", 'deny', 'Bash', REMOTE_REASON],
+    ["ssh host 'rm -rf /home/remote'", 'deny', 'Bash', REMOTE_REASON],
+    ["ssh host 'rm -rf /home/remote/.claude'", 'deny', 'Bash', REMOTE_REASON],
+    ["ssh host 'rm -rf /root'", 'deny', 'Bash', REMOTE_REASON],
+    ["ssh host 'rm -rf /home/*'", 'deny', 'Bash', REMOTE_REASON],
+    ["ssh -p 2222 host 'rm -rf ~'", 'deny', 'Bash', REMOTE_REASON],
+    ["ssh -o StrictHostKeyChecking=no host 'rm -rf ~'", 'deny', 'Bash', REMOTE_REASON],
+    ["ssh host '\nrm -rf ~\n'", 'deny', 'Bash', REMOTE_REASON],
+    ["cat notes.md; ssh host 'rm -rf ~'", 'deny', 'Bash', REMOTE_REASON],
+    ['ssh a \'ssh b "rm -rf ~"\'', 'deny', 'Bash', REMOTE_REASON],
+  ]);
+});
+
+// The remote set is distinct from the local one and must not reintroduce SQ-251's false
+// positives: an ordinary remote subdirectory stays deletable, recursively or not.
+test('home-delete guard allows ordinary remote targets', () => {
+  assertDecisions([
+    ["ssh host 'rm ~/subdir'", 'allow'],
+    ["ssh host 'rm -rf ~/subdir'", 'allow'],
+    ['ssh host rm -rf ~/subdir', 'allow'],
+    ["ssh host 'rm -rf ~/mainsail'", 'allow'],
+    ["ssh host 'rm -rf ~/.cache/pr-reviews'", 'allow'],
+    ["ssh host 'rm -rf $HOME/mainsail'", 'allow'],
+    ["ssh host 'rm -rf /home/remote/mainsail'", 'allow'],
+    ["ssh host 'rm -rf /tmp/build'", 'allow'],
+    ["ssh host 'rmdir ~/.cache/pr-reviews/git.lock'", 'allow'],
+    ['ssh host uptime', 'allow'],
   ]);
 });
 

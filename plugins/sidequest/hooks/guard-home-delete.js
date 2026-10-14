@@ -171,6 +171,7 @@ function writeDeny(hookEventName, permissionDecisionReason) {
 
 // src/hooks/guard-home-delete.ts
 var UNKNOWN = "\0";
+var REMOTE_HOME = "";
 function deleteArguments(command) {
   const commands = /(?:^|[;&|{}()\n])\s*(?:[\w.-]+\s+)*(?:remove-item|rm|rmdir|rd|ri|del|erase)\b((?:\$\{[^{}\n]*\}|[^;&|{}\n])*)/gi;
   return [...command.matchAll(commands)].map((match) => match[1] || "");
@@ -376,19 +377,88 @@ function isProtectedTarget(rawTarget) {
   const pattern = patternFor(candidate);
   return protectedPaths(home).some((protectedPath) => pattern.test(protectedPath));
 }
-function hasProtectedRecursiveDelete(command) {
-  return deleteArguments(command).some((argumentsAfterDelete) => {
+var REMOTE_HOME_SPELLING = /^(?:~|\$\{(?:env:)?(?:home|userprofile)\}|\$env:(?:home|userprofile)|\$(?:home|userprofile)|%userprofile%|%homedrive%%homepath%)(?=[\\/]|$)/i;
+function markRemoteHome(value) {
+  return value.replace(/^(\/(?:home|users)\/)[^/]+(?=\/|$)/i, (_, root) => `${root}${REMOTE_HOME}`);
+}
+var REMOTE_PROTECTED = [
+  "/",
+  "/home",
+  "/users",
+  `/${REMOTE_HOME}`,
+  `/${REMOTE_HOME}/.claude`,
+  `/home/${REMOTE_HOME}`,
+  `/home/${REMOTE_HOME}/.claude`,
+  `/users/${REMOTE_HOME}`,
+  `/users/${REMOTE_HOME}/.claude`,
+  "/root",
+  "/root/.claude",
+  "/var/root",
+  "/var/root/.claude"
+];
+function isRemoteProtectedTarget(rawTarget) {
+  const marked = markUnknown(markRemoteHome(rawTarget.replace(REMOTE_HOME_SPELLING, () => `/${REMOTE_HOME}`)));
+  if (!marked) return false;
+  const normalized = slashes(marked);
+  let candidate;
+  if (normalized.includes(UNKNOWN)) {
+    if (normalized.split("/").some((part) => part === "." || part === "..")) return true;
+    if (!normalized.startsWith(UNKNOWN) && !normalized.startsWith("/")) return false;
+    candidate = trimTrailingSlashes(normalized);
+  } else {
+    if (!normalized.startsWith("/")) return false;
+    candidate = markRemoteHome(trimTrailingSlashes(import_node_path2.default.posix.resolve("/", normalized)));
+  }
+  const pattern = patternFor(candidate);
+  return REMOTE_PROTECTED.some((protectedPath) => pattern.test(protectedPath));
+}
+var SSH_OPTIONS_WITH_ARGUMENT = /* @__PURE__ */ new Set(["-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m", "-O", "-o", "-P", "-p", "-Q", "-R", "-S", "-W", "-w"]);
+function sshPayloads(command, depth = 0) {
+  if (depth > 3) return [];
+  const payloads = [];
+  const words = tokenize(command);
+  for (let index = 0; index < words.length; index += 1) {
+    if (!/^(?:.*[\\/])?ssh$/i.test(words[index] ?? "")) continue;
+    let destination = index + 1;
+    while ((words[destination] ?? "").startsWith("-")) {
+      destination += SSH_OPTIONS_WITH_ARGUMENT.has(words[destination] ?? "") ? 2 : 1;
+    }
+    const payload = words.slice(destination + 1).join(" ");
+    if (!payload) continue;
+    payloads.push(payload);
+    payloads.push(...sshPayloads(payload, depth + 1));
+  }
+  return payloads;
+}
+function protectedRecursiveTarget(command, isProtected) {
+  for (const argumentsAfterDelete of deleteArguments(command)) {
     const parsed = parseDeleteArguments(argumentsAfterDelete);
-    return parsed.recursive && parsed.targets.some(isProtectedTarget);
-  });
+    if (!parsed.recursive) continue;
+    const target = parsed.targets.find(isProtected);
+    if (target !== void 0) return target;
+  }
+  return void 0;
+}
+function protectedDeleteReason(command) {
+  for (const payload of sshPayloads(command)) {
+    const target = protectedRecursiveTarget(payload, isRemoteProtectedTarget);
+    if (target !== void 0) {
+      return `blocked a recursive delete of remote profile root (matched ${JSON.stringify(target)}).`;
+    }
+  }
+  if (protectedRecursiveTarget(command, isProtectedTarget) !== void 0) {
+    return "blocked a recursive delete aimed at the user profile or .claude root.";
+  }
+  return void 0;
 }
 function main() {
   const input = readStdin();
   if (!input || !["Bash", "PowerShell"].includes(stringField(input, "tool_name"))) return;
   const toolInput = input.tool_input;
   const command = toolInput !== null && typeof toolInput === "object" && !Array.isArray(toolInput) ? String(toolInput.command || "") : "";
-  if (!hasProtectedRecursiveDelete(command)) return;
-  writeDeny("PreToolUse", "sidequest: blocked a recursive delete aimed at the user profile or .claude root. Use a specific project or scratchpad path instead.");
+  const reason = protectedDeleteReason(command);
+  if (!reason) return;
+  writeDeny("PreToolUse", `sidequest: ${reason} Use a specific project or scratchpad path instead.`);
 }
 try {
   main();
