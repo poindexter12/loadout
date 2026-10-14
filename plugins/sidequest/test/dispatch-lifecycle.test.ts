@@ -46,6 +46,7 @@ const { collectGitSubmissionFacts } = require('../lib/mcp-lifecycle.js');
 const FORCE_EXEC_BYPASS = path.join(__dirname, '..', 'hooks', 'force-exec-bypass.js');
 const SUBAGENT_START = path.join(__dirname, '..', 'hooks', 'subagent-start.js');
 const SUBAGENT_STOP = path.join(__dirname, '..', 'hooks', 'subagent-stop.js');
+const GUARD_WORKTREE_ISOLATION = path.join(__dirname, '..', 'hooks', 'guard-worktree-isolation.js');
 const slug = store.ensureProject(PROJECT).slug;
 
 function markCheckoutInstance(worktree: string): void {
@@ -1572,6 +1573,116 @@ test('released handbacks carry registered native worktrees into continuation dis
     store.releaseTicket(slug, ticket.ref, 'continuation-cleanup', { status: 'todo', source: 'test', force: true });
     execFileSync('git', ['worktree', 'remove', '--force', worktree], { cwd: PROJECT });
     execFileSync('git', ['branch', '-D', branch], { cwd: PROJECT });
+  }
+});
+
+// SQ-171. A continuation resumes a worktree the board retained from an earlier attempt, so its binding
+// source is 'continuation' and it never records the WorktreeCreate facts an ordinary isolated dispatch
+// does. Every route that bound a runtime agent id from an `agent_id` alone — the only identity Claude
+// Code's hook payload carries for a dispatched executor — demanded exactly those facts, so a continuation
+// executor could claim and then never bind. An unbound identity holds no write lease anywhere, the
+// retained worktree included, and the only lever the resulting refusal named (dispatch with
+// recoveryEvidence) refuses a dispatch whose claim is still held. That is the deadlock observed
+// 2026-09-27 on SQ-67 attempt 3: a live claimed executor that could neither write nor recover, which
+// released rather than bypass the hook.
+test('a continuation executor binds from its agent id and writes in the retained worktree', () => {
+  const ticket = createFixture('continuation write lease fixture');
+  const firstSession = `continuation-lease-${Date.now()}`;
+  const firstAgent = `continuationlease${Date.now()}`;
+  const branch = `worktree-agent-${firstAgent}`;
+  const retained = worktrees.canonicalPath(path.join(SIDEQUEST_HOME, 'worktrees', `agent-lease-parent-${firstAgent}`, `agent-${firstAgent}`));
+  const stray = worktrees.canonicalPath(path.join(SIDEQUEST_HOME, 'worktrees', `agent-lease-parent-${firstAgent}`, `agent-${firstAgent}-stray`));
+  fs.mkdirSync(path.dirname(retained), { recursive: true });
+  const prepared = store.prepareDispatch(slug, ticket.ref, { sessionId: firstSession });
+  const executor = prepared.ticket.dispatchExecutor;
+  try {
+    assert.equal(store.recordDispatchLaunch(slug, ticket.ref, {
+      sessionId: firstSession,
+      token: prepared.token,
+      executor,
+      agentName: firstAgent,
+    }).ok, true);
+    assert.equal(store.bindDispatchWorktreeCreation(slug, firstSession, retained).ok, true);
+    execFileSync('git', ['worktree', 'add', '-b', branch, retained, 'HEAD'], { cwd: PROJECT });
+    markCheckoutInstance(retained);
+    assert.equal(store.completeDispatchWorktreeCreation(slug, firstSession, retained).ok, true);
+    assert.equal(store.bindDispatchAgent(firstSession, executor, firstAgent, firstAgent, retained).ok, true);
+    assert.equal(store.claimTicket(slug, ticket.ref, 'continuation-lease-worker', {
+      sessionId: firstSession,
+      token: prepared.token,
+      executor,
+    }).ok, true);
+    fs.appendFileSync(path.join(retained, 'tracked.js'), 'module.exports = 2;\n');
+    execFileSync('git', ['add', 'tracked.js'], { cwd: retained });
+    execFileSync('git', ['commit', '--quiet', '-m', 'continuation lease checkpoint'], { cwd: retained });
+    assert.equal(store.releaseTicket(slug, ticket.ref, 'continuation-lease-worker', {
+      status: 'todo',
+      source: 'test',
+      releaseKind: 'handback',
+      releaseReason: 'Continue in another executor.',
+    }).ok, true);
+
+    const secondSession = `${firstSession}-next`;
+    const continued = store.prepareDispatch(slug, ticket.ref, { sessionId: secondSession });
+    assert.equal(
+      continued.ticket.dispatch.continuation?.sourceWorktree,
+      retained,
+      JSON.stringify(continued.ticket.dispatch.continuationFallback),
+    );
+    const continuationExecutor = continued.ticket.dispatchExecutor;
+    // The launch records the dispatch's own launch name, which is NOT the runtime agent id: that id does
+    // not exist until the harness spawns the agent, and the hook payload is the only place it appears.
+    assert.equal(store.recordDispatchLaunch(slug, ticket.ref, {
+      sessionId: secondSession,
+      token: continued.token,
+      executor: continuationExecutor,
+      agentName: continued.ticket.dispatch.launchName,
+    }).ok, true);
+    assert.equal(store.claimTicket(slug, ticket.ref, 'continuation-lease-second', {
+      sessionId: secondSession,
+      token: continued.token,
+      executor: continuationExecutor,
+    }).ok, true);
+    assert.ok(!store.getTicket(slug, ticket.ref).dispatch.agentId, 'the claim alone leaves the runtime agent id unbound');
+
+    // The first write a continuation makes, and the one the incident refused: a release fragment inside
+    // the retained worktree. The write guard is the only thing that can bind this runtime, so an allow
+    // here is the whole fix.
+    const runtimeAgent = `${firstAgent}next`;
+    const fragment = path.join(retained, '.release', 'unreleased', `${ticket.ref}.md`);
+    fs.mkdirSync(path.dirname(fragment), { recursive: true });
+    const write = (cwd: string, file: string) => runLifecycleHook(GUARD_WORKTREE_ISOLATION, {
+      session_id: secondSession,
+      agent_id: runtimeAgent,
+      agent_type: continuationExecutor,
+      cwd,
+      tool_name: 'Write',
+      tool_input: { file_path: file, content: `sidequest: ${ticket.ref} fragment\n` },
+    });
+    assert.equal(write(retained, fragment), null, 'the retained worktree is this continuation\'s own tree');
+    assert.equal(store.getTicket(slug, ticket.ref).dispatch.agentId, runtimeAgent, 'the guard bound the continuation runtime from its agent id alone');
+
+    // A spawn that landed in a different checkout must still be refused, but with the refusal that names
+    // the tree to move to — never the unresolvable-identity one whose only named lever refuses a live claim.
+    execFileSync('git', ['worktree', 'add', '--detach', stray, 'HEAD'], { cwd: PROJECT });
+    markCheckoutInstance(stray);
+    const refused = write(stray, path.join(stray, 'tracked.js'));
+    assert.equal(refused.hookSpecificOutput.permissionDecision, 'deny');
+    const reason = refused.hookSpecificOutput.permissionDecisionReason;
+    assert.ok(reason.includes(`${ticket.ref} has no write lease for this linked worktree`), reason);
+    // It names the tree the board holds this attempt to, and a lever that works for a claimed attempt.
+    assert.match(reason, /expected worktree:/, reason);
+    assert.match(reason, /Use the worktree assigned to this executor/, reason);
+    assert.equal(store.getTicket(slug, ticket.ref).dispatch.worktree, retained);
+    // Never the unresolved-identity refusal, whose only named lever is a recovery that refuses a live claim.
+    assert.doesNotMatch(reason, /cannot match to any dispatch record/, reason);
+    assert.doesNotMatch(reason, /recoveryEvidence/, reason);
+  } finally {
+    store.releaseTicket(slug, ticket.ref, 'continuation-lease-cleanup', { status: 'todo', source: 'test', force: true });
+    for (const checkout of [stray, retained]) {
+      try { execFileSync('git', ['worktree', 'remove', '--force', checkout], { cwd: PROJECT }); } catch { /* never created */ }
+    }
+    try { execFileSync('git', ['branch', '-D', branch], { cwd: PROJECT }); } catch { /* never created */ }
   }
 });
 
