@@ -59,6 +59,9 @@ const {
   verifyEmbedsWorktreeRoot,
   withoutCategories,
 } = require('./mcp-shared');
+// The delivery-channel modes are enumerated once, in the kernel. The schema
+// below repeats them for the caller, so it reads them from there.
+const { DELIVERY_CHANNEL_MODES } = require('./kernel/pr-delivery.js');
 
 type ToolDefinition = {
   name: string;
@@ -423,7 +426,17 @@ const tools: ToolDefinition[] = [
         generatedPairs: {},
         integrationMode: { type: 'string', description: 'auto is local without origin; local does not push.' },
         integrationBranch: { type: 'string', minLength: 1, description: 'Branch used as the integration baseline. Defaults to main. Remote mode requires origin/<branch>.' },
-        delivery: { type: 'string', description: 'Default submission delivery mode. Defaults to merge.' },
+        delivery: { type: 'string', description: 'Git strategy integrate uses to apply a wave onto the integration branch: merge, replay, or apply. Defaults to merge. This is not deliveryChannel, which chooses whether that branch is advanced locally or through a pull request.' },
+        deliveryChannel: {
+          type: ['object', 'null'],
+          description: 'Where an integrated wave lands. mode "local" advances the integration branch in this checkout; mode "pr" pushes the wave branch and opens one pull request per wave, leaving participants awaiting-merge until it merges. A write replaces the whole channel, and null clears it back to the local default. This is not delivery, which is the git strategy used either way.',
+          properties: {
+            mode: { type: 'string', enum: DELIVERY_CHANNEL_MODES, description: 'local advances the integration branch directly; pr opens a pull request per wave.' },
+            remote: { type: 'string', description: 'Remote the wave branch is pushed to. Defaults to origin.' },
+            target: { type: 'string', description: 'Pull request base branch. Defaults to the board integrationBranch.' },
+          },
+          required: ['mode'],
+        },
         integrationVerifyTimeoutMs: { type: 'integer' },
         worktreeIsolation: { type: 'boolean', description: 'false runs executors in the shared checkout (default true).' },
         worktreeBase: { type: 'string', enum: ['auto', 'origin-main', 'local-main'], description: 'Isolated-worktree base.' },
@@ -457,6 +470,9 @@ const tools: ToolDefinition[] = [
       if (args.integrationMode != null) patch.integrationMode = args.integrationMode;
       if (args.integrationBranch != null) patch.integrationBranch = args.integrationBranch;
       if (args.delivery != null) patch.delivery = args.delivery;
+      // An explicit null is the documented clear, so this reads undefined
+      // rather than null to tell "leave it alone" from "clear it".
+      if (args.deliveryChannel !== undefined) patch.deliveryChannel = args.deliveryChannel;
       if (args.integrationVerifyTimeoutMs != null) patch.integrationVerifyTimeoutMs = args.integrationVerifyTimeoutMs;
       if (args.worktreeIsolation !== undefined) patch.worktreeIsolation = args.worktreeIsolation;
       if (args.worktreeBase !== undefined) patch.worktreeBase = args.worktreeBase;
