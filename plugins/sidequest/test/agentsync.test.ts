@@ -219,6 +219,107 @@ test('briefings surface tracked generated outputs paired into effective scope', 
   assert.doesNotMatch(agentsync.renderTicketBriefing(ticket, 'empty-generated-brief-token', slug, root), /Auto-paired tracked generated files/);
 });
 
+// SQ-330: SQ-329 was filed with no `files`, dispatched with allowUnscoped, and its
+// spawn prompt said "(No files were declared.)" while pulse and the commit gate both
+// enforced `docs/`, the scope defaultAlwaysInScope derives from the repo layout. The
+// executor believed the prompt, wrote nine files under plugins/quartermaster/, and
+// lost the run to a commit refusal. The enforced-scope block each surface prints must
+// be the same list pulse reports.
+// Reads the paths the single scope list prints, stripping the board-inferred
+// annotation so the list can be compared against what pulse reports, path for path.
+function enforcedScopeList(text: string) {
+  const lines = String(text).split('\n');
+  const start = lines.indexOf('Declared files:');
+  if (start === -1) return null;
+  const paths: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (line.startsWith('Nothing was declared;')) continue;
+    if (!line.startsWith('- ')) break;
+    paths.push(line.slice(2).replace(/ \(board-inferred\)$/, ''));
+  }
+  return paths;
+}
+function withStubbedSidequestInstall(run: () => void) {
+  const previous = process.env.SIDEQUEST_CLAUDE_HOME;
+  const claudeHome = tmpDir();
+  const installPath = path.join(claudeHome, 'sidequest-install');
+  fs.mkdirSync(path.join(installPath, 'hooks'), { recursive: true });
+  fs.writeFileSync(path.join(installPath, '.mcp.json'), JSON.stringify({ mcpServers: { board: { command: 'node', args: ['bin/sidequest-mcp.js'] } } }));
+  fs.writeFileSync(path.join(installPath, 'hooks', 'hooks.json'), JSON.stringify({ hooks: {} }));
+  fs.mkdirSync(path.join(claudeHome, 'plugins'), { recursive: true });
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '.claude-plugin', 'plugin.json'), 'utf8'));
+  fs.writeFileSync(path.join(claudeHome, 'plugins', 'installed_plugins.json'), JSON.stringify({
+    plugins: { 'sidequest@loadout': [{ scope: 'user', installPath, version: manifest.version }] },
+  }));
+  process.env.SIDEQUEST_CLAUDE_HOME = claudeHome;
+  try {
+    run();
+  } finally {
+    if (previous === undefined) delete process.env.SIDEQUEST_CLAUDE_HOME;
+    else process.env.SIDEQUEST_CLAUDE_HOME = previous;
+  }
+}
+
+test('SQ-330: the dispatch prompt and briefing print the enforced scope pulse reports', () => {
+  const root = tmpDir();
+  assert.equal(git(root, ['init', '-b', 'main']).status, 0);
+  assert.equal(git(root, ['config', 'user.name', 'Sidequest Test']).status, 0);
+  assert.equal(git(root, ['config', 'user.email', 'sidequest-test@example.invalid']).status, 0);
+  fs.mkdirSync(path.join(root, 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'docs', 'index.md'), '# docs\n');
+  fs.writeFileSync(path.join(root, 'tracked.js'), 'module.exports = 1;\n');
+  assert.equal(git(root, ['add', '.']).status, 0);
+  assert.equal(git(root, ['commit', '-m', 'fixture']).status, 0);
+  const store = require('../lib/store.js');
+  const slug = store.ensureProject(root, 'enforced scope briefing').slug;
+  // The board derived this: nobody declared it, and no ticket can opt out of it.
+  assert.deepEqual(store.boardConfig(slug).alwaysInScope, ['docs/']);
+  configure(store, 'sq330.scope', { model: 'sonnet', effort: 'high' });
+
+  const unscoped = store.createTicket(slug, { title: 'allowUnscoped write ticket', category: 'sq330.scope', source: 'test' });
+  assert.deepEqual(unscoped.files, []);
+  const beforeDispatch = store.pulsePayload(slug, unscoped.ref);
+  assert.equal(beforeDispatch.scope.enforced, null);
+  assert.deepEqual(beforeDispatch.scope.declared, ['docs/']);
+  const earlyBriefing = agentsync.renderTicketBriefing(unscoped, 'sq330-no-dispatch-token', slug, root);
+  assert.deepEqual(enforcedScopeList(earlyBriefing), beforeDispatch.scope.declared);
+  assert.match(earlyBriefing, /Declared files:\nNothing was declared; the board derived this set\.\n- docs\/ \(board-inferred\)\nWrites and commits are gated on exactly these paths\./);
+  assert.doesNotMatch(earlyBriefing, /\(No files were declared\.\)/);
+  // ticketCommitScope admits this ticket's release fragment only once it declares a
+  // file, so an undeclared ticket must not be told the fragment is writable. Asserted
+  // on the scope list, not the whole briefing: other guidance mentions .release paths.
+  assert.ok(!enforcedScopeList(earlyBriefing)!.some((file) => file.includes('.release/unreleased')));
+
+  withStubbedSidequestInstall(() => {
+    const prepared = store.prepareDispatch(slug, unscoped.ref, { sessionId: `sq330-unscoped-${Date.now()}`, allowUnscoped: true });
+    const live = prepared.ticket;
+    const pulse = store.pulsePayload(slug, unscoped.ref);
+    assert.deepEqual(pulse.scope.enforced, ['docs/']);
+    const stub = agentsync.renderDispatchStub(live, root);
+    const briefing = agentsync.renderTicketBriefing(live, live.dispatchNonce, slug, root);
+    for (const surface of [stub, briefing]) {
+      assert.deepEqual(enforcedScopeList(surface), pulse.scope.enforced);
+      assert.doesNotMatch(surface, /\(No files were declared\.\)/);
+      assert.match(surface, /- docs\/ \(board-inferred\)/);
+      assert.match(surface, /Writes and commits are gated on exactly these paths\./);
+    }
+  });
+
+  const declared = store.createTicket(slug, { title: 'declared scope ticket', category: 'sq330.scope', files: ['tracked.js'], source: 'test' });
+  const declaredPulse = store.pulsePayload(slug, declared.ref);
+  assert.deepEqual(declaredPulse.scope.declared, ['tracked.js', 'docs/', `.release/unreleased/${declared.ref}.md`]);
+  const declaredBriefing = agentsync.renderTicketBriefing(declared, 'sq330-declared-token', slug, root);
+  assert.match(declaredBriefing, /Declared files:\n- tracked\.js/);
+  assert.deepEqual(enforcedScopeList(declaredBriefing), declaredPulse.scope.declared);
+  assert.match(declaredBriefing, /- docs\/ \(board-inferred\)/);
+  // The release fragment is one of the enforced paths, annotated in place rather than
+  // in a second paragraph the dispatch response has no byte budget for.
+  assert.match(declaredBriefing, new RegExp(`- \\.release/unreleased/${declared.ref}\\.md \\(board-inferred\\)`));
+  assert.doesNotMatch(declaredBriefing, /Nothing was declared;/);
+  store.deleteTicket(slug, unscoped.ref);
+  store.deleteTicket(slug, declared.ref);
+});
+
 test('dispatch uncertainty does not inspect symbols named in ticket text', () => {
   const root = tmpDir();
   assert.equal(git(root, ['init', '-b', 'main']).status, 0);
