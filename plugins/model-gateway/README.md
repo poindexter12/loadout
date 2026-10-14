@@ -49,6 +49,8 @@ For each session, usage observability also keeps a small high-water file under `
 
 When the gateway disappears or restarts, ask Claude to run `doctor`. It names the lifecycle evidence at `$CLAUDE_CONFIG_DIR/model-gateway/logs/lifecycle.jsonl` and distinguishes an observed supervisor, worker, or proxy exit from no exit evidence. The bounded records identify PIDs, orderly setup/stop/restart requests, signals, and recovery outcomes. A force-killed supervisor or OS termination can leave no final record, so a missing exit entry does not prove an orderly shutdown.
 
+If you disable the plugin or stop the gateway, any project still wired to it fails every API call with ECONNREFUSED. `doctor` checks each project in `$CLAUDE_CONFIG_DIR/model-gateway/wired-projects.json`, WARNs about the ones whose settings still point at the shim port while the plugin is disabled in the active tree or the shim is not listening, and prints each one's exact project-scoped `env --remove` command. It never unwires anything itself. It also reports registry entries whose project directory is gone or whose settings no longer point at the gateway, and removes those entries only when you pass `doctor --prune-wired-projects`. `wired-projects` prints the same report on its own, and `update-loadout` runs it when it skips a disabled gateway.
+
 Doctor also prints a model-window table for Codex, Grok, live Antigravity Gemini rows, and native Claude pins: backend and picker ids,
 backend and advertised windows, Claude Code's client window and compaction point, sentry mode and trigger,
 and the measurement date. It compares the live shim ids with the installed policy when those ids are

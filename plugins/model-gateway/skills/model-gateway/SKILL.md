@@ -207,6 +207,15 @@ that owns it, or set the port overrides for this account.
 
 - **Every request fails after wiring**: a SessionStart hook can time out while it starts the shim. Claude Code cancels that hook, and a directly spawned supervisor can die with its process tree before it records an exit. Model Gateway launches the supervisor outside that tree and stops waiting before the hook budget, but if this is an older install or it still repeats, run
   `doctor`, check logs. Worst case `env --remove` restores stock behavior instantly.
+- **ECONNREFUSED in a project after the plugin was disabled or the gateway stopped**: the project's
+  `settings.local.json` (or committed `settings.json`) still sets `ANTHROPIC_BASE_URL` to the shim
+  port. `doctor` WARNs about every project recorded in `wired-projects.json` that is still wired
+  while the plugin is disabled in the active tree or the shim is not listening, and prints that
+  project's exact `cd "<project>" && node "<cli>" env --remove` command (wiring in a committed
+  `settings.json` is named for deletion by hand). Doctor removes nothing itself; offer the user
+  the printed command. It also lists registry entries whose directory is gone or whose settings no
+  longer point at the gateway, and drops them only for `doctor --prune-wired-projects`.
+  `update-loadout` prints the same list (via `wired-projects`) when it skips a disabled gateway.
 - **Codex sessions drop while this plugin's suite runs**: this version scopes fixture cleanup to
   the test gateway home, so the suite never touches the installed gateway. If it happens after
   updating, run `doctor` and include its supervisor conflict line and lifecycle evidence.

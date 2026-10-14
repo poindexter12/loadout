@@ -168,7 +168,13 @@ const USAGE = `usage: model-gateway.js <command>
                    these two are the only commands that replace an ANTHROPIC_BASE_URL
                    pointing somewhere other than this gateway or Anthropic; setup and
                    ensure leave such a project alone and name the URL instead
-  doctor           full health check
+  doctor [--prune-wired-projects]
+                   full health check; WARNs about recorded projects still wired to a
+                   disabled or stopped gateway and prints each one's env --remove
+                   command; --prune-wired-projects drops stale wired-projects.json entries
+  wired-projects [--prune-wired-projects]
+                   just doctor's read-only wired-projects report (update-loadout runs it
+                   on a tree that disabled the plugin)
   remote-control <enable|disable|doctor>
                    manage the opt-in hosts-file compatibility mode
   serve-shim       (internal) run the router in the foreground
@@ -339,7 +345,7 @@ const HEALTH_RELAY_TIMEOUT_MS = 5000;
 const {
   cleanLegacyEnvSettings, cleanLegacyGatewayModelCache, effectiveBaseUrl, foreignBaseUrlForWrite,
   gatewayPluginEnablement, isForeignBaseUrl, isWired, migrateLegacyProjectSettings, projectsStillWired,
-  readSettingsForWrite, reconcileRegisteredProjectWirings, recordProjectWiring, registeredProjectWirings,
+  projectWiringAudit, pruneProjectWiringRegistry, readSettingsForWrite, reconcileRegisteredProjectWirings, recordProjectWiring, registeredProjectWirings,
   selectedWiringScope, retireWiringModeConfig, settingsPath, wiredMode, writeSettings,
 } = require('./settings-wiring.js');
 
@@ -598,10 +604,90 @@ async function restartProxyIfOutdated({ quiet = false } = {}) {
 // Code has this plugin turned off for the active tree. Pure so tests can pin it.
 function disabledSetupMessage(enablement, stillWired = []) {
   const lines = [`model-gateway: ${enablement.pluginId} is disabled in ${enablement.file}, so setup left the gateway alone: nothing was downloaded, started, or wired. Set it to true there (or enable it from /plugin) and run setup again to use the gateway.`];
-  if (stillWired.length > 0) {
-    lines.push(`model-gateway: ${stillWired.length} recorded project(s) still route ANTHROPIC_BASE_URL through this gateway and cannot reach the API while it is off, starting with ${stillWired[0].file}. Run \`node "${CLI_PATH}" env --remove\` from each such project to unwire it.`);
-  }
+  lines.push(...staleWiringLines(stillWired, staleWiringReasons(enablement, true)));
   return lines.join('\n');
+}
+
+// SQ-345. Why a recorded project still wired to this gateway cannot count on
+// reaching the API, or [] when nothing stands in its way.
+function staleWiringReasons(enablement, shimRunning) {
+  const reasons = [];
+  if (enablement && !enablement.enabled) reasons.push(`${enablement.pluginId} is disabled in ${enablement.file}, so nothing starts the gateway for them`);
+  if (!shimRunning) reasons.push(`the gateway shim is not listening on :${PUBLIC_SHIM_PORT}`);
+  return reasons;
+}
+
+// The exact, project-scoped way to unwire one project. env --remove only edits
+// the project's settings.local.json, so wiring that lives in a committed
+// settings.json gets the key to delete instead of a command that would not touch it.
+function unwireInstruction(wiring, cliPath = CLI_PATH) {
+  const where = `${wiring.project}: ${wiring.file} sets ANTHROPIC_BASE_URL=${wiring.value}.`;
+  if (wiring.source === 'project-shared') {
+    return `${where} env --remove only edits settings.local.json, so delete ANTHROPIC_BASE_URL from that committed settings.json by hand.`;
+  }
+  return `${where} Unwire it: cd "${wiring.project}" && node "${cliPath}" env --remove`;
+}
+
+// One WARN block shared by doctor, wired-projects (what update-loadout prints on
+// a disabled tree), and setup's disabled path, so the three cannot drift.
+function staleWiringLines(wired, reasons, cliPath = CLI_PATH) {
+  if (wired.length === 0 || reasons.length === 0) return [];
+  return [
+    `model-gateway: WARN: ${wired.length} recorded project(s) still route ANTHROPIC_BASE_URL through this gateway, but ${reasons.join(', and ')}; their API calls fail with ECONNREFUSED whenever the gateway is not running. Nothing was removed. Unwire each one:`,
+    ...wired.map((wiring) => `model-gateway: WARN:   ${unwireInstruction(wiring, cliPath)}`),
+  ];
+}
+
+function staleRegistryEntryText(stale) {
+  if (stale.reason === 'invalid') return `${JSON.stringify(stale.entry)}: not an absolute project path`;
+  if (stale.reason === 'duplicate') return `${stale.project}: recorded more than once`;
+  if (stale.reason === 'missing') return `${stale.project}: the project directory no longer exists`;
+  return `${stale.project}: its settings no longer point at this gateway${stale.value ? ` (ANTHROPIC_BASE_URL=${stale.value})` : ''}`;
+}
+
+// SQ-345. The full wired-projects report: projects still wired while the gateway
+// is disabled or down, then registry entries that no longer describe a wired
+// project. Pure, so tests can pin the wording; `prune` is the result of an
+// explicit --prune-wired-projects and never happens here.
+function projectWiringReportLines(audit, { enablement, shimRunning, prune = null, cliPath = CLI_PATH } = {}) {
+  if (audit.unreadable) {
+    return [`model-gateway: WARN: ${audit.registry} is unreadable (${audit.unreadable}); recorded project wiring was not checked and the file was left as it is.`];
+  }
+  if (!audit.exists || (audit.wired.length === 0 && audit.stale.length === 0)) {
+    return [`wired projects: none recorded in ${audit.registry}`];
+  }
+  const lines = [];
+  const reasons = staleWiringReasons(enablement, shimRunning);
+  if (audit.wired.length > 0 && reasons.length === 0) {
+    lines.push(`wired projects: ${audit.wired.length} recorded project(s) route through this gateway, which is enabled and listening`);
+  }
+  lines.push(...staleWiringLines(audit.wired, reasons, cliPath));
+  if (audit.stale.length > 0) {
+    lines.push(`wired projects: ${audit.registry} has ${audit.stale.length} stale entr${audit.stale.length === 1 ? 'y' : 'ies'}:`);
+    for (const stale of audit.stale) lines.push(`  ${staleRegistryEntryText(stale)}`);
+    lines.push(prune
+      ? `wired projects: pruned ${prune.pruned.length} stale entr${prune.pruned.length === 1 ? 'y' : 'ies'} from ${audit.registry}`
+      : `wired projects: left as is. Run \`node "${cliPath}" doctor --prune-wired-projects\` to drop them; nothing prunes them otherwise.`);
+  }
+  return lines;
+}
+
+function reportProjectWiring({ enablement, shimRunning, pruneWiredProjects = false }) {
+  const audit = projectWiringAudit();
+  const prune = pruneWiredProjects ? pruneProjectWiringRegistry(audit) : null;
+  for (const line of projectWiringReportLines(audit, { enablement, shimRunning, prune })) log(line);
+  return { audit, prune };
+}
+
+// `wired-projects [--prune-wired-projects]`: the read-only half of doctor that
+// update-loadout runs on a tree that disabled the plugin. It starts nothing.
+async function wiredProjectsCommand({
+  enablement = gatewayPluginEnablement(),
+  pruneWiredProjects = flag('--prune-wired-projects'),
+  probeShim = fetchShimHealth,
+} = {}) {
+  const shimRunning = Boolean(await probeShim());
+  return reportProjectWiring({ enablement, shimRunning, pruneWiredProjects });
 }
 
 async function setup({ enablement = gatewayPluginEnablement(), stillWired = projectsStillWired } = {}) {
@@ -1523,7 +1609,11 @@ async function reportLiveShimModelPolicy() {
   return false;
 }
 
-async function doctor({ readiness: suppliedReadiness = null } = {}) {
+async function doctor({
+  readiness: suppliedReadiness = null,
+  enablement = gatewayPluginEnablement(),
+  pruneWiredProjects = flag('--prune-wired-projects'),
+} = {}) {
   recordedGatewayPids();
   const readiness = suppliedReadiness || await getCodexReadiness();
   log(`binary: ${readiness.checks.proxyBinary ? PROXY_BIN : 'MISSING (run setup)'}`);
@@ -1599,10 +1689,21 @@ async function doctor({ readiness: suppliedReadiness = null } = {}) {
   if (effective.source === 'project-local' && effective.shadowed.some(({ source }) => source === 'user')) {
     log('wiring precedence: project settings.local.json wins over user settings.json.');
   }
-  if (!effectiveWired) {
+  if (!enablement.enabled) {
+    log(`plugin: ${enablement.pluginId} is disabled in ${enablement.file}; Claude Code starts no gateway for this tree.`);
+  }
+  if (!effectiveWired && !enablement.enabled) {
+    // SQ-345: suggesting `env --write-project` to a disabled tree would wire it
+    // into the very ECONNREFUSED this report exists to catch.
+    log('wiring: not configured, as expected while the plugin is disabled');
+  } else if (!effectiveWired) {
     console.error('model-gateway: ERROR: wiring is not configured. Run /model-gateway:model-gateway, then use its env --write-project command and restart Claude Code.');
     process.exitCode = 1;
   }
+  // SQ-345: other projects wired through this gateway break silently when it is
+  // disabled or down. Report them, and the registry's stale entries; change
+  // nothing unless --prune-wired-projects was given.
+  reportProjectWiring({ enablement, shimRunning: Boolean(readiness.checks.shimRunning), pruneWiredProjects });
   const effectiveMode = modeFor(effective.value);
   const shadowedMode = effective.shadowed.find((definition) => {
     const mode = modeFor(definition.value);
@@ -2747,6 +2848,7 @@ const commands = {
   pin: () => pinCommand(),
   env: () => envCommand(),
   doctor: (options) => doctor(options),
+  'wired-projects': (options) => wiredProjectsCommand(options),
   'remote-control': () => remoteControlCommand(),
   'serve-shim': () => runShim(),
   'recover-shim': async () => { await recoverShimAfterIncumbent(); },
@@ -2775,6 +2877,8 @@ module.exports = {
   loginSuccessMessage,
   disabledSetupMessage,
   gatewayPluginEnablement,
+  projectWiringReportLines,
+  unwireInstruction,
   startupWaitMsFor,
   startAll,
   spawnReparented,
