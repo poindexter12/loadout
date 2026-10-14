@@ -53,7 +53,10 @@ const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 // attestation grammar alone. Everything that can wait for the second call went to the skill instead.
 // Raised from 23600 for recovery-retention board configuration (SQ-2453) while preserving the 2.5KB reserve.
 // Raised from 23800 for the issue_link tool (external tracker links, 276 bytes) while preserving the 2.5KB reserve.
-const MCP_TOOLS_LIST_MAX_BYTES = 24100;
+// Raised from 24100 for board_config.deliveryChannel (SQ-340, 181 bytes) while preserving the 2.5KB reserve.
+// The mode/remote/target object stays structured rather than a packed string: an orchestrator turning
+// PR delivery on gets the enum and the two optional fields from the schema, not from a second call.
+const MCP_TOOLS_LIST_MAX_BYTES = 24300;
 const MCP_TOOLS_LIST_HEADROOM_BYTES = 2500;
 
 function serverVersion() {
@@ -95,7 +98,7 @@ function toolMutates(name?: any, args?: any) {
   if (MUTATING_TOOLS.has(String(name))) return true;
   if (name === 'new_board_profile') return args.profile !== undefined;
   if (name === 'global_fallback') return args.model !== undefined || args.effort !== undefined;
-  if (name === 'board_config') return args.name !== undefined || args.alwaysInScope != null || args.generatedPairs !== undefined || args.integrationMode != null || args.integrationBranch != null || args.worktreeIsolation !== undefined || args.worktreeBase !== undefined || args.notIntegratedSalvageAgeHours !== undefined || args.worktreeRecoveryRetentionAgeHours !== undefined || args.worktreeRecoveryRetentionMaxPerAgent !== undefined || args.autoApproveTestScope !== undefined || args.autoApproveScope !== undefined || args.worktreeSetup !== undefined || args.worktreeDependencyPaths !== undefined;
+  if (name === 'board_config') return args.name !== undefined || args.alwaysInScope != null || args.generatedPairs !== undefined || args.integrationMode != null || args.integrationBranch != null || args.deliveryChannel !== undefined || args.worktreeIsolation !== undefined || args.worktreeBase !== undefined || args.notIntegratedSalvageAgeHours !== undefined || args.worktreeRecoveryRetentionAgeHours !== undefined || args.worktreeRecoveryRetentionMaxPerAgent !== undefined || args.autoApproveTestScope !== undefined || args.autoApproveScope !== undefined || args.worktreeSetup !== undefined || args.worktreeDependencyPaths !== undefined;
   return false;
 }
 

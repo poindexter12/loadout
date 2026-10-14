@@ -122,6 +122,28 @@ If a routing profile offers fewer models than you expect, ask Claude to check mo
 
 A model going unready does not repoint your routes. A gateway restart, or a catalog Sidequest cannot refresh, makes a model temporarily unlistable, but a category already routed to it stays routed to it: a dispatch in that window is refused with the readiness message rather than quietly handed to a Claude model. A profile only gains a non-Claude route, never loses one, so once the gateway publishes a model the route sticks until you change it. Restart the gateway and retry, or edit the category if you want it to run on Claude.
 
+## Deliver through pull requests
+
+By default a board delivers locally: when you integrate a wave, Sidequest advances the integration branch in your checkout. If your repository requires every commit to arrive through a review, switch the board's delivery channel to PR mode instead:
+
+```text
+sidequest board-config --delivery-channel pr
+```
+
+Integrating a wave then leaves your checkout and the target branch untouched. Sidequest builds the wave in a temporary worktree off `origin/main`, pushes it as `sidequest/wave/<wave-id>`, opens one pull request for the whole wave, and enables auto-merge. Every participating ticket moves to awaiting-merge and stays there until the pull request merges, so `sidequest watch` and the ticket pulse show you which waves are waiting on review rather than reporting them as delivered. The pull request's own CI is the wave gate, which is why no local full suite runs at integration time.
+
+PR mode needs the `gh` CLI installed and authenticated for the repository. When it is not, integration refuses and names the cause. It never falls back to moving your local branch, because a board configured for review delivery asking for a quiet local merge is the one outcome that would defeat the setting.
+
+Two optional flags adjust the destination, and both need a mode in the same command because a write replaces the whole channel:
+
+```text
+sidequest board-config --delivery-channel pr --delivery-remote upstream --delivery-target release/next
+```
+
+The remote defaults to `origin` and the base branch defaults to the board's integration branch. `sidequest board-config --delivery-channel none` clears the channel and returns the board to local delivery. Agents set the same thing through the `board_config` MCP tool's `deliveryChannel` property.
+
+Do not confuse this with `--delivery`, which stays the git strategy used to apply a wave (`merge`, `replay`, or `apply`). `--delivery` decides how the commits are shaped; `--delivery-channel` decides whether they land locally or behind a pull request.
+
 ## Keep GitHub issues aligned
 
 Link a GitHub issue to its execution ticket when that issue should follow the delivery lifecycle. Agents use the `issue_link` MCP tool; the CLI equivalent is:

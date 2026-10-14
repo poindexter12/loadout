@@ -2031,6 +2031,30 @@
         "delivery": {
           "type": "string"
         },
+        "deliveryChannel": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "local",
+                "pr"
+              ]
+            },
+            "remote": {
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
         "integrationVerifyTimeoutMs": {
           "type": "integer"
         },

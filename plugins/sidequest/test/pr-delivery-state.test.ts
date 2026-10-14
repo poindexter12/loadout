@@ -1,4 +1,9 @@
 import './_temp-cleanup.js';
+// A board_config write is a mutation, so both write surfaces run the install
+// freshness gate against whatever installed_plugins.json the machine has. This
+// registers a stub install at this build's version so the two SQ-340 surface
+// tests below are hermetic.
+import './_sidequest-install-fixture.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -151,6 +156,101 @@ test('an unknown delivery mode or unsafe channel value is refused with a clear m
   assert.equal(store.setBoardConfig(board.slug, { deliveryChannel: { mode: 'pr', target: 'main' } }).ok, true);
   assert.throws(() => store.setBoardConfig(board.slug, { deliveryChannel: { mode: 'pr' } }), /needs a PR base branch/);
   assert.deepEqual(store.resolveDeliveryConfig(board.slug), { mode: 'pr', remote: 'origin', target: 'main' });
+});
+
+// SQ-340: the two surfaces that WRITE the channel. The store has accepted a
+// deliveryChannel patch since US-3 and the read path has always returned one,
+// but neither caller ever passed it, so every board sat on local delivery with
+// no supported way off it. The tests above cover the store; these cover the
+// callers, and both fail before this ticket — the MCP tool refusing
+// deliveryChannel as an unknown argument, the CLI refusing the flag.
+test('the board_config MCP tool writes, reads back, and clears the delivery channel', async () => {
+  const board = makeBoard('mcp-surface');
+  const mcp = require('../lib/mcp.js');
+  let requestId = 0;
+  const call = async (args: Record<string, unknown>) => {
+    const response = await mcp.handleRequest({ jsonrpc: '2.0', id: ++requestId, method: 'tools/call', params: { name: 'board_config', arguments: args } });
+    assert.ok(response && response.result, 'board_config returned a result');
+    return response.result;
+  };
+  const ok = async (args: Record<string, unknown>) => {
+    const result = await call(args);
+    assert.ok(!result.isError, result.content?.[0]?.text);
+    return JSON.parse(result.content[0].text);
+  };
+
+  const written = await ok({ project: board.slug, deliveryChannel: { mode: 'pr', remote: 'upstream', target: 'release/next' } });
+  const explicit = { mode: 'pr', remote: 'upstream', target: 'release/next' };
+  assert.deepEqual(written.deliveryChannel, explicit);
+  assert.deepEqual((await ok({ project: board.slug })).deliveryChannel, explicit, 'a later read returns what was written');
+  assert.deepEqual(store.readMeta(board.slug).deliveryChannel, { mode: 'pr', remote: 'upstream', target: 'release/next' });
+
+  // Mode on its own takes the defaults, and a write replaces the whole channel
+  // rather than merging into the one above.
+  assert.deepEqual((await ok({ project: board.slug, deliveryChannel: { mode: 'pr' } })).deliveryChannel, { mode: 'pr', remote: 'origin', target: 'main' });
+
+  // An explicit null is the documented clear, which is why the handler tests
+  // for undefined: reading `!= null` would make the clear unreachable.
+  assert.deepEqual((await ok({ project: board.slug, deliveryChannel: null })).deliveryChannel, LOCAL_DEFAULT);
+  assert.equal(Object.hasOwn(store.readMeta(board.slug), 'deliveryChannel'), false);
+
+  // The store's validator is the only one. The tool adds no second copy, so a
+  // bad mode comes back with the store's own message.
+  const refused = await call({ project: board.slug, deliveryChannel: { mode: 'github' } });
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /deliveryChannel\.mode must be "local" or "pr"; got "github"\./);
+  assert.deepEqual((await ok({ project: board.slug })).deliveryChannel, LOCAL_DEFAULT, 'a refused call writes nothing');
+});
+
+test('the board-config CLI writes, reads back, and clears the delivery channel', () => {
+  const board = makeBoard('cli-surface');
+  const cli = path.join(ROOT, 'bin', 'sidequest.js');
+  const run = (args: string[]) => {
+    const result = spawnSync(process.execPath, [cli, 'board-config', '--project', board.repo, ...args], {
+      encoding: 'utf8',
+      windowsHide: true,
+      env: { ...process.env, CLAUDE_PLUGIN_ROOT: ROOT, CLAUDE_PROJECT_DIR: board.repo, SIDEQUEST_HOME: home },
+    });
+    return { status: result.status, stdout: result.stdout || '', stderr: result.stderr || '' };
+  };
+  // Each read runs in its own process, so a channel that survives one has
+  // genuinely reached the store rather than a cache this test shares.
+  const channelOf = (args: string[]) => {
+    const result = run([...args, '--json']);
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout).deliveryChannel;
+  };
+
+  assert.deepEqual(channelOf([]), LOCAL_DEFAULT);
+  const explicit = { mode: 'pr', remote: 'upstream', target: 'release/next' };
+  assert.deepEqual(channelOf(['--delivery-channel', 'pr', '--delivery-remote', 'upstream', '--delivery-target', 'release/next']), explicit);
+  assert.deepEqual(channelOf([]), explicit, 'a fresh process reads the stored channel');
+
+  // The printed form names the channel on its own line, separate from the git
+  // strategy, which is the pair the old `delivery` description conflated.
+  const printed = run(['--delivery-channel', 'pr']);
+  assert.equal(printed.status, 0, printed.stderr);
+  assert.match(printed.stdout, /^delivery channel: pr \(remote origin, base main\)$/m);
+  assert.match(printed.stdout, /^delivery: merge$/m);
+
+  assert.deepEqual(channelOf(['--delivery-channel', 'none']), LOCAL_DEFAULT);
+
+  // A remote or base with no mode is refused rather than written: a channel
+  // write replaces the whole record, so accepting one alone would silently
+  // reset the mode to local while appearing to set a destination.
+  const orphan = run(['--delivery-remote', 'upstream']);
+  assert.equal(orphan.status, 1);
+  assert.match(orphan.stderr, /--delivery-remote needs --delivery-channel local\|pr in the same command/);
+  assert.match(run(['--delivery-remote', 'upstream', '--delivery-target', 'release/next']).stderr, /--delivery-remote and --delivery-target need --delivery-channel local\|pr/);
+  const clearing = run(['--delivery-channel', 'none', '--delivery-target', 'release/next']);
+  assert.equal(clearing.status, 1);
+  assert.match(clearing.stderr, /--delivery-channel none clears the channel, so it cannot be combined with --delivery-target/);
+
+  // The store's validator reaches the CLI too, with no second copy of it here.
+  const bad = run(['--delivery-channel', 'github']);
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /deliveryChannel\.mode must be "local" or "pr"; got "github"\./);
+  assert.deepEqual(channelOf([]), LOCAL_DEFAULT, 'every refusal above wrote nothing');
 });
 
 test('markWaveAwaitingMerge moves every wave participant to awaiting-merge at once', () => {
