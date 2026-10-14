@@ -1144,6 +1144,103 @@ test('a manual delivery reads the target branch from a linked worktree instead o
   assert.equal(result.integration.targetBranch, waveBranch);
 });
 
+// SQ-344: a worktree directory deleted without `git worktree remove` keeps holding its branch
+// in git's administrative records, and `git worktree list --porcelain` marks the record
+// `prunable` on a line AFTER `branch`. The lookup used to answer at the branch line and hand
+// back a path that no longer exists, so git was spawned into a missing cwd and the delivery
+// was refused as `delivery_evidence_unavailable` — blaming the evidence for a stale
+// registration. The refusal must name the real problem instead.
+test('a manual delivery refuses on the branch, not the evidence, when the target worktree directory was deleted', () => {
+  const fixture = makeRepo('wave-prunable');
+  const { slug } = store.ensureProject(fixture.repo);
+  const ticket = store.createTicket(slug, {
+    title: 'wave branch held by a deleted worktree',
+    category: 'codebase-exploration',
+    description: 'A wave branch still registered to a worktree whose directory was deleted without git worktree remove.',
+    files: ['feature.txt'],
+  });
+  submitFixture(slug, ticket, fixture);
+
+  const waveBranch = 'sidequest/wave/wave-prunable';
+  const wave = path.join(fixture.repo, '.claude', 'worktrees', 'wave-prunable-wt');
+  git(['worktree', 'add', '-b', waveBranch, wave, fixture.submitted], fixture.repo);
+  fs.rmSync(wave, { recursive: true, force: true });
+  assert.match(git(['worktree', 'list', '--porcelain'], fixture.repo), /\nprunable/);
+
+  const result = store.recordDeliveredSubmission(slug, ticket.ref, {
+    target: { mode: 'local', branch: waveBranch, upstream: waveBranch },
+    deliveryCommit: fixture.submitted,
+    deliveryMethod: 'manual',
+    reason: 'The wave branch has not merged into main and its worktree directory is gone.',
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'branch_not_checked_out');
+});
+
+test('a manual delivery accepts a merged wave branch whose worktree directory was deleted', () => {
+  const fixture = makeRepo('wave-prunable-merged');
+  const { slug } = store.ensureProject(fixture.repo);
+  const ticket = store.createTicket(slug, {
+    title: 'merged wave branch held by a deleted worktree',
+    category: 'codebase-exploration',
+    description: 'A merged wave branch still registered to a worktree whose directory was deleted.',
+    files: ['feature.txt'],
+  });
+  submitFixture(slug, ticket, fixture);
+
+  const waveBranch = 'sidequest/wave/wave-prunable-merged';
+  const wave = path.join(fixture.repo, '.claude', 'worktrees', 'wave-prunable-merged-wt');
+  git(['worktree', 'add', '-b', waveBranch, wave, fixture.submitted], fixture.repo);
+  git(['merge', '--ff-only', waveBranch], fixture.repo);
+  const mainHead = head(fixture.repo);
+  fs.rmSync(wave, { recursive: true, force: true });
+
+  const delivered = store.recordDeliveredSubmission(slug, ticket.ref, {
+    target: { mode: 'local', branch: waveBranch, upstream: waveBranch },
+    deliveryCommit: mainHead,
+    deliveryMethod: 'manual',
+    reason: 'The wave branch merged into main; its leaked worktree directory must not block the record.',
+  });
+  assert.equal(delivered.ok, true, delivered.message);
+  assert.equal(delivered.integration.targetBranch, waveBranch);
+  assert.equal(delivered.integration.resultingHead, mainHead);
+});
+
+// Locking suppresses the prunable line entirely, so a locked worktree whose directory is gone
+// reports only `locked` — the same dead path by a different name.
+test('a manual delivery accepts a merged wave branch whose locked worktree directory was deleted', () => {
+  const fixture = makeRepo('wave-locked-merged');
+  const { slug } = store.ensureProject(fixture.repo);
+  const ticket = store.createTicket(slug, {
+    title: 'merged wave branch held by a deleted locked worktree',
+    category: 'codebase-exploration',
+    description: 'A merged wave branch still registered to a locked worktree whose directory was deleted.',
+    files: ['feature.txt'],
+  });
+  submitFixture(slug, ticket, fixture);
+
+  const waveBranch = 'sidequest/wave/wave-locked-merged';
+  const wave = path.join(fixture.repo, '.claude', 'worktrees', 'wave-locked-merged-wt');
+  git(['worktree', 'add', '-b', waveBranch, wave, fixture.submitted], fixture.repo);
+  git(['merge', '--ff-only', waveBranch], fixture.repo);
+  const mainHead = head(fixture.repo);
+  git(['worktree', 'lock', wave], fixture.repo);
+  fs.rmSync(wave, { recursive: true, force: true });
+  const listing = git(['worktree', 'list', '--porcelain'], fixture.repo);
+  assert.match(listing, /\nlocked/);
+  assert.doesNotMatch(listing, /\nprunable/);
+
+  const delivered = store.recordDeliveredSubmission(slug, ticket.ref, {
+    target: { mode: 'local', branch: waveBranch, upstream: waveBranch },
+    deliveryCommit: mainHead,
+    deliveryMethod: 'manual',
+    reason: 'The wave branch merged into main; its locked, deleted worktree must not block the record.',
+  });
+  assert.equal(delivered.ok, true, delivered.message);
+  assert.equal(delivered.integration.targetBranch, waveBranch);
+  assert.equal(delivered.integration.resultingHead, mainHead);
+});
+
 test('groomClose delivers a landed candidate despite an overlapping pending sibling candidate', async () => {
   const fixture = makeRepo('gc-ovl');
   const { slug } = store.ensureProject(fixture.repo);

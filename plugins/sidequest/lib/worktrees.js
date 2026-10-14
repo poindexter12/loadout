@@ -336,8 +336,9 @@ function parseWorktreeList(output) {
   return output.split(/\r?\n\r?\n/).filter(Boolean).map((block) => {
     const entry = {};
     for (const line of block.split(/\r?\n/)) {
-      const match = /^(worktree|HEAD|branch|locked)\s*(.*)$/.exec(line);
-      if (match?.[1] && match[2] != null) entry[match[1].toLowerCase()] = match[1] === "locked" ? "true" : match[2];
+      const match = /^(worktree|HEAD|branch|locked|prunable)\s*(.*)$/.exec(line);
+      const presenceOnly = match?.[1] === "locked" || match?.[1] === "prunable";
+      if (match?.[1] && match[2] != null) entry[match[1].toLowerCase()] = presenceOnly ? "true" : match[2];
     }
     return entry;
   }).filter((entry) => entry.worktree);

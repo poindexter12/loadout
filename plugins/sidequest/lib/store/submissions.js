@@ -9,6 +9,7 @@ const { assembleWave, openWave, recordAssembledWaveGate, recordWaveDelivery } = 
 const { AWAITING_MERGE_OUTCOME, isSafeBranchName, isSafeRefComponent, validateWavePullRequest, waveBranchName } = require("../kernel/pr-delivery.js");
 const { createGhPrPort, PrDeliveryUnavailableError } = require("../ports/github-pr.js");
 const { isInScope, scopedPaths } = require("../scope-match");
+const { parseWorktreeList } = require("../worktrees.js");
 const backupRefs = require("../backup-refs");
 const os = require("node:os");
 function createSubmissions(dependencies) {
@@ -1290,19 +1291,8 @@ ${verify.outputTail}` : null
       return null;
     }
     const targetRef = `refs/heads/${branch}`;
-    let currentPath = null;
-    for (const line of listing.split(/\r?\n/)) {
-      if (line.startsWith("worktree ")) {
-        currentPath = line.slice("worktree ".length).trim();
-      } else if (line.startsWith("branch ")) {
-        const matched = currentPath && line.slice("branch ".length).trim() === targetRef;
-        if (matched) return currentPath;
-        currentPath = null;
-      } else if (line === "") {
-        currentPath = null;
-      }
-    }
-    return null;
+    const live = parseWorktreeList(listing).find((entry) => entry.branch === targetRef && !entry.prunable && !entry.locked);
+    return live ? live.worktree : null;
   }
   function targetBranchMergedIntoHead(repo, branch, deliveryCommit, head) {
     const candidates = [deliveryCommit];
