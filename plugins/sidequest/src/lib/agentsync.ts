@@ -93,6 +93,10 @@ const { stableClaudeName, stableDispatchName, stableReadOnlyClaudeName, stableRe
 const { createWorktreeLease, worktreeResumeDecision } = require('./kernel/worktree.js');
 const crypto = require('crypto');
 const store = require('./store.js');
+// store.ts passes commit-scope into its layers but never re-exports it, so the
+// `store.commitScope?.…` this file used read undefined and optional-chained the
+// release-fragment line away without erroring. Require the module directly.
+const commitScope = require('./commit-scope.js');
 const { worktreeRoot } = require('./worktrees.js');
 const { spawnDescription } = store;
 const { compileContextProjection } = require('./context-packet.js');
@@ -1140,9 +1144,54 @@ function oracleHandoffPacket(ticket?: any) {
   return `Oracle handoff: ${ticket.status === 'awaiting-oracle' ? 'awaiting a human verdict' : 'verdict recorded'}. Ask: ${oracle.ask}.${verdict}`;
 }
 
-function ticketReleaseFragmentScope(ticket?: any) {
-  const fragment = store.commitScope?.ticketReleaseFragment(ticket?.ref);
-  return fragment ? `\n\nImplicit release fragment (write only this ticket's):\n- ${fragment}` : '';
+function briefingScopeKey(file?: any) {
+  const value = String(file || '').replace(/\\/g, '/').replace(/\/+$/, '').trim();
+  return process.platform === 'win32' ? value.toLowerCase() : value;
+}
+
+// The spawn stub and the briefing both printed `ticket.files` alone, so a ticket
+// filed with no files and dispatched with allowUnscoped read "(No files were
+// declared.)" while pulse and the commit gate enforced the scope the board
+// derived — `docs/` from defaultAlwaysInScope. SQ-329's executor took the
+// briefing at its word, wrote nine files under plugins/quartermaster/, and lost
+// the run to a commit refusal. Both surfaces now print the set the gate actually
+// admits: a live dispatch binding is that set (it is exactly what pulse reports
+// as scope.enforced), and without one the ticket's own commit scope is (pulse
+// scope.declared). SQ-330.
+function enforcedScopePaths(ticket?: any, slug?: any) {
+  // Both branches mirror scopePulse in store/pulse.ts line for line, including its
+  // dispatchState read, so the two surfaces cannot drift into disagreement again.
+  const dispatch = ticket && ticket.dispatch && typeof ticket.dispatch === 'object' ? ticket.dispatch : null;
+  const bound = dispatch && !dispatch.terminalAt && Array.isArray(dispatch.declaredFiles) ? dispatch.declaredFiles : null;
+  // An empty binding is still the binding: the gate then admits nothing, and
+  // saying so beats falling back to a wider set the dispatch has superseded.
+  if (bound) return bound.slice();
+  const declared = Array.isArray(ticket?.files) ? ticket.files : [];
+  const effective = slug ? store.effectiveScope(slug, ticket) : declared.slice();
+  return commitScope.ticketCommitScope(effective, declared, ticket?.ref);
+}
+
+// One list, because two of them disagreed. The gate admits exactly the enforced
+// set, so that is what prints, with every path the board added to the declared
+// list marked inferred. Deliberately terse: this block also rides the dispatch
+// tool's response, which context-budget-benchmark holds to 1320 bytes, and a
+// second list or a second paragraph does not fit under it. That budget is also
+// why the dead "Implicit release fragment" paragraph is not revived: the fragment
+// is one of these paths and is annotated in place.
+function scopeBlock(ticket?: any, enforced?: any) {
+  const declared = Array.isArray(ticket?.files) ? ticket.files : [];
+  const paths = Array.isArray(enforced) ? enforced : [];
+  if (!paths.length) return declared.length ? declared.map((file: any) => `- ${file}`).join('\n') : '(No files were declared.)';
+  const declaredKeys = new Set(declared.map(briefingScopeKey));
+  let inferred = 0;
+  const lines = paths.map((file: any) => {
+    if (declaredKeys.has(briefingScopeKey(file))) return `- ${file}`;
+    inferred += 1;
+    return `- ${file} (board-inferred)`;
+  });
+  if (!inferred) return lines.join('\n');
+  const preface = declared.length ? '' : 'Nothing was declared; the board derived this set.\n';
+  return `${preface}${lines.join('\n')}\nWrites and commits are gated on exactly these paths.`;
 }
 
 function executorTaskBody(ticket?: any, category?: any, declaredFiles?: any, uncertainty?: any, planDocument?: any, experimentLog?: any, findingCheckpoints?: any, continuation?: any) {
@@ -1163,7 +1212,7 @@ ${category.contract || '(No category-specific executor instructions were recorde
     ...(continuation ? [continuation] : []),
     ...(oracleHandoffPacket(ticket) ? [oracleHandoffPacket(ticket)] : []),
     ...(experimentLog ? [`Experiment log:\n${experimentLog}`] : []),
-    `Declared files:\n${declaredFiles}${ticketReleaseFragmentScope(ticket)}`,
+    `Declared files:\n${declaredFiles}`,
     ...(planDocument ? [planDocument] : []),
     'Never hold a claim waiting for a human verdict. Release with kind `oracle`, provide the ask in `oracle`, and exit so the ticket parks as awaiting-oracle. A user is not a board fallback: when no board path remains, comment the evidence and release with kind `technical_blocker`; never compose a command for a human to run.\n\nScope check: request scope when a needed path is outside the declared set. A granted ruling takes effect immediately for write enforcement and commit admission. On refusal, commit in-scope work and release with kind `handback`, naming the refused paths. The orchestrator can expand the ticket files and redispatch. A declared directory covers descendants, and globs match paths consistently at the hook and commit gate. On the first uncovered scope miss, sweep tests, fixtures, goldens, and generated outputs, then make one consolidated request. Never ship a compensating or downstream workaround inside scope instead: a verified workaround is not a substitute for the root fix.',
   ].join('\n\n');
@@ -1172,7 +1221,8 @@ ${category.contract || '(No category-specific executor instructions were recorde
 function taskAndScopeBody(ticket?: any, slug?: any) {
   const category = ticket?.category || {};
   const declared = Array.isArray(ticket?.files) ? ticket.files : [];
-  const declaredFiles = declared.length ? declared.map((file: any) => `- ${file}`).join('\n') : '(No files were declared.)';
+  const enforced = enforcedScopePaths(ticket, slug);
+  const declaredFiles = scopeBlock(ticket, enforced);
   const effectiveFiles = store.effectiveScope(slug, ticket);
   const declaredKeys = new Set(declared.map((file: any) => process.platform === 'win32' ? String(file).toLowerCase() : String(file)));
   const alwaysKeys = new Set((store.boardConfig(slug)?.alwaysInScope || []).map((file: any) => process.platform === 'win32' ? String(file).toLowerCase() : String(file)));
@@ -1365,14 +1415,16 @@ function transportExecutorBriefing(briefing?: any, ticket?: any, slug?: any, pro
 function dispatchTicketContext(ticket?: any, projectPath?: any) {
   const title = String(ticket?.title || '(Untitled ticket)');
   const description = String(ticket?.description || '(No additional description was recorded.)');
-  const declaredFiles = Array.isArray(ticket?.files) && ticket.files.length
-    ? ticket.files.map((file: any) => `- ${file}`).join('\n')
-    : '(No files were declared.)';
+  // No slug to resolve alwaysInScope against, and none needed: renderDispatchStub
+  // is this function's only caller and it refuses a ticket without a dispatch token,
+  // so the dispatch binding always exists and enforcedScopePaths returns it directly.
+  const enforced = enforcedScopePaths(ticket);
+  const declaredFiles = scopeBlock(ticket, enforced);
   const anchors = String(ticket?.executorAnchors || '(No anchors were recorded.)');
   return [
     `Title: ${title}`,
     `Description:\n${description}`,
-    `Declared files:\n${declaredFiles}${ticketReleaseFragmentScope(ticket)}`,
+    `Declared files:\n${declaredFiles}`,
     `Anchors:\n${anchors}`,
   ].join('\n\n');
 }

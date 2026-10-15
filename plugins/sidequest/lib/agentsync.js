@@ -8,6 +8,7 @@ const { stableClaudeName, stableDispatchName, stableReadOnlyClaudeName, stableRe
 const { createWorktreeLease, worktreeResumeDecision } = require("./kernel/worktree.js");
 const crypto = require("crypto");
 const store = require("./store.js");
+const commitScope = require("./commit-scope.js");
 const { worktreeRoot } = require("./worktrees.js");
 const { spawnDescription } = store;
 const { compileContextProjection } = require("./context-packet.js");
@@ -828,12 +829,33 @@ function oracleHandoffPacket(ticket) {
   const verdict = oracle.verdict?.text ? ` Human verdict: ${oracle.verdict.text}` : "";
   return `Oracle handoff: ${ticket.status === "awaiting-oracle" ? "awaiting a human verdict" : "verdict recorded"}. Ask: ${oracle.ask}.${verdict}`;
 }
-function ticketReleaseFragmentScope(ticket) {
-  const fragment = store.commitScope?.ticketReleaseFragment(ticket?.ref);
-  return fragment ? `
-
-Implicit release fragment (write only this ticket's):
-- ${fragment}` : "";
+function briefingScopeKey(file) {
+  const value = String(file || "").replace(/\\/g, "/").replace(/\/+$/, "").trim();
+  return process.platform === "win32" ? value.toLowerCase() : value;
+}
+function enforcedScopePaths(ticket, slug) {
+  const dispatch = ticket && ticket.dispatch && typeof ticket.dispatch === "object" ? ticket.dispatch : null;
+  const bound = dispatch && !dispatch.terminalAt && Array.isArray(dispatch.declaredFiles) ? dispatch.declaredFiles : null;
+  if (bound) return bound.slice();
+  const declared = Array.isArray(ticket?.files) ? ticket.files : [];
+  const effective = slug ? store.effectiveScope(slug, ticket) : declared.slice();
+  return commitScope.ticketCommitScope(effective, declared, ticket?.ref);
+}
+function scopeBlock(ticket, enforced) {
+  const declared = Array.isArray(ticket?.files) ? ticket.files : [];
+  const paths = Array.isArray(enforced) ? enforced : [];
+  if (!paths.length) return declared.length ? declared.map((file) => `- ${file}`).join("\n") : "(No files were declared.)";
+  const declaredKeys = new Set(declared.map(briefingScopeKey));
+  let inferred = 0;
+  const lines = paths.map((file) => {
+    if (declaredKeys.has(briefingScopeKey(file))) return `- ${file}`;
+    inferred += 1;
+    return `- ${file} (board-inferred)`;
+  });
+  if (!inferred) return lines.join("\n");
+  const preface = declared.length ? "" : "Nothing was declared; the board derived this set.\n";
+  return `${preface}${lines.join("\n")}
+Writes and commits are gated on exactly these paths.`;
 }
 function executorTaskBody(ticket, category, declaredFiles, uncertainty, planDocument, experimentLog, findingCheckpoints, continuation) {
   return [
@@ -856,7 +878,7 @@ ${findingCheckpoints}`] : [],
     ...experimentLog ? [`Experiment log:
 ${experimentLog}`] : [],
     `Declared files:
-${declaredFiles}${ticketReleaseFragmentScope(ticket)}`,
+${declaredFiles}`,
     ...planDocument ? [planDocument] : [],
     "Never hold a claim waiting for a human verdict. Release with kind `oracle`, provide the ask in `oracle`, and exit so the ticket parks as awaiting-oracle. A user is not a board fallback: when no board path remains, comment the evidence and release with kind `technical_blocker`; never compose a command for a human to run.\n\nScope check: request scope when a needed path is outside the declared set. A granted ruling takes effect immediately for write enforcement and commit admission. On refusal, commit in-scope work and release with kind `handback`, naming the refused paths. The orchestrator can expand the ticket files and redispatch. A declared directory covers descendants, and globs match paths consistently at the hook and commit gate. On the first uncovered scope miss, sweep tests, fixtures, goldens, and generated outputs, then make one consolidated request. Never ship a compensating or downstream workaround inside scope instead: a verified workaround is not a substitute for the root fix."
   ].join("\n\n");
@@ -864,7 +886,8 @@ ${declaredFiles}${ticketReleaseFragmentScope(ticket)}`,
 function taskAndScopeBody(ticket, slug) {
   const category = ticket?.category || {};
   const declared = Array.isArray(ticket?.files) ? ticket.files : [];
-  const declaredFiles = declared.length ? declared.map((file) => `- ${file}`).join("\n") : "(No files were declared.)";
+  const enforced = enforcedScopePaths(ticket, slug);
+  const declaredFiles = scopeBlock(ticket, enforced);
   const effectiveFiles = store.effectiveScope(slug, ticket);
   const declaredKeys = new Set(declared.map((file) => process.platform === "win32" ? String(file).toLowerCase() : String(file)));
   const alwaysKeys = new Set((store.boardConfig(slug)?.alwaysInScope || []).map((file) => process.platform === "win32" ? String(file).toLowerCase() : String(file)));
@@ -1046,14 +1069,15 @@ function transportExecutorBriefing(briefing, ticket, slug, projectPath) {
 function dispatchTicketContext(ticket, projectPath) {
   const title = String(ticket?.title || "(Untitled ticket)");
   const description = String(ticket?.description || "(No additional description was recorded.)");
-  const declaredFiles = Array.isArray(ticket?.files) && ticket.files.length ? ticket.files.map((file) => `- ${file}`).join("\n") : "(No files were declared.)";
+  const enforced = enforcedScopePaths(ticket);
+  const declaredFiles = scopeBlock(ticket, enforced);
   const anchors = String(ticket?.executorAnchors || "(No anchors were recorded.)");
   return [
     `Title: ${title}`,
     `Description:
 ${description}`,
     `Declared files:
-${declaredFiles}${ticketReleaseFragmentScope(ticket)}`,
+${declaredFiles}`,
     `Anchors:
 ${anchors}`
   ].join("\n\n");
