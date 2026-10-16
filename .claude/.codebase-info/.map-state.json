@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "tool": "codebase-mapper",
-  "version": "2.16.1",
-  "mappedAt": "2026-10-11",
-  "gitCommit": "6955c171cfb6a10af2abeca360a4b5502bad7c76",
+  "version": "2.17.0",
+  "mappedAt": "2026-10-16",
+  "gitCommit": "e524b94e272831dc5e6446e50bcd4bd11fd7384d",
   "structure": "graphify",
   "documents": [
     "architecture.md",
@@ -19,7 +19,7 @@
     "coding-style.md": "9cf0a75f5a65bd017221473d022c32079fc92f2a4cefecbfbc01388875c53916",
     "onboarding.md": "b39a94c095a1a5a0f5e87765201cc748a1b4209019a0a7df9bc22d94eee39014",
     "patterns.md": "541fde4bf3b5d3a99908e7c9eefd3d4a9698af875dcc6d0c859d7fd463aede06",
-    "release-publishing.md": "53e1ebd7bd255721f3c4ec281fb03ed23d3c2be9b1b49bb4e00d303965380b63",
+    "release-publishing.md": "c8c5f07108f1c0f1cccbdc196607610b6b289f794aa58953f11c65f2dafdd6f9",
     "tech-landscape.md": "c33a843facccdae73060d6b9baa7341530f330ba63b8f4f8a9b4fd412b7ed326"
   }
 }
