@@ -68,7 +68,7 @@ const { createPulse } = require('./store/pulse.js');
 const { createRouting } = require('./store/routing.js');
 const { createTickets } = require('./store/tickets.js');
 const { createSubmissions } = require('./store/submissions.js');
-const { createDispatch } = require('./store/dispatch.js');
+const { createDispatch, preparedVerificationRequirement } = require('./store/dispatch.js');
 const { createPaths } = require('./store/paths.js');
 const { resolveSidequestHome } = require('./claude-home.js');
 const { createCache } = require('./store/cache.js');
@@ -515,6 +515,7 @@ const {
   dispatchMatchesStopIdentity,
   markDispatchStopped,
   reconcileLaunchedDispatches,
+  ticketEvidenceDirectory,
 } = (dispatch = createDispatch({
   ARTIFACT_BASELINE_MAX_PATHS,
   normalizeCategoryId: (...args: any[]) => normalizeCategoryId(...args),
@@ -3839,6 +3840,9 @@ module.exports = {
   closeSubmissionAsSuperseded,
   verifyIntegration,
   effectiveScope,
+  // Re-exported for the read-only briefing preview (SQ-356); see store/dispatch.js.
+  preparedVerificationRequirement,
+  ticketEvidenceDirectory,
   executionScope,
   foreignCommitPaths,
   foreignCommitPathsMessage,
