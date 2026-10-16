@@ -101,7 +101,7 @@ const { worktreeRoot } = require('./worktrees.js');
 const { spawnDescription } = store;
 const { compileContextProjection } = require('./context-packet.js');
 const { canonicalPreparedDispatchExecutor } = require('./prepared-dispatch.js');
-const { verificationRequirement } = require('./kernel/verification.js');
+const { verificationRequirement, classifyVerificationKind } = require('./kernel/verification.js');
 
 type SyncOptions = { dir?: string; readOnlyDeniedTools?: any };
 type SyncResult = { written: number; removed: number; unchanged: number };
@@ -1261,8 +1261,8 @@ function renderExecutorProjection(packet?: any) {
   ].join('\n\n');
 }
 
-function ticketBrief(ticket?: any, nonce?: any, marker?: any, slug?: any, projectPath?: any) {
-  if (slug && ticket?.ref && rejectedSubmissionRows(ticket).some((entry: any) => entry.preservationState === 'pending')) {
+function ticketBrief(ticket?: any, nonce?: any, marker?: any, slug?: any, projectPath?: any, readOnlyRender?: boolean) {
+  if (!readOnlyRender && slug && ticket?.ref && rejectedSubmissionRows(ticket).some((entry: any) => entry.preservationState === 'pending')) {
     const reconciled = store.reconcileSubmissionRejections(slug, ticket.ref);
     if (reconciled.ok) ticket = reconciled.ticket;
   }
@@ -1309,6 +1309,53 @@ function renderTicketBriefing(ticket?: any, nonce?: any, slug?: any, projectPath
     throw new Error('dispatch briefing nonce is required and must be a non-empty one-line string.');
   }
   return ticketBrief(ticket, nonce.trim(), ticketRouteMarker(ticket), slug, projectPath);
+}
+
+// SQ-356: the assembled briefing is the largest agent-facing surface Sidequest has, and it used to
+// be the only one that could not be read without consuming a real dispatch — `briefing` demands a
+// live token, and a token comes only from `dispatch`, which binds a worktree and spawns an executor.
+// So any claim about the briefing's TEXT (ordering, prominence, wording) cost an Opus dispatch to
+// settle, and SQ-333 sat open twice for want of this. The preview renders through the SAME
+// ticketBrief() assembly as a real dispatch and substitutes clearly marked placeholders for the
+// values preparation mints. agentsync.test.ts pins it to byte-identity against a real dispatch's
+// briefing, so it cannot drift into a reassuring second code path that no executor ever reads.
+const BRIEFING_PREVIEW_PLACEHOLDERS = Object.freeze({
+  token: '<dry-run: dispatch token is minted by dispatch>',
+  tokenFile: '<dry-run: dispatch token file is minted by dispatch>',
+  worktree: '<dry-run: worktree path is bound by dispatch>',
+  worktreeGitDirectory: '<dry-run: worktree Git directory is bound by dispatch>',
+  baseCommit: '<dry-run-base-commit>',
+});
+
+function briefingPreviewDispatchState(ticket?: any, slug?: any, projectPath?: any) {
+  const story = ticket?.storyId && slug ? store.getStory(slug, ticket.storyId) : null;
+  const integrationTarget = slug ? store.integrationTarget(slug) : null;
+  return {
+    verificationRequirement: store.preparedVerificationRequirement(ticket, String(projectPath || '')),
+    evidenceDirectory: store.ticketEvidenceDirectory(slug, ticket?.ref, projectPath),
+    sharedTree: false,
+    // Mirrors preparation: the enforced scope an executor is bound to is the commit scope derived
+    // from the effective scope, not the raw declared list, so a preview that printed `ticket.files`
+    // would misreport the one block the executor's writes are actually gated on.
+    declaredFiles: commitScope.ticketCommitScope(store.effectiveScope(slug, ticket), ticket?.files, ticket?.ref),
+    worktree: BRIEFING_PREVIEW_PLACEHOLDERS.worktree,
+    worktreeGitDirectory: BRIEFING_PREVIEW_PLACEHOLDERS.worktreeGitDirectory,
+    baseCommit: BRIEFING_PREVIEW_PLACEHOLDERS.baseCommit,
+    ...(integrationTarget ? { integrationTarget } : {}),
+    readonly: store.dispatchReadOnly(ticket) === true,
+    storyContract: store.storyExecutionContract(story),
+    tokenFile: BRIEFING_PREVIEW_PLACEHOLDERS.tokenFile,
+    launchSeq: Number(ticket?.dispatch?.launchSeq) || 1,
+  };
+}
+
+// Reads nothing but the ticket and board config, writes nothing, and mints nothing. The caller
+// supplies a ticket already read from the board; this never claims, prepares, or binds.
+function renderBriefingPreview(ticket?: any, slug?: any, projectPath?: any) {
+  if (!ticket || !ticket.ref) throw new Error('briefing preview requires a ticket.');
+  const project = String(projectPath || (slug && store.readMeta(slug)?.path) || '').trim();
+  const preview = Object.assign({}, ticket, { dispatch: briefingPreviewDispatchState(ticket, slug, project) });
+  return ticketBrief(preview, BRIEFING_PREVIEW_PLACEHOLDERS.token, ticketRouteMarker(ticket), slug, project, true);
 }
 
 function ticketIsolation(ticket?: any, sharedTree?: any) {
@@ -1768,6 +1815,8 @@ module.exports = {
   renderDiagnosticProbe,
   renderExecAgent,
   renderTicketBriefing,
+  renderBriefingPreview,
+  BRIEFING_PREVIEW_PLACEHOLDERS,
   briefingTransportFilePath,
   transportExecutorBriefing,
   rejectedSubmissionRows,

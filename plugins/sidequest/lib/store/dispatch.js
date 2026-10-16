@@ -2642,7 +2642,10 @@ function createDispatch(dependencies) {
     bindDispatchAgent,
     dispatchMatchesStopIdentity,
     markDispatchStopped,
-    reconcileLaunchedDispatches
+    reconcileLaunchedDispatches,
+    // The read-only briefing preview (SQ-356) must report the SAME board-owned evidence directory a
+    // real dispatch records, so it reuses this rather than recomputing the path.
+    ticketEvidenceDirectory
   };
 }
-module.exports = { createDispatch, unscopedWriteCannotAutoApprove };
+module.exports = { createDispatch, unscopedWriteCannotAutoApprove, preparedVerificationRequirement };

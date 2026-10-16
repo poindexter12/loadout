@@ -13,7 +13,7 @@ const { worktreeRoot } = require("./worktrees.js");
 const { spawnDescription } = store;
 const { compileContextProjection } = require("./context-packet.js");
 const { canonicalPreparedDispatchExecutor } = require("./prepared-dispatch.js");
-const { verificationRequirement } = require("./kernel/verification.js");
+const { verificationRequirement, classifyVerificationKind } = require("./kernel/verification.js");
 const TEMPLATE_PATH = path.join(__dirname, "..", "scripts", "_exec-template.md");
 const LEGACY_MARKER = "<!-- generated-by: sidequest-agentsync -->";
 const MARKER = "<!-- generated-by: sidequest-agentsync gen2 -->";
@@ -922,8 +922,8 @@ function renderExecutorProjection(packet) {
     ...items
   ].join("\n\n");
 }
-function ticketBrief(ticket, nonce, marker, slug, projectPath) {
-  if (slug && ticket?.ref && rejectedSubmissionRows(ticket).some((entry) => entry.preservationState === "pending")) {
+function ticketBrief(ticket, nonce, marker, slug, projectPath, readOnlyRender) {
+  if (!readOnlyRender && slug && ticket?.ref && rejectedSubmissionRows(ticket).some((entry) => entry.preservationState === "pending")) {
     const reconciled = store.reconcileSubmissionRejections(slug, ticket.ref);
     if (reconciled.ok) ticket = reconciled.ticket;
   }
@@ -970,6 +970,40 @@ function renderTicketBriefing(ticket, nonce, slug, projectPath) {
     throw new Error("dispatch briefing nonce is required and must be a non-empty one-line string.");
   }
   return ticketBrief(ticket, nonce.trim(), ticketRouteMarker(ticket), slug, projectPath);
+}
+const BRIEFING_PREVIEW_PLACEHOLDERS = Object.freeze({
+  token: "<dry-run: dispatch token is minted by dispatch>",
+  tokenFile: "<dry-run: dispatch token file is minted by dispatch>",
+  worktree: "<dry-run: worktree path is bound by dispatch>",
+  worktreeGitDirectory: "<dry-run: worktree Git directory is bound by dispatch>",
+  baseCommit: "<dry-run-base-commit>"
+});
+function briefingPreviewDispatchState(ticket, slug, projectPath) {
+  const story = ticket?.storyId && slug ? store.getStory(slug, ticket.storyId) : null;
+  const integrationTarget = slug ? store.integrationTarget(slug) : null;
+  return {
+    verificationRequirement: store.preparedVerificationRequirement(ticket, String(projectPath || "")),
+    evidenceDirectory: store.ticketEvidenceDirectory(slug, ticket?.ref, projectPath),
+    sharedTree: false,
+    // Mirrors preparation: the enforced scope an executor is bound to is the commit scope derived
+    // from the effective scope, not the raw declared list, so a preview that printed `ticket.files`
+    // would misreport the one block the executor's writes are actually gated on.
+    declaredFiles: commitScope.ticketCommitScope(store.effectiveScope(slug, ticket), ticket?.files, ticket?.ref),
+    worktree: BRIEFING_PREVIEW_PLACEHOLDERS.worktree,
+    worktreeGitDirectory: BRIEFING_PREVIEW_PLACEHOLDERS.worktreeGitDirectory,
+    baseCommit: BRIEFING_PREVIEW_PLACEHOLDERS.baseCommit,
+    ...integrationTarget ? { integrationTarget } : {},
+    readonly: store.dispatchReadOnly(ticket) === true,
+    storyContract: store.storyExecutionContract(story),
+    tokenFile: BRIEFING_PREVIEW_PLACEHOLDERS.tokenFile,
+    launchSeq: Number(ticket?.dispatch?.launchSeq) || 1
+  };
+}
+function renderBriefingPreview(ticket, slug, projectPath) {
+  if (!ticket || !ticket.ref) throw new Error("briefing preview requires a ticket.");
+  const project = String(projectPath || slug && store.readMeta(slug)?.path || "").trim();
+  const preview = Object.assign({}, ticket, { dispatch: briefingPreviewDispatchState(ticket, slug, project) });
+  return ticketBrief(preview, BRIEFING_PREVIEW_PLACEHOLDERS.token, ticketRouteMarker(ticket), slug, project, true);
 }
 function ticketIsolation(ticket, sharedTree) {
   const continuationMode = ticket?.dispatch?.continuation?.mode;
@@ -1374,6 +1408,8 @@ module.exports = {
   renderDiagnosticProbe,
   renderExecAgent,
   renderTicketBriefing,
+  renderBriefingPreview,
+  BRIEFING_PREVIEW_PLACEHOLDERS,
   briefingTransportFilePath,
   transportExecutorBriefing,
   rejectedSubmissionRows,
