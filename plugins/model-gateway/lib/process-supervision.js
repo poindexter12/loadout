@@ -23,7 +23,38 @@ function annotateFetchFailure(error, { url, startedAt, headersReceived, reusedSo
   return error;
 }
 
+// SQ-346: port 0 means "no listener assigned yet", never "the default port". Node's
+// http client disagrees: an explicit `:0` in the URL arrives as the number 0, and
+// `options.port = options.port || defaultPort || 80` turns that falsy 0 into 80. So a
+// probe aimed at an unassigned port silently interrogates whatever answers on :80 and
+// reports the gateway healthy on the strength of an unrelated server. On this project's
+// macOS host that is a local nginx returning 200 to every path, which is why six
+// ensure/lock/guardian tests failed here and passed on a CI runner with nothing on :80.
+// A raw `net.connect` to port 0 fails with EADDRNOTAVAIL, so the socket layer already
+// agrees; only the HTTP layer's default-port fallback needs blocking.
+function isProbeablePort(port) {
+  const value = Number(port);
+  return Number.isInteger(value) && value > 0 && value <= 65535;
+}
+
+function unassignedPortOf(url) {
+  try { return new URL(String(url)).port === '0'; } catch { return false; }
+}
+
+function unassignedPortError(url) {
+  const error = new Error(`no port assigned: ${url}`);
+  error.code = 'EADDRNOTAVAIL';
+  error.unassignedPort = true;
+  return error;
+}
+
 function fetchUrl(url, { timeout = 15000, headers = {} } = {}) {
+  if (unassignedPortOf(url)) {
+    const startedAt = Date.now();
+    return Promise.reject(annotateFetchFailure(unassignedPortError(url), {
+      url, startedAt, headersReceived: false, reusedSocket: false,
+    }));
+  }
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https:') ? https : http;
     const startedAt = Date.now();
@@ -777,6 +808,9 @@ async function stopRunningSupervisor({
   return { ok: true, pid, siblingInstallRoot, escalated };
 }
 function postJson(url, body, timeout = 2000) {
+  // SQ-346: same default-port trap as fetchUrl, and a POST to a stranger on :80 is
+  // worse than a GET, so refuse an unassigned port before the request is built.
+  if (unassignedPortOf(url)) return Promise.reject(unassignedPortError(url));
   return new Promise((resolve, reject) => {
     const payload = Buffer.from(JSON.stringify(body));
     const req = http.request(url, { method: 'POST', agent: false, headers: { 'content-type': 'application/json', 'content-length': payload.length } }, (res) => {
@@ -909,6 +943,18 @@ async function confirmProbeDown(probe, {
 // only thing that makes a repeating probe failure diagnosable from a log file.
 async function proxyModelsProbe(port = PROXY_PORT, fetch = fetchUrl, { timeout = PROBE_TIMEOUT_MS } = {}) {
   const startedAt = Date.now();
+  // SQ-346: refuse before the request, not inside the HTTP client. An unassigned port
+  // cannot host this proxy, and dispatching the request at all is what let Node's
+  // default-port fallback answer from :80 (see unassignedPortOf above).
+  if (!isProbeablePort(port)) {
+    return {
+      ok: false,
+      status: null,
+      code: 'EADDRNOTAVAIL',
+      elapsedMs: Date.now() - startedAt,
+      reason: `no proxy port assigned (port ${port}), so nothing could be probed`,
+    };
+  }
   try {
     const response = await fetch(`http://127.0.0.1:${port}/v1/models`, { timeout });
     const elapsedMs = Date.now() - startedAt;
@@ -1191,7 +1237,7 @@ function dropPooledSockets(agents) {
 }
 
 module.exports = {
-  commandIncludesFile, commandResultAsync, confirmProbeDown, createProbeChildRegistry, createProxyRecovery, createWakeDetector, describeFetchFailure, dropPooledSockets, fetchUrl, foreignOwnerRemedy, foreignPortOwner, foreignPortOwnerReason, foreignShimOwner, foreignShimOwnerMessage, gatewayInstallRoot, installBelongsToThisPlugin, isDescendantOfAsync, killPid, killPidAsync, pidFile, pidRecordFile, pluginCacheIdentity, portListening, postJson,
+  commandIncludesFile, commandResultAsync, confirmProbeDown, createProbeChildRegistry, createProxyRecovery, createWakeDetector, describeFetchFailure, dropPooledSockets, fetchUrl, foreignOwnerRemedy, foreignPortOwner, foreignPortOwnerReason, foreignShimOwner, foreignShimOwnerMessage, gatewayInstallRoot, installBelongsToThisPlugin, isDescendantOfAsync, isProbeablePort, killPid, killPidAsync, pidFile, pidRecordFile, pluginCacheIdentity, portListening, postJson,
   processInfoAsync, processIsOwnedByThisInstall, processIsOwnedByThisInstallAsync, processOwningPort: processOwningPortSync, processOwningPortAsync, processOwningPortInProcAsync, processTableAsync, resolvePortOwner, portOwnerRefusal, PROBE_FAILURE_THRESHOLD, PROBE_TIMEOUT_MS,
   probeFailureReason, probeSucceeded, proxyModelsAnswering, proxyModelsProbe, readPid, readPidRecord, recordedGatewayPids, reapGatewayOrphans, removePid, restartWorkerWithDrain, shimHealthy, spawnDetached,
   spawnSupervisedProxy, stopAll, stopProcess, stopRunningSupervisor, stopShimWithDrain, supervisorStopWaitMs, waitForPortRelease, waitForShimExit, writePidRecord, writePidRecordAsync,

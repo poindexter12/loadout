@@ -30,7 +30,7 @@ const http = require('node:http');
 const net = require('node:net');
 const test = require('node:test');
 const {
-  createProxyRecovery, describeFetchFailure, PROBE_TIMEOUT_MS, probeFailureReason, probeSucceeded, proxyModelsAnswering, proxyModelsProbe,
+  createProxyRecovery, describeFetchFailure, fetchUrl, postJson, PROBE_TIMEOUT_MS, probeFailureReason, probeSucceeded, proxyModelsAnswering, proxyModelsProbe,
 } = require('../lib/process-supervision.js');
 const gateway = require('../lib/commands.js');
 
@@ -244,4 +244,59 @@ test('a startup timeout reports the last probe reason instead of an unexplained 
   assert.equal(result.ok, false);
   assert.equal(result.timedOut, true);
   assert.match(result.probeReason, /no answer within 2000ms/);
+});
+
+// SQ-346. Node's http client turns an explicit `:0` into the default port 80, so a
+// probe aimed at a port nothing has been assigned yet interrogated whatever answers on
+// :80 and called the gateway proxy healthy on its behalf. These assertions are
+// platform-independent on purpose: the injected fetch stands in for the stranger that
+// answered 200, which on a CI runner with an empty :80 was an ECONNREFUSED instead.
+test('a probe against an unassigned port refuses instead of asking whatever answers on :80', async () => {
+  const requested = [];
+  const strangerAnswering200 = async (url) => {
+    requested.push(url);
+    return { status: 200, body: Buffer.from('{"data":[]}') };
+  };
+
+  const result = await proxyModelsProbe(0, strangerAnswering200);
+
+  assert.equal(result.ok, false, 'port 0 cannot host this proxy, so the probe must not report it answering');
+  assert.deepEqual(requested, [], 'no request may be issued at all, because the client would retarget it to :80');
+  assert.equal(result.code, 'EADDRNOTAVAIL');
+  assert.match(result.reason, /no proxy port assigned \(port 0\)/);
+  assert.equal(await proxyModelsAnswering(0, strangerAnswering200), false, 'the boolean wrapper agrees');
+});
+
+test('fetchUrl refuses an explicit port 0 rather than falling back to the default port', async () => {
+  await assert.rejects(
+    fetchUrl('http://127.0.0.1:0/v1/models', { timeout: 500 }),
+    (error) => {
+      assert.equal(error.code, 'EADDRNOTAVAIL');
+      assert.equal(error.unassignedPort, true);
+      assert.match(error.message, /no port assigned/);
+      assert.equal(error.phase, 'before any response headers', 'the failure is still annotated for probeFailureReason');
+      return true;
+    },
+  );
+});
+
+test('postJson refuses an explicit port 0 so a drain request never reaches a stranger', async () => {
+  await assert.rejects(
+    postJson('http://127.0.0.1:0/drain', { drain: true }, 500),
+    (error) => {
+      assert.equal(error.code, 'EADDRNOTAVAIL');
+      return true;
+    },
+  );
+});
+
+test('a real port still reaches the server it names', async (t) => {
+  const server = http.createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end('{"data":[]}');
+  });
+  const port = await listen(server);
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  assert.equal((await proxyModelsProbe(port)).ok, true, 'the port-0 guard must not reject a legitimate port');
 });
