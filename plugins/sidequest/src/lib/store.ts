@@ -2933,7 +2933,9 @@ function linkedReviewPass(slug?: any, ticket?: any) {
 const HIGH_STAKES_REVIEW_WARNING = 'high-stakes ticket integrated without a recorded review pass. Record one with a comment starting reviewed-by: <ref>, or link a completed review-audit ticket.';
 const DELIVERY_COMMIT_RE = /^[0-9a-f]{7,64}$/i;
 
-function shippedPluginsWithoutReleaseFragment(repoPath?: any, ref?: any, changedPaths?: any, fragmentExists?: any) {
+const RELEASE_FRAGMENT_PATH_RE = /^\.release\/unreleased\/[^/]+\.md$/;
+
+function shippedPluginsWithoutReleaseFragment(repoPath?: any, ref?: any, changedPaths?: any, fragmentExists?: any, anyRefSatisfies?: any) {
   const repo = String(repoPath || '').trim();
   if (!repo) return null;
   const marketplacePath = path.join(repo, '.claude-plugin', 'marketplace.json');
@@ -2950,7 +2952,15 @@ function shippedPluginsWithoutReleaseFragment(repoPath?: any, ref?: any, changed
   });
   if (!shipped.length) return null;
   const fragmentPath = `.release/unreleased/${ref}.md`;
-  return changed.includes(fragmentPath) && fragmentExists(fragmentPath)
+  // A delivery close accepts a fragment filed under ANY ref in the delivered range, not only the
+  // closing ticket's own ref (SQ-354). A ticket whose fix was delivered incidentally by a sibling
+  // ticket's commit is already announced by that sibling's fragment, and writing a second fragment
+  // under the closing ref would double-announce one change in the changelog. Submit keeps the
+  // own-ref requirement: there the closing ticket IS the author of its candidate.
+  const satisfying = anyRefSatisfies === true
+    ? changed.filter((changedPath: any) => RELEASE_FRAGMENT_PATH_RE.test(String(changedPath)))
+    : changed.filter((changedPath: any) => changedPath === fragmentPath);
+  return satisfying.some((candidate: any) => fragmentExists(String(candidate)))
     ? null
     : { fragmentPath, plugins: shipped };
 }
@@ -2961,7 +2971,27 @@ function missingReleaseFragment(repoPath?: any, ref?: any, changedPaths?: any) {
 }
 
 function missingDeliveredReleaseFragment(repoPath?: any, ref?: any, changedPaths?: any) {
-  return shippedPluginsWithoutReleaseFragment(repoPath, ref, changedPaths, () => true);
+  return shippedPluginsWithoutReleaseFragment(repoPath, ref, changedPaths, () => true, true);
+}
+
+// A delivery commit already published under a release tag has its changelog entry written and
+// immutable, so there is nothing a fragment could contribute and demanding one would only
+// double-announce a released change (SQ-354). Every tag in a release-managed repo marks a cut, so
+// containment by any tag is the signal; an unreleased delivery commit still faces the gate.
+function commitPublishedUnderReleaseTag(repoPath?: any, commit?: any) {
+  const repo = String(repoPath || '').trim();
+  const sha = String(commit || '').trim();
+  if (!repo || !sha) return false;
+  try {
+    return execFileSync('git', ['tag', '--contains', sha], {
+      cwd: repo,
+      encoding: 'utf8',
+      windowsHide: true,
+      stdio: 'pipe',
+    }).split('\n').some((line: string) => line.trim());
+  } catch (_: any) {
+    return false;
+  }
 }
 
 function missingReleaseFragmentMessage(ref?: any, fragmentPath?: any, plugins?: any) {
@@ -3256,7 +3286,9 @@ function completeTicketAsControlPlane(slug?: any, idOrRef?: any, opts?: any) {
       return commitPaths(repo, head);
     }
   })();
-  const missingFragment = delivery ? missingDeliveredReleaseFragment(readMeta(slug)?.path, ticket.ref, deliveredRangePaths) : null;
+  const missingFragment = delivery && !commitPublishedUnderReleaseTag(readMeta(slug)?.path, delivery.commit)
+    ? missingDeliveredReleaseFragment(readMeta(slug)?.path, ticket.ref, deliveredRangePaths)
+    : null;
   if (missingFragment) return {
     ok: false,
     reason: 'missing_release_fragment',

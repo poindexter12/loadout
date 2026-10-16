@@ -2672,7 +2672,8 @@ function linkedReviewPass(slug, ticket) {
 }
 const HIGH_STAKES_REVIEW_WARNING = "high-stakes ticket integrated without a recorded review pass. Record one with a comment starting reviewed-by: <ref>, or link a completed review-audit ticket.";
 const DELIVERY_COMMIT_RE = /^[0-9a-f]{7,64}$/i;
-function shippedPluginsWithoutReleaseFragment(repoPath, ref, changedPaths, fragmentExists) {
+const RELEASE_FRAGMENT_PATH_RE = /^\.release\/unreleased\/[^/]+\.md$/;
+function shippedPluginsWithoutReleaseFragment(repoPath, ref, changedPaths, fragmentExists, anyRefSatisfies) {
   const repo = String(repoPath || "").trim();
   if (!repo) return null;
   const marketplacePath = path.join(repo, ".claude-plugin", "marketplace.json");
@@ -2687,14 +2688,30 @@ function shippedPluginsWithoutReleaseFragment(repoPath, ref, changedPaths, fragm
   });
   if (!shipped.length) return null;
   const fragmentPath = `.release/unreleased/${ref}.md`;
-  return changed.includes(fragmentPath) && fragmentExists(fragmentPath) ? null : { fragmentPath, plugins: shipped };
+  const satisfying = anyRefSatisfies === true ? changed.filter((changedPath) => RELEASE_FRAGMENT_PATH_RE.test(String(changedPath))) : changed.filter((changedPath) => changedPath === fragmentPath);
+  return satisfying.some((candidate) => fragmentExists(String(candidate))) ? null : { fragmentPath, plugins: shipped };
 }
 function missingReleaseFragment(repoPath, ref, changedPaths) {
   const repo = String(repoPath || "").trim();
   return shippedPluginsWithoutReleaseFragment(repo, ref, changedPaths, (fragmentPath) => fs.existsSync(path.join(repo, fragmentPath)));
 }
 function missingDeliveredReleaseFragment(repoPath, ref, changedPaths) {
-  return shippedPluginsWithoutReleaseFragment(repoPath, ref, changedPaths, () => true);
+  return shippedPluginsWithoutReleaseFragment(repoPath, ref, changedPaths, () => true, true);
+}
+function commitPublishedUnderReleaseTag(repoPath, commit) {
+  const repo = String(repoPath || "").trim();
+  const sha = String(commit || "").trim();
+  if (!repo || !sha) return false;
+  try {
+    return execFileSync("git", ["tag", "--contains", sha], {
+      cwd: repo,
+      encoding: "utf8",
+      windowsHide: true,
+      stdio: "pipe"
+    }).split("\n").some((line) => line.trim());
+  } catch (_) {
+    return false;
+  }
 }
 function missingReleaseFragmentMessage(ref, fragmentPath, plugins) {
   return `submit: refused ${ref}; submitted range changes shipped plugin paths (${plugins.map((plugin) => plugin.source).join(", ")}) but does not include ${fragmentPath}. Write the fragment, then commit it, then submit again. Next time write it BEFORE your first commit so it rides along:
@@ -2958,7 +2975,7 @@ function completeTicketAsControlPlane(slug, idOrRef, opts) {
       return commitPaths(repo, head);
     }
   })();
-  const missingFragment = delivery ? missingDeliveredReleaseFragment(readMeta(slug)?.path, ticket.ref, deliveredRangePaths) : null;
+  const missingFragment = delivery && !commitPublishedUnderReleaseTag(readMeta(slug)?.path, delivery.commit) ? missingDeliveredReleaseFragment(readMeta(slug)?.path, ticket.ref, deliveredRangePaths) : null;
   if (missingFragment) return {
     ok: false,
     reason: "missing_release_fragment",
