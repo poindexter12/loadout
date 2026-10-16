@@ -149,3 +149,92 @@ test('SQ-186: groomClose manual delivery covers the whole submitted range, not j
   assert.equal(closed.ok, true, `expected the whole submitted range (which includes the fragment) to satisfy the check, got: ${closed.reason} ${closed.message || ''}`);
   assert.equal(store.getTicket(project, ticket.ref).status, 'done');
 });
+
+/**
+ * SQ-354 regression: the second axis of the same gate. Within the delivered
+ * range the check used to accept ONLY a fragment filed under the closing
+ * ticket's own ref, so a ticket whose fix was delivered incidentally by a
+ * sibling ticket's commit could not be closed at all — the escape routes were
+ * to double-announce the change under a second ref, or to force the status by
+ * hand and lose the delivery provenance `--deliveryCommit` exists to record.
+ *
+ * The fixtures below model the shape that hit it (SQ-227): the closing ticket
+ * carries no candidate of its own, and the commit that delivered its fix is a
+ * sibling ticket's, announced by the sibling's fragment.
+ */
+function stageIncidentalDelivery(title: string, options: any) {
+  const worktree = createGitWorktree();
+  addMarketplaceFixture(worktree);
+  const project = store.ensureProject(worktree).slug;
+  store.setBoardConfig(project, { integrationMode: 'local', integrationBranch: 'main' });
+  const ticket = store.createTicket(project, {
+    title, files: ['plugins/fixture-plugin'], complexity: 3, labels: ['direct-ok'],
+    complexityWhy: 'confirm the delivered-fragment gate accepts a sibling ref and steps aside for an already-released delivery commit',
+  });
+
+  fs.mkdirSync(path.join(worktree, 'plugins', 'fixture-plugin'), { recursive: true });
+  fs.writeFileSync(path.join(worktree, 'plugins', 'fixture-plugin', 'index.js'), 'changed\n');
+  const changedPaths: string[] = ['plugins/fixture-plugin/index.js'];
+  if (options.fragmentRef) {
+    fs.mkdirSync(path.join(worktree, '.release', 'unreleased'), { recursive: true });
+    fs.writeFileSync(
+      path.join(worktree, '.release', 'unreleased', `${options.fragmentRef}.md`),
+      `---\nref: ${options.fragmentRef}\ntitle: Fixture change\nbump: patch\nplugins:\n  - fixture-plugin\n---\n\nFixture change.\n`,
+    );
+    changedPaths.push(`.release/unreleased/${options.fragmentRef}.md`);
+  }
+  gitAt(worktree, ['add', ...changedPaths]);
+  gitAt(worktree, ['commit', '-m', 'sibling ticket\'s commit, which also carried this ticket\'s fix']);
+  const tipCommit = gitAt(worktree, ['rev-parse', 'HEAD']);
+  gitAt(worktree, ['push']);
+  if (options.releaseTag) gitAt(worktree, ['tag', options.releaseTag, tipCommit]);
+  assert.equal(store.getTicket(project, ticket.ref).submission, undefined, 'fixture setup: the closing ticket must carry no candidate of its own');
+  return { project, ticket, tipCommit, worktree };
+}
+
+function closeByDelivery(staged: any) {
+  return store.completeTicketAsControlPlane(staged.project, staged.ticket.ref, {
+    by: 'sibling-fragment-integrator',
+    reason: 'The fix landed incidentally in a sibling ticket\'s commit, already reachable from main.',
+    deliveryCommit: staged.tipCommit,
+    deliveryMethod: 'manual',
+    purpose: 'delivery',
+  });
+}
+
+test('SQ-354: a fragment filed under a sibling ref in the delivered range satisfies the delivery gate', () => {
+  const staged = stageIncidentalDelivery('incidental fix delivered under a sibling ticket\'s fragment', { fragmentRef: 'SQ-9001' });
+  assert.notEqual('SQ-9001', staged.ticket.ref, 'fixture setup: the fragment must be filed under a ref other than the closing ticket\'s');
+
+  const closed = closeByDelivery(staged);
+  assert.equal(closed.ok, true, `expected a sibling ref's fragment to satisfy the delivered-range check, got: ${closed.reason} ${closed.message || ''}`);
+  const done = store.getTicket(staged.project, staged.ticket.ref);
+  assert.equal(done.status, 'done');
+  // The provenance --deliveryCommit exists to record survives the close, which forcing the status
+  // by hand would have discarded.
+  assert.equal(done.completion?.delivery?.commit, staged.tipCommit);
+  assert.equal(done.completion?.delivery?.targetBranch, 'main');
+  assert.equal(
+    fs.existsSync(path.join(staged.worktree, '.release', 'unreleased', `${staged.ticket.ref}.md`)),
+    false,
+    'closing this way must not require a second fragment that would double-announce the sibling\'s change',
+  );
+});
+
+test('SQ-354: an unreleased delivery commit with no fragment anywhere in its range is still refused', () => {
+  const staged = stageIncidentalDelivery('shipped plugin change delivered with no fragment at all', {});
+
+  const closed = closeByDelivery(staged);
+  assert.equal(closed.ok, false, 'the gate is narrowed, not removed: an unreleased delivery still needs a fragment in its range');
+  assert.equal(closed.reason, 'missing_release_fragment');
+  assert.match(String(closed.message || ''), new RegExp(`\\.release/unreleased/${staged.ticket.ref}\\.md`));
+  assert.notEqual(store.getTicket(staged.project, staged.ticket.ref).status, 'done');
+});
+
+test('SQ-354: a delivery commit already published under a release tag closes without any fragment', () => {
+  const staged = stageIncidentalDelivery('already-released delivery commit, changelog entry immutable', { releaseTag: 'fixture-plugin-v1.0.0' });
+
+  const closed = closeByDelivery(staged);
+  assert.equal(closed.ok, true, `expected a released delivery commit to skip the fragment gate, got: ${closed.reason} ${closed.message || ''}`);
+  assert.equal(store.getTicket(staged.project, staged.ticket.ref).status, 'done');
+});
