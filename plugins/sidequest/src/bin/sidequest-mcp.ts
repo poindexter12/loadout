@@ -153,7 +153,9 @@ function main() {
   };
 
   const dispatchMessage = (message: unknown) => {
-    const operation: Promise<void> = Promise.resolve(mcp.handleRequest(message)).then(
+    // writeMessage is the only stdout writer, so handing it over is what lets a
+    // long-running tool emit notifications/progress mid-call (SQ-355).
+    const operation: Promise<void> = Promise.resolve(mcp.handleRequest(message, { sendNotification: writeMessage })).then(
       (response: unknown) => { writeMessage(response); },
       () => undefined,
     );

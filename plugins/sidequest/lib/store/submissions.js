@@ -709,7 +709,7 @@ Run the pinned command through: ${wrapper}` : "";
       };
     }
     const timeoutMilliseconds = normalizeIntegrationVerifyTimeoutMs(boardConfig(slug)?.integrationVerifyTimeoutMs);
-    return timedIntegrationVerification(requirement, {
+    return phasedIntegrationVerification(String(opts?.verifyPhase || "merged-tree"), opts, requirement, {
       cwd: readMeta(slug)?.path,
       timeoutMilliseconds,
       logPath: integrationVerifyLogPath(slug, ticket),
@@ -870,6 +870,26 @@ ${verify.outputTail}` : null
     const started = Date.now();
     const result = runProcessVerification(requirement, options);
     return Object.freeze(Object.assign({}, result, { durationMs: Date.now() - started }));
+  }
+  function reportVerificationPhase(opts, event) {
+    const report = opts?.onVerifyPhase;
+    if (typeof report !== "function") return;
+    try {
+      report(event);
+    } catch (_) {
+    }
+  }
+  function phasedIntegrationVerification(phase, opts, requirement, options) {
+    reportVerificationPhase(opts, { phase, state: "started", command: requirement?.command || null });
+    const verification = timedIntegrationVerification(requirement, options);
+    reportVerificationPhase(opts, {
+      phase,
+      state: "finished",
+      command: requirement?.command || null,
+      status: verification?.status || null,
+      durationMs: verification?.durationMs ?? null
+    });
+    return verification;
   }
   function withVerificationTimeoutGuidance(slug, message, verify) {
     const guidance = verificationTimeoutGuidance(verify, boardConfig(slug)?.integrationVerifyTimeoutMaxMs);
@@ -3042,7 +3062,7 @@ ${verify.outputTail}` : null
       const candidateWorktree = tickets.length === 1 ? String(tickets[0]?.submission?.worktree || "").trim() : "";
       return {
         ok: true,
-        verification: timedIntegrationVerification(requirement.requirement, {
+        verification: phasedIntegrationVerification("candidate", opts, requirement.requirement, {
           cwd: candidateWorktree || readMeta(slug)?.path,
           timeoutMilliseconds,
           logPath: integrationVerifyLogPath(slug, { ref: waveId }),
@@ -3093,7 +3113,8 @@ ${verify.outputTail}` : null
         verification: ticket.submission?.verificationResult,
         skipVerify: true,
         verificationWaiver: opts.verificationWaiver,
-        target: opts.target
+        target: opts.target,
+        onVerifyPhase: opts?.onVerifyPhase
       });
       if (!assembled2.ok) return assembled2;
       return assembledWaveForDelivery(slug, getTicket(slug, ticket.id));
@@ -3106,7 +3127,8 @@ ${verify.outputTail}` : null
       verification: ticket.submission?.verificationResult,
       skipVerify: opts?.skipVerify === true,
       verificationWaiver: opts?.verificationWaiver,
-      target: opts?.target
+      target: opts?.target,
+      onVerifyPhase: opts?.onVerifyPhase
     });
     if (!assembled.ok) return assembled;
     return assembledWaveForDelivery(slug, getTicket(slug, ticket.id));
