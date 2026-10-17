@@ -192,15 +192,38 @@ function assertMutationFreshness(projectArg) {
   });
   if (freshness.refusal) throw new Error(freshness.refusal);
 }
-async function runTool(tool, rawArgs) {
+async function runTool(tool, rawArgs, context) {
   const { args, aliases } = validateToolArguments(tool, rawArgs);
   if (!toolMutates(tool.name, args)) {
-    const output = await tool.handler(args);
+    const output = await tool.handler(args, context);
     return acknowledgeAliases(tool.name === "context_page" ? output : boundedReadPayload(tool.name, output), aliases);
   }
   assertMutationFreshness(args.project);
   const board = mutationQueueKey(tool.name, args);
-  return enqueueMutation(board, async () => acknowledgeAliases(await tool.handler(args), aliases));
+  return enqueueMutation(board, async () => acknowledgeAliases(await tool.handler(args, context), aliases));
+}
+function progressReporter(params, options) {
+  const progressToken = params?._meta?.progressToken;
+  const send = options?.sendNotification;
+  if (typeof send !== "function" || progressToken == null) return void 0;
+  let emitted = 0;
+  return (update) => {
+    emitted += 1;
+    const total = Number(update?.total);
+    try {
+      send({
+        jsonrpc: "2.0",
+        method: "notifications/progress",
+        params: {
+          progressToken,
+          progress: emitted,
+          ...Number.isFinite(total) && total > 0 ? { total } : {},
+          message: String(update?.message || update?.phase || "working")
+        }
+      });
+    } catch (_) {
+    }
+  };
 }
 const ATTESTATION_VERIFY_CONTRACT = "verifyKind attestation: `attestation: <attestationArtifact verbatim> | <evidence produced> | <what it showed>`.";
 const MCP_SCHEMA_PROPERTY_DESCRIPTIONS = {
@@ -270,7 +293,7 @@ function rpcResult(id, result) {
 function rpcError(id, code, message) {
   return { jsonrpc: "2.0", id, error: { code, message } };
 }
-async function handleRequest(msg) {
+async function handleRequest(msg, options) {
   if (!msg || msg.jsonrpc !== "2.0") return null;
   const { id, method, params } = msg;
   const isNotification = id === void 0 || id === null;
@@ -297,7 +320,7 @@ async function handleRequest(msg) {
       return rpcResult(id, { content: [{ type: "text", text: `Unknown tool "${name}".` }], isError: true });
     }
     try {
-      const out = await runTool(tool, args);
+      const out = await runTool(tool, args, { progress: progressReporter(params, options) });
       return rpcResult(id, { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] });
     } catch (e) {
       const error = e;

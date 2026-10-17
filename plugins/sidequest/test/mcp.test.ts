@@ -6091,4 +6091,102 @@ test('a freshly registered Codex pin lands in the Claude agent directory and is 
   }
 });
 
+// SQ-355: integrate held its client silent for the sum of two pinned verify runs,
+// which the MCP client reported as `failed` on a delivery that had already merged.
+test('MCP handleRequest hands a tool a progress reporter and emits notifications/progress under the client token', async () => {
+  const tool = mcp.TOOLS.find((candidate: any) => candidate.name === 'pulse');
+  assert.ok(tool, 'the pulse tool is registered');
+  const original = tool.handler;
+  const reporterTypes: string[] = [];
+  tool.handler = (args: any, context: any) => {
+    reporterTypes.push(typeof context?.progress);
+    if (typeof context?.progress === 'function') {
+      context.progress({ phase: 'candidate:started', message: 'integrate: candidate gate started: npm test' });
+      context.progress({ phase: 'merged-tree:finished', message: 'integrate: merged-tree gate finished: passed after 42s' });
+    }
+    return { ok: true, ref: args.ref };
+  };
+  try {
+    const notifications: any[] = [];
+    const withToken: any = await mcp.handleRequest(
+      { jsonrpc: '2.0', id: 9501, method: 'tools/call', params: { name: 'pulse', arguments: { ref: 'SQ-355' }, _meta: { progressToken: 'tok-355' } } },
+      { sendNotification: (notification: any) => notifications.push(notification) },
+    );
+    assert.equal(withToken.result.isError, undefined, withToken.result.content?.[0]?.text);
+    assert.equal(reporterTypes[0], 'function', 'a progress reporter reaches the handler when the client supplied a token');
+    assert.deepEqual(notifications.map((notification) => notification.method), ['notifications/progress', 'notifications/progress']);
+    assert.deepEqual(notifications.map((notification) => notification.params.progressToken), ['tok-355', 'tok-355']);
+    assert.deepEqual(notifications.map((notification) => notification.params.progress), [1, 2], 'progress is monotonic per token, as the protocol requires');
+    assert.match(notifications[0].params.message, /candidate gate started/);
+    assert.match(notifications[1].params.message, /merged-tree gate finished: passed/);
+
+    // No client token: unsolicited progress is forbidden, so no reporter and no traffic.
+    const unsolicited: any[] = [];
+    await mcp.handleRequest(
+      { jsonrpc: '2.0', id: 9502, method: 'tools/call', params: { name: 'pulse', arguments: { ref: 'SQ-355' } } },
+      { sendNotification: (notification: any) => unsolicited.push(notification) },
+    );
+    assert.equal(reporterTypes[1], 'undefined');
+    assert.deepEqual(unsolicited, []);
+
+    // The tests and the in-process callers drive handleRequest with no sink at all.
+    const sinkless: any = await mcp.handleRequest({ jsonrpc: '2.0', id: 9503, method: 'tools/call', params: { name: 'pulse', arguments: { ref: 'SQ-355' }, _meta: { progressToken: 7 } } });
+    assert.equal(sinkless.result.isError, undefined, sinkless.result.content?.[0]?.text);
+    assert.equal(reporterTypes[2], 'undefined');
+  } finally {
+    tool.handler = original;
+  }
+});
+
+test('integration delivery reports the verification phase it enters and leaves (SQ-355)', async () => {
+  const gate = 'node --version';
+  const fixture = isolatedDispatch('sq-mcp-verify-phase-', 'verify-phase-worker', ['src/phase.js'], gate);
+  fs.mkdirSync(path.join(fixture.worktree, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(fixture.worktree, 'src', 'phase.js'), 'module.exports = { phase: true };\n');
+  gitAt(fixture.worktree, ['config', 'user.name', 'Sidequest Test']);
+  gitAt(fixture.worktree, ['config', 'user.email', 'sidequest-test@example.invalid']);
+  const committed = await callTool('commit', {
+    project: fixture.project,
+    ref: fixture.ref,
+    by: fixture.by,
+    message: 'Deliver a candidate whose gate is observable',
+    worktree: fixture.worktree,
+  });
+  assert.ok(committed.commit, committed.message || committed.reason);
+  const gitRef = `refs/sidequest/${fixture.ref}`;
+  gitAt(fixture.worktree, ['update-ref', gitRef, committed.commit]);
+  const { capture } = await runCapturedVerification(gate, { project: fixture.project, ticket: fixture.ref }, fixture.worktree);
+  assert.equal(capture.status, 'passed', capture.evidence);
+  fs.rmSync(capture.logPath, { force: true });
+  const submitted = await callTool('submit', {
+    project: fixture.project,
+    ref: fixture.ref,
+    by: fixture.by,
+    commit: committed.commit,
+    gitRef,
+    worktree: fixture.worktree,
+    verify: gate,
+    body: 'Phase reporting fixture.',
+  });
+  assert.equal(submitted.ok, true, submitted.message || submitted.reason);
+
+  const phases: any[] = [];
+  const delivered: any = await store.integrateSubmission(fixture.project, fixture.ref, {
+    mode: 'merge',
+    target: store.integrationTarget(fixture.project),
+    onVerifyPhase: (event: any) => phases.push(event),
+  });
+  assert.equal(delivered.ok, true, delivered.message || delivered.reason);
+  assert.deepEqual(
+    phases.map((event) => `${event.phase}:${event.state}`),
+    ['candidate:started', 'candidate:finished', 'merged-tree:started', 'merged-tree:finished'],
+    'both gates announce entry and exit, so neither run is silent',
+  );
+  assert.equal(phases[0].command, gate, 'the started phase names the command, so a watcher need not probe the process table');
+  assert.equal(phases[1].command, gate);
+  assert.equal(phases[1].status, 'passed', 'the finished phase reports the status the gate actually returned');
+  assert.equal(phases[1].status, store.getTicket(fixture.project, fixture.ref).submission.integration.verify.status, 'the reported status is the one the board recorded');
+  assert.equal(typeof phases[1].durationMs, 'number');
+});
+
 export {};

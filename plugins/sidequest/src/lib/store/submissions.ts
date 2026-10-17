@@ -71,6 +71,7 @@ type WaveDeliveryOptions = {
   };
   deliveryVerification?: VerificationResult;
   prPort?: GitHubPrPort;
+  onVerifyPhase?: (event: { phase: string; state: string; command?: string | null; status?: string | null; durationMs?: number | null }) => void;
 };
 
 type ExactWaveAdmission =
@@ -881,7 +882,7 @@ function verifyDeliveredSubmission(slug: any, ticket: any, opts?: any) {
     };
   }
   const timeoutMilliseconds = normalizeIntegrationVerifyTimeoutMs(boardConfig(slug)?.integrationVerifyTimeoutMs);
-  return timedIntegrationVerification(requirement, {
+  return phasedIntegrationVerification(String(opts?.verifyPhase || 'merged-tree'), opts, requirement, {
     cwd: readMeta(slug)?.path,
     timeoutMilliseconds,
     logPath: integrationVerifyLogPath(slug, ticket),
@@ -1059,6 +1060,37 @@ function timedIntegrationVerification(requirement: any, options: any) {
   const started = Date.now();
   const result = runProcessVerification(requirement, options);
   return Object.freeze(Object.assign({}, result, { durationMs: Date.now() - started }));
+}
+
+/*
+ * An integration gate is the longest silence an integrate produces, and a single
+ * delivery can run two of them (the candidate gate, then the merged-tree gate).
+ * Reporting the transition into and out of each one is what keeps a watching MCP
+ * client's idle timer alive without defeating it: these fire on phase changes, so
+ * a gate that wedges inside one phase still goes quiet and still times out
+ * (SQ-355). opts.onVerifyPhase is optional; the CLI passes nothing.
+ */
+function reportVerificationPhase(opts: any, event: any) {
+  const report = opts?.onVerifyPhase;
+  if (typeof report !== 'function') return;
+  try {
+    report(event);
+  } catch (_) {
+    // Reporting progress must never fail the gate it is describing.
+  }
+}
+
+function phasedIntegrationVerification(phase: string, opts: any, requirement: any, options: any) {
+  reportVerificationPhase(opts, { phase, state: 'started', command: requirement?.command || null });
+  const verification = timedIntegrationVerification(requirement, options);
+  reportVerificationPhase(opts, {
+    phase,
+    state: 'finished',
+    command: requirement?.command || null,
+    status: verification?.status || null,
+    durationMs: verification?.durationMs ?? null,
+  });
+  return verification;
 }
 
 // Appends the board-config recovery route when the runner stopped a verify at
@@ -3527,7 +3559,7 @@ function authoritativeWaveVerification(slug: any, tickets: any[], waveId: string
     const candidateWorktree = tickets.length === 1 ? String(tickets[0]?.submission?.worktree || '').trim() : '';
     return {
       ok: true,
-      verification: timedIntegrationVerification(requirement.requirement, {
+      verification: phasedIntegrationVerification('candidate', opts, requirement.requirement, {
         cwd: candidateWorktree || readMeta(slug)?.path,
         timeoutMilliseconds,
         logPath: integrationVerifyLogPath(slug, { ref: waveId }),
@@ -3581,6 +3613,7 @@ function ensureSingletonAssembledWave(slug: any, idOrRef: any, opts?: any) {
       skipVerify: true,
       verificationWaiver: opts.verificationWaiver,
       target: opts.target,
+      onVerifyPhase: opts?.onVerifyPhase,
     });
     if (!assembled.ok) return assembled;
     return assembledWaveForDelivery(slug, getTicket(slug, ticket.id));
@@ -3594,6 +3627,7 @@ function ensureSingletonAssembledWave(slug: any, idOrRef: any, opts?: any) {
     skipVerify: opts?.skipVerify === true,
     verificationWaiver: opts?.verificationWaiver,
     target: opts?.target,
+    onVerifyPhase: opts?.onVerifyPhase,
   });
   if (!assembled.ok) return assembled;
   return assembledWaveForDelivery(slug, getTicket(slug, ticket.id));
