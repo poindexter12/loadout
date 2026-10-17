@@ -1136,7 +1136,9 @@ const tools: ToolDefinition[] = [
     async handler(args, context) {
       const { slug, meta } = resolveProject(args.project);
       const by = requireBy(args, 'integrate');
-      const onVerifyPhase = integrationPhaseReporter(context);
+      const phaseReporter = integrationPhaseReporter(context);
+      // Spread, so a client without a progressToken forwards no key at all.
+      const phaseProgress = phaseReporter ? { onVerifyPhase: phaseReporter } : {};
       const refs = String(args.ref).split(',').map((ref: string) => ref.trim()).filter(Boolean);
       if (!refs.length) throw new Error('integrate: pass one or more ticket refs.');
       if (Object.hasOwn(args, 'wave')) {
@@ -1147,7 +1149,7 @@ const tools: ToolDefinition[] = [
             message: 'integrate: wave must be an options object. Pass every wave participant in the comma-separated ref string, for example ref: "SQ-1,SQ-2".',
           });
         }
-        return waveAssemblyAck(slug, store.assembleSubmissionWave(slug, refs, Object.assign({}, args.wave, { onVerifyPhase })));
+        return waveAssemblyAck(slug, store.assembleSubmissionWave(slug, refs, Object.assign({}, args.wave, phaseProgress)));
       }
       const failures: Array<{ reason: string; message: string }> = [];
       const ticket = store.getTicket(slug, refs[0]!);
@@ -1170,7 +1172,7 @@ const tools: ToolDefinition[] = [
           target,
           skipVerify: args.skipVerify === true,
           verificationWaiver: args.verificationWaiver,
-          onVerifyPhase,
+          ...phaseProgress,
         });
         if (!delivery.ok) {
           return groupPrDelivery
@@ -1197,7 +1199,7 @@ const tools: ToolDefinition[] = [
           mode: args.mode == null ? store.boardConfig(slug).delivery : args.mode,
           skipVerify: args.skipVerify === true,
           verificationWaiver: args.verificationWaiver,
-          onVerifyPhase,
+          ...phaseProgress,
         });
         const failure: any = delivery.outside?.length ? { strayPaths: delivery.outside } : {};
         if (delivery.verify && /^verification_[a-z_]+_post_merge(?:_rollback_failed)?$/.test(String(delivery.reason))) failure.verifyFailed = delivery.verify;
@@ -1242,7 +1244,7 @@ const tools: ToolDefinition[] = [
           reason: args.reason,
           skipVerify: args.skipVerify === true,
           verificationWaiver: args.verificationWaiver,
-          onVerifyPhase,
+          ...phaseProgress,
         });
         if (!recorded.ok) return mutationAck(slug, recorded);
         const deliveryTicket = recorded.ticket;
@@ -1266,7 +1268,7 @@ const tools: ToolDefinition[] = [
         target,
         skipVerify: args.skipVerify === true,
         verificationWaiver: args.verificationWaiver,
-        onVerifyPhase,
+        ...phaseProgress,
       });
       if (!delivery.ok) {
         const failure: any = delivery.outside?.length ? { strayPaths: delivery.outside } : {};
@@ -1280,7 +1282,7 @@ const tools: ToolDefinition[] = [
         by,
         skipVerify: args.skipVerify === true,
         verificationWaiver: args.verificationWaiver,
-        onVerifyPhase,
+        ...phaseProgress,
       });
       if (!verification.ok) {
         return Object.assign(mutationAck(slug, verification), { delivery: integration, verifyFailed: verification.verify });

@@ -971,7 +971,8 @@ const tools = [
     async handler(args, context) {
       const { slug, meta } = resolveProject(args.project);
       const by = requireBy(args, "integrate");
-      const onVerifyPhase = integrationPhaseReporter(context);
+      const phaseReporter = integrationPhaseReporter(context);
+      const phaseProgress = phaseReporter ? { onVerifyPhase: phaseReporter } : {};
       const refs = String(args.ref).split(",").map((ref) => ref.trim()).filter(Boolean);
       if (!refs.length) throw new Error("integrate: pass one or more ticket refs.");
       if (Object.hasOwn(args, "wave")) {
@@ -982,7 +983,7 @@ const tools = [
             message: 'integrate: wave must be an options object. Pass every wave participant in the comma-separated ref string, for example ref: "SQ-1,SQ-2".'
           });
         }
-        return waveAssemblyAck(slug, store.assembleSubmissionWave(slug, refs, Object.assign({}, args.wave, { onVerifyPhase })));
+        return waveAssemblyAck(slug, store.assembleSubmissionWave(slug, refs, Object.assign({}, args.wave, phaseProgress)));
       }
       const failures = [];
       const ticket = store.getTicket(slug, refs[0]);
@@ -1005,7 +1006,7 @@ const tools = [
           target: target2,
           skipVerify: args.skipVerify === true,
           verificationWaiver: args.verificationWaiver,
-          onVerifyPhase
+          ...phaseProgress
         });
         if (!delivery2.ok) {
           return groupPrDelivery ? Object.assign(mutationAck(slug, delivery2), prDeliveryRefusalFields(delivery2)) : mutationAck(slug, delivery2);
@@ -1030,7 +1031,7 @@ const tools = [
           mode: args.mode == null ? store.boardConfig(slug).delivery : args.mode,
           skipVerify: args.skipVerify === true,
           verificationWaiver: args.verificationWaiver,
-          onVerifyPhase
+          ...phaseProgress
         });
         const failure = delivery2.outside?.length ? { strayPaths: delivery2.outside } : {};
         if (delivery2.verify && /^verification_[a-z_]+_post_merge(?:_rollback_failed)?$/.test(String(delivery2.reason))) failure.verifyFailed = delivery2.verify;
@@ -1075,7 +1076,7 @@ const tools = [
           reason: args.reason,
           skipVerify: args.skipVerify === true,
           verificationWaiver: args.verificationWaiver,
-          onVerifyPhase
+          ...phaseProgress
         });
         if (!recorded.ok) return mutationAck(slug, recorded);
         const deliveryTicket2 = recorded.ticket;
@@ -1099,7 +1100,7 @@ const tools = [
         target,
         skipVerify: args.skipVerify === true,
         verificationWaiver: args.verificationWaiver,
-        onVerifyPhase
+        ...phaseProgress
       });
       if (!delivery.ok) {
         const failure = delivery.outside?.length ? { strayPaths: delivery.outside } : {};
@@ -1113,7 +1114,7 @@ const tools = [
         by,
         skipVerify: args.skipVerify === true,
         verificationWaiver: args.verificationWaiver,
-        onVerifyPhase
+        ...phaseProgress
       });
       if (!verification.ok) {
         return Object.assign(mutationAck(slug, verification), { delivery: integration, verifyFailed: verification.verify });
