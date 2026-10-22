@@ -510,6 +510,11 @@ const {
   dispatchIdentityAmbiguous,
   dispatchCanBindRuntimeIdentity,
   recordDispatchRuntimeIdentity,
+  claimWorktreeReconciliation,
+  recordProvenLeaseOccupancy,
+  recordClaimWorktreeRefusal,
+  clearClaimWorktreeRefusal,
+  claimWorktreeLeaseRefusal,
   bindDispatchClaimToken,
   bindDispatchAgent,
   dispatchMatchesStopIdentity,
@@ -2041,6 +2046,18 @@ function bindClaimRuntimeIdentity(slug?: any, idOrRef?: any, opts?: any) {
   const agentId = String(opts?.agentId || '').trim();
   const found = getTicket(slug, idOrRef);
   if (!agentId || !found) return { ok: false, reason: !found ? 'not_found' : 'missing_identity' };
+  // SQ-324. The claim is the only place both halves of the pairing are known at once: the dispatch token
+  // says which ticket this runtime holds, and the hook's cwd says which checkout it is standing in. Creation
+  // had neither and attributed its leases in board order, so a concurrent fan-out left leases crossed, and
+  // binding here without consulting the checkout was what made a crossed lease authoritative — the executor
+  // then learned of it from an Edit refusal that could only talk about paths. Reconciled before the ticket
+  // lock, because the corrective exchange takes that lock itself.
+  const reconciled = claimWorktreeReconciliation(slug, found.id, {
+    sessionId: opts?.sessionId,
+    agentId,
+    observedWorktree: opts?.observedWorktree,
+    observedCheckout: opts?.observedCheckout,
+  });
   return withTicketLock(slug, found.id, () => {
     const ticket = getTicket(slug, found.id);
     if (!ticket) return { ok: false, reason: 'not_found' };
@@ -2068,13 +2085,22 @@ function bindClaimRuntimeIdentity(slug?: any, idOrRef?: any, opts?: any) {
       return { ok: false, reason: 'runtime_identity_mismatch', ticket };
     }
     const now = new Date().toISOString();
-    if (!recordDispatchRuntimeIdentity(slug, state, agentId, null, now)) {
+    // A lease that cannot be made to agree with the claiming runtime's own checkout is recorded rather than
+    // thrown away: this runs in a PreToolUse hook, which may not deny the claim, so claimTicket raises it.
+    if (!reconciled.ok) {
+      recordClaimWorktreeRefusal(ticket, state, agentId, reconciled, now);
+      putTicket(slug, ticket);
+      return { ok: false, reason: reconciled.reason, ticket, leased: reconciled.leased || null, observed: reconciled.observed || null };
+    }
+    if (!recordDispatchRuntimeIdentity(slug, state, agentId, null, now, reconciled.facts)) {
       return { ok: false, reason: 'runtime_identity_mismatch', ticket };
     }
+    if (reconciled.facts || reconciled.proven) recordProvenLeaseOccupancy(state, agentId, now);
+    clearClaimWorktreeRefusal(state);
     state.bindSource = 'claim_runtime_identity';
     stampDispatchEvent(ticket, 'claim-runtime-identity', now);
     putTicket(slug, ticket);
-    return { ok: true, ticket };
+    return { ok: true, ticket, exchangedWith: reconciled.exchangedWith || null };
   });
 }
 
@@ -2157,6 +2183,29 @@ function claimTicket(slug?: any, idOrRef?: any, by?: any, opts?: any) {
         ticket: t,
         message: `claim: refused ${t.ref}; this runtime presented the current token and executor but did not bind to the prepared dispatch. ${by} may immediately release this attempt with kind technical_blocker, using this refusal as the command/output evidence and the same session identity when one was supplied, then stop.`,
       };
+    }
+    // SQ-324. A dispatch whose write lease does not point at its own executor's checkout can do nothing: the
+    // worktree guard refuses the leased checkout and the lease guard refuses the one the executor is in. It
+    // used to surface as that pair of contradictory Edit refusals AFTER the claim succeeded, neither able to
+    // name the ticket whose lease was wrong. Refused here instead, naming both paths, and authorized to
+    // surrender the same way an unbound runtime is: an instruction to release is worthless if the release is
+    // then refused as another runtime's attempt, which is how the recorded incident reached a dead end.
+    const crossedLease = !directExecution && opts.requireBoundAgent && currentDispatch
+      ? claimWorktreeLeaseRefusal(t, currentDispatch)
+      : null;
+    if (crossedLease) {
+      currentDispatch.failedClaimSurrender = {
+        by,
+        executor: String(opts.executor || ''),
+        sessionId: opts.sessionId ? String(opts.sessionId) : null,
+        tokenDigest: dispatchTokenDigest(admission.token),
+        tokenPrefix: dispatchTokenPrefix(admission.token),
+        at: now,
+      };
+      stampDispatchEvent(t, opts.source || 'claim', now);
+      putTicket(slug, t);
+      queueEventNotification(slug, t, t.lastEventType, t.lastEventSource);
+      return { ok: false, reason: crossedLease.reason, ticket: t, message: crossedLease.message };
     }
     if (currentDispatch?.resumedAt && isolatedDispatchWorktreeMissing(currentDispatch)) return { ok: false, reason: 'worktree_missing', ticket: t };
     // Submitted work awaits the orchestrator's publish transaction, not another

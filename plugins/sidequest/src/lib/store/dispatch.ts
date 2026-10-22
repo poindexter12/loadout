@@ -1334,6 +1334,19 @@ function retainedWorktreeContinuationState(slug?: any, ticket?: any, state?: any
   const checkpointCommit = String(attempt?.commit || '').trim();
   const checkpointedTerminalFailure = Boolean(state?.terminalAt && checkpointCommit && ['failed', 'died'].includes(state.outcome));
   if (!state || (!inherited && !checkpointedTerminalFailure && state.outcome !== 'released') || !state.terminalAt || state.sharedTree !== false) return null;
+  // SQ-324. A cross-bound attempt releases with a lease pointing at a SIBLING's checkout, and the release
+  // alone makes that lease look retained. Resuming it would put the retry in another ticket's tree, which is
+  // worse than the refusal it replaces, and there is nothing of this ticket's to retain: no claim ever
+  // succeeded under that lease. Reported as a fallback so the retry creates its own checkout and the record
+  // says why the retained one was declined.
+  const crossBound = crossBoundTerminalLease(ticket, state);
+  if (crossBound) {
+    return {
+      fallback: continuationFallback('worktree_lease_cross_bound', crossBound.leased || state.worktree, {
+        cause: `the claim refused this lease as ${crossBound.reason}${crossBound.observed ? `; its executor was running in ${crossBound.observed}` : ''}`,
+      }),
+    };
+  }
   const releasedAt = inherited ? String(inherited.releasedAt || state.terminalAt) : state.terminalAt;
   const recordedWorktree = String(state.worktree || inherited?.sourceWorktree || '').trim();
   if (!recordedWorktree || !fs.existsSync(recordedWorktree)) {
@@ -1438,6 +1451,21 @@ function releaseFragmentOnlyCheckpoint(projectPath?: any, ticket?: any, checkpoi
   } catch (_: any) {
     return false;
   }
+}
+
+// SQ-324 (scope absorbed from SQ-357). Worktree recovery reads the retained checkout's HEAD and refuses the
+// retry when it has moved off the dispatch base, because that commit is an unintegrated candidate. Under a
+// crossed lease the checkout it reads belongs to a SIBLING, so the commit it protects is the sibling's and
+// the ticket is left with no legal path at all: the recorded incident refused a plain retry over a foreign
+// commit, refused recoveryEvidence and recoveryTaskId as "not an active attempt", and was only escaped with
+// a replacement ticket. A recorded claim refusal is proof this attempt never claimed under that lease, so it
+// never wrote in that checkout and has no candidate there to protect. The sibling's checkout is left exactly
+// as it is: recovery already declined to remove it, and this only declines to refuse the retry over it.
+function crossBoundTerminalLease(ticket?: any, state?: any) {
+  if (!state?.claimWorktreeRefusal || state.sharedTree !== false || !state.terminalAt) return null;
+  if (state.claimedAt || ticket?.claim?.by || state.worktreeOccupancyProvenAt) return null;
+  const refusal = state.claimWorktreeRefusal;
+  return { reason: String(refusal.reason || 'worktree_cross_bind'), leased: refusal.leased || null, observed: refusal.observed || null };
 }
 
 function unclaimedWorktreeRecoveryFacts(projectPath?: any, ticket?: any, state?: any) {
@@ -1667,7 +1695,8 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
       });
       if (recovery && recovery.reclaimed === false && recovery.discardable !== true) {
         const retainedContinuation = retainedWorktreeContinuationState(slug, t, current);
-        if (!retainedContinuation?.continuation) {
+        const crossBound = crossBoundTerminalLease(t, current);
+        if (!retainedContinuation?.continuation && !crossBound) {
           const checkpointCommit = String(t.checkpoint?.commit || '').trim();
           const checkpointRecovery = checkpointCommit
             ? ` Restore ${current.worktree} to checkpoint ${checkpointCommit}, then dispatch again; the board will resume that retained checkout without creating another.`
@@ -2327,6 +2356,17 @@ function recoverDispatchQuotaFailure(slug?: any, idOrRef?: any, opts?: any) {
   });
 }
 
+// The harness names each isolated checkout after the agent it creates it for (`agent-<agent_id>`), so the
+// path itself records who owns it — the one fact creation attribution lacks, arriving in the only field
+// WorktreeCreate carries. It is written down as evidence and never as authority: it says which RUNTIME owns
+// the checkout, never which ticket that runtime holds a token for, and only the claim can say that. Having
+// it on the record is what lets a crossed lease name the agent the checkout actually belongs to (SQ-324).
+function worktreeNamedAgentId(worktree?: any) {
+  const name = String(worktree || '').trim().split(/[\\/]+/).filter(Boolean).pop() || '';
+  const match = /^agent-([0-9a-z]+)$/i.exec(name);
+  return match ? match[1] : null;
+}
+
 function dispatchCreationCandidate(state?: any, sessionId?: any) {
   return Boolean(state
     && state.sessionId === sessionId
@@ -2373,6 +2413,7 @@ function bindDispatchWorktreeCreation(slug?: any, sessionId?: any, worktree?: an
       if (!baseline) return { ok: false, reason: 'baseline_unavailable' };
       state.worktree = boundWorktree;
       state.worktreeBindingSource = 'worktree-create';
+      state.worktreeNamedAgentId = worktreeNamedAgentId(boundWorktree);
       state.worktreeBoundAt = new Date().toISOString();
       stampDispatchEvent(ticket, 'worktree-create-binding', state.worktreeBoundAt);
       putTicket(slug, ticket);
@@ -2873,6 +2914,7 @@ function unclaimedCreationReservation(ticket?: any, state?: any, sessionId?: any
 function applyExchangedCreationBinding(state?: any, facts?: any, otherRef?: any, now?: any) {
   const from = canonicalPath(state.worktree);
   state.worktree = facts.worktree;
+  state.worktreeNamedAgentId = worktreeNamedAgentId(facts.worktree);
   state.worktreeGitDirectory = facts.gitDirectory;
   state.worktreeCommonGitDirectory = facts.commonGitDirectory;
   state.worktreeCheckoutInstance = facts.checkoutInstance;
@@ -2924,6 +2966,202 @@ function exchangeCrossedCreationBinding(slug?: any, ticketId?: any, sessionId?: 
     }
     return { ok: true, exchangedWith: holder.ref };
   }));
+}
+
+// SQ-324. Creation attribution is a guess (see the comment above), and until something corrects it the
+// guess is the write lease. The correction above needs a sibling that is still unclaimed and still
+// identity-unbound on BOTH sides, which under a real fan-out it rarely is: on the recorded incident the
+// sibling bound and claimed 10s before the crossed reservation bound at all, so the only repair path was
+// already closed and both executors were left unable to write anywhere. These three functions are the
+// claim-time repair, and the claim is the right place for it: it is the one call an executor makes holding a
+// per-dispatch token, so the ticket-to-checkout pairing it reports is the only one in the system that is not
+// a guess. An observation under a token outranks creation order; it does not outrank another runtime's
+// proven occupancy.
+
+// Occupancy a runtime proved by claiming with a token while standing in the checkout its own dispatch
+// leases. Recorded by the claim bind alone, never by creation and never by an observed-write bind: those
+// report a checkout without proving which ticket owns it. A lease carrying this is never exchanged away.
+function provenLeaseOccupancy(state?: any, worktree?: any) {
+  const candidate = String(worktree || '').trim();
+  if (!state?.worktreeOccupancyProvenAt || !state.worktree || !candidate) return false;
+  return canonicalPath(state.worktree) === canonicalPath(candidate);
+}
+
+function recordProvenLeaseOccupancy(state?: any, agentId?: any, now?: any) {
+  if (!state || state.sharedTree !== false || !state.worktree) return;
+  state.worktreeOccupancyProvenAt = now || new Date().toISOString();
+  state.worktreeOccupancyProvenBy = String(agentId || '').trim() || null;
+}
+
+// Either side of a claim-time exchange: an isolated creation reservation of this session whose lease is
+// still only creation's guess. Deliberately NOT `unclaimedCreationReservation` — requiring both sides to be
+// unclaimed and identity-unbound is exactly what froze the incident. The safety question is not whether a
+// reservation has progressed, it is whether anything ever PROVED the lease, and that is asked separately.
+function claimLeaseExchangeable(state?: any, sessionId?: any) {
+  return Boolean(state && state.sessionId === sessionId && state.sharedTree === false && !state.terminalAt
+    && !state.continuation?.sourceWorktree && state.worktreeBindingSource === 'worktree-create' && state.worktree);
+}
+
+function exchangeClaimedCreationBinding(slug?: any, ticketId?: any, opts?: any) {
+  const sessionId = String(opts?.sessionId || '').trim();
+  const agentId = String(opts?.agentId || '').trim();
+  const reported = canonicalPath(String(opts?.reported || '').trim());
+  const target = getTicket(slug, ticketId);
+  const targetState = dispatchState(target);
+  if (!reported || !sessionId || !claimLeaseExchangeable(targetState, sessionId)) {
+    return { ok: false, reason: 'lease_not_exchangeable' };
+  }
+  const boundAgent = String(targetState.agentId || '').trim();
+  if (boundAgent && agentId && boundAgent !== agentId) return { ok: false, reason: 'runtime_identity_mismatch' };
+  const held = canonicalPath(targetState.worktree);
+  if (held === reported) return { ok: true, exchanged: false };
+  if (provenLeaseOccupancy(targetState, held)) return { ok: false, reason: 'lease_occupancy_proven' };
+  const holder = listTickets(slug).find((candidate?: any) => candidate.id !== target.id
+    && claimLeaseExchangeable(dispatchState(candidate), sessionId)
+    && canonicalPath(dispatchState(candidate).worktree) === reported);
+  if (!holder) return { ok: false, reason: 'no_crossed_reservation' };
+  const holderState = dispatchState(holder);
+  // The holder standing in the checkout it leases is the one case where moving the lease would be theft.
+  if (provenLeaseOccupancy(holderState, reported)) return { ok: false, reason: 'holder_occupancy_proven', holder: holder.ref };
+  const baseline = String(targetState.baseCommit || '').trim();
+  if (!baseline || baseline !== String(holderState.baseCommit || '').trim()) {
+    return { ok: false, reason: 'baseline_mismatch', holder: holder.ref };
+  }
+  // Creation facts lag binding by tens of seconds under a fan-out, so they are derived here instead of
+  // required from the record. Both checkouts exist by claim time; one that does not, or one whose head has
+  // already moved off the shared baseline, is a refusal rather than "no crossing found", or the exchange
+  // would hand a reservation a tree carrying someone else's commits.
+  const reportedFacts = immutableWorktreeFacts(slug, reported);
+  const heldFacts = immutableWorktreeFacts(slug, held);
+  if (!reportedFacts || !heldFacts) return { ok: false, reason: 'checkout_facts_unreadable', holder: holder.ref };
+  if (reportedFacts.revision !== baseline || heldFacts.revision !== baseline) {
+    return { ok: false, reason: 'checkout_moved_off_baseline', holder: holder.ref };
+  }
+  const [firstId, secondId] = [target.id, holder.id].sort();
+  const factsFor = new Map([[target.id, reportedFacts], [holder.id, heldFacts]]);
+  const refFor = new Map([[target.id, holder.ref], [holder.id, target.ref]]);
+  const exchanged = withTicketLock(slug, firstId, () => withTicketLock(slug, secondId, () => {
+    const now = new Date().toISOString();
+    for (const id of [firstId, secondId]) {
+      const ticket = getTicket(slug, id);
+      const state = dispatchState(ticket);
+      if (!claimLeaseExchangeable(state, sessionId)) return null;
+      const facts = factsFor.get(id);
+      if (!facts || canonicalPath(state.worktree) === facts.worktree) return null;
+      if (provenLeaseOccupancy(state, canonicalPath(state.worktree))) return null;
+      applyExchangedCreationBinding(state, facts, refFor.get(id), now);
+      stampDispatchEvent(ticket, 'worktree-claim-exchange', now);
+      putTicket(slug, ticket);
+    }
+    return { ok: true, exchanged: true, holder: holder.ref };
+  }));
+  return exchanged || { ok: false, reason: 'exchange_lost_race', holder: holder.ref };
+}
+
+// What the claim knows that nothing before it did: which ticket this runtime holds a token for, and which
+// checkout that runtime is standing in. Called before the claim's own ticket lock, because the exchange
+// takes that lock itself.
+function claimWorktreeReconciliation(slug?: any, ticketId?: any, opts?: any) {
+  const ticket = getTicket(slug, ticketId);
+  const state = dispatchState(ticket);
+  if (!ticket || !state || state.sharedTree !== false || state.terminalAt) return { ok: true, facts: null };
+  // A continuation binds against its retained lease, which recordDispatchRuntimeIdentity already verifies
+  // against the reported checkout (SQ-171); nothing here reattributes a lease it never guessed.
+  if (state.continuation?.sourceWorktree) return { ok: true, facts: null };
+  const observedCheckout = String(opts?.observedCheckout || '').trim();
+  const observed = String(opts?.observedWorktree || '').trim();
+  // No checkout reported at all (a caller with no cwd): there is no evidence to reconcile against, so this
+  // stays the pre-SQ-324 bind rather than inventing a refusal.
+  if (!observed && !observedCheckout) return { ok: true, facts: null };
+  const leased = boundIsolatedWorktree(state) ? canonicalPath(state.worktree) : null;
+  if (!observed) {
+    return { ok: false, reason: 'worktree_isolation_lost', leased, observed: canonicalPath(observedCheckout) };
+  }
+  const reported = canonicalPath(observed);
+  // Already proven: re-deriving the immutable facts would compare a revision this executor has legitimately
+  // moved on from, so a later claim by the runtime that proved the lease is left alone.
+  if (provenLeaseOccupancy(state, reported)) return { ok: true, facts: null, proven: true };
+  if (!leased) return { ok: false, reason: 'worktree_lease_unbound', leased: null, observed: reported };
+  let exchangedWith = null;
+  if (leased !== reported) {
+    const exchange = exchangeClaimedCreationBinding(slug, ticket.id, {
+      sessionId: opts?.sessionId,
+      agentId: opts?.agentId,
+      reported,
+    });
+    if (!exchange.ok) {
+      return {
+        ok: false,
+        reason: 'worktree_cross_bind',
+        leased,
+        observed: reported,
+        detail: exchange.reason,
+        holder: exchange.holder || null,
+        // The harness names a checkout after the agent it made it for, so the OBSERVED path says which
+        // runtime owns the tree this executor is standing in. That is the fact that separates the two shapes
+        // of this defect: the same agent id means a crossed lease, a different one means this runtime is
+        // standing in a sibling's checkout, and the holder ref says which ticket that sibling holds.
+        observedAgentId: worktreeNamedAgentId(reported),
+      };
+    }
+    exchangedWith = exchange.holder || null;
+  }
+  const facts = immutableWorktreeFacts(slug, reported);
+  if (!facts) return { ok: false, reason: 'invalid_worktree_binding', leased, observed: reported };
+  return { ok: true, facts, observed: reported, exchangedWith };
+}
+
+// The claim bind cannot refuse the claim itself: it runs in a PreToolUse hook, which may not rewrite or deny
+// a board call. So an unreconcilable lease is recorded on the dispatch and the claim handler refuses on it.
+// Without this the cross-bind stayed silent until the executor's first Edit, which is refused by a guard that
+// can only talk about paths and cannot name the ticket whose lease is wrong.
+function recordClaimWorktreeRefusal(ticket?: any, state?: any, agentId?: any, refusal?: any, now?: any) {
+  if (!state || !refusal || refusal.ok) return;
+  state.claimWorktreeRefusal = {
+    reason: String(refusal.reason || 'worktree_cross_bind'),
+    leased: refusal.leased || null,
+    observed: refusal.observed || null,
+    detail: refusal.detail || null,
+    holder: refusal.holder || null,
+    observedAgentId: refusal.observedAgentId || null,
+    leasedAgentId: refusal.leasedAgentId || null,
+    agentId: String(agentId || '').trim() || null,
+    at: now || new Date().toISOString(),
+  };
+  stampDispatchEvent(ticket, 'claim-worktree-refusal', state.claimWorktreeRefusal.at);
+}
+
+function clearClaimWorktreeRefusal(state?: any) {
+  if (state?.claimWorktreeRefusal) delete state.claimWorktreeRefusal;
+}
+
+function claimWorktreeRefusalText(ref?: any, refusal?: any) {
+  const observed = refusal?.observed || 'a checkout it did not report';
+  const leased = refusal?.leased || null;
+  const release = `Release this attempt now with kind technical_blocker quoting this refusal, then stop; this dispatch cannot be retried in place and the orchestrator must re-dispatch ${ref}, spawning worktree-isolated executors one Agent call per response.`;
+  if (refusal?.reason === 'worktree_isolation_lost') {
+    return `claim: refused ${ref}; it was dispatched into an isolated worktree${leased ? ` (${leased})` : ''} but its executor is running in the shared checkout ${observed}, where no dispatched write is allowed. ${release}`;
+  }
+  if (refusal?.reason === 'worktree_lease_unbound') {
+    return `claim: refused ${ref}; it was dispatched into an isolated worktree but the board holds no write lease for one, so every write would be refused wherever this executor stands (${observed}). ${release}`;
+  }
+  if (refusal?.reason === 'invalid_worktree_binding') {
+    return `claim: refused ${ref}; the checkout its executor reports (${observed}) is not a readable linked worktree of this repository, so no write lease can be bound to it. ${release}`;
+  }
+  const detail = refusal?.detail ? ` (${refusal.detail}${refusal.holder ? `, held by ${refusal.holder}` : ''})` : '';
+  const owner = refusal?.observedAgentId ? `, the checkout of agent ${refusal.observedAgentId}` : '';
+  return `claim: refused ${ref}; its write lease points at ${leased || 'another checkout'} while its executor is running in ${observed}${owner}, and the lease could not be moved${detail}. Writes to the leased checkout are refused by the worktree guard and writes to this one by the lease guard, so this attempt can do nothing. ${release}`;
+}
+
+// Re-asked under the claim's own lock: a refusal recorded by the bind is spent the moment the lease and the
+// reported checkout agree, so a later repair (the sibling's own claim exchanging the pair back) clears it
+// without needing a fresh dispatch.
+function claimWorktreeLeaseRefusal(ticket?: any, state?: any) {
+  const refusal = state?.claimWorktreeRefusal;
+  if (!refusal || state.sharedTree !== false || state.terminalAt) return null;
+  const observed = String(refusal.observed || '').trim();
+  if (observed && boundIsolatedWorktree(state) && canonicalPath(state.worktree) === canonicalPath(observed)) return null;
+  return { reason: String(refusal.reason || 'worktree_cross_bind'), message: claimWorktreeRefusalText(ticket?.ref, refusal) };
 }
 
 function bindDispatchAgent(sessionId?: any, executor?: any, agentId?: any, agentName?: any, worktree?: any) {
@@ -3204,6 +3442,13 @@ function reconcileLaunchedDispatches(sessionId?: any, opts?: any) {
     dispatchIdentityAmbiguous,
     dispatchCanBindRuntimeIdentity,
     recordDispatchRuntimeIdentity,
+    // SQ-324: the claim is the only token-backed pairing of a ticket with the checkout its runtime stands
+    // in, so it owns lease reconciliation and the refusal a lease that cannot be reconciled must raise.
+    claimWorktreeReconciliation,
+    recordProvenLeaseOccupancy,
+    recordClaimWorktreeRefusal,
+    clearClaimWorktreeRefusal,
+    claimWorktreeLeaseRefusal,
     bindDispatchClaimToken,
     bindDispatchAgent,
     dispatchMatchesStopIdentity,

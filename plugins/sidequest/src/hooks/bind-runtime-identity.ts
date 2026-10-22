@@ -21,6 +21,7 @@ function bindClaimRuntimeIdentity(input: HookInput, agentId: string, executor: s
   if (stringField(input, 'tool_name') !== 'mcp__plugin_sidequest_board__claim' || !isRecord(input.tool_input)) return false;
   const toolInput = input.tool_input;
   const ref = String(toolInput.ref || '').trim();
+  const cwd = stringField(input, 'cwd');
   const sessionId = stringField(input, 'session_id', 'sessionId');
   if (!agentId || !sessionId || !executorAgent(executor) || !ref || String(toolInput.executor || '').trim() !== executor) return true;
   try {
@@ -37,6 +38,13 @@ function bindClaimRuntimeIdentity(input: HookInput, agentId: string, executor: s
     const project = String(toolInput.project || '').trim() || store.sessionProjectRoot();
     const found = store.findProject(project);
     if (found.ok && found.slug) {
+      // SQ-324: the checkout the harness actually put this agent in. The claim is the only call that knows
+      // it alongside a per-dispatch token, so it is the only evidence that can say which ticket owns which
+      // isolated worktree. Creation attributes its leases in board order and a concurrent fan-out crosses
+      // them; without this the store bound the crossed lease as authoritative and the executor found out
+      // from a refused Edit. A non-linked checkout is reported separately rather than dropped: an isolated
+      // dispatch whose executor is standing in the shared checkout is the other half of the same defect.
+      const checkout = cwd ? enclosingCheckout(cwd) : null;
       store.bindClaimRuntimeIdentity(found.slug, ref, {
         token: toolInput.token,
         tokenFile: toolInput.tokenFile,
@@ -44,6 +52,8 @@ function bindClaimRuntimeIdentity(input: HookInput, agentId: string, executor: s
         effort: toolInput.effort,
         agentId,
         sessionId,
+        observedWorktree: checkout?.linked ? checkout.root : null,
+        observedCheckout: checkout?.root || null,
       });
     }
   } catch (_) {

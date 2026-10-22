@@ -226,6 +226,7 @@ function bindClaimRuntimeIdentity(input, agentId, executor) {
   if (stringField(input, "tool_name") !== "mcp__plugin_sidequest_board__claim" || !isRecord(input.tool_input)) return false;
   const toolInput = input.tool_input;
   const ref = String(toolInput.ref || "").trim();
+  const cwd = stringField(input, "cwd");
   const sessionId = stringField(input, "session_id", "sessionId");
   if (!agentId || !sessionId || !executorAgent(executor) || !ref || String(toolInput.executor || "").trim() !== executor) return true;
   try {
@@ -233,13 +234,16 @@ function bindClaimRuntimeIdentity(input, agentId, executor) {
     const project = String(toolInput.project || "").trim() || store.sessionProjectRoot();
     const found = store.findProject(project);
     if (found.ok && found.slug) {
+      const checkout = cwd ? enclosingCheckout(cwd) : null;
       store.bindClaimRuntimeIdentity(found.slug, ref, {
         token: toolInput.token,
         tokenFile: toolInput.tokenFile,
         executor,
         effort: toolInput.effort,
         agentId,
-        sessionId
+        sessionId,
+        observedWorktree: checkout?.linked ? checkout.root : null,
+        observedCheckout: checkout?.root || null
       });
     }
   } catch (_) {
