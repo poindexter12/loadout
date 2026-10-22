@@ -613,6 +613,11 @@ const {
   dispatchIdentityAmbiguous,
   dispatchCanBindRuntimeIdentity,
   recordDispatchRuntimeIdentity,
+  claimWorktreeReconciliation,
+  recordProvenLeaseOccupancy,
+  recordClaimWorktreeRefusal,
+  clearClaimWorktreeRefusal,
+  claimWorktreeLeaseRefusal,
   bindDispatchClaimToken,
   bindDispatchAgent,
   dispatchMatchesStopIdentity,
@@ -1917,6 +1922,12 @@ function bindClaimRuntimeIdentity(slug, idOrRef, opts) {
   const agentId = String(opts?.agentId || "").trim();
   const found = getTicket(slug, idOrRef);
   if (!agentId || !found) return { ok: false, reason: !found ? "not_found" : "missing_identity" };
+  const reconciled = claimWorktreeReconciliation(slug, found.id, {
+    sessionId: opts?.sessionId,
+    agentId,
+    observedWorktree: opts?.observedWorktree,
+    observedCheckout: opts?.observedCheckout
+  });
   return withTicketLock(slug, found.id, () => {
     const ticket = getTicket(slug, found.id);
     if (!ticket) return { ok: false, reason: "not_found" };
@@ -1935,13 +1946,20 @@ function bindClaimRuntimeIdentity(slug, idOrRef, opts) {
       return { ok: false, reason: "runtime_identity_mismatch", ticket };
     }
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    if (!recordDispatchRuntimeIdentity(slug, state, agentId, null, now)) {
+    if (!reconciled.ok) {
+      recordClaimWorktreeRefusal(ticket, state, agentId, reconciled, now);
+      putTicket(slug, ticket);
+      return { ok: false, reason: reconciled.reason, ticket, leased: reconciled.leased || null, observed: reconciled.observed || null };
+    }
+    if (!recordDispatchRuntimeIdentity(slug, state, agentId, null, now, reconciled.facts)) {
       return { ok: false, reason: "runtime_identity_mismatch", ticket };
     }
+    if (reconciled.facts || reconciled.proven) recordProvenLeaseOccupancy(state, agentId, now);
+    clearClaimWorktreeRefusal(state);
     state.bindSource = "claim_runtime_identity";
     stampDispatchEvent(ticket, "claim-runtime-identity", now);
     putTicket(slug, ticket);
-    return { ok: true, ticket };
+    return { ok: true, ticket, exchangedWith: reconciled.exchangedWith || null };
   });
 }
 function claimTicket(slug, idOrRef, by, opts) {
@@ -2019,6 +2037,21 @@ function claimTicket(slug, idOrRef, by, opts) {
         ticket: t2,
         message: `claim: refused ${t2.ref}; this runtime presented the current token and executor but did not bind to the prepared dispatch. ${by} may immediately release this attempt with kind technical_blocker, using this refusal as the command/output evidence and the same session identity when one was supplied, then stop.`
       };
+    }
+    const crossedLease = !directExecution && opts.requireBoundAgent && currentDispatch ? claimWorktreeLeaseRefusal(t2, currentDispatch) : null;
+    if (crossedLease) {
+      currentDispatch.failedClaimSurrender = {
+        by,
+        executor: String(opts.executor || ""),
+        sessionId: opts.sessionId ? String(opts.sessionId) : null,
+        tokenDigest: dispatchTokenDigest(admission.token),
+        tokenPrefix: dispatchTokenPrefix(admission.token),
+        at: now
+      };
+      stampDispatchEvent(t2, opts.source || "claim", now);
+      putTicket(slug, t2);
+      queueEventNotification(slug, t2, t2.lastEventType, t2.lastEventSource);
+      return { ok: false, reason: crossedLease.reason, ticket: t2, message: crossedLease.message };
     }
     if (currentDispatch?.resumedAt && isolatedDispatchWorktreeMissing(currentDispatch)) return { ok: false, reason: "worktree_missing", ticket: t2 };
     if (pendingSubmission(t2) && !opts.force) return { ok: false, reason: "submitted", ticket: t2, submission: t2.submission };

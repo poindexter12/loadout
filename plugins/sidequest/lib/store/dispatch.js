@@ -1066,6 +1066,14 @@ function createDispatch(dependencies) {
     const checkpointCommit = String(attempt?.commit || "").trim();
     const checkpointedTerminalFailure = Boolean(state?.terminalAt && checkpointCommit && ["failed", "died"].includes(state.outcome));
     if (!state || !inherited && !checkpointedTerminalFailure && state.outcome !== "released" || !state.terminalAt || state.sharedTree !== false) return null;
+    const crossBound = crossBoundTerminalLease(ticket, state);
+    if (crossBound) {
+      return {
+        fallback: continuationFallback("worktree_lease_cross_bound", crossBound.leased || state.worktree, {
+          cause: `the claim refused this lease as ${crossBound.reason}${crossBound.observed ? `; its executor was running in ${crossBound.observed}` : ""}`
+        })
+      };
+    }
     const releasedAt = inherited ? String(inherited.releasedAt || state.terminalAt) : state.terminalAt;
     const recordedWorktree = String(state.worktree || inherited?.sourceWorktree || "").trim();
     if (!recordedWorktree || !fs.existsSync(recordedWorktree)) {
@@ -1182,6 +1190,12 @@ function createDispatch(dependencies) {
     } catch (_) {
       return false;
     }
+  }
+  function crossBoundTerminalLease(ticket, state) {
+    if (!state?.claimWorktreeRefusal || state.sharedTree !== false || !state.terminalAt) return null;
+    if (state.claimedAt || ticket?.claim?.by || state.worktreeOccupancyProvenAt) return null;
+    const refusal = state.claimWorktreeRefusal;
+    return { reason: String(refusal.reason || "worktree_cross_bind"), leased: refusal.leased || null, observed: refusal.observed || null };
   }
   function unclaimedWorktreeRecoveryFacts(projectPath, ticket, state) {
     const checkpointCommit = String(ticket?.checkpoint?.commit || ticket?.submission?.commit || "").trim();
@@ -1335,7 +1349,8 @@ function createDispatch(dependencies) {
         });
         if (recovery2 && recovery2.reclaimed === false && recovery2.discardable !== true) {
           const retainedContinuation = retainedWorktreeContinuationState(slug, t, current);
-          if (!retainedContinuation?.continuation) {
+          const crossBound = crossBoundTerminalLease(t, current);
+          if (!retainedContinuation?.continuation && !crossBound) {
             const checkpointCommit = String(t.checkpoint?.commit || "").trim();
             const checkpointRecovery = checkpointCommit ? ` Restore ${current.worktree} to checkpoint ${checkpointCommit}, then dispatch again; the board will resume that retained checkout without creating another.` : "";
             const resumeRefusal = retainedContinuation?.fallback?.reason ? ` The retained checkout cannot resume: ${retainedContinuation.fallback.reason}${retainedContinuation.fallback.cause ? ` (${typeof retainedContinuation.fallback.cause === "string" ? retainedContinuation.fallback.cause : JSON.stringify(retainedContinuation.fallback.cause)})` : ""}.` : "";
@@ -1904,6 +1919,11 @@ function createDispatch(dependencies) {
       return { ok: true, ticket: t, token: t.dispatchNonce, recovery };
     });
   }
+  function worktreeNamedAgentId(worktree) {
+    const name = String(worktree || "").trim().split(/[\\/]+/).filter(Boolean).pop() || "";
+    const match = /^agent-([0-9a-z]+)$/i.exec(name);
+    return match ? match[1] : null;
+  }
   function dispatchCreationCandidate(state, sessionId) {
     return Boolean(state && state.sessionId === sessionId && state.sharedTree === false && state.outcome === "launched" && !state.terminalAt && !state.worktree && !state.continuation?.sourceWorktree);
   }
@@ -1941,6 +1961,7 @@ function createDispatch(dependencies) {
         if (!baseline) return { ok: false, reason: "baseline_unavailable" };
         state.worktree = boundWorktree;
         state.worktreeBindingSource = "worktree-create";
+        state.worktreeNamedAgentId = worktreeNamedAgentId(boundWorktree);
         state.worktreeBoundAt = (/* @__PURE__ */ new Date()).toISOString();
         stampDispatchEvent(ticket, "worktree-create-binding", state.worktreeBoundAt);
         putTicket(slug, ticket);
@@ -2345,6 +2366,7 @@ function createDispatch(dependencies) {
   function applyExchangedCreationBinding(state, facts, otherRef, now) {
     const from = canonicalPath(state.worktree);
     state.worktree = facts.worktree;
+    state.worktreeNamedAgentId = worktreeNamedAgentId(facts.worktree);
     state.worktreeGitDirectory = facts.gitDirectory;
     state.worktreeCommonGitDirectory = facts.commonGitDirectory;
     state.worktreeCheckoutInstance = facts.checkoutInstance;
@@ -2383,6 +2405,152 @@ function createDispatch(dependencies) {
       }
       return { ok: true, exchangedWith: holder.ref };
     }));
+  }
+  function provenLeaseOccupancy(state, worktree) {
+    const candidate = String(worktree || "").trim();
+    if (!state?.worktreeOccupancyProvenAt || !state.worktree || !candidate) return false;
+    return canonicalPath(state.worktree) === canonicalPath(candidate);
+  }
+  function recordProvenLeaseOccupancy(state, agentId, now) {
+    if (!state || state.sharedTree !== false || !state.worktree) return;
+    state.worktreeOccupancyProvenAt = now || (/* @__PURE__ */ new Date()).toISOString();
+    state.worktreeOccupancyProvenBy = String(agentId || "").trim() || null;
+  }
+  function claimLeaseExchangeable(state, sessionId) {
+    return Boolean(state && state.sessionId === sessionId && state.sharedTree === false && !state.terminalAt && !state.continuation?.sourceWorktree && state.worktreeBindingSource === "worktree-create" && state.worktree);
+  }
+  function exchangeClaimedCreationBinding(slug, ticketId, opts) {
+    const sessionId = String(opts?.sessionId || "").trim();
+    const agentId = String(opts?.agentId || "").trim();
+    const reported = canonicalPath(String(opts?.reported || "").trim());
+    const target = getTicket(slug, ticketId);
+    const targetState = dispatchState(target);
+    if (!reported || !sessionId || !claimLeaseExchangeable(targetState, sessionId)) {
+      return { ok: false, reason: "lease_not_exchangeable" };
+    }
+    const boundAgent = String(targetState.agentId || "").trim();
+    if (boundAgent && agentId && boundAgent !== agentId) return { ok: false, reason: "runtime_identity_mismatch" };
+    const held = canonicalPath(targetState.worktree);
+    if (held === reported) return { ok: true, exchanged: false };
+    if (provenLeaseOccupancy(targetState, held)) return { ok: false, reason: "lease_occupancy_proven" };
+    const holder = listTickets(slug).find((candidate) => candidate.id !== target.id && claimLeaseExchangeable(dispatchState(candidate), sessionId) && canonicalPath(dispatchState(candidate).worktree) === reported);
+    if (!holder) return { ok: false, reason: "no_crossed_reservation" };
+    const holderState = dispatchState(holder);
+    if (provenLeaseOccupancy(holderState, reported)) return { ok: false, reason: "holder_occupancy_proven", holder: holder.ref };
+    const baseline = String(targetState.baseCommit || "").trim();
+    if (!baseline || baseline !== String(holderState.baseCommit || "").trim()) {
+      return { ok: false, reason: "baseline_mismatch", holder: holder.ref };
+    }
+    const reportedFacts = immutableWorktreeFacts(slug, reported);
+    const heldFacts = immutableWorktreeFacts(slug, held);
+    if (!reportedFacts || !heldFacts) return { ok: false, reason: "checkout_facts_unreadable", holder: holder.ref };
+    if (reportedFacts.revision !== baseline || heldFacts.revision !== baseline) {
+      return { ok: false, reason: "checkout_moved_off_baseline", holder: holder.ref };
+    }
+    const [firstId, secondId] = [target.id, holder.id].sort();
+    const factsFor = /* @__PURE__ */ new Map([[target.id, reportedFacts], [holder.id, heldFacts]]);
+    const refFor = /* @__PURE__ */ new Map([[target.id, holder.ref], [holder.id, target.ref]]);
+    const exchanged = withTicketLock(slug, firstId, () => withTicketLock(slug, secondId, () => {
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      for (const id of [firstId, secondId]) {
+        const ticket = getTicket(slug, id);
+        const state = dispatchState(ticket);
+        if (!claimLeaseExchangeable(state, sessionId)) return null;
+        const facts = factsFor.get(id);
+        if (!facts || canonicalPath(state.worktree) === facts.worktree) return null;
+        if (provenLeaseOccupancy(state, canonicalPath(state.worktree))) return null;
+        applyExchangedCreationBinding(state, facts, refFor.get(id), now);
+        stampDispatchEvent(ticket, "worktree-claim-exchange", now);
+        putTicket(slug, ticket);
+      }
+      return { ok: true, exchanged: true, holder: holder.ref };
+    }));
+    return exchanged || { ok: false, reason: "exchange_lost_race", holder: holder.ref };
+  }
+  function claimWorktreeReconciliation(slug, ticketId, opts) {
+    const ticket = getTicket(slug, ticketId);
+    const state = dispatchState(ticket);
+    if (!ticket || !state || state.sharedTree !== false || state.terminalAt) return { ok: true, facts: null };
+    if (state.continuation?.sourceWorktree) return { ok: true, facts: null };
+    const observedCheckout = String(opts?.observedCheckout || "").trim();
+    const observed = String(opts?.observedWorktree || "").trim();
+    if (!observed && !observedCheckout) return { ok: true, facts: null };
+    const leased = boundIsolatedWorktree(state) ? canonicalPath(state.worktree) : null;
+    if (!observed) {
+      return { ok: false, reason: "worktree_isolation_lost", leased, observed: canonicalPath(observedCheckout) };
+    }
+    const reported = canonicalPath(observed);
+    if (provenLeaseOccupancy(state, reported)) return { ok: true, facts: null, proven: true };
+    if (!leased) return { ok: false, reason: "worktree_lease_unbound", leased: null, observed: reported };
+    let exchangedWith = null;
+    if (leased !== reported) {
+      const exchange = exchangeClaimedCreationBinding(slug, ticket.id, {
+        sessionId: opts?.sessionId,
+        agentId: opts?.agentId,
+        reported
+      });
+      if (!exchange.ok) {
+        return {
+          ok: false,
+          reason: "worktree_cross_bind",
+          leased,
+          observed: reported,
+          detail: exchange.reason,
+          holder: exchange.holder || null,
+          // The harness names a checkout after the agent it made it for, so the OBSERVED path says which
+          // runtime owns the tree this executor is standing in. That is the fact that separates the two shapes
+          // of this defect: the same agent id means a crossed lease, a different one means this runtime is
+          // standing in a sibling's checkout, and the holder ref says which ticket that sibling holds.
+          observedAgentId: worktreeNamedAgentId(reported)
+        };
+      }
+      exchangedWith = exchange.holder || null;
+    }
+    const facts = immutableWorktreeFacts(slug, reported);
+    if (!facts) return { ok: false, reason: "invalid_worktree_binding", leased, observed: reported };
+    return { ok: true, facts, observed: reported, exchangedWith };
+  }
+  function recordClaimWorktreeRefusal(ticket, state, agentId, refusal, now) {
+    if (!state || !refusal || refusal.ok) return;
+    state.claimWorktreeRefusal = {
+      reason: String(refusal.reason || "worktree_cross_bind"),
+      leased: refusal.leased || null,
+      observed: refusal.observed || null,
+      detail: refusal.detail || null,
+      holder: refusal.holder || null,
+      observedAgentId: refusal.observedAgentId || null,
+      leasedAgentId: refusal.leasedAgentId || null,
+      agentId: String(agentId || "").trim() || null,
+      at: now || (/* @__PURE__ */ new Date()).toISOString()
+    };
+    stampDispatchEvent(ticket, "claim-worktree-refusal", state.claimWorktreeRefusal.at);
+  }
+  function clearClaimWorktreeRefusal(state) {
+    if (state?.claimWorktreeRefusal) delete state.claimWorktreeRefusal;
+  }
+  function claimWorktreeRefusalText(ref, refusal) {
+    const observed = refusal?.observed || "a checkout it did not report";
+    const leased = refusal?.leased || null;
+    const release = `Release this attempt now with kind technical_blocker quoting this refusal, then stop; this dispatch cannot be retried in place and the orchestrator must re-dispatch ${ref}, spawning worktree-isolated executors one Agent call per response.`;
+    if (refusal?.reason === "worktree_isolation_lost") {
+      return `claim: refused ${ref}; it was dispatched into an isolated worktree${leased ? ` (${leased})` : ""} but its executor is running in the shared checkout ${observed}, where no dispatched write is allowed. ${release}`;
+    }
+    if (refusal?.reason === "worktree_lease_unbound") {
+      return `claim: refused ${ref}; it was dispatched into an isolated worktree but the board holds no write lease for one, so every write would be refused wherever this executor stands (${observed}). ${release}`;
+    }
+    if (refusal?.reason === "invalid_worktree_binding") {
+      return `claim: refused ${ref}; the checkout its executor reports (${observed}) is not a readable linked worktree of this repository, so no write lease can be bound to it. ${release}`;
+    }
+    const detail = refusal?.detail ? ` (${refusal.detail}${refusal.holder ? `, held by ${refusal.holder}` : ""})` : "";
+    const owner = refusal?.observedAgentId ? `, the checkout of agent ${refusal.observedAgentId}` : "";
+    return `claim: refused ${ref}; its write lease points at ${leased || "another checkout"} while its executor is running in ${observed}${owner}, and the lease could not be moved${detail}. Writes to the leased checkout are refused by the worktree guard and writes to this one by the lease guard, so this attempt can do nothing. ${release}`;
+  }
+  function claimWorktreeLeaseRefusal(ticket, state) {
+    const refusal = state?.claimWorktreeRefusal;
+    if (!refusal || state.sharedTree !== false || state.terminalAt) return null;
+    const observed = String(refusal.observed || "").trim();
+    if (observed && boundIsolatedWorktree(state) && canonicalPath(state.worktree) === canonicalPath(observed)) return null;
+    return { reason: String(refusal.reason || "worktree_cross_bind"), message: claimWorktreeRefusalText(ticket?.ref, refusal) };
   }
   function bindDispatchAgent(sessionId, executor, agentId, agentName, worktree) {
     const normalizedSessionId = String(sessionId || "").trim();
@@ -2638,6 +2806,13 @@ function createDispatch(dependencies) {
     dispatchIdentityAmbiguous,
     dispatchCanBindRuntimeIdentity,
     recordDispatchRuntimeIdentity,
+    // SQ-324: the claim is the only token-backed pairing of a ticket with the checkout its runtime stands
+    // in, so it owns lease reconciliation and the refusal a lease that cannot be reconciled must raise.
+    claimWorktreeReconciliation,
+    recordProvenLeaseOccupancy,
+    recordClaimWorktreeRefusal,
+    clearClaimWorktreeRefusal,
+    claimWorktreeLeaseRefusal,
     bindDispatchClaimToken,
     bindDispatchAgent,
     dispatchMatchesStopIdentity,
