@@ -38,6 +38,14 @@ Review stays tied to the pinned contract. If two candidate fixes are rejected in
 
 The board keeps the work visible while Claude and its executors handle the ticket lifecycle. A Git ticket submits a verified range; a non-Git ticket submits a verified project snapshot. Claude reports any unavailable capability or failed delivery instead of guessing around it.
 
+### Delegation with Sidequest
+
+Installing Sidequest unconditionally denies generic `Agent` delegation in that session, whether or not a board ticket is in progress. This includes general-purpose, exploration, code-review, and GSD agents. The only agents that remain available are the Sidequest executors returned by dispatch for a ticket.
+
+For a one-off investigation that needs delegated work, file and dispatch a spike ticket, usually in the `codebase-exploration` category. For a small lookup, use inline `Read`, `Glob`, `Grep`, or `WebFetch` instead of delegation.
+
+The refusal may say not to proceed to a PR, merge, publish, or ship until the ticket is filed, dispatched, and closed. That gate applies to the work you tried to delegate: it must have its own ticket and lifecycle. It does not by itself block unrelated release work already outside that delegation.
+
 ## Use the dashboard
 
 The project rail keeps every registered board in one place, with ticket counts and status progress beside each project. The combined view is useful when you want to scan ownership, priorities, labels, stories, and routes across the whole queue.
