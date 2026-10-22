@@ -126,7 +126,7 @@ function main() {
     return false;
   };
   const dispatchMessage = (message) => {
-    const operation = Promise.resolve(mcp.handleRequest(message)).then(
+    const operation = Promise.resolve(mcp.handleRequest(message, { sendNotification: writeMessage })).then(
       (response) => {
         writeMessage(response);
       },

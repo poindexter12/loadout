@@ -73,11 +73,12 @@ function pruneDoneBackupRefs(slug: string, projectPath: string): { backupRefsPru
   }
 }
 
+type ToolContext = { progress?: (update: { phase?: string; message?: string; total?: number }) => void };
 type ToolDefinition = {
   name: string;
   description: string;
   inputSchema: any;
-  handler: (args: any) => any | Promise<any>;
+  handler: (args: any, context?: ToolContext) => any | Promise<any>;
 };
 
 type ShippedPlugin = {
@@ -232,6 +233,27 @@ function combinedRefusal(ticket: any, failures: Array<{ reason: string; message:
     reason: primary.reason,
     message: failures.map((failure) => failure.message).join('\n\n'),
     failures,
+  };
+}
+
+/*
+ * A delivery can hold its client for the sum of two pinned verify runs — the
+ * candidate gate and the merged-tree gate — and before SQ-355 it emitted nothing
+ * in between. The client read that silence as a dead call and reported `failed`
+ * on an integrate that had already merged, which invites a second integrate and
+ * a third concurrent suite. Naming the phase is the point: an orchestrator can
+ * tell a live gate from a wedged one without reading the process table, and a
+ * gate that never changes phase still goes quiet and still times out.
+ */
+function integrationPhaseReporter(context?: ToolContext) {
+  const progress = context?.progress;
+  if (typeof progress !== 'function') return undefined;
+  return (event: { phase: string; state: string; command?: string | null; status?: string | null; durationMs?: number | null }) => {
+    const phase = `${event.phase} gate`;
+    const detail = event.state === 'finished'
+      ? `${phase} finished: ${event.status || 'unknown'}${Number.isFinite(Number(event.durationMs)) ? ` after ${Math.round(Number(event.durationMs) / 1000)}s` : ''}`
+      : `${phase} started${event.command ? `: ${event.command}` : ''}`;
+    progress({ phase: `${event.phase}:${event.state}`, message: `integrate: ${detail}` });
   };
 }
 
@@ -1092,7 +1114,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: 'integrate',
-    description: 'Deliver one ref or a comma-separated ref group. wave assembles and gates only as an options object at the current integration-target head; a refusal keeps submitted candidates parked. Review-rejected candidates stay parked for later supersession without blocking overlap checks; active and accepted pending candidates still block an incomplete participant set. Call again without wave to deliver. Terminal isolated worktrees are reclaimed best-effort after durable delivery.',
+    description: 'Deliver one ref or a comma-separated ref group. wave assembles and gates only as an options object at the current integration-target head; a refusal keeps submitted candidates parked. Review-rejected candidates stay parked for later supersession without blocking overlap checks; active and accepted pending candidates still block an incomplete participant set. Call again without wave to deliver. Terminal isolated worktrees are reclaimed best-effort after durable delivery. Delivery runs the pinned verifier twice, on the candidate and on the merged tree, and reports MCP progress as each gate starts and finishes, so a long integrate is not silence: read the phase name rather than probing the process table, and never retry a delivery that is still reporting phases, which would stack a second writer and a third concurrent suite behind the live one.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1111,9 +1133,12 @@ const tools: ToolDefinition[] = [
       },
       required: ['ref', 'by'],
     },
-    async handler(args) {
+    async handler(args, context) {
       const { slug, meta } = resolveProject(args.project);
       const by = requireBy(args, 'integrate');
+      const phaseReporter = integrationPhaseReporter(context);
+      // Spread, so a client without a progressToken forwards no key at all.
+      const phaseProgress = phaseReporter ? { onVerifyPhase: phaseReporter } : {};
       const refs = String(args.ref).split(',').map((ref: string) => ref.trim()).filter(Boolean);
       if (!refs.length) throw new Error('integrate: pass one or more ticket refs.');
       if (Object.hasOwn(args, 'wave')) {
@@ -1124,7 +1149,7 @@ const tools: ToolDefinition[] = [
             message: 'integrate: wave must be an options object. Pass every wave participant in the comma-separated ref string, for example ref: "SQ-1,SQ-2".',
           });
         }
-        return waveAssemblyAck(slug, store.assembleSubmissionWave(slug, refs, args.wave));
+        return waveAssemblyAck(slug, store.assembleSubmissionWave(slug, refs, Object.assign({}, args.wave, phaseProgress)));
       }
       const failures: Array<{ reason: string; message: string }> = [];
       const ticket = store.getTicket(slug, refs[0]!);
@@ -1147,6 +1172,7 @@ const tools: ToolDefinition[] = [
           target,
           skipVerify: args.skipVerify === true,
           verificationWaiver: args.verificationWaiver,
+          ...phaseProgress,
         });
         if (!delivery.ok) {
           return groupPrDelivery
@@ -1173,6 +1199,7 @@ const tools: ToolDefinition[] = [
           mode: args.mode == null ? store.boardConfig(slug).delivery : args.mode,
           skipVerify: args.skipVerify === true,
           verificationWaiver: args.verificationWaiver,
+          ...phaseProgress,
         });
         const failure: any = delivery.outside?.length ? { strayPaths: delivery.outside } : {};
         if (delivery.verify && /^verification_[a-z_]+_post_merge(?:_rollback_failed)?$/.test(String(delivery.reason))) failure.verifyFailed = delivery.verify;
@@ -1217,6 +1244,7 @@ const tools: ToolDefinition[] = [
           reason: args.reason,
           skipVerify: args.skipVerify === true,
           verificationWaiver: args.verificationWaiver,
+          ...phaseProgress,
         });
         if (!recorded.ok) return mutationAck(slug, recorded);
         const deliveryTicket = recorded.ticket;
@@ -1240,6 +1268,7 @@ const tools: ToolDefinition[] = [
         target,
         skipVerify: args.skipVerify === true,
         verificationWaiver: args.verificationWaiver,
+        ...phaseProgress,
       });
       if (!delivery.ok) {
         const failure: any = delivery.outside?.length ? { strayPaths: delivery.outside } : {};
@@ -1253,6 +1282,7 @@ const tools: ToolDefinition[] = [
         by,
         skipVerify: args.skipVerify === true,
         verificationWaiver: args.verificationWaiver,
+        ...phaseProgress,
       });
       if (!verification.ok) {
         return Object.assign(mutationAck(slug, verification), { delivery: integration, verifyFailed: verification.verify });

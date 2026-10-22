@@ -1871,3 +1871,144 @@ test('a pin left in the legacy SIDEQUEST_HOME directory is swept, not kept alive
 });
 
 export {};
+
+// SQ-356: the briefing is the largest agent-facing surface Sidequest has, and until now the only
+// one that could not be read without burning a dispatch. These three tests are the whole guarantee
+// the dry-run render is worth trusting: it renders with no dispatch, it is byte-identical to the
+// real thing apart from the marked placeholders, and it writes nothing to the board.
+test('SQ-356: --dry-run renders the assembled briefing with no dispatch, byte-identical to the real one, and mutates nothing', () => {
+  const root = tmpDir();
+  assert.equal(git(root, ['init', '-b', 'main']).status, 0);
+  assert.equal(git(root, ['config', 'user.name', 'Sidequest Test']).status, 0);
+  assert.equal(git(root, ['config', 'user.email', 'sidequest-test@example.invalid']).status, 0);
+  fs.mkdirSync(path.join(root, 'plugins', 'demo'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'plugins', 'demo', 'index.js'), 'module.exports = 1;\n');
+  assert.equal(git(root, ['add', '.']).status, 0);
+  assert.equal(git(root, ['commit', '-m', 'fixture']).status, 0);
+  const store = require('../lib/store.js');
+  const slug = store.ensureProject(root, 'briefing dry run').slug;
+  // Pin the integration mode so preparation records an integration target, as the real board does.
+  // With mode 'auto' preparation records none and the worktree-synchronization block disappears,
+  // which would make this fixture unlike every dispatch an executor actually receives.
+  store.setBoardConfig(slug, { integrationMode: 'local', integrationBranch: 'main' });
+  configure(store, 'sq356.render', { model: 'sonnet', effort: 'high' });
+  const created = store.createTicket(slug, {
+    title: 'briefing dry-run subject',
+    description: 'Render me without spending a dispatch.',
+    category: 'sq356.render',
+    files: ['plugins/demo/index.js'],
+    executorVerify: 'node --test plugins/demo/index.test.js',
+    source: 'test',
+  });
+  // Read it back the way the CLI does: createTicket's return value has not had its category,
+  // route, or effort resolved yet, and the briefing prints all three.
+  const ticket = store.getTicket(slug, created.ref);
+  assert.equal(ticket.categoryId, 'sq356.render');
+  assert.equal(ticket.status, 'todo');
+  assert.ok(!ticket.dispatch, 'fixture ticket must start with no dispatch state');
+
+  // 1. It renders at all, with no live dispatch and no token.
+  const preview = agentsync.renderBriefingPreview(ticket, slug, root);
+  assert.match(preview, /^## Executor briefing/);
+  const placeholders = agentsync.BRIEFING_PREVIEW_PLACEHOLDERS;
+  // The token itself is never printed in a briefing (it gates the fetch), so only the four values a
+  // briefing actually renders are asserted present.
+  for (const key of ['tokenFile', 'worktree', 'worktreeGitDirectory', 'baseCommit'] as const) {
+    assert.ok(preview.includes(placeholders[key]), `preview must mark ${key}`);
+  }
+  // The verifier line is what SQ-333 is about, so the preview has to carry the pinned form, not the
+  // "Legacy verifier" fallback a dispatch-less render would otherwise produce.
+  assert.match(preview, /Pinned verifier: command\. Command: node --test plugins\/demo\/index\.test\.js/);
+
+  // 2. Byte-identity against a REAL dispatch's briefing. The real one is rendered through
+  // renderTicketBriefing (the path an executor's briefing command uses) after the four
+  // dispatch-minted values are swapped for the same placeholders the preview prints. Any other
+  // difference — ordering, wording, a packet the preview forgets to populate — fails here, which is
+  // what stops the render drifting into a separate code path that reassures without reflecting
+  // reality.
+  withStubbedSidequestInstall(() => {
+    const prepared = store.prepareDispatch(slug, ticket.ref, { sessionId: `sq356-${Date.now()}` });
+    const live = JSON.parse(JSON.stringify(prepared.ticket));
+    assert.ok(live.dispatch.tokenFile, 'a real dispatch mints a token file');
+    assert.ok(live.dispatch.baseCommit, 'a real dispatch records a base commit');
+    live.dispatch.tokenFile = placeholders.tokenFile;
+    live.dispatch.baseCommit = placeholders.baseCommit;
+    // Preparation does not bind a worktree; the harness does, before the executor reads its
+    // briefing. Both are dispatch-specific either way, so both are placeholders in the preview.
+    live.dispatch.worktree = placeholders.worktree;
+    live.dispatch.worktreeGitDirectory = placeholders.worktreeGitDirectory;
+    const real = agentsync.renderTicketBriefing(live, placeholders.token, slug, root);
+    assert.equal(preview, real);
+  });
+
+  // 3. Board state is unchanged by the render. Asserted against a fresh render on a fresh ticket,
+  // so nothing the dispatch above did can mask a write the preview made.
+  const untouched = store.createTicket(slug, {
+    title: 'dry-run must not touch the board',
+    description: 'Second subject.',
+    category: 'sq356.render',
+    files: ['plugins/demo/index.js'],
+    executorVerify: 'node --test plugins/demo/index.test.js',
+    source: 'test',
+  });
+  const before = JSON.stringify(store.getTicket(slug, untouched.ref));
+  const homeBefore = JSON.stringify(fs.readdirSync(process.env.SIDEQUEST_HOME!).sort());
+  agentsync.renderBriefingPreview(untouched, slug, root);
+  const after = store.getTicket(slug, untouched.ref);
+  assert.equal(JSON.stringify(after), before, 'the preview must not write ticket state');
+  assert.equal(after.status, 'todo');
+  assert.ok(!after.dispatch, 'the preview must not create a dispatch row');
+  assert.ok(!after.dispatchNonce, 'the preview must not mint a token');
+  assert.ok(!after.claimedBy, 'the preview must not claim');
+  assert.equal(JSON.stringify(fs.readdirSync(process.env.SIDEQUEST_HOME!).sort()), homeBefore, 'the preview must not write under the board home');
+  // The evidence directory is printed, not created: a dry run makes no directories.
+  const evidence = /Verification evidence: write screenshots, HTML dumps, and probe output to (.+?)\. It is board-owned/.exec(agentsync.renderBriefingPreview(untouched, slug, root));
+  assert.ok(evidence, 'the preview prints the evidence directory');
+  assert.ok(!fs.existsSync(evidence![1]), 'the preview must not create the evidence directory');
+});
+
+test('SQ-356: the briefing CLI refuses without a token and renders with --dry-run', () => {
+  const root = tmpDir();
+  assert.equal(git(root, ['init', '-b', 'main']).status, 0);
+  assert.equal(git(root, ['config', 'user.name', 'Sidequest Test']).status, 0);
+  assert.equal(git(root, ['config', 'user.email', 'sidequest-test@example.invalid']).status, 0);
+  fs.writeFileSync(path.join(root, 'tracked.js'), 'module.exports = 1;\n');
+  assert.equal(git(root, ['add', '.']).status, 0);
+  assert.equal(git(root, ['commit', '-m', 'fixture']).status, 0);
+  const store = require('../lib/store.js');
+  const slug = store.ensureProject(root, 'briefing dry run cli').slug;
+  configure(store, 'sq356.cli', { model: 'sonnet', effort: 'high' });
+  const ticket = store.createTicket(slug, {
+    title: 'cli dry-run subject',
+    category: 'sq356.cli',
+    files: ['tracked.js'],
+    executorVerify: 'node --test tracked.test.js',
+    source: 'test',
+  });
+  const cli = path.join(__dirname, '..', 'bin', 'sidequest.js');
+  const run = (args: string[]) => spawnSync(process.execPath, [cli, 'briefing', ...args, '--project', root], {
+    encoding: 'utf8',
+    windowsHide: true,
+    env: { ...process.env },
+  });
+
+  const rendered = run([ticket.ref, '--dry-run']);
+  assert.equal(rendered.status, 0, rendered.stderr);
+  assert.match(rendered.stdout, /^## Executor briefing/);
+  assert.ok(rendered.stdout.includes(agentsync.BRIEFING_PREVIEW_PLACEHOLDERS.tokenFile), rendered.stdout.slice(0, 400));
+  assert.match(rendered.stdout, /Pinned verifier: command\. Command: node --test tracked\.test\.js/);
+  // --render is the documented alias and must produce the same bytes.
+  const aliased = run([ticket.ref, '--render']);
+  assert.equal(aliased.status, 0, aliased.stderr);
+  assert.equal(aliased.stdout, rendered.stdout);
+
+  // Exits non-zero only when the ticket cannot be found.
+  const missing = run(['SQ-99999', '--dry-run']);
+  assert.notEqual(missing.status, 0);
+  assert.match(`${missing.stderr}${missing.stdout}`, /briefing: no ticket "SQ-99999"|no ticket/);
+
+  // Without a token and without --dry-run it still refuses, and the refusal now names the dry run.
+  const tokenless = run([ticket.ref]);
+  assert.notEqual(tokenless.status, 0);
+  assert.match(`${tokenless.stderr}${tokenless.stdout}`, /--dry-run/);
+});

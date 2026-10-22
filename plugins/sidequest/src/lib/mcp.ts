@@ -32,14 +32,22 @@ const { tools: lifecycleTools } = require('./mcp-lifecycle');
 const { tools: collaborationTools } = require('./mcp-collaboration');
 const { tools: routingTools } = require('./mcp-routing');
 
+// A tool whose work can outlast a client's idle timeout is handed a progress
+// reporter as its second argument. Emitting on it resets that timer, so a long
+// but healthy call stops looking dead (SQ-355: integrate runs two multi-minute
+// verify gates back to back and the client aborted the silence as a failure).
+type ToolProgressUpdate = { phase?: string; message?: string; total?: number };
+type ToolProgress = (update: ToolProgressUpdate) => void;
+type ToolContext = { progress?: ToolProgress };
 type ToolDefinition = {
   name: string;
   description: string;
   inputSchema: any;
-  handler: (args: any) => any | Promise<any>;
+  handler: (args: any, context?: ToolContext) => any | Promise<any>;
 };
 type RpcId = string | number | null | undefined;
 type RpcMessage = { jsonrpc?: string; id?: RpcId; method?: string; params?: any };
+type HandleRequestOptions = { sendNotification?: (notification: any) => void };
 
 const SERVER_NAME = 'sidequest';
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
@@ -231,15 +239,47 @@ function assertMutationFreshness(projectArg: unknown) {
   if (freshness.refusal) throw new Error(freshness.refusal);
 }
 
-async function runTool(tool: ToolDefinition, rawArgs: any) {
+async function runTool(tool: ToolDefinition, rawArgs: any, context?: ToolContext) {
   const { args, aliases } = validateToolArguments(tool, rawArgs);
   if (!toolMutates(tool.name, args)) {
-    const output = await tool.handler(args);
+    const output = await tool.handler(args, context);
     return acknowledgeAliases(tool.name === 'context_page' ? output : boundedReadPayload(tool.name, output), aliases);
   }
   assertMutationFreshness(args.project);
   const board = mutationQueueKey(tool.name, args);
-  return enqueueMutation(board, async () => acknowledgeAliases(await tool.handler(args), aliases));
+  return enqueueMutation(board, async () => acknowledgeAliases(await tool.handler(args, context), aliases));
+}
+
+/*
+ * notifications/progress for a call the client is still waiting on. The client
+ * opts in by putting a progressToken in params._meta; without one the protocol
+ * forbids unsolicited progress, so the reporter is simply absent and a handler
+ * that checks for it does nothing. The counter is monotonic because the spec
+ * requires `progress` to increase on every notification for a token.
+ */
+function progressReporter(params: any, options?: HandleRequestOptions): ToolProgress | undefined {
+  const progressToken = params?._meta?.progressToken;
+  const send = options?.sendNotification;
+  if (typeof send !== 'function' || progressToken == null) return undefined;
+  let emitted = 0;
+  return (update?: ToolProgressUpdate) => {
+    emitted += 1;
+    const total = Number(update?.total);
+    try {
+      send({
+        jsonrpc: '2.0',
+        method: 'notifications/progress',
+        params: {
+          progressToken,
+          progress: emitted,
+          ...(Number.isFinite(total) && total > 0 ? { total } : {}),
+          message: String(update?.message || update?.phase || 'working'),
+        },
+      });
+    } catch (_) {
+      // A broken or closed stdout must never turn a healthy tool call into a failure.
+    }
+  };
 }
 
 
@@ -335,7 +375,7 @@ function rpcError(id?: RpcId, code?: any, message?: any) {
   return { jsonrpc: '2.0', id, error: { code, message } };
 }
 
-async function handleRequest(msg?: RpcMessage) {
+async function handleRequest(msg?: RpcMessage, options?: HandleRequestOptions) {
   if (!msg || msg.jsonrpc !== '2.0') return null;
   const { id, method, params } = msg;
   const isNotification = id === undefined || id === null;
@@ -367,7 +407,7 @@ async function handleRequest(msg?: RpcMessage) {
       return rpcResult(id, { content: [{ type: 'text', text: `Unknown tool "${name}".` }], isError: true });
     }
     try {
-      const out = await runTool(tool, args);
+      const out = await runTool(tool, args, { progress: progressReporter(params, options) });
       return rpcResult(id, { content: [{ type: 'text', text: JSON.stringify(out, null, 2) }] });
     } catch (e) {
       const error = e as any;

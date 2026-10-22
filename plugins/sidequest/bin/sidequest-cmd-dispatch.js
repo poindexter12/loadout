@@ -72,8 +72,24 @@ async function cmdDispatch(opts, positional) {
 async function cmdBriefing(opts, positional) {
   const idOrRef = positional[0];
   if (!idOrRef) fail("briefing: pass a ticket ref, e.g. sidequest briefing SQ-12 --token-file <path>.");
-  if (!opts["token-file"]) fail("briefing: pass the dispatch token file with --token-file.");
+  const dryRun = opts["dry-run"] === true || opts.render === true;
+  if (!dryRun && !opts["token-file"]) {
+    fail("briefing: pass the dispatch token file with --token-file, or pass --dry-run to render the assembled briefing read-only without a token.");
+  }
   const { slug, meta } = await resolveProject(opts);
+  if (dryRun) {
+    let ticket = null;
+    try {
+      ticket = store.getTicket(slug, idOrRef);
+    } catch (err) {
+      fail(`briefing: ${err && err.message || err}`);
+    }
+    if (!ticket) fail(`briefing: no ticket "${idOrRef}".`);
+    const preview = agentsync.withProjectIdentity(agentsync.renderBriefingPreview(ticket, slug, meta.path), meta.path);
+    process.stdout.write(`${preview}
+`);
+    return;
+  }
   const result = store.readDispatchBriefing(slug, idOrRef, void 0, opts["token-file"]);
   if (!result.ok) {
     const message = result.reason === "not_found" ? `no ticket "${idOrRef}".` : result.reason === "stale" ? "dispatch is no longer current; re-run dispatch for a current spawn." : "dispatch token was refused or its token file was unavailable. Re-run the exact briefing command from this executor prompt; do not re-run dispatch.";

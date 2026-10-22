@@ -3209,7 +3209,14 @@ function reconcileLaunchedDispatches(sessionId?: any, opts?: any) {
     dispatchMatchesStopIdentity,
     markDispatchStopped,
     reconcileLaunchedDispatches,
+    // The read-only briefing preview (SQ-356) must report the SAME board-owned evidence directory a
+    // real dispatch records, so it reuses this rather than recomputing the path.
+    ticketEvidenceDirectory,
   };
 }
 
-module.exports = { createDispatch, unscopedWriteCannotAutoApprove };
+// preparedVerificationRequirement is exported for the read-only briefing
+// preview (SQ-356): the preview has to report the SAME pinned verifier and evidence directory a real
+// dispatch would record, and reimplementing either would make the preview a second code path that
+// reassures without reflecting reality.
+module.exports = { createDispatch, unscopedWriteCannotAutoApprove, preparedVerificationRequirement };

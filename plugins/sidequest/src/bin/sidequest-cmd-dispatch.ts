@@ -74,8 +74,27 @@ async function cmdDispatch(opts: any, positional: any) {
 async function cmdBriefing(opts: any, positional: any) {
   const idOrRef = positional[0];
   if (!idOrRef) fail('briefing: pass a ticket ref, e.g. sidequest briefing SQ-12 --token-file <path>.');
-  if (!opts['token-file']) fail('briefing: pass the dispatch token file with --token-file.');
+  // SQ-356: --dry-run renders the assembled briefing read-only. No token, no claim, no worktree, no
+  // dispatch row, and nothing written: it is how a briefing-text claim gets checked without burning
+  // a dispatch. Dispatch-specific values print as marked placeholders, and the full text always
+  // prints inline rather than through the >28k file transport, because the point is reading it here.
+  const dryRun = opts['dry-run'] === true || opts.render === true;
+  if (!dryRun && !opts['token-file']) {
+    fail('briefing: pass the dispatch token file with --token-file, or pass --dry-run to render the assembled briefing read-only without a token.');
+  }
   const { slug, meta } = await resolveProject(opts);
+  if (dryRun) {
+    let ticket = null;
+    try {
+      ticket = store.getTicket(slug, idOrRef);
+    } catch (err: any) {
+      fail(`briefing: ${(err && err.message) || err}`);
+    }
+    if (!ticket) fail(`briefing: no ticket "${idOrRef}".`);
+    const preview = agentsync.withProjectIdentity(agentsync.renderBriefingPreview(ticket, slug, meta.path), meta.path);
+    process.stdout.write(`${preview}\n`);
+    return;
+  }
   const result = store.readDispatchBriefing(slug, idOrRef, undefined, opts['token-file']);
   if (!result.ok) {
     const message = result.reason === 'not_found'

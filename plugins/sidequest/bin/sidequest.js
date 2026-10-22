@@ -16,7 +16,7 @@ const { cmdAudit } = require("./sidequest-cmd-audit");
 const { cmdIssue } = require("./sidequest-cmd-issue");
 const ARRAY_FLAGS = /* @__PURE__ */ new Set(["image", "label", "file", "always-in-scope", "read-only-denied-tool", "auto-approve-scope", "produces", "changes", "consumes", "changed-surface", "dependency"]);
 const ARRAY_FLAG_ALIASES = { files: "file", labels: "label" };
-const BOOLEAN_FLAGS = /* @__PURE__ */ new Set(["json", "brief", "open", "help", "force", "done", "archived", "all", "dry-run", "yolo", "wave", "unclassified", "enabled", "disabled", "no-fallback", "global", "clear", "steal", "shared-tree", "direct", "sweep", "yes", "integration", "skip-verify", "contract-waiver", "full", "rotate", "worktree-isolation", "auto-approve-test-scope", "high-stakes", "working-tree-delivery", "external-deliverable", "unverified-transport", "allow-repeat-failure", "allow-unscoped", "no-process", "no-worktree", "review", "abandon-submission", "apply"]);
+const BOOLEAN_FLAGS = /* @__PURE__ */ new Set(["json", "brief", "open", "help", "force", "done", "archived", "all", "dry-run", "yolo", "wave", "unclassified", "enabled", "disabled", "no-fallback", "global", "clear", "steal", "shared-tree", "direct", "sweep", "yes", "integration", "skip-verify", "contract-waiver", "full", "rotate", "worktree-isolation", "auto-approve-test-scope", "high-stakes", "working-tree-delivery", "external-deliverable", "unverified-transport", "allow-repeat-failure", "allow-unscoped", "no-process", "no-worktree", "review", "abandon-submission", "apply", "render"]);
 const COMMON_FLAGS = /* @__PURE__ */ new Set(["help", "json", "project", "source"]);
 const COMMAND_FLAGS = {
   add: ["title", "desc", "description", "body", "body-file", "priority", "status", "category", "unclassified", "complexity", "why", "high-stakes", "label", "image", "file", "produces", "changes", "consumes", "contract-waiver", "readonly", "working-tree-delivery", "external-deliverable", "anchors", "verify-kind", "attestation-artifact", "verify", "story", "route-model", "route-effort", "route", "model", "effort", "review-ref", "review-commit", "review-source", "review-revision", "dry-run", "name"],
@@ -63,7 +63,7 @@ const COMMAND_FLAGS = {
   archive: ["done"],
   unarchive: [],
   dispatch: ["shared-tree", "allow-repeat-failure", "allow-unscoped", "session", "unverified-transport", "recovery-evidence", "recovery-task-id"],
-  briefing: ["token-file"],
+  briefing: ["token-file", "dry-run", "render"],
   temp: ["root"],
   "cleanup-temp": ["root"],
   "native-agent": ["prompt", "shared-tree", "unverified-transport", "session", "dir", "name"],
@@ -285,7 +285,7 @@ const HELP_COMMANDS = {
   archive: "sidequest archive [<id|SQ-n>] [--done]",
   unarchive: "sidequest unarchive <id|SQ-n>",
   dispatch: 'sidequest dispatch <SQ-n> [--shared-tree] [--allow-repeat-failure] [--allow-unscoped] [--project <path-or-slug>] [--session id] [--unverified-transport] [--recovery-evidence "<observed failure evidence>" [--recovery-task-id <failed host task id>]]',
-  briefing: "sidequest briefing <SQ-n> --token-file <path> [--project <path-or-slug>]",
+  briefing: "sidequest briefing <SQ-n> (--token-file <path> | --dry-run) [--project <path-or-slug>]",
   "native-agent": 'sidequest native-agent <SQ-n> [--prompt "task"] [--shared-tree] [--json] [--unverified-transport]',
   temp: "sidequest temp cleanup [--root <path>] [--json]",
   "cleanup-temp": "sidequest cleanup-temp [--root <path>] [--json]",
@@ -419,7 +419,7 @@ Complexity is legacy input. Category routing chooses the concrete model and effo
 
 Native Agent dispatch (routed work stays in this conversation):
   sidequest dispatch <SQ-n> [--shared-tree] [--allow-repeat-failure] [--allow-unscoped] [--project <path-or-slug>] [--session id] [--unverified-transport] [--recovery-evidence "<observed failure evidence>" [--recovery-task-id <failed host task id>]]  prepare a token-gated dispatch: declared-file tickets use worktrees by default; shared-tree dispatch requires the spawning runtime to already be rooted in the declared checkout; executors with a live claim cannot dispatch child work; --recovery-evidence retires an attempt no runtime will finish, either one that never bound a runtime, claim, or checkpoint, or one bound and unclaimed past the claim-idle backstop, records that evidence on the failed attempt, and prepares one fresh identity; --recovery-task-id carries the failed task id from a host task-failure notification, and when it matches that unclaimed attempt's own bound runtime the evidence applies at once instead of waiting out the backstop
-  sidequest briefing <SQ-n> --token-file <path> [--project <path-or-slug>]  print the current token-gated executor briefing
+  sidequest briefing <SQ-n> (--token-file <path> | --dry-run) [--project <path-or-slug>]  print the current token-gated executor briefing; --dry-run (alias --render) assembles and prints the same briefing read-only, with no token, claim, worktree, or dispatch row, substituting marked placeholders for the values dispatch mints, so briefing text can be reviewed without spending a dispatch
   sidequest native-agent <SQ-n> [--prompt "task"] [--shared-tree] [--json] [--unverified-transport]  return an already-registered native Agent spawn spec + bounded prompt; CLI transport refuses unless --unverified-transport
   sidequest native-agent cleanup --name <name>        clean up any legacy temporary native Agent definition
     Invoke the returned executor through the current conversation's Agent tool. It is already registered; native-agent does not write a temporary definition.
