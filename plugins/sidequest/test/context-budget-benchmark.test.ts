@@ -22,6 +22,40 @@ const mcp = require('../lib/mcp.js');
 const agentsync = require('../lib/agentsync.js');
 const { compactionPolicyOutput } = require('../src/hooks/shared/compaction-policy.ts');
 
+// SQ-364: a compact dispatch payload embeds temp-directory paths several times over (the
+// project path, the planned token file under SIDEQUEST_HOME, the worktree root), so a raw
+// `Buffer.byteLength` of that payload measures THIS MACHINE'S temp path, not the payload's
+// own content. The spread is not small: macOS `os.tmpdir()` resolves to
+// `/private/var/folders/<2>/<30>/T` (~31 characters longer than Linux `/tmp`), and
+// `scripts/test-full.mjs` nests another 28 characters under TMPDIR for the suite sandbox.
+// Measured on this base, each added path character costs 3 payload bytes, which is how the
+// v4.14.0 cut saw 1370 bytes against a 1320 cap while Linux CI passed the very same commit
+// and `npm run test:files` passed it locally. Normalize every temp root to the Linux `/tmp`
+// shape before measuring so this cap bounds payload CONTENT — a new field, a longer prose
+// string — which is the only thing it can usefully police.
+const PAYLOAD_TEMP_ROOT_STANDIN = '/tmp';
+function payloadTempRoots(): string[] {
+  const roots = new Set<string>();
+  for (const candidate of [os.tmpdir(), process.env.TMPDIR, process.env.TMP, process.env.TEMP]) {
+    if (!candidate) continue;
+    const trimmed = candidate.replace(/[\\/]+$/, '');
+    if (!trimmed) continue;
+    roots.add(trimmed);
+    try { roots.add(fs.realpathSync(trimmed)); } catch { /* an unresolvable root cannot appear in a payload */ }
+  }
+  // Longest first: `/private/var/folders/...` CONTAINS the unresolved `/var/folders/...`,
+  // so replacing the short form first would leave `/private/tmp` and reintroduce drift.
+  return [...roots].sort((left, right) => right.length - left.length);
+}
+function payloadBytes(text: string): number {
+  let normalized = text;
+  for (const root of payloadTempRoots()) normalized = normalized.split(root).join(PAYLOAD_TEMP_ROOT_STANDIN);
+  for (const root of payloadTempRoots()) {
+    assert.ok(!normalized.includes(root), `payload byte budget still depends on the temp path ${root}`);
+  }
+  return Buffer.byteLength(normalized, 'utf8');
+}
+
 let requestId = 0;
 async function callTool(name: string, args: Record<string, unknown>) {
   const response = await mcp.handleRequest({
@@ -119,7 +153,7 @@ test('end-to-end context budgets preserve real storage, retrieval, and model sea
   });
   const dispatch = await callToolRaw('dispatch', { project, ref: orientationTicket.ref });
   assert.ok(!dispatch.isError, dispatch.content?.[0]?.text);
-  assert.ok(Buffer.byteLength(dispatch.content[0].text, 'utf8') <= 1320, `dispatch is ${Buffer.byteLength(dispatch.content[0].text)} bytes`);
+  assert.ok(payloadBytes(dispatch.content[0].text) <= 1320, `dispatch is ${payloadBytes(dispatch.content[0].text)} bytes`);
 
   const context = hookOutput("output.writeContext('SessionStart', 'Recover with the typed board call. ' + '🙂'.repeat(4000))");
   const contextText = context.hookSpecificOutput.additionalContext;
