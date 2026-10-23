@@ -166,6 +166,26 @@ Use `sidequest issue list SQ-123` to see the links and `sidequest issue unlink S
 
 For a linked issue, todo tickets leave it open with no Sidequest status label. Doing, awaiting-oracle, and pending-submission work is open with `status:in-progress`; done but unreleased work is open with `status:in-testing`. When every linked ticket is released, Sidequest removes those status labels, posts one release marker comment, and closes the issue. Applying the same audit again is safe: existing labels and release comments are not duplicated.
 
+### Mirror bugs and features automatically
+
+Hand-linking covers issues that already exist. The issue mirror runs the other direction: it files a GitHub issue for board tickets that users would want to see, so the issue list reflects the product work without exposing internal fix-ups, reviews, explorations, or planning tickets.
+
+It is off until you configure a filter:
+
+```text
+sidequest board-config --issue-mirror '{"enabled":true,"labels":["bug","feature"]}'
+```
+
+The filter takes `labels`, `categories`, and `stories`; a ticket mirrors when it matches any of them. Categories are opt-in by name, and review, audit, research, lookup, exploration, planning, and grooming categories never match unless you list that exact category yourself. Turn the mirror back off with `--issue-mirror off`.
+
+A mirrored ticket gets an issue on the project's origin repo, and Sidequest records it as an ordinary link, exactly as `issue link` would. From that point the lifecycle above owns it: status labels, the release marker, and close-on-done. There is no second sync path, and a ticket you linked by hand is never mirrored on top of.
+
+Ticket labels map to repository labels (`bug` to `bug`, `feature` to `enhancement` by default, overridable with `labelMap`). Sidequest only sends a label the repository already defines.
+
+The issue is a rewrite, not a copy. Sidequest publishes an allow-list of two fields, the title and the description, so a field added to tickets later cannot start leaking. Both are scrubbed of board refs, board slugs, absolute paths, hostnames, session and worktree ids, tokens, cost figures, and other projects' names. If a rendering still trips the detector after scrubbing, Sidequest skips that ticket and warns instead of publishing it.
+
+Mirroring obeys the same `--apply` rule as everything else. `sidequest audit` plans from board state alone, costs no extra GitHub call, and prints `would create issue for SQ-123 ...`. Only `sidequest audit --apply` creates anything. Review a dry run before you first enable the filter: every matching open ticket is mirrored on the next apply, so a broad filter on a long-running board files a lot of issues at once.
+
 SessionStart runs the audit in report-only mode with a short background budget. When it finds something, the session context contains one summary line such as `sidequest audit: 2 untracked issues. Run sidequest audit for detail.` It stays quiet when every count is zero and never blocks startup. A release cut with `--push` runs `sidequest audit --apply` after publishing its tag; `--dry-run` runs the report mode only. Audit failures are warnings and never roll back a release cut.
 
 ## If something stops working
