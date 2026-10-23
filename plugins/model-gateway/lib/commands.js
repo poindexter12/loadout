@@ -552,6 +552,70 @@ function sweepOldProxyBinaries({ directory = BIN_DIR, basename = path.basename(P
   }
 }
 
+// Nothing ever capped the gateway's own append-only logs: on the maintainer's
+// machine proxy.log reached 19MB, guardian.log 8.7MB, and request-routes.jsonl
+// 5.0MB, all still growing. 10MB per file keeps days of history for a
+// postmortem while bounding each log at twice the cap on disk (the live file
+// plus the single `.1` predecessor below). Do not read the observed sizes as
+// the normal rate: most of guardian.log was one probe defect repeating itself.
+const LOG_ROTATION_CAP_BYTES = 10 * 1024 * 1024;
+
+// The append-only logs this plugin owns and writes without bound. shim.log and
+// lifecycle.jsonl are deliberately absent: both were kilobytes when these were
+// megabytes, and lifecycle.jsonl is the exit evidence `doctor` reads. Note the
+// structured proxy log under ~/.local/state is a different file with a
+// different owner — this list is the model-gateway stdout mirror only.
+const ROTATED_LOG_NAMES = ['proxy.log', 'guardian.log'];
+
+function rotatableLogPaths({
+  directory = LOGS,
+  names = ROTATED_LOG_NAMES,
+  routeLogPath = REQUEST_ROUTE_LOG_PATH,
+} = {}) {
+  return [...new Set([...names.map((name) => path.join(directory, name)), routeLogPath])];
+}
+
+// Copy-then-truncate rather than rename: the proxy and every supervisor hold
+// their log open in append mode for their whole lifetime
+// (spawnSupervisedProxy/spawnDetached in process-supervision.js), so a rename
+// would leave those writers pointed at the renamed inode and the cap would
+// never bind on a gateway that stays up for days — exactly the case that
+// produced the 19MB proxy.log. Truncating the inode they already hold leaves
+// them appending to a file that is now empty. The cost is the handful of lines
+// written between the copy and the truncate.
+function rotateOversizedLog(filePath, { capBytes = LOG_ROTATION_CAP_BYTES, fsImpl = fs, report = console.error } = {}) {
+  let size;
+  try { size = fsImpl.statSync(filePath).size; } catch { return null; }
+  if (size <= capBytes) return null;
+  const previousPath = `${filePath}.1`;
+  try {
+    fsImpl.copyFileSync(filePath, previousPath);
+    fsImpl.truncateSync(filePath, 0);
+  } catch (error) {
+    report(`model-gateway: could not rotate ${filePath}: ${error.code || error.message}`);
+    return null;
+  }
+  return { path: filePath, previousPath, rotatedBytes: size };
+}
+
+// Swept from `ensure` next to sweepOldProxyBinaries, for the same reason that
+// sweep lives there: `ensure` is the command that runs often, already holds the
+// ensure lock, and already owns this kind of housekeeping. Exactly one
+// predecessor is kept per log — a rotation overwrites the previous `.1`.
+function sweepOversizedLogs({
+  paths = rotatableLogPaths(),
+  capBytes = LOG_ROTATION_CAP_BYTES,
+  fsImpl = fs,
+  report = console.error,
+} = {}) {
+  const rotated = [];
+  for (const filePath of paths) {
+    const result = rotateOversizedLog(filePath, { capBytes, fsImpl, report });
+    if (result) rotated.push(result);
+  }
+  return rotated;
+}
+
 function replaceProxyBinary({ currentPath = PROXY_BIN, stagedPath, currentVersion, fsImpl = fs, now = Date.now() } = {}) {
   const hadExistingProxy = fsImpl.existsSync(currentPath);
   const previousPath = hadExistingProxy ? oldProxyPath(currentPath, proxyVersion(currentVersion), now) : null;
@@ -2757,6 +2821,7 @@ const commands = {
     cleanLegacyEnvSettings();
     cleanLegacyGatewayModelCache();
     sweepOldProxyBinaries();
+    sweepOversizedLogs();
     const wired = isWired();
     const initialReadiness = await getCodexReadiness();
     if (!initialReadiness.checks.proxyBinary) {
@@ -2910,6 +2975,11 @@ module.exports = {
   restartProxyForVersionChange,
   restartProxyIfOutdated,
   sweepOldProxyBinaries,
+  LOG_ROTATION_CAP_BYTES,
+  ROTATED_LOG_NAMES,
+  rotatableLogPaths,
+  rotateOversizedLog,
+  sweepOversizedLogs,
   shimNeedsRestart,
   servingShimVersion,
   restartShimIfOutdated,
