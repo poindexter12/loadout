@@ -981,8 +981,49 @@ async function reclaimStaleUnixSocket(socketPath) {
   return 'unknown'; // inconclusive -- when in doubt, do not unlink
 }
 
+// The route log's directory creation used to sit inside the per-request write:
+// every logged request paid three mkdirSync calls to create directories that
+// already existed. The directory is created once, on the first write of a
+// worker's life, and only again if a write proves it has gone away — the one
+// case the per-request mkdirs was really covering (a user or a test removing
+// the logs directory under a live worker).
+function createRequestRouteLogWriter({
+  logPath = REQUEST_ROUTE_LOG_PATH,
+  makeDirectories = mkdirs,
+  appendFile = fs.appendFileSync,
+  report = console.error,
+} = {}) {
+  let directoryReady = false;
+  const ensureDirectory = () => {
+    makeDirectories();
+    directoryReady = true;
+  };
+  const append = (entry) => appendFile(logPath, JSON.stringify(entry) + '\n', { encoding: 'utf8', mode: 0o600 });
+  return function writeRequestRouteEntry(entry) {
+    try {
+      if (!directoryReady) ensureDirectory();
+      append(entry);
+      return true;
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        try {
+          ensureDirectory();
+          append(entry);
+          return true;
+        } catch (retryError) {
+          report(`model-gateway: could not write request route log: ${retryError.code || retryError.message}`);
+          return false;
+        }
+      }
+      report(`model-gateway: could not write request route log: ${error.code || error.message}`);
+      return false;
+    }
+  };
+}
+
 function runWorker() {
   process.once('disconnect', () => process.exit(0));
+  const writeRequestRouteEntry = createRequestRouteLogWriter();
   // Prime the auth answer so the first /healthz does not wait on the Keychain.
   void authStatusCache.refresh();
   let modelCache = {
@@ -1073,12 +1114,7 @@ function runWorker() {
       ...(identity?.sessionSource ? { sessionSource: identity.sessionSource } : {}),
       ...(Number.isInteger(markersLength) ? { markersLength } : {}),
     };
-    try {
-      mkdirs();
-      fs.appendFileSync(REQUEST_ROUTE_LOG_PATH, JSON.stringify(entry) + '\n', { encoding: 'utf8', mode: 0o600 });
-    } catch (error) {
-      console.error(`model-gateway: could not write request route log: ${error.code || error.message}`);
-    }
+    writeRequestRouteEntry(entry);
   }
 
   function codexSessionId(req) {
@@ -2384,7 +2420,7 @@ function runWorker() {
 }
 
 module.exports = {
-  createAuthStatusCache, createHostsBypassResolver, effectiveCodexSentryPolicy, gatewayModel, getCodexReadiness, isAuthedAsync, runWorker,
+  createAuthStatusCache, createHostsBypassResolver, createRequestRouteLogWriter, effectiveCodexSentryPolicy, gatewayModel, getCodexReadiness, isAuthedAsync, runWorker,
   probeUnixSocketLive, reclaimStaleUnixSocket,
   codexRateLimitBody, codexRateLimitMessage, upstreamConnectErrorMessage,
 };
