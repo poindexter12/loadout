@@ -54,9 +54,8 @@ Use this only when the user wants `/remote-control` while keeping Model Gateway 
    # <<< model-gateway RC compatibility <<<
    ```
 
-   The real hosts file is `C:\Windows\System32\drivers\etc\hosts` on Windows and `/etc/hosts`
-   on macOS/Linux. Windows requires an Administrator editor; macOS/Linux require `sudo`. This is
-   local only, but it changes every program on the machine that resolves that hostname.
+   The real hosts file is `/etc/hosts` on supported macOS/Linux systems and requires `sudo` to edit.
+   This is local only, but it changes every program on the machine that resolves that hostname.
 
 3. Ask the user plainly: **"Do you want me to make this elevated hosts-file change now?"**
    Wait for a direct yes.

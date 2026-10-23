@@ -157,10 +157,10 @@ the default. Disabling compatibility restores the rows. model-gateway offers an 
 reversible workaround:
 
 - The user (never this plugin, never automatically) adds one hosts entry mapping
-  `api.anthropic.com` to loopback — `127.0.0.1 api.anthropic.com` on Windows
-  (`C:\Windows\System32\drivers\etc\hosts`, needs Administrator), macOS, and Linux (`/etc/hosts`,
-  needs `sudo`). If asked to help with this, tell the user the exact line and file, and that they
-  need elevated privileges to save it; do not attempt to edit the hosts file yourself.
+  `api.anthropic.com` to loopback — `127.0.0.1 api.anthropic.com` in `/etc/hosts` on supported
+  macOS and Linux systems (needs `sudo`). If asked to help with this, tell the user the exact line
+  and file, and that they need elevated privileges to save it; do not attempt to edit the hosts file
+  yourself.
 - `ensure`/`setup`/`doctor` detect the entry (read-only) and, only after confirming the shim can
   actually bind loopback port 80, switch `ANTHROPIC_BASE_URL` to `http://api.anthropic.com` and
   start a second listener on port 80 next to the account's usual loopback shim port. Exactly one line tells
@@ -246,9 +246,9 @@ that owns it, or set the port overrides for this account.
   before recovering a still-bound proxy. Ownership probes use `CODEX_GATEWAY_PROBE_TIMEOUT_MS`
   (2 seconds by default). An inspection failure stays retryable: recovery leaves the listener alone,
   records `owner-unknown` when process inspection is inconclusive, and tries again after backoff.
-  Linux discovery retains the `/proc` fallback when `lsof` is unavailable. Windows discovery keeps
-  probe output attached; shutdown kills and reaps probe children. A confirmed foreign owner is
-  refused and never replaced. Account-specific state and socket paths remain isolated.
+  Linux discovery retains the `/proc` fallback when `lsof` is unavailable. Shutdown kills and reaps
+  probe children. A confirmed foreign owner is refused and never replaced. Account-specific state
+  and socket paths remain isolated.
 - **`doctor` shows `Not authenticated` right after an upgrade**: bumping the proxy binary (e.g.
   0.1.10 → 0.1.17 via `setup`) can invalidate the credential the old version accepted — the new
   binary reads it as not authenticated and `setup` stops before wiring. Fix: re-run `login`, then
