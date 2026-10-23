@@ -1,4 +1,8 @@
 import './_temp-cleanup.js';
+// SQ-367: this file plans codex dispatches ~8 minutes into the full suite's functional phase, long
+// past the 5-minute CATALOG_STALE_MS window the suite's one-shot fixture catalog is stamped for.
+// The SQ-2199 hook re-stamps that catalog before every test, which is what keeps readiness answering.
+import './_gateway-catalog-freshness.js';
 'use strict';
 
 const test = require('node:test');
@@ -893,4 +897,60 @@ test('verification capture names the unresolved project and the --project source
   } finally {
     fs.rmSync(unregistered, { recursive: true, force: true });
   }
+});
+
+/**
+ * SQ-367. The full suite seeds ONE Codex-ready model-gateway catalog before the functional phase and
+ * never touches it again (`scripts/test-full.mjs`), while `discovery.ts` reads any catalog older than
+ * CATALOG_STALE_MS (5 minutes) as absent. This file is reached roughly 8 minutes into that phase and
+ * runs for several more, so whether its codex routes resolve at all came down to whether some OTHER
+ * file's `_gateway-catalog-freshness` hook happened to re-stamp the shared catalog recently enough.
+ * On 2026-10-23 that luck ran out: `prepareDispatch` below refused with "model-gateway readiness is
+ * unavailable" and failed the v4.14.0 cut while the real gateway was up and ready.
+ *
+ * The fix is the opt-in this file never took (the import at the top). These tests prove it by doing
+ * deliberately what the suite did by accident: point discovery at a catalog already stamped outside
+ * the window, and require the dispatch path to work anyway. Without the hook they go red here, in a
+ * standalone run, instead of intermittently 19 minutes into a full suite.
+ */
+test.describe('SQ-367: a catalog aged past the stale window', () => {
+  const agedCatalogDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-367-aged-catalog-'));
+  const AGED_PAST_THE_WINDOW_MILLISECONDS = 6 * 60 * 1000;
+  let previousDiscoveryDirs: string | undefined;
+
+  test.before(() => {
+    fs.mkdirSync(path.join(agedCatalogDirectory, 'model-gateway'), { recursive: true });
+    fs.writeFileSync(path.join(agedCatalogDirectory, 'model-gateway', 'catalog.json'), JSON.stringify({
+      schemaVersion: 3,
+      source: 'model-gateway',
+      updatedAt: new Date(Date.now() - AGED_PAST_THE_WINDOW_MILLISECONDS).toISOString(),
+      codexReadiness: { ready: true, state: 'ready', message: 'Codex readiness confirms the local gateway is ready.' },
+      models: [{ id: 'claude-gpt-5.6-terra', slug: 'codex-gpt-5-6-terra', label: 'GPT-5.6 Terra' }],
+    }));
+    previousDiscoveryDirs = process.env.SIDEQUEST_DISCOVERY_DIRS;
+    process.env.SIDEQUEST_DISCOVERY_DIRS = agedCatalogDirectory;
+  });
+
+  test.after(() => {
+    if (previousDiscoveryDirs === undefined) delete process.env.SIDEQUEST_DISCOVERY_DIRS;
+    else process.env.SIDEQUEST_DISCOVERY_DIRS = previousDiscoveryDirs;
+    fs.rmSync(agedCatalogDirectory, { recursive: true, force: true });
+  });
+
+  test('still answers for Codex readiness', () => {
+    assert.equal(
+      require('../lib/discovery.js').providerReadiness('codex')?.ready,
+      true,
+      'a null readiness here is what routing.ts turns into "Codex dispatch refused: model-gateway readiness is unavailable"',
+    );
+  });
+
+  test('still plans a dispatch for an isolated capture fixture', () => {
+    const fixture = isolatedCaptureFixture('sq-367-aged-catalog-');
+    try {
+      assert.equal(typeof fixture.prepared.token, 'string');
+    } finally {
+      fixture.cleanup();
+    }
+  });
 });
