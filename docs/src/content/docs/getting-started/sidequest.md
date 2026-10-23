@@ -132,25 +132,42 @@ A model going unready does not repoint your routes. A gateway restart, or a cata
 
 ## Deliver through pull requests
 
-By default a board delivers locally: when you integrate a wave, Sidequest advances the integration branch in your checkout. If your repository requires every commit to arrive through a review, switch the board's delivery channel to PR mode instead:
+By default, Sidequest uses local delivery: integrating a wave advances the board's integration branch in your checkout. Local mode remains the default and its behavior is unchanged. From Sidequest 5.10.0, repositories that require every change to arrive through review can opt into PR delivery with the board's `deliveryChannel` setting:
+
+```json
+{ "deliveryChannel": { "mode": "pr" } }
+```
+
+The PR channel defaults to `mode: "local"` when it is omitted. Its remote defaults to `origin`, and its base branch defaults to the board's `integrationBranch` (normally `main`). Set `remote` or `target` only when the repository uses different names. The CLI shorthand is:
 
 ```text
 sidequest board-config --delivery-channel pr
 ```
 
-Integrating a wave then leaves your checkout and the target branch untouched. Sidequest builds the wave in a temporary worktree off `origin/main`, pushes it as `sidequest/wave/<wave-id>`, opens one pull request for the whole wave, and enables auto-merge. Every participating ticket moves to awaiting-merge and stays there until the pull request merges, so `sidequest watch` and the ticket pulse show you which waves are waiting on review rather than reporting them as delivered. The pull request's own CI is the wave gate, which is why no local full suite runs at integration time.
+Do not confuse `deliveryChannel` with `delivery`. The latter remains the git strategy used to apply a wave (`merge`, `replay`, or `apply`); the channel decides whether the result lands locally or through a pull request. Agents configure the channel through the `board_config` MCP tool.
 
-PR mode needs the `gh` CLI installed and authenticated for the repository. When it is not, integration refuses and names the cause. It never falls back to moving your local branch, because a board configured for review delivery asking for a quiet local merge is the one outcome that would defeat the setting.
+With PR delivery, the flow is:
 
-Two optional flags adjust the destination, and both need a mode in the same command because a write replaces the whole channel:
+1. Run `integrate`. Sidequest fetches the configured remote, assembles the wave from the target branch in a temporary worktree, pushes `sidequest/wave/<wave-id>`, opens one pull request for the wave, and enables auto-merge.
+2. The pull request runs CI. The aggregate `test-gate` check is the wave gate. The tickets remain awaiting merge rather than being marked delivered.
+3. Run `integrate` again after the PR merges. Sidequest reconciles the PR, verifies the merge commit reached the target branch, and closes the participating tickets. `sidequest watch` or ticket pulse can alert you when the PR becomes merged or fails, with guidance to run `integrate` to close it.
+
+Before enabling PR delivery, the repository must have GitHub auto-merge enabled, a ruleset requiring the aggregate `test-gate` check, and an authenticated `gh` CLI with permission to fetch, push, open PRs, and enable auto-merge. Auto-merge is a GitHub request, not proof that the PR landed. If it appears green but does not merge, explicitly merge the PR when policy allows and confirm that the target branch actually moved before running `integrate` again.
+
+PR delivery never silently falls back to a local merge. Common outcomes are:
+
+- `wave_ci_failed`: CI failed. Inspect the named failing checks and the PR, fix or rework the candidate, then retry integration as appropriate.
+- `wave_pr_closed_unmerged`: the PR was closed without merging. Reopen or replace it according to your repository policy, then re-integrate the wave or assemble a new one.
+- `pr_delivery_unavailable`: Sidequest could not use `gh`, the configured remote, or GitHub authentication. Install or authenticate `gh`, fix the remote or permissions, and retry; it does not switch to local delivery.
+- `wave_merge_unreachable`: GitHub reports a merge, but the merge commit is not yet reachable from the configured target branch. Wait for the remote to catch up, then run `integrate` again.
+
+Optional destination settings can be supplied together:
 
 ```text
 sidequest board-config --delivery-channel pr --delivery-remote upstream --delivery-target release/next
 ```
 
-The remote defaults to `origin` and the base branch defaults to the board's integration branch. `sidequest board-config --delivery-channel none` clears the channel and returns the board to local delivery. Agents set the same thing through the `board_config` MCP tool's `deliveryChannel` property.
-
-Do not confuse this with `--delivery`, which stays the git strategy used to apply a wave (`merge`, `replay`, or `apply`). `--delivery` decides how the commits are shaped; `--delivery-channel` decides whether they land locally or behind a pull request.
+`sidequest board-config --delivery-channel none` clears the channel and returns the board to local delivery. Local mode documentation and behavior stay as they were.
 
 ## Keep GitHub issues aligned
 
