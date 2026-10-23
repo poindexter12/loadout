@@ -56,6 +56,39 @@ const sourceRevisionCapability = require('../lib/source-revision-capability.js')
 const { runCapturedVerification } = require('../lib/verify-capture.js');
 const worktrees = require('../lib/worktrees.js');
 const { createCheckoutInstanceMarker } = require('../lib/kernel/worktree.js');
+// SQ-364: a compact dispatch payload embeds temp-directory paths several times over
+// (the project path, the planned token file under SIDEQUEST_HOME, the worktree root), so
+// a raw `Buffer.byteLength` of that payload measures THIS MACHINE'S temp path, not the
+// payload's own content. The spread is not small: macOS `os.tmpdir()` resolves to
+// `/private/var/folders/<2>/<30>/T` (~31 characters longer than Linux `/tmp`), and
+// `scripts/test-full.mjs` nests another 28 characters under TMPDIR for the suite
+// sandbox. Measured on this base, each added path character costs 3 payload bytes, which
+// is how the v4.14.0 cut saw 1266 bytes against a 1220 cap while Linux CI passed the very
+// same commit and `npm run test:files` passed it locally. Normalize every temp root to
+// the Linux `/tmp` shape before measuring so these caps bound payload CONTENT — a new
+// field, a longer prose string — which is the only thing they can usefully police.
+const PAYLOAD_TEMP_ROOT_STANDIN = '/tmp';
+function payloadTempRoots(): string[] {
+  const roots = new Set<string>();
+  for (const candidate of [os.tmpdir(), process.env.TMPDIR, process.env.TMP, process.env.TEMP]) {
+    if (!candidate) continue;
+    const trimmed = candidate.replace(/[\\/]+$/, '');
+    if (!trimmed) continue;
+    roots.add(trimmed);
+    try { roots.add(fs.realpathSync(trimmed)); } catch { /* an unresolvable root cannot appear in a payload */ }
+  }
+  // Longest first: `/private/var/folders/...` CONTAINS the unresolved `/var/folders/...`,
+  // so replacing the short form first would leave `/private/tmp` and reintroduce drift.
+  return [...roots].sort((left, right) => right.length - left.length);
+}
+function payloadBytes(text: string): number {
+  let normalized = text;
+  for (const root of payloadTempRoots()) normalized = normalized.split(root).join(PAYLOAD_TEMP_ROOT_STANDIN);
+  for (const root of payloadTempRoots()) {
+    assert.ok(!normalized.includes(root), `payload byte budget still depends on the temp path ${root}`);
+  }
+  return Buffer.byteLength(normalized, 'utf8');
+}
 const DISPATCH_DESCRIPTION = 'Where: the routed test fixture. Contract: prepare a stable executor without changing the ticket title. Verify: inspect the dispatch result.';
 const NO_SCOPE_WARNING = 'Planning-depth warning: no file scope declared for a write-scope ticket, and this board has no autoApproveScope policy that can grant the first request. Dispatch will refuse unless you declare files or explicitly allow an unscoped run.';
 
@@ -1578,7 +1611,7 @@ test('MCP defaults cap category, dispatch, and pulse result payloads', async () 
   }
 
   const categories = await callToolRaw('category_list', { project });
-  assert.ok(Buffer.byteLength(categories.content[0].text) <= 70 * 1024, `category_list is ${Buffer.byteLength(categories.content[0].text)} bytes`);
+  assert.ok(payloadBytes(categories.content[0].text) <= 70 * 1024, `category_list is ${payloadBytes(categories.content[0].text)} bytes`);
   const categoryPayload = JSON.parse(categories.content[0].text);
   assert.ok(categoryPayload.total >= 18);
   assert.equal(categoryPayload.returned, categoryPayload.categories.length);
@@ -1590,7 +1623,7 @@ test('MCP defaults cap category, dispatch, and pulse result payloads', async () 
 
   const ticket = await callTool('add', { project, title: 'payload dispatch', description: DISPATCH_DESCRIPTION, category: 'payload-0' });
   const dispatched = await callToolRaw('dispatch', { allowUnscoped: true, project, ref: ticket.ref });
-  assert.ok(Buffer.byteLength(dispatched.content[0].text) <= 1220, `dispatch is ${Buffer.byteLength(dispatched.content[0].text)} bytes`);
+  assert.ok(payloadBytes(dispatched.content[0].text) <= 1220, `dispatch is ${payloadBytes(dispatched.content[0].text)} bytes`);
   const dispatchPayload = JSON.parse(dispatched.content[0].text);
   assert.deepStrictEqual(Object.keys(dispatchPayload).sort(), ['effort', 'ref', 'runsLabel', 'spawn']);
   assert.equal(dispatchPayload.token, undefined);
@@ -1599,11 +1632,11 @@ test('MCP defaults cap category, dispatch, and pulse result payloads', async () 
 
   const warningTicket = await callTool('add', { project, title: 'payload warning', description: DISPATCH_DESCRIPTION, category: 'debugging', files: ['fixture.ts'] });
   const warningDispatch = await callToolRaw('dispatch', { allowUnscoped: true, project, ref: warningTicket.ref });
-  assert.ok(Buffer.byteLength(warningDispatch.content[0].text) <= 1220, `warning dispatch is ${Buffer.byteLength(warningDispatch.content[0].text)} bytes`);
+  assert.ok(payloadBytes(warningDispatch.content[0].text) <= 1220, `warning dispatch is ${payloadBytes(warningDispatch.content[0].text)} bytes`);
   assert.equal(JSON.parse(warningDispatch.content[0].text).warnings, undefined);
 
   const pulse = await callToolRaw('pulse', { project, ref: ticket.ref });
-  assert.ok(Buffer.byteLength(pulse.content[0].text) <= 1200, `pulse is ${Buffer.byteLength(pulse.content[0].text)} bytes`);
+  assert.ok(payloadBytes(pulse.content[0].text) <= 1200, `pulse is ${payloadBytes(pulse.content[0].text)} bytes`);
   const pulsePayload = JSON.parse(pulse.content[0].text);
   assert.equal(pulsePayload.submission, undefined);
   assert.equal(pulsePayload.git, undefined);
@@ -1617,7 +1650,7 @@ test('MCP defaults cap category, dispatch, and pulse result payloads', async () 
     ['integrate', { project, ref: 'SQ-999999', by: 'payload-tester' }, 1200],
   ] as const) {
     const result = await callToolRaw(name, args);
-    assert.ok(Buffer.byteLength(result.content[0].text) <= maxBytes, `${name} is ${Buffer.byteLength(result.content[0].text)} bytes`);
+    assert.ok(payloadBytes(result.content[0].text) <= maxBytes, `${name} is ${payloadBytes(result.content[0].text)} bytes`);
   }
 });
 
