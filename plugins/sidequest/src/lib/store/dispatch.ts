@@ -4,6 +4,7 @@ const { canonicalPreparedDispatchExecutor } = require('../prepared-dispatch.js')
 const { forcedClaimReleaseGuidance } = require('../refusal-guidance.js');
 const { classifyVerificationKind, verificationRequirement } = require('../kernel/verification.js');
 const { resolveSuite } = require('../suite-resolver.js');
+const { defaultHostSleep } = require('../host-sleep.js');
 const { FILESYSTEM_SNAPSHOT_SOURCE, withPrecomputedFilesystemSnapshot } = require('../source-revision-capability.js');
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationOutcome } = require('../kernel/review-binding');
 
@@ -990,7 +991,14 @@ function setDispatchTerminal(ticket?: any, outcome?: any, source?: any, opts?: a
     reason: opts.releaseReason || null,
     evidence: opts.releaseEvidence || null,
   } : null;
-  const failureShape = opts?.failureShape || release?.kind || classifyDispatchFailure(opts?.error);
+  // The attempt's silent window runs from its last runtime milestone to this terminal record;
+  // host sleep inside it turns a watchdog-shaped death into host_sleep (SQ-164). Lazy, so
+  // the host is only read when the error actually looks like a watchdog death.
+  const attemptStart = state.claimedAt || state.boundAt || state.launchedAt || state.preparedAt || null;
+  const hostSleep = opts?.hostSleep || defaultHostSleep();
+  const failureShape = opts?.failureShape || release?.kind || classifyDispatchFailure(opts?.error, {
+    hostSleptDuring: () => Boolean(attemptStart) && hostSleep.sleptDuring(attemptStart, at),
+  });
   state.outcome = outcome;
   state.failureShape = failureShape;
   state.terminalAt = at;

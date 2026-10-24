@@ -337,10 +337,20 @@ function createRouting(dependencies) {
     }
     return null;
   }
-  function classifyDispatchFailure(error) {
+  const WATCHDOG_FAILURE = /request interrupted by user|stream (?:idle )?(?:timeout|timed out|watchdog)|stream (?:stalled|idle)/;
+  function hostSleptDuringFailure(context) {
+    const value = context?.hostSleptDuring;
+    try {
+      return Boolean(typeof value === "function" ? value() : value);
+    } catch (_error) {
+      return false;
+    }
+  }
+  function classifyDispatchFailure(error, context) {
     const text = String(error || "").trim();
-    if (!text) return "process_death";
+    if (!text) return hostSleptDuringFailure(context) ? "host_sleep" : "process_death";
     const normalized = text.toLowerCase();
+    if (WATCHDOG_FAILURE.test(normalized) && hostSleptDuringFailure(context)) return "host_sleep";
     if (claudeQuotaFailure(text)) return "quota_exhausted";
     if (/prompt is too long|request too large \(max 32mb\)|context (?:length|window).*(?:exceed|too (?:large|long)|overflow)|maximum context/.test(normalized)) return "context_overflow";
     if (/\bmax(?:imum)?[_ -]?(?:output[_ -]?)?tokens?\b/.test(normalized)) return "max_tokens";
