@@ -7,6 +7,10 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const { once } = require('node:events');
 const os = require('node:os');
+const { capacityWaitDeadlineMilliseconds } = require('./_capacity-deadline.js');
+
+// SQ-65: spawn and exit waits scale with the competing test workers instead of a fixed 3s.
+const SPAWN_WAIT_MS = capacityWaitDeadlineMilliseconds({ perTestWorkerMilliseconds: 2_000, floorMilliseconds: 3_000 }, os.loadavg()[0] || 0);
 const path = require('node:path');
 
 type JsonRpcRecord = Record<string, unknown>;
@@ -98,7 +102,7 @@ function mcpServer(environment: NodeJS.ProcessEnv = process.env) {
 }
 
 function initialize(server: import('node:child_process').ChildProcess) {
-  const response = waitForJsonMessage(server, (message) => message.id === 1, 3_000);
+  const response = waitForJsonMessage(server, (message) => message.id === 1, SPAWN_WAIT_MS);
   server.stdin?.write(`${JSON.stringify({
     jsonrpc: '2.0',
     id: 1,
@@ -133,7 +137,7 @@ test('MCP server leaves sibling processes alone', async () => {
     const server = mcpServer();
     try {
       server.stdin?.end();
-      assert.deepEqual(await waitForExit(server, 3_000), { code: 0, signal: null });
+      assert.deepEqual(await waitForExit(server, SPAWN_WAIT_MS), { code: 0, signal: null });
       assert.equal(sibling.exitCode, null);
     } finally {
       if (server.exitCode === null) server.kill();
@@ -150,7 +154,7 @@ test('MCP server exits after its client closes stdin', async () => {
   try {
     server.stdout?.setEncoding('utf8');
     await initialize(server);
-    const exit = waitForExit(server, 3_000);
+    const exit = waitForExit(server, SPAWN_WAIT_MS);
     server.stdin?.end();
     assert.deepEqual(await exit, { code: 0, signal: null });
   } finally {
@@ -250,7 +254,7 @@ test('MCP server keeps an initialized client alive beyond its initialization dea
     server.stdin?.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
     await answeredHeartbeats;
     assert.equal(server.exitCode, null);
-    const exit = waitForExit(server, 3_000);
+    const exit = waitForExit(server, SPAWN_WAIT_MS);
     server.stdin?.end();
     assert.deepEqual(await exit, { code: 0, signal: null });
   } finally {

@@ -6,6 +6,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
+const { waitForCapacity } = require('./_capacity-deadline.js');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 
@@ -79,10 +80,12 @@ test('board MCP server started in a deleted cwd recovers before serving requests
   child.stdout.on('data', (chunk: Buffer) => { stdout += chunk; });
   child.stderr.on('data', (chunk: Buffer) => { stderr += chunk; });
   child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'sq368', version: '0' } } })}\n`);
-  const deadline = Date.now() + 15_000;
-  while (!stdout.includes('"id":1') && Date.now() < deadline && child.exitCode === null) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+  // SQ-65: a fixed 15s spawn wait loses under load; scale it with the competing test workers.
+  await waitForCapacity(() => stdout.includes('"id":1') || child.exitCode !== null, {
+    perTestWorkerMilliseconds: 2_000,
+    floorMilliseconds: 15_000,
+    pollMilliseconds: 50,
+  });
   child.stdin.end();
   child.kill();
   assert.match(stdout, /"id":1/, `server answered initialize; stderr: ${stderr}`);

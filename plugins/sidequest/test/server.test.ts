@@ -13,6 +13,34 @@ const http = require('http');
 const { spawn } = require('child_process');
 
 const DASHBOARD_COMMAND_BIN = path.join(__dirname, '..', 'bin', 'sidequest-cmd-server.js');
+const { capacityWaitDeadlineMilliseconds } = require('./_capacity-deadline.js');
+
+const DASHBOARD_START_PER_TEST_WORKER_MS = 2_000;
+const DASHBOARD_START_FLOOR_MS = 9_000;
+
+function dashboardStartTestDeadlineMilliseconds(loadAverage = os.loadavg()[0] || 0) {
+  return capacityWaitDeadlineMilliseconds({
+    perTestWorkerMilliseconds: DASHBOARD_START_PER_TEST_WORKER_MS,
+    floorMilliseconds: DASHBOARD_START_FLOOR_MS,
+  }, loadAverage);
+}
+
+test('SQ-65 dashboardStartDeadlineMilliseconds: honors a positive integer override, else the 9s default', () => {
+  const { dashboardStartDeadlineMilliseconds } = require(DASHBOARD_COMMAND_BIN);
+  assert.equal(typeof dashboardStartDeadlineMilliseconds, 'function');
+  assert.equal(dashboardStartDeadlineMilliseconds({}), 9_000);
+  assert.equal(dashboardStartDeadlineMilliseconds({ SIDEQUEST_DASHBOARD_START_DEADLINE_MS: '45000' }), 45_000);
+  for (const bad of ['0', '-5', '1.5', 'soon', '']) {
+    assert.equal(dashboardStartDeadlineMilliseconds({ SIDEQUEST_DASHBOARD_START_DEADLINE_MS: bad }), 9_000, `override ${JSON.stringify(bad)}`);
+  }
+});
+
+test('SQ-65 dashboard start test deadline scales with machine load and never drops below the production default', () => {
+  const idle = dashboardStartTestDeadlineMilliseconds(0);
+  const busy = dashboardStartTestDeadlineMilliseconds(os.availableParallelism() * 4);
+  assert.ok(idle >= DASHBOARD_START_FLOOR_MS, `idle deadline ${idle}ms`);
+  assert.ok(busy >= idle, `busy ${busy}ms must not undercut idle ${idle}ms`);
+});
 const HOME_DIR = os.homedir();
 // Point the store at a throwaway home so any incidental store reads/writes
 // (findNewerInstall never touches it, but requiring server.js pulls in
@@ -633,6 +661,9 @@ test('dashboard heals a stale recorded server through the registry launcher', { 
     SIDEQUEST_HOME: home,
     SIDEQUEST_CLAUDE_HOME: claudeHome,
     SIDEQUEST_NO_HOT_RECYCLE: '1',
+    // SQ-65: the dashboard start wait scales with the workers competing for the machine instead
+    // of the production default, which lost a coin flip at load ~29 (SQ-62 Run B).
+    SIDEQUEST_DASHBOARD_START_DEADLINE_MS: String(dashboardStartTestDeadlineMilliseconds()),
   });
   const old = spawn(process.execPath, [path.join(oldRoot, 'bin', 'sidequest.js'), 'serve', '--port', String(port)], {
     env,
