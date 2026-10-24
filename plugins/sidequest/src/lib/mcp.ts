@@ -64,7 +64,11 @@ const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 // Raised from 24100 for board_config.deliveryChannel (SQ-340, 181 bytes) while preserving the 2.5KB reserve.
 // The mode/remote/target object stays structured rather than a packed string: an orchestrator turning
 // PR delivery on gets the enum and the two optional fields from the schema, not from a second call.
-const MCP_TOOLS_LIST_MAX_BYTES = 24300;
+// Raised from 24300 for board_config.issueMirror (SQ-98, ~600 bytes) while preserving the 2.5KB reserve.
+// The filter stays structured for the same reason deliveryChannel did: an orchestrator turning the
+// mirror on has to know that an empty filter is refused and that review categories need naming, and
+// a packed string would make it learn both from a refusal instead of the schema.
+const MCP_TOOLS_LIST_MAX_BYTES = 24950;
 const MCP_TOOLS_LIST_HEADROOM_BYTES = 2500;
 
 function serverVersion() {

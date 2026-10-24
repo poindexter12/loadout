@@ -132,3 +132,68 @@ test('audit marks unavailable evidence and includes the underlying failure', () 
   assert.equal(report.evidenceUnavailable, true);
   assert.match(formatAudit(report), /spawn git ENOENT/);
 });
+
+// --- Issue mirror through the audit report (SQ-98) --------------------------
+
+const mirrorTicketRow = {
+  id: 'tk_bug', ref: 'SQ-910', title: 'Totals drift after a refresh', status: 'todo',
+  description: 'Totals disagree with the rows below after a refresh on /Users/someone/Code/loadout. Expected: they agree.',
+  labels: ['bug'], category: 'coding.normal', createdAt: '2020-01-01T00:00:00.000Z',
+};
+const mirrorConfig = { enabled: true, labels: ['bug'], categories: [], stories: [], labelMap: { bug: 'bug' } };
+
+function mirrorGit(args: string[]) {
+  const command = args.join(' ');
+  if (command === 'remote get-url origin') return 'git@github.com:owner/repo.git';
+  return git(args);
+}
+
+test('audit dry run shows the sanitized issue it would create and posts nothing', () => {
+  const calls: string[] = [];
+  const report = auditReport({
+    tickets: [mirrorTicketRow], links: [], git: mirrorGit,
+    gh: gh({ [list]: [] }, calls), repo: 'owner/repo', issueMirror: mirrorConfig,
+    link: () => { throw new Error('a dry run must not record a link'); },
+  });
+  assert.equal(report.issueMirror.length, 1);
+  assert.equal(report.issueMirror[0].ref, 'SQ-910');
+  assert.equal(report.issueMirror[0].body.includes('/Users/someone'), false);
+  assert.match(report.issueMirror[0].body, /\[redacted\]/);
+  assert.equal(calls.some((command) => command.startsWith('issue create')), false);
+  const output = formatAudit(report);
+  assert.match(output, /ISSUE MIRROR \(1\)/);
+  assert.match(output, /would create issue for SQ-910 in owner\/repo/);
+  assert.match(auditSummary(report), /1 tickets would be mirrored to new issues/);
+});
+
+test('audit --apply creates the mirrored issue and records it as an ordinary external link', () => {
+  const recorded: any[] = [];
+  const responses: Record<string, unknown> = {
+    [list]: [],
+    'label list --repo owner/repo --limit 1000 --json name': [{ name: 'bug' }],
+  };
+  const calls: string[] = [];
+  const executor = (program: string, args: string[]) => {
+    if (args[0] === 'issue' && args[1] === 'create') {
+      calls.push(args.join(' '));
+      return 'https://github.com/owner/repo/issues/91\n';
+    }
+    return gh(responses, calls)(program, args);
+  };
+  const report = auditReport({
+    tickets: [mirrorTicketRow], links: [], git: mirrorGit, gh: executor as any, repo: 'owner/repo',
+    issueMirror: mirrorConfig, link: (ticketId: string, record: any) => recorded.push({ ticketId, ...record }),
+  }, true);
+  assert.deepEqual(report.issueMirror, []);
+  assert.deepEqual(report.applied.map((item: any) => [item.action, item.ok, item.number]), [['createIssue', true, 91]]);
+  assert.deepEqual(recorded, [{ ticketId: 'tk_bug', provider: 'github', repo: 'owner/repo', number: 91, url: 'https://github.com/owner/repo/issues/91' }]);
+  assert.equal(calls.some((command) => command.includes('SQ-910')), false);
+  assert.equal(calls.some((command) => command.includes('/Users/someone')), false);
+});
+
+test('audit leaves the mirror alone when the board has not opted in', () => {
+  const calls: string[] = [];
+  const report = auditReport({ tickets: [mirrorTicketRow], links: [], git: mirrorGit, gh: gh({ [list]: [] }, calls), repo: 'owner/repo' }, true);
+  assert.deepEqual(report.issueMirror, []);
+  assert.equal(calls.some((command) => command.startsWith('issue create')), false);
+});
