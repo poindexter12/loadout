@@ -3,6 +3,8 @@
 const { classifyVerificationKind, commandVerificationResult, verificationAccepted, verificationFailureDiagnostic, verificationOutcome, verificationRequirement, validateVerificationWaiver, verificationWaiverDiagnostic, verifyCaptureWrapperCommand } = require('../kernel/verification.js');
 const { runProcessVerification } = require('../ports/process.js');
 const { verificationTimeoutGuidance } = require('../refusal-guidance.js');
+// SQ-275: landedness has exactly one authority, the remote's live advertisement.
+const { landedRemoteFromTarget, landedRemoteUnavailableMessage, proveLandedOnRemote } = require('./landed-authority.js');
 const { decideSubmissionAdmission } = require('../kernel/submission');
 const { isSourceRevisionAdapterFacts, sourceRevisionBaseline } = require('../source-revision-capability.js');
 const { reviewCandidateFromSubmission, reviewRelationFor, reviewRelationRef, reviewRelationOutcome, reviewLockMessage, reviewProvenance } = require('../kernel/review-binding');
@@ -883,7 +885,7 @@ function verifyDeliveredSubmission(slug: any, ticket: any, opts?: any) {
   }
   const timeoutMilliseconds = normalizeIntegrationVerifyTimeoutMs(boardConfig(slug)?.integrationVerifyTimeoutMs);
   return phasedIntegrationVerification(String(opts?.verifyPhase || 'merged-tree'), opts, requirement, {
-    cwd: readMeta(slug)?.path,
+    cwd: opts?.cwd || readMeta(slug)?.path,
     timeoutMilliseconds,
     logPath: integrationVerifyLogPath(slug, ticket),
     outputTailBytes: INTEGRATION_VERIFY_OUTPUT_TAIL_BYTES,
@@ -1618,6 +1620,20 @@ function targetBranchMergedIntoHead(repo: string, branch: string, deliveryCommit
   });
 }
 
+// SQ-275: delivery-commit verification runs in a detached scratch worktree at that commit, so
+// recording a delivery never runs a verifier with cwd in the user's checkout and never moves it.
+function verifyInScratchWorktree(repo: string, commit: string, run: (cwd: string) => any) {
+  const scratch = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'sq-delivery-verify-'));
+  try {
+    integrationGit(repo, ['worktree', 'add', '--detach', '--force', scratch, commit]);
+    return run(scratch);
+  } finally {
+    try { integrationGit(repo, ['worktree', 'remove', '--force', scratch]); } catch (_) { /* pruned below */ }
+    try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (_) { /* best effort */ }
+    try { integrationGit(repo, ['worktree', 'prune']); } catch (_) { /* best effort */ }
+  }
+}
+
 function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
   opts = opts || {};
   const preflight = validateIntegrationSubmission(slug, idOrRef, { deliveryInteractionCommit: opts.deliveryInteractionCommit });
@@ -1647,17 +1663,52 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
     if (currentBranch !== target.branch && !targetBranchMergedIntoHead(repo, target.branch, deliveryCommit, resultingHead)) {
       return { ok: false, reason: 'branch_not_checked_out', ticket, message: `${target.branch} must be checked out before recording an external delivery; currently on ${currentBranch || 'detached HEAD'}.` };
     }
-    const deliveryRevision = {
-      source: `git:${target.upstream}`,
-      value: resultingHead,
-      observedAt: new Date().toISOString(),
-    };
+    // SQ-275: the check above is CHECKOUT STATE and rightly reads local refs. LANDEDNESS is a
+    // different question: when the target delivers to a remote, only that remote's live
+    // advertisement answers it (landed-authority.ts), and local reachability never contributes.
+    // `landedHead` is the head every landedness computation below measures against.
+    const landedRemote = landedRemoteFromTarget(target);
     let reachable = true;
-    try {
-      integrationGit(repo, ['merge-base', '--is-ancestor', deliveryCommit, resultingHead]);
-    } catch (error: any) {
-      if (error?.status === 1) reachable = false;
-      else throw error;
+    let landedHead = resultingHead;
+    let landedTip: string | null = null;
+    let deliveryRevision: any;
+    if (landedRemote) {
+      const proof = proveLandedOnRemote({ repo, remote: landedRemote.remote, branch: landedRemote.branch, commit: deliveryCommit });
+      if (!proof.ok) {
+        return {
+          ok: false,
+          reason: 'landed_remote_unavailable',
+          ticket,
+          remote: proof.remote,
+          branch: proof.branch,
+          message: landedRemoteUnavailableMessage(ticket.ref, proof.remote, proof.branch, proof.detail),
+        };
+      }
+      if (!proof.tip) {
+        return {
+          ok: false,
+          reason: 'delivery_not_reachable',
+          ticket,
+          remote: proof.remote,
+          branch: proof.branch,
+          message: `${ticket.ref} reconciliation refused: remote ${proof.remote} advertises no refs/heads/${proof.branch}, so delivery commit ${deliveryCommit} cannot be on it. Landedness is decided only by the remote's live advertisement; there is no local fallback.`,
+        };
+      }
+      reachable = proof.landed;
+      landedTip = proof.tip;
+      landedHead = proof.tip;
+      // The source names exactly the remote ref that was just consulted (git:<remote>/<branch>).
+      deliveryRevision = { source: proof.source, value: proof.tip, observedAt: proof.observedAt };
+    } else {
+      // Local-mode board: the integration line is a local branch with no remote, so the local
+      // line is the authority and the source names that line, not a remote.
+      deliveryRevision = { source: `git:${target.upstream || target.branch}`, value: resultingHead, observedAt: new Date().toISOString() };
+      try {
+        integrationGit(repo, ['merge-base', '--is-ancestor', deliveryCommit, resultingHead]);
+      } catch (error: any) {
+        if (error?.status === 1) reachable = false;
+        else throw error;
+      }
     }
     const deliveryMethod = workingTreeDeliveryMethod(opts.deliveryMethod);
     const requestedDeliveryMethod = String(opts.deliveryMethod || '').trim();
@@ -1670,12 +1721,21 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
       };
     }
     const workingTreeDelivery = deliveryMethod !== null && !reachable;
+    // SQ-275: a working-tree delivery proves its content from the checkout, so its revision names
+    // the checkout, never the upstream (which was consulted and did not carry the commit).
+    if (workingTreeDelivery && landedRemote) {
+      deliveryRevision = { source: `git-checkout:${target.branch}`, value: resultingHead, observedAt: deliveryRevision.observedAt };
+    }
     if (!reachable && !workingTreeDelivery) {
+      const where = landedRemote
+        ? `the live ${landedRemote.remote}/${landedRemote.branch} tip ${landedTip} that remote ${landedRemote.remote} advertised just now. Landedness is decided only by that advertisement; local refs, the checkout, and other local branches are not consulted, so a commit present only on this machine is refused`
+        : target.branch;
       return {
         ok: false,
         reason: 'delivery_not_reachable',
         ticket,
-        message: `${ticket.ref} reconciliation refused: delivery commit ${deliveryCommit} is not reachable from ${target.branch}. Record a reset, working-tree, or manual delivery with this pinned candidate, deliveryMethod, and the candidate content present in the integration working tree.`,
+        ...(landedRemote ? { remote: landedRemote.remote, branch: landedRemote.branch, remoteTip: landedTip } : {}),
+        message: `${ticket.ref} reconciliation refused: delivery commit ${deliveryCommit} is not reachable from ${where}. Record a reset, working-tree, or manual delivery with this pinned candidate, deliveryMethod, and the candidate content present in the integration working tree.`,
       };
     }
     if (workingTreeDelivery && !pinnedCandidateMatches(repo, ticket, deliveryCommit)) {
@@ -1692,7 +1752,7 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
     let descendant: any = null;
     let landingCommit: string | null = null;
     if (!content.ok && workingTreeDelivery) {
-      landingCommit = landedCommitWithContent(repo, ticket.submission, deliveryCommit, resultingHead);
+      landingCommit = landedCommitWithContent(repo, ticket.submission, deliveryCommit, landedHead);
       if (landingCommit) content = { ok: true, evidence: 'landed_candidate_content' };
     }
     if (!content.ok) {
@@ -1720,7 +1780,7 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
         ? workingTreeContainsSubmittedContent(repo, ticket.submission, descendant.commit, descendant.paths)
         : deliveryContainsReviewedDescendant(repo, ticket.submission, descendant.commit, deliveryCommit);
       if (!content.ok && workingTreeDelivery) {
-        landingCommit = landedCommitWithContent(repo, ticket.submission, descendant.commit, resultingHead, descendant.paths);
+        landingCommit = landedCommitWithContent(repo, ticket.submission, descendant.commit, landedHead, descendant.paths);
         if (landingCommit) content = { ok: true, evidence: 'landed_candidate_content' };
       }
       if (!content.ok) {
@@ -1735,9 +1795,13 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
     }
     const interaction = workingTreeDelivery || descendant
       ? { ok: true, interaction: null }
-      : reviewedMergedTreeInteraction(repo, ticket, deliveryCommit, resultingHead, opts.deliveryInteractionCommit);
+      : reviewedMergedTreeInteraction(repo, ticket, deliveryCommit, landedHead, opts.deliveryInteractionCommit);
     if (!interaction.ok) return Object.assign({ ticket }, interaction);
-    const verify = verifyDeliveredSubmission(slug, ticket);
+    // SQ-275: a working-tree delivery is verified where its content lives; every other delivery is
+    // verified in a detached scratch worktree at the delivery commit, never in the user's checkout.
+    const verify = workingTreeDelivery
+      ? verifyDeliveredSubmission(slug, ticket)
+      : verifyInScratchWorktree(repo, deliveryCommit, (cwd: string) => verifyDeliveredSubmission(slug, ticket, { cwd }));
     if (!verificationAccepted(verify)) {
       return integrationFailure(slug, ticket, {
         reason: `${verificationOutcome(verify)}_recorded_delivery`,

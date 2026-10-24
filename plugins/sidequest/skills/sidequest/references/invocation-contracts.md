@@ -27,8 +27,12 @@ this file only covers what the schema has no way to say.
   `category` from the live taxonomy instead whenever one fits.
 - **`groomClose`**: one tool, three purposes, each with a different gate. `deliveryCommit` closes it as a
   delivery and the commit must already be reachable from the integration target recorded when that ticket was
-  prepared. A later board-target or checkout change does not retarget the ticket. `integration: true` closes
-  it as an integration. Neither of those closes it as grooming. `reason` is required in all three.
+  prepared. On a remote-mode board that reachability is proven only by a fresh remote advertisement (live
+  `ls-remote` of the target branch, then ancestry against its advertised tip) — never by local refs, a cached
+  `refs/remotes/<remote>/<branch>`, or the checkout's HEAD. An unreachable remote refuses with
+  `landed_remote_unavailable` rather than falling back to local evidence. A later board-target or checkout
+  change does not retarget the ticket. `integration: true` closes it as an integration. Neither of those
+  closes it as grooming. `reason` is required in all three.
 - **`supersede_submission`**: `supersededBy` is the repair ticket's ref, not a commit. A bound candidate stays locked until its review ticket has an oracle verdict. When that verdict accepts the recorded defect conclusion, Sidequest marks the candidate rejected on both binding halves; after a fresh repair integrates, `supersede_submission` can close the rejected source submission.
 
 ## Synonyms the validator accepts
