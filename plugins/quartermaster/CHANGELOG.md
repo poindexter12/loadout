@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.11.0 (2026-10-24)
+
+Released in v4.14.0, up from 0.10.1.
+
+### Features
+
+- model-gateway doctor warns about projects still wired to a disabled or stopped gateway (SQ-345)
+  `model-gateway doctor` now checks every project recorded in `wired-projects.json`. A project whose settings still point `ANTHROPIC_BASE_URL` at the shim port gets a WARN when the plugin is disabled in the active tree or the shim is not listening, along with that project's exact `env --remove` command. Doctor removes nothing itself. It also lists registry entries whose project directory is gone or whose settings no longer point at the gateway, and prunes them only for `doctor --prune-wired-projects`. A new read-only `wired-projects` command prints the same report, and `update-loadout` runs it when it skips a disabled gateway.
+
+### Fixes
+
+- update-loadout no longer starts model-gateway on a tree that disabled it (SQ-343)
+  `update-loadout` used to run `model-gateway setup`, which starts the gateway, even on a tree where `"model-gateway@loadout": false`. The update now skips the gateway step on such a tree and says so. `model-gateway setup` and `ensure` also refuse to download, start, or write anything while the plugin is disabled, and setup lists any recorded projects that still route through the gateway. The gateway also no longer overwrites a `/model` picker cache that belongs to a different gateway.
+
 ## 0.10.1 (2026-10-13)
 
 Released in v4.13.0, up from 0.10.0.
