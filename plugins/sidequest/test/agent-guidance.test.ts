@@ -37,12 +37,21 @@ test('published guidance excludes retired instructions', () => {
   assert.match(executorTemplate, /name the assertion in the test that ran and was not skipped/);
   assert.match(executorTemplate, /state that the state directory started empty/);
   assert.match(executorTemplate, /both names must cover the changed behavior, not an unrelated test/);
-  assert.match(orchestration, /Retire terminal teammates/);
-  assert.match(orchestration, /TaskStop\(\{ task_id: "<agent name>" \}\)`\s+once/);
-  assert.match(orchestration, /Claude Code host action, not a Sidequest tool/);
-  assert.match(orchestration, /Never stop a live claim, retained continuation,\s+or candidate awaiting\s+integration/);
-  assert.match(orchestration, /Do not wake a completed executor, poll FleetView, or create a cleanup loop/);
-  assert.match(skill, /TaskStop\(\{ task_id: "<agent name>" \}\)/);
+  // SQ-183: the dispatch name is a SendMessage address, not a TaskStop task id, so guidance that told the
+  // orchestrator to retire executors with TaskStop produced "No task found with ID" or user-rejected prompts.
+  assert.match(orchestration, /\*\*Never `TaskStop` an executor\.\*\*/);
+  assert.match(orchestration, /dispatch name is a `SendMessage` address, not a\s+`TaskStop` task id/);
+  assert.match(orchestration, /Never stop a live claim, retained continuation, or candidate awaiting integration/);
+  assert.match(orchestration, /Do not\s+wake a completed executor, poll FleetView, or create a cleanup loop/);
+  assert.match(skill, /\*\*Never `TaskStop` an executor\.\*\*/);
+  for (const [name, text] of [['orchestration', orchestration], ['skill', skill]] as const) {
+    assert.doesNotMatch(text, /Retire terminal teammates|retire terminal teammates/, `${name} must not tell the orchestrator to retire teammates`);
+    assert.doesNotMatch(text, /use `?TaskStop\(\{ task_id: "<agent name>" \}\)`? once|call `TaskStop\(\{ task_id: "<agent name>" \}\)` once/, `${name} must not instruct a TaskStop by agent name`);
+  }
+  for (const hook of ['session-start.js', 'subagent-stop.js']) {
+    const text = fs.readFileSync(path.join(ROOT, 'hooks', hook), 'utf8');
+    assert.doesNotMatch(text, /TaskStop\(\{ task_id/, `${hook} must not tell the orchestrator to TaskStop an executor by name`);
+  }
   assert.match(executorTemplate, /After terminal closeout, the board terminal state is authoritative/);
   assert.match(executorTemplate, /Never call `TaskStop` on another ticket's executor or dispatch id/);
   // SQ-224: the rule forbade exactly one stop verb, so an executor reaching for Bash violated nothing.
