@@ -48,17 +48,19 @@ function errorDetail(error: any): string {
 
 // The remote a target delivers to, or null when the target is a local integration line with no
 // remote at all (local-mode boards). `origin/main` and `refs/remotes/origin/main` both name a
-// remote; `main` and `refs/heads/main` are local lines.
+// remote; `main` and `refs/heads/main` are local lines. The remote branch is read from the
+// upstream itself, never from the local branch name, so the ref consulted is always the ref the
+// recorded `git:<upstream>` source names.
 export function landedRemoteFromTarget(target: { mode?: string; upstream?: string; branch?: string } | null | undefined): LandedRemote | null {
-  const branch = String(target?.branch || '').trim();
+  const localBranch = String(target?.branch || '').trim();
   let upstream = String(target?.upstream || '').trim();
-  if (!branch || !upstream || target?.mode === 'local') return null;
+  if (!upstream || target?.mode === 'local') return null;
   if (upstream.startsWith('refs/remotes/')) upstream = upstream.slice('refs/remotes/'.length);
   else if (upstream.startsWith('refs/')) return null;
-  if (upstream === branch) return null;
+  if (upstream === localBranch) return null;
   const slash = upstream.indexOf('/');
-  if (slash <= 0) return null;
-  return { remote: upstream.slice(0, slash), branch };
+  if (slash <= 0 || slash === upstream.length - 1) return null;
+  return { remote: upstream.slice(0, slash), branch: upstream.slice(slash + 1) };
 }
 
 export function landedRemoteUnavailableMessage(ref: string, remote: string, branch: string, detail: string): string {

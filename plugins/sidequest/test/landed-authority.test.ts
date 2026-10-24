@@ -40,6 +40,16 @@ test('SQ-275: landedRemoteFromTarget identifies a remote-mode target and rejects
     landedAuthority.landedRemoteFromTarget({ mode: 'remote', upstream: 'origin/main', branch: 'main' }),
     { remote: 'origin', branch: 'main' },
   );
+  // The remote branch comes from the upstream, never from the local branch name, so the consulted
+  // ref is always the one the recorded git:<upstream> source names.
+  assert.deepStrictEqual(
+    landedAuthority.landedRemoteFromTarget({ mode: 'remote', upstream: 'origin/main', branch: 'feature-local' }),
+    { remote: 'origin', branch: 'main' },
+  );
+  assert.deepStrictEqual(
+    landedAuthority.landedRemoteFromTarget({ mode: 'remote', upstream: 'refs/remotes/origin/release/1.0', branch: 'release/1.0' }),
+    { remote: 'origin', branch: 'release/1.0' },
+  );
   assert.strictEqual(landedAuthority.landedRemoteFromTarget({ mode: 'local', upstream: 'main', branch: 'main' }), null);
   assert.strictEqual(landedAuthority.landedRemoteFromTarget({ branch: 'main', upstream: 'main' }), null);
   assert.strictEqual(landedAuthority.landedRemoteFromTarget({ branch: 'main', upstream: 'refs/heads/main' }), null);

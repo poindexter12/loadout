@@ -3619,7 +3619,11 @@ test('SQ-2169: integrate records an already delivered reviewed candidate or a re
   const originalConfig = store.boardConfig(slug);
   try {
     const review = dispatchedIsolatedReview('recorded delivery review', ticket.ref, candidate, 'recorded-delivery-review');
-    const candidateTarget = Object.assign({}, store.integrationTarget(slug), { branch: git(['branch', '--show-current']) });
+    // SQ-275: landedness is proven only by the remote's live advertisement, so "already reached the
+    // integration branch" must be true on origin, not merely on this checkout's local branch.
+    const candidateBranch = git(['branch', '--show-current']);
+    git(['push', 'origin', `${candidate}:refs/heads/${candidateBranch}`]);
+    const candidateTarget = Object.assign({}, store.integrationTarget(slug), { branch: candidateBranch, upstream: `origin/${candidateBranch}` });
     const missingReview = store.recordDeliveredSubmission(slug, ticket.ref, {
       target: candidateTarget,
       deliveryCommit: candidate,

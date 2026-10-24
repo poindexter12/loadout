@@ -1697,7 +1697,8 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
       reachable = proof.landed;
       landedTip = proof.tip;
       landedHead = proof.tip;
-      deliveryRevision = { source: `git:${target.upstream}`, value: proof.tip, observedAt: proof.observedAt };
+      // The source names exactly the remote ref that was just consulted (git:<remote>/<branch>).
+      deliveryRevision = { source: proof.source, value: proof.tip, observedAt: proof.observedAt };
     } else {
       // Local-mode board: the integration line is a local branch with no remote, so the local
       // line is the authority and the source names that line, not a remote.

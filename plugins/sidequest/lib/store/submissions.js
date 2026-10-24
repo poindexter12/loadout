@@ -1410,7 +1410,7 @@ ${verify.outputTail}` : null
         reachable = proof.landed;
         landedTip = proof.tip;
         landedHead = proof.tip;
-        deliveryRevision = { source: `git:${target.upstream}`, value: proof.tip, observedAt: proof.observedAt };
+        deliveryRevision = { source: proof.source, value: proof.tip, observedAt: proof.observedAt };
       } else {
         deliveryRevision = { source: `git:${target.upstream || target.branch}`, value: resultingHead, observedAt: (/* @__PURE__ */ new Date()).toISOString() };
         try {

@@ -40,15 +40,15 @@ function errorDetail(error) {
   return text.split(/\r?\n/).filter(Boolean).slice(-1)[0] || "git exited without detail";
 }
 function landedRemoteFromTarget(target) {
-  const branch = String(target?.branch || "").trim();
+  const localBranch = String(target?.branch || "").trim();
   let upstream = String(target?.upstream || "").trim();
-  if (!branch || !upstream || target?.mode === "local") return null;
+  if (!upstream || target?.mode === "local") return null;
   if (upstream.startsWith("refs/remotes/")) upstream = upstream.slice("refs/remotes/".length);
   else if (upstream.startsWith("refs/")) return null;
-  if (upstream === branch) return null;
+  if (upstream === localBranch) return null;
   const slash = upstream.indexOf("/");
-  if (slash <= 0) return null;
-  return { remote: upstream.slice(0, slash), branch };
+  if (slash <= 0 || slash === upstream.length - 1) return null;
+  return { remote: upstream.slice(0, slash), branch: upstream.slice(slash + 1) };
 }
 function landedRemoteUnavailableMessage(ref, remote, branch, detail) {
   return `${ref} reconciliation refused: remote ${remote} could not be contacted to read the live refs/heads/${branch} tip (${detail}). Landedness is decided only by the remote's live advertisement; there is no local fallback, so refs/remotes/${remote}/${branch}, the checkout's HEAD, and local branches are never consulted. Restore network access to ${remote} and record the delivery again.`;
