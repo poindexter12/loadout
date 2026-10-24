@@ -729,7 +729,7 @@ function createTickets(dependencies) {
       const refusedEvidencePaths = refused.filter((file) => isVerificationEvidencePath(file, evidenceDirectory, t.ref));
       const refusedOutsideDeclaredFiles = refused.filter((file) => !isForeignReleaseFragmentScope(file) && !isVerificationEvidencePath(file, evidenceDirectory, t.ref));
       const foreignReleaseFragmentMessage = foreignReleaseFragments.length ? foreignReleaseFragmentRefusal("scopeRequest", slug, t.ref, foreignReleaseFragments, t) : "";
-      const scopeExpansionRefusalMessage = additions.length ? `Scope expansion refused: ${refused.join(", ")}.` : "";
+      const scopeExpansionRefusalMessage = additions.length && refused.length ? `Scope expansion refused: ${refused.join(", ")}.` : "";
       const refusalMessage = [foreignReleaseFragmentMessage, scopeExpansionRefusalMessage].filter(Boolean).join(" ");
       const body = refused.length ? `${refusalMessage}${approved.length ? ` Auto-approved ${policy}: ${approved.join(", ")}.` : ""}${undeclared}${declaredScopeGuidance(t, refusedOutsideDeclaredFiles)}${verificationEvidenceGuidance(evidenceDirectory, refusedEvidencePaths)} Commit in-scope work, then release with kind "handback" and name the refused paths.` : `Auto-approved ${policy}: ${approved.join(", ")}.`;
       const comment = createComment({ by: refused.length ? "board" : "board", body, kind: "comment", source: refused.length ? opts.source || "cli" : "policy" }, now);

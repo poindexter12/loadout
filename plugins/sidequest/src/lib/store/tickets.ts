@@ -833,7 +833,7 @@ function requestScope(slug?: any, idOrRef?: any, by?: any, files?: any, opts?: a
     const foreignReleaseFragmentMessage = foreignReleaseFragments.length
       ? foreignReleaseFragmentRefusal('scopeRequest', slug, t.ref, foreignReleaseFragments, t)
       : '';
-    const scopeExpansionRefusalMessage = additions.length
+    const scopeExpansionRefusalMessage = additions.length && refused.length
       ? `Scope expansion refused: ${refused.join(', ')}.`
       : '';
     const refusalMessage = [foreignReleaseFragmentMessage, scopeExpansionRefusalMessage].filter(Boolean).join(' ');
