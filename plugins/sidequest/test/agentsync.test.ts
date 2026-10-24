@@ -435,6 +435,52 @@ test('briefings include every byte of large descriptions, comments, and experime
   assert.match(transport, /Before acting, Read/);
   assert.equal(fs.readFileSync(briefingPath, 'utf8'), briefing);
   assert.doesNotMatch(transport, /DESCRIPTION-START/);
+  // SQ-349: the file pointer carries the measured cost of what it points at, so an executor
+  // sees its briefing budget before paying for the Read.
+  assert.match(transport, new RegExp(`Launch budget: this briefing is ${briefing.length} chars`));
+  assert.match(transport, /Launch budget warning: this briefing alone exceeds 10% of usable context/);
+});
+
+test('SQ-349: an inline briefing ends with a measured launch budget naming its largest sections', () => {
+  const briefing = [
+    '## Executor briefing',
+    '',
+    '## Dispatch, claim, worktree, lifecycle, and verification safety',
+    'd'.repeat(3000),
+    '## This ticket',
+    't'.repeat(9000),
+    '## Newest ticket evidence and comments (newest first)',
+    'c'.repeat(5000),
+  ].join('\n');
+  const ticket = { ref: 'SQ-9349', dispatch: { tokenFile: '/tmp/token' } };
+  const transport = agentsync.transportExecutorBriefing(briefing, ticket, 'fixture-slug', '/fixture');
+
+  assert.ok(transport.startsWith(briefing), 'the inline briefing is delivered unchanged before the budget');
+  assert.match(transport, /\n## Launch budget\nLaunch budget: this briefing is \d+ chars/);
+  assert.match(transport, new RegExp(`this briefing is ${briefing.length} chars, about ${Math.ceil(briefing.length / 4)} tokens`));
+  const largest = /Largest sections: (.+?)\. The ambient surface/.exec(transport);
+  assert.ok(largest, 'the budget names its largest sections');
+  assert.match(largest[1], /^"This ticket" 9\d{3} chars, "Newest ticket evidence and comments \(newest first\)" 5\d{3} chars, "Dispatch, claim, worktree, lifecycle, and verification safety" 3\d{3} chars$/);
+  // A briefing under the warn fraction does not cry wolf.
+  assert.doesNotMatch(transport, /Launch budget warning/);
+});
+
+test('SQ-349: the launch budget says whose number a session-level context warning reports', () => {
+  const packet = agentsync.launchBudgetPacket('## This ticket\nsmall');
+  assert.match(packet, /measures the orchestrator, not you, because a subagent shares its parent's session id/);
+  assert.match(packet, /Do not stop, ask the user, or hand back on that warning/);
+  assert.match(packet, /begin the release reason with "context exhaustion:"/);
+});
+
+test('SQ-349: the launch budget warns exactly when the briefing passes the warn fraction of usable context', () => {
+  assert.equal(agentsync.LAUNCH_BUDGET_WARN_TOKENS, Math.floor(agentsync.EXECUTOR_USABLE_CONTEXT_TOKENS / 10));
+  const thresholdChars = agentsync.LAUNCH_BUDGET_WARN_TOKENS * 4;
+  const atThreshold = agentsync.launchBudgetPacket(`## This ticket\n${'x'.repeat(thresholdChars - 15)}`);
+  const overThreshold = agentsync.launchBudgetPacket(`## This ticket\n${'x'.repeat(thresholdChars + 4)}`);
+  assert.doesNotMatch(atThreshold, /Launch budget warning/);
+  assert.match(overThreshold, /Launch budget warning: this briefing alone exceeds 10% of usable context/);
+  assert.match(overThreshold, /comment this measurement and the largest sections above before releasing/);
+  assert.deepEqual(agentsync.briefingSectionSizes('lead\n## A\naa\n## B\nb').map((section: any) => section.heading), ['(preamble)', 'A', 'B']);
 });
 
 test('SQ-1015: a plan document briefing carries only the path, never the body, and grows by roughly one line', () => {

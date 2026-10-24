@@ -1470,9 +1470,64 @@ function briefingTransportFilePath(ticket?: any, slug?: any) {
   return path.join(store.homeRoot(), 'briefings', directory, 'briefing.txt');
 }
 
+// SQ-349: executors handed back without writing code, reporting 78-91% of usable context
+// spent before their first tool call. Their own transcripts said otherwise: measured
+// 2026-10-24, twenty Opus executors of one orchestrator session opened at 56-59k tokens
+// (about 35% of a 167k usable window) while a session-level PostToolUse monitor told each
+// of them "CONTEXT CRITICAL: 100% (167k of 167k) ... ask how they want to proceed". That
+// monitor reads a statusline bridge file keyed by session id, and a subagent shares its
+// parent's session id, so every executor was shown the orchestrator's number. The packet
+// below gives the executor its real briefing cost, names the sections that spent it, and
+// says whose number the hook is reporting, so an executor neither stops on a false
+// warning nor launches blind on a genuinely oversized briefing.
+const EXECUTOR_USABLE_CONTEXT_TOKENS = 167_000;
+const BRIEFING_CHARS_PER_TOKEN = 4;
+const LAUNCH_BUDGET_WARN_FRACTION = 0.1;
+const LAUNCH_BUDGET_WARN_TOKENS = Math.floor(EXECUTOR_USABLE_CONTEXT_TOKENS * LAUNCH_BUDGET_WARN_FRACTION);
+
+function briefingSectionSizes(briefing?: any): Array<{ heading: string; chars: number }> {
+  const text = String(briefing || '');
+  const sections: Array<{ heading: string; chars: number }> = [];
+  const pattern = /^## (.+)$/gm;
+  const starts: Array<{ heading: string; index: number }> = [];
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) starts.push({ heading: match[1].trim(), index: match.index });
+  if (!starts.length || starts[0].index > 0) starts.unshift({ heading: '(preamble)', index: 0 });
+  for (let index = 0; index < starts.length; index += 1) {
+    const end = index + 1 < starts.length ? starts[index + 1].index : text.length;
+    const chars = end - starts[index].index;
+    if (chars > 0) sections.push({ heading: starts[index].heading, chars });
+  }
+  return sections;
+}
+
+function launchBudgetPacket(briefing?: any) {
+  const text = String(briefing || '');
+  const chars = text.length;
+  const tokens = Math.ceil(chars / BRIEFING_CHARS_PER_TOKEN);
+  const percent = Math.round((tokens / EXECUTOR_USABLE_CONTEXT_TOKENS) * 1000) / 10;
+  const largest = briefingSectionSizes(text)
+    .sort((left, right) => right.chars - left.chars)
+    .slice(0, 3)
+    .map((section) => `"${section.heading}" ${section.chars} chars`)
+    .join(', ');
+  const lines = [
+    `Launch budget: this briefing is ${chars} chars, about ${tokens} tokens at ${BRIEFING_CHARS_PER_TOKEN} chars per token, ${percent}% of a ${EXECUTOR_USABLE_CONTEXT_TOKENS}-token usable window. Largest sections: ${largest || '(none)'}. The ambient surface (system prompt, tool, skill, and agent listings, the CLAUDE.md hierarchy) is paid before this briefing and is not counted here; your true per-turn usage is the usage Claude Code records for this agent's own turns.`,
+  ];
+  if (tokens > LAUNCH_BUDGET_WARN_TOKENS) {
+    lines.push(`Launch budget warning: this briefing alone exceeds ${Math.round(LAUNCH_BUDGET_WARN_FRACTION * 100)}% of usable context. Read only the sections your next step needs, and if the work cannot fit, comment this measurement and the largest sections above before releasing, so the orchestrator can trim or split the ticket instead of redispatching it unchanged.`);
+  }
+  lines.push(
+    'Context warnings: a context-usage percentage injected by a session-level hook (a statusline-bridge monitor such as gsd-context-monitor) measures the orchestrator, not you, because a subagent shares its parent\'s session id. Do not stop, ask the user, or hand back on that warning; pace by the tool-round Continuation checkpoint rule instead.',
+    'If you do exhaust your own context, follow the Continuation checkpoint rule and begin the release reason with "context exhaustion:", naming the files touched and the next step, so the board can tell it apart from a planning or design blocker.',
+  );
+  return lines.join('\n');
+}
+
 function transportExecutorBriefing(briefing?: any, ticket?: any, slug?: any, projectPath?: any) {
   const fullBriefing = String(briefing || '');
-  if (fullBriefing.length <= BRIEFING_FILE_TRANSPORT_THRESHOLD_CHARS) return fullBriefing;
+  const budget = launchBudgetPacket(fullBriefing);
+  if (fullBriefing.length <= BRIEFING_FILE_TRANSPORT_THRESHOLD_CHARS) return `${fullBriefing}\n\n## Launch budget\n${budget}`;
   const briefingPath = briefingTransportFilePath(ticket, slug);
   fs.mkdirSync(path.dirname(briefingPath), { recursive: true, mode: 0o700 });
   fs.writeFileSync(briefingPath, fullBriefing, { encoding: 'utf8', mode: 0o600 });
@@ -1481,6 +1536,7 @@ function transportExecutorBriefing(briefing?: any, ticket?: any, slug?: any, pro
     `Token-gated executor briefing for ${ticket?.ref || '(unknown ticket)'}.`,
     `Project: ${String(projectPath || '').trim() || '(unavailable)'}. Token file: ${tokenFile}.`,
     `Before acting, Read "${briefingPath}" in full. It contains the exact claim call, worktree contract, complete task and scope, comments, and verification instructions.`,
+    budget,
   ].join('\n');
 }
 
@@ -1843,6 +1899,10 @@ module.exports = {
   renderBriefingPreview,
   BRIEFING_PREVIEW_PLACEHOLDERS,
   briefingTransportFilePath,
+  briefingSectionSizes,
+  launchBudgetPacket,
+  EXECUTOR_USABLE_CONTEXT_TOKENS,
+  LAUNCH_BUDGET_WARN_TOKENS,
   transportExecutorBriefing,
   rejectedSubmissionRows,
   taskAndScopeBody,
