@@ -381,7 +381,7 @@ test('every hook registered with a 10s timeout installs the hook lock budget, an
   // SQ-133: exactly the security guards switch the budget to fail closed at load; every other hook, including
   // guard-home-delete, keeps failing open.
   const failClosed = [...budgeted].filter((name) => /^failClosedOnBoardBusy\(\);$/m.test(bundle(name))).sort();
-  assert.deepStrictEqual(failClosed, ['force-exec-bypass', 'guard-destructive-git', 'guard-shared-checkout-git', 'guard-worktree-isolation']);
+  assert.deepStrictEqual(failClosed, ['force-exec-bypass', 'guard-destructive-git', 'guard-process-signal', 'guard-shared-checkout-git', 'guard-shared-tree-commit', 'guard-worktree-isolation']);
   for (const name of failClosed) assert.match(bundle(name), /fail-closed, board lock busy/, `${name} must carry the fail-closed refusal`);
   assert.ok(budgeted.has('guard-home-delete'));
   assert.doesNotMatch(bundle('guard-home-delete'), /fail-closed/, 'guard-home-delete stays fail-open');

@@ -158,10 +158,16 @@ function currentBranch(repo: string): string {
   return gitOutput(repo, ['branch', '--show-current']);
 }
 
+// One push consults the upstream up to three times; each answer costs a git spawn, so ask once per repo (SQ-370).
+const upstreams = new Map<string, { remote: string; branch: string } | null>();
+
 function upstream(repo: string): { remote: string; branch: string } | null {
+  if (upstreams.has(repo)) return upstreams.get(repo) ?? null;
   const ref = gitOutput(repo, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']);
   const slash = ref.indexOf('/');
-  return slash > 0 ? { remote: ref.slice(0, slash), branch: ref.slice(slash + 1) } : null;
+  const found = slash > 0 ? { remote: ref.slice(0, slash), branch: ref.slice(slash + 1) } : null;
+  upstreams.set(repo, found);
+  return found;
 }
 
 function isRemote(repo: string, name: string): boolean {
@@ -246,14 +252,19 @@ function main(): void {
   const input = readStdin();
   if (!input || !['Bash', 'PowerShell'].includes(stringField(input, 'tool_name'))) return;
   const command = withoutHereDocBodies(commandText(input));
-  const repo = repoRoot(targetRepo(command, stringField(input, 'cwd')));
+  // Every Bash call runs this guard under a 10s hook timeout, and a guard the harness kills decides nothing, so
+  // the call proceeds. Most commands are not git at all: answer them without spawning git (SQ-370).
+  if (!/\bgit\b/i.test(command)) return;
   const publication = publicationAction(command, stringField(input, 'cwd'));
   if (publication && !publish.publishLockOwnedBySession(publication.repo, stringField(input, 'session_id'))) {
     writeDeny('PreToolUse', publicationRefusal(publication.label, publication.repo));
     return;
   }
   const label = destructive(command);
-  if (!label || !sharedCheckout(repo)) return;
+  if (!label) return;
+  // Resolve the repository only for a command that could destroy work in it.
+  const repo = repoRoot(targetRepo(command, stringField(input, 'cwd')));
+  if (!sharedCheckout(repo)) return;
   const dirty = dirtyPaths(repo);
   if (dirty.length) writeDeny('PreToolUse', destructiveRefusal(label, repo, dirty));
 }

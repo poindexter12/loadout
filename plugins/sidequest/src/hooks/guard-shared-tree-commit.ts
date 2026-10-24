@@ -1,11 +1,15 @@
 #!/usr/bin/env node
-import './shared/sqlite-budget.js';
+import { failClosedOnBoardBusy, refuseWhenBoardBusy } from './shared/sqlite-budget.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { readStdin, stringField, isRecord } from './shared/input.js';
 import { writeDeny } from './shared/output.js';
 import { runtimeModule } from './shared/paths.js';
+
+// An enforcement guard: refuse under board lock contention rather than let a raw shared-tree commit through
+// unchecked, since holding the lock would otherwise be a way past it (SQ-370).
+failClosedOnBoardBusy();
 
 const GIT_COMMIT = /(?:^|[;&|\n]\s*|\$\(\s*)(?:&\s*)?git\s+(?:(?:-C|-c|--config-env)\s+(?:"[^"]+"|'[^']+'|\S+)\s+)*commit\b/gi;
 
@@ -107,5 +111,6 @@ function main(): void {
 
 try {
   main();
-} catch {
+} catch (error) {
+  refuseWhenBoardBusy(error);
 }

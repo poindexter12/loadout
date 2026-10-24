@@ -28,6 +28,7 @@ var import_node_fs = __toESM(require("node:fs"));
 var import_node_path = __toESM(require("node:path"));
 var SQLITE_BUSY_POLICY_KEY = /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy");
 var HOOK_SQLITE_BUSY_TIMEOUT_MS = 1500;
+var failClosedEvent = null;
 function hookName() {
   return import_node_path.default.basename(process.argv[1] || "hook", ".js");
 }
@@ -50,7 +51,42 @@ function failOpen(error) {
 `);
   process.exit(0);
 }
+function failClosed(error) {
+  const hook = hookName();
+  const reason = `sidequest: ${hook} refused this call because of board lock contention: another process holds the Sidequest board database lock, so this security guard could not finish its board check, and it refuses rather than allow the call unchecked. The call did not run. Retry the same call in a few seconds; if it keeps failing, a long-running Sidequest writer is holding the board lock.`;
+  let denied = false;
+  try {
+    import_node_fs.default.writeSync(1, JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: failClosedEvent || "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: reason
+      }
+    }));
+    denied = true;
+  } catch (_) {
+  }
+  writeStderr(`${denied ? "" : `${reason}
+`}sidequest: ${hook} refused this event without its board check (fail-closed, board lock busy): ${error.message}
+`);
+  process.exit(denied ? 0 : 2);
+}
+function boardBusy(error) {
+  if (!(error instanceof Error)) return false;
+  const code = Reflect.get(error, "code");
+  const errcode = Reflect.get(error, "errcode");
+  if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" || errcode === 5 || errcode === 6) return true;
+  if (/database (?:table )?is (?:locked|busy)/i.test(error.message)) return true;
+  return boardBusy(Reflect.get(error, "cause"));
+}
 installBudget(failOpen);
+function failClosedOnBoardBusy(hookEventName = "PreToolUse") {
+  failClosedEvent = hookEventName;
+  installBudget(failClosed);
+}
+function refuseWhenBoardBusy(error) {
+  if (failClosedEvent && boardBusy(error)) failClosed(error);
+}
 
 // src/hooks/shared/input.ts
 var import_node_fs2 = __toESM(require("node:fs"));
@@ -246,6 +282,7 @@ function withoutHereDocBodies(command) {
 }
 
 // src/hooks/guard-process-signal.ts
+failClosedOnBoardBusy();
 var WRAPPERS = /* @__PURE__ */ new Set([
   "sudo",
   "doas",
@@ -433,6 +470,7 @@ function main() {
 }
 try {
   main();
-} catch (_) {
+} catch (error) {
+  refuseWhenBoardBusy(error);
   process.exit(0);
 }
