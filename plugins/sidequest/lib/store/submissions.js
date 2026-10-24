@@ -2,6 +2,7 @@
 const { classifyVerificationKind, commandVerificationResult, verificationAccepted, verificationFailureDiagnostic, verificationOutcome, verificationRequirement, validateVerificationWaiver, verificationWaiverDiagnostic, verifyCaptureWrapperCommand } = require("../kernel/verification.js");
 const { runProcessVerification } = require("../ports/process.js");
 const { verificationTimeoutGuidance } = require("../refusal-guidance.js");
+const { landedRemoteFromTarget, landedRemoteUnavailableMessage, proveLandedOnRemote } = require("./landed-authority.js");
 const { decideSubmissionAdmission } = require("../kernel/submission");
 const { isSourceRevisionAdapterFacts, sourceRevisionBaseline } = require("../source-revision-capability.js");
 const { reviewCandidateFromSubmission, reviewRelationFor, reviewRelationRef, reviewRelationOutcome, reviewLockMessage, reviewProvenance } = require("../kernel/review-binding");
@@ -710,7 +711,7 @@ Run the pinned command through: ${wrapper}` : "";
     }
     const timeoutMilliseconds = normalizeIntegrationVerifyTimeoutMs(boardConfig(slug)?.integrationVerifyTimeoutMs);
     return phasedIntegrationVerification(String(opts?.verifyPhase || "merged-tree"), opts, requirement, {
-      cwd: readMeta(slug)?.path,
+      cwd: opts?.cwd || readMeta(slug)?.path,
       timeoutMilliseconds,
       logPath: integrationVerifyLogPath(slug, ticket),
       outputTailBytes: INTEGRATION_VERIFY_OUTPUT_TAIL_BYTES
@@ -1330,6 +1331,26 @@ ${verify.outputTail}` : null
       }
     });
   }
+  function verifyInScratchWorktree(repo, commit, run) {
+    const scratch = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "sq-delivery-verify-"));
+    try {
+      integrationGit(repo, ["worktree", "add", "--detach", "--force", scratch, commit]);
+      return run(scratch);
+    } finally {
+      try {
+        integrationGit(repo, ["worktree", "remove", "--force", scratch]);
+      } catch (_) {
+      }
+      try {
+        fs.rmSync(scratch, { recursive: true, force: true });
+      } catch (_) {
+      }
+      try {
+        integrationGit(repo, ["worktree", "prune"]);
+      } catch (_) {
+      }
+    }
+  }
   function recordDeliveredSubmission(slug, idOrRef, opts) {
     opts = opts || {};
     const preflight = validateIntegrationSubmission(slug, idOrRef, { deliveryInteractionCommit: opts.deliveryInteractionCommit });
@@ -1359,17 +1380,45 @@ ${verify.outputTail}` : null
       if (currentBranch !== target.branch && !targetBranchMergedIntoHead(repo, target.branch, deliveryCommit, resultingHead)) {
         return { ok: false, reason: "branch_not_checked_out", ticket, message: `${target.branch} must be checked out before recording an external delivery; currently on ${currentBranch || "detached HEAD"}.` };
       }
-      const deliveryRevision = {
-        source: `git:${target.upstream}`,
-        value: resultingHead,
-        observedAt: (/* @__PURE__ */ new Date()).toISOString()
-      };
+      const landedRemote = landedRemoteFromTarget(target);
       let reachable = true;
-      try {
-        integrationGit(repo, ["merge-base", "--is-ancestor", deliveryCommit, resultingHead]);
-      } catch (error) {
-        if (error?.status === 1) reachable = false;
-        else throw error;
+      let landedHead = resultingHead;
+      let landedTip = null;
+      let deliveryRevision;
+      if (landedRemote) {
+        const proof = proveLandedOnRemote({ repo, remote: landedRemote.remote, branch: landedRemote.branch, commit: deliveryCommit });
+        if (!proof.ok) {
+          return {
+            ok: false,
+            reason: "landed_remote_unavailable",
+            ticket,
+            remote: proof.remote,
+            branch: proof.branch,
+            message: landedRemoteUnavailableMessage(ticket.ref, proof.remote, proof.branch, proof.detail)
+          };
+        }
+        if (!proof.tip) {
+          return {
+            ok: false,
+            reason: "delivery_not_reachable",
+            ticket,
+            remote: proof.remote,
+            branch: proof.branch,
+            message: `${ticket.ref} reconciliation refused: remote ${proof.remote} advertises no refs/heads/${proof.branch}, so delivery commit ${deliveryCommit} cannot be on it. Landedness is decided only by the remote's live advertisement; there is no local fallback.`
+          };
+        }
+        reachable = proof.landed;
+        landedTip = proof.tip;
+        landedHead = proof.tip;
+        deliveryRevision = { source: `git:${target.upstream}`, value: proof.tip, observedAt: proof.observedAt };
+      } else {
+        deliveryRevision = { source: `git:${target.upstream || target.branch}`, value: resultingHead, observedAt: (/* @__PURE__ */ new Date()).toISOString() };
+        try {
+          integrationGit(repo, ["merge-base", "--is-ancestor", deliveryCommit, resultingHead]);
+        } catch (error) {
+          if (error?.status === 1) reachable = false;
+          else throw error;
+        }
       }
       const deliveryMethod = workingTreeDeliveryMethod(opts.deliveryMethod);
       const requestedDeliveryMethod = String(opts.deliveryMethod || "").trim();
@@ -1382,12 +1431,17 @@ ${verify.outputTail}` : null
         };
       }
       const workingTreeDelivery = deliveryMethod !== null && !reachable;
+      if (workingTreeDelivery && landedRemote) {
+        deliveryRevision = { source: `git-checkout:${target.branch}`, value: resultingHead, observedAt: deliveryRevision.observedAt };
+      }
       if (!reachable && !workingTreeDelivery) {
+        const where = landedRemote ? `the live ${landedRemote.remote}/${landedRemote.branch} tip ${landedTip} that remote ${landedRemote.remote} advertised just now. Landedness is decided only by that advertisement; local refs, the checkout, and other local branches are not consulted, so a commit present only on this machine is refused` : target.branch;
         return {
           ok: false,
           reason: "delivery_not_reachable",
           ticket,
-          message: `${ticket.ref} reconciliation refused: delivery commit ${deliveryCommit} is not reachable from ${target.branch}. Record a reset, working-tree, or manual delivery with this pinned candidate, deliveryMethod, and the candidate content present in the integration working tree.`
+          ...landedRemote ? { remote: landedRemote.remote, branch: landedRemote.branch, remoteTip: landedTip } : {},
+          message: `${ticket.ref} reconciliation refused: delivery commit ${deliveryCommit} is not reachable from ${where}. Record a reset, working-tree, or manual delivery with this pinned candidate, deliveryMethod, and the candidate content present in the integration working tree.`
         };
       }
       if (workingTreeDelivery && !pinnedCandidateMatches(repo, ticket, deliveryCommit)) {
@@ -1402,7 +1456,7 @@ ${verify.outputTail}` : null
       let descendant = null;
       let landingCommit = null;
       if (!content.ok && workingTreeDelivery) {
-        landingCommit = landedCommitWithContent(repo, ticket.submission, deliveryCommit, resultingHead);
+        landingCommit = landedCommitWithContent(repo, ticket.submission, deliveryCommit, landedHead);
         if (landingCommit) content = { ok: true, evidence: "landed_candidate_content" };
       }
       if (!content.ok) {
@@ -1426,7 +1480,7 @@ ${verify.outputTail}` : null
         descendant = reviewed.interaction;
         content = workingTreeDelivery ? workingTreeContainsSubmittedContent(repo, ticket.submission, descendant.commit, descendant.paths) : deliveryContainsReviewedDescendant(repo, ticket.submission, descendant.commit, deliveryCommit);
         if (!content.ok && workingTreeDelivery) {
-          landingCommit = landedCommitWithContent(repo, ticket.submission, descendant.commit, resultingHead, descendant.paths);
+          landingCommit = landedCommitWithContent(repo, ticket.submission, descendant.commit, landedHead, descendant.paths);
           if (landingCommit) content = { ok: true, evidence: "landed_candidate_content" };
         }
         if (!content.ok) {
@@ -1439,9 +1493,9 @@ ${verify.outputTail}` : null
           };
         }
       }
-      const interaction = workingTreeDelivery || descendant ? { ok: true, interaction: null } : reviewedMergedTreeInteraction(repo, ticket, deliveryCommit, resultingHead, opts.deliveryInteractionCommit);
+      const interaction = workingTreeDelivery || descendant ? { ok: true, interaction: null } : reviewedMergedTreeInteraction(repo, ticket, deliveryCommit, landedHead, opts.deliveryInteractionCommit);
       if (!interaction.ok) return Object.assign({ ticket }, interaction);
-      const verify = verifyDeliveredSubmission(slug, ticket);
+      const verify = workingTreeDelivery ? verifyDeliveredSubmission(slug, ticket) : verifyInScratchWorktree(repo, deliveryCommit, (cwd) => verifyDeliveredSubmission(slug, ticket, { cwd }));
       if (!verificationAccepted(verify)) {
         return integrationFailure(slug, ticket, {
           reason: `${verificationOutcome(verify)}_recorded_delivery`,
