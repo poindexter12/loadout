@@ -829,6 +829,117 @@ function testDefinitionName(line, extension) {
   if (PYTHON_TEST_EXTENSIONS.has(extension)) return line.match(PYTHON_TEST_DEFINITION)?.[1] || "";
   return "";
 }
+function matchingCallParen(source, openIndex) {
+  let depth = 0;
+  let braceDepth = 0;
+  let inTemplate = false;
+  const interpolations = [];
+  let index = openIndex;
+  while (index < source.length) {
+    const char = source[index];
+    const next = source[index + 1];
+    if (char === "\\") {
+      index += 2;
+      continue;
+    }
+    if (inTemplate) {
+      if (char === "`") inTemplate = false;
+      else if (char === "$" && next === "{") {
+        interpolations.push(braceDepth);
+        inTemplate = false;
+        index += 2;
+        continue;
+      }
+      index += 1;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      index += 1;
+      while (index < source.length && source[index] !== char && source[index] !== "\n") index += source[index] === "\\" ? 2 : 1;
+      index += 1;
+      continue;
+    }
+    if (char === "`") {
+      inTemplate = true;
+    } else if (char === "/" && next === "/") {
+      const end = source.indexOf("\n", index);
+      index = end === -1 ? source.length : end;
+      continue;
+    } else if (char === "/" && next === "*") {
+      const end = source.indexOf("*/", index + 2);
+      index = end === -1 ? source.length : end + 2;
+      continue;
+    } else if (char === "{") {
+      braceDepth += 1;
+    } else if (char === "}") {
+      if (interpolations.length && interpolations.at(-1) === braceDepth) {
+        interpolations.pop();
+        inTemplate = true;
+      } else {
+        braceDepth -= 1;
+      }
+    } else if (char === "(") {
+      depth += 1;
+    } else if (char === ")") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+    index += 1;
+  }
+  return -1;
+}
+function testDefinitionSpans(source, extension) {
+  const lines = source.split(/\r?\n/);
+  const lineStarts = [];
+  let offset = 0;
+  for (const line of lines) {
+    lineStarts.push(offset);
+    offset += line.length + 1;
+  }
+  const lineOfOffset = (target) => {
+    let low = 0;
+    let high = lineStarts.length - 1;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if ((lineStarts[mid] ?? 0) <= target) low = mid;
+      else high = mid - 1;
+    }
+    return low + 1;
+  };
+  const normalized = lines.join("\n");
+  const spans = [];
+  lines.forEach((line, index) => {
+    const name = testDefinitionName(line, extension);
+    if (!name) return;
+    const start = index + 1;
+    let end = 0;
+    if (CALL_STYLE_TEST_EXTENSIONS.has(extension)) {
+      const match = line.match(CALL_STYLE_TEST_DEFINITION);
+      const openIndex = (lineStarts[index] ?? 0) + (match?.index ?? 0) + (match?.[0].indexOf("(") ?? 0);
+      const closeIndex = matchingCallParen(normalized, openIndex);
+      if (closeIndex !== -1) end = lineOfOffset(closeIndex);
+    } else {
+      const indent = (line.match(/^\s*/)?.[0] ?? "").length;
+      end = start;
+      for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+        const body = lines[cursor] ?? "";
+        if (!body.trim()) continue;
+        if ((body.match(/^\s*/)?.[0] ?? "").length <= indent) break;
+        end = cursor + 1;
+      }
+    }
+    spans.push({ start, end, name });
+  });
+  spans.forEach((span, index) => {
+    if (span.end) return;
+    const following = spans.slice(index + 1).find((entry) => entry.start > span.start);
+    span.end = following ? following.start - 1 : lines.length;
+  });
+  return spans;
+}
+function innermostTestSpan(spans, ...lines) {
+  return spans.filter((span) => lines.every((line) => span.start <= line && line <= span.end)).reduce((best, span) => !best || span.start > best.start ? span : best, null);
+}
 function changedTestNames(delta, changedPaths) {
   if (!delta?.workspace) return [];
   const names = /* @__PURE__ */ new Set();
@@ -852,10 +963,7 @@ function changedTestNames(delta, changedPaths) {
     } catch (_) {
       continue;
     }
-    const definitions = source.split(/\r?\n/).map((line, index) => {
-      const name = testDefinitionName(line, extension);
-      return name ? { line: index + 1, name } : null;
-    }).filter(Boolean);
+    const spans = testDefinitionSpans(source, extension);
     try {
       execFileSync("git", ["cat-file", "-e", `${delta.workspace.base}:${file}`], {
         cwd: delta.workspace.root,
@@ -863,38 +971,30 @@ function changedTestNames(delta, changedPaths) {
         windowsHide: true
       });
     } catch (_) {
-      for (const definition of definitions) names.add(definition.name);
+      for (const span of spans) names.add(span.name);
       continue;
     }
     let newLine = 0;
-    let changedInHunk = false;
-    const addNearestDefinition = (line) => {
-      const definition = definitions.filter((entry) => entry.line <= line).at(-1);
-      if (definition) names.add(definition.name);
-    };
     for (const line of diff.split(/\r?\n/)) {
-      const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
       if (hunk) {
-        if (changedInHunk) addNearestDefinition(newLine);
         newLine = Number(hunk[1]);
-        changedInHunk = false;
+        if (hunk[2] === "0") {
+          const span = innermostTestSpan(spans, newLine, newLine + 1);
+          if (span) names.add(span.name);
+        }
         continue;
       }
       if (line.startsWith("+") && !line.startsWith("+++")) {
-        changedInHunk = true;
         const addedName = testDefinitionName(line.slice(1), extension);
         if (addedName) names.add(addedName);
-        addNearestDefinition(newLine);
+        const span = innermostTestSpan(spans, newLine);
+        if (span) names.add(span.name);
         newLine += 1;
-        continue;
-      }
-      if (line.startsWith("-") && !line.startsWith("---")) {
-        changedInHunk = true;
         continue;
       }
       if (line.startsWith(" ")) newLine += 1;
     }
-    if (changedInHunk) addNearestDefinition(newLine);
   }
   return Array.from(names);
 }
