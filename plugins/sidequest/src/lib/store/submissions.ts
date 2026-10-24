@@ -1374,7 +1374,7 @@ function releaseFragmentOnlyAncestors(repo: string | null, captures: any[], subm
     try {
       if (!isAncestorCommit(repo, value, target)) continue;
       const changed = integrationGit(repo, ['diff', '--name-only', '--no-renames', '-z', value, target]).split('\0').filter(Boolean);
-      if (changed.length && changed.every((file) => file.startsWith(RELEASE_FRAGMENT_DIR) && file.length > RELEASE_FRAGMENT_DIR.length)) carried.push(value);
+      if (changed.length && changed.every((file: string) => file.startsWith(RELEASE_FRAGMENT_DIR) && file.length > RELEASE_FRAGMENT_DIR.length)) carried.push(value);
     } catch (_) {
       continue;
     }
