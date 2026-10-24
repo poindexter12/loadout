@@ -94,17 +94,43 @@ function captureBudgetClass(command: string): CaptureBudgetClass {
   return isTestSuiteCommand(command) ? 'test-suite' : 'command';
 }
 
+function otherRunnableThreads(loadAverage: number): number {
+  return typeof loadAverage === 'number' && Number.isFinite(loadAverage) && loadAverage > 0 ? loadAverage : 0;
+}
+
+// SQ-74: the one effective-worker model. The full-suite capture budget below, test-full's phase
+// budget (scripts/test-full.mjs calculateEffectiveTestWorkers, same formula) and the in-test
+// waits all read capacity through it, so both sides of a pinned gate degrade together under
+// load the gate did not start. `testConcurrency` workers share `availableParallelism` cores with
+// `loadAverage` other runnable threads; the result is the share of the machine they really get.
+function effectiveTestWorkers(testConcurrency: number, availableParallelism: number, loadAverage: number): number {
+  return Math.min(
+    testConcurrency,
+    Math.max(minimumEffectiveTestWorkers, (availableParallelism * testConcurrency) / (testConcurrency + otherRunnableThreads(loadAverage))),
+  );
+}
+
+// SQ-74: SQ-58's per-worker in-test deadline (`perTestWorkerMilliseconds * testWorkers`) scaled
+// by the same capacity factor the capture budget uses. Before this the capture widened under a
+// sibling suite that never took the capture slot while the waits inside it stayed fixed, so a
+// starved suite failed as if it were broken. On an idle host with a core per worker the factor
+// is 1 and the deadline is exactly SQ-58's; under load it widens by
+// testWorkers / effectiveTestWorkers. A reading taken mid-suite also counts the suite's own
+// workers, which can only widen a failure's deadline: a wait still returns the moment its
+// condition holds.
+function capacityScaledDeadlineMilliseconds(perTestWorkerMilliseconds: number, testWorkers: number, availableParallelism = os.availableParallelism(), loadAverage = os.loadavg()[0] || 0): number {
+  const workers = Number.isFinite(testWorkers) && testWorkers > 0 ? testWorkers : 1;
+  const capacityScale = workers / effectiveTestWorkers(workers, availableParallelism, loadAverage);
+  return Math.round(perTestWorkerMilliseconds * workers * capacityScale);
+}
+
 function captureBudget(command: string, availableParallelism = os.availableParallelism(), loadAverage = os.loadavg()[0] || 0, rawOverride = process.env[phaseBudgetOverrideVariable]): CaptureBudget {
   const budgetClass = captureBudgetClass(command);
   const testConcurrency = Math.min(maximumTestConcurrency, Math.max(minimumTestConcurrency, availableParallelism));
-  const otherRunnableThreads = typeof loadAverage === 'number' && Number.isFinite(loadAverage) && loadAverage > 0 ? loadAverage : 0;
-  const effectiveTestWorkers = Math.min(
-    testConcurrency,
-    Math.max(minimumEffectiveTestWorkers, (availableParallelism * testConcurrency) / (testConcurrency + otherRunnableThreads)),
-  );
+  const effectiveWorkers = effectiveTestWorkers(testConcurrency, availableParallelism, loadAverage);
   const capacityPhaseBudgetMilliseconds = Math.min(
     maximumTestPhaseTimeoutMilliseconds,
-    Math.round((baselineTestPhaseDurationMilliseconds * maximumTestConcurrency / effectiveTestWorkers) * testPhaseBudgetSafetyFactor),
+    Math.round((baselineTestPhaseDurationMilliseconds * maximumTestConcurrency / effectiveWorkers) * testPhaseBudgetSafetyFactor),
   );
   // A command that is not a test runner keeps the ordinary setup allowance alone: it has no
   // suite phase to scale, and the override is its one lever.
@@ -134,8 +160,8 @@ function captureBudget(command: string, availableParallelism = os.availableParal
     phaseBudgetMilliseconds,
     hardMaximumMilliseconds: captureHardMaximumMilliseconds,
     availableParallelism,
-    loadAverage: otherRunnableThreads,
-    effectiveTestWorkers,
+    loadAverage: otherRunnableThreads(loadAverage),
+    effectiveTestWorkers: effectiveWorkers,
     overrideVariable: phaseBudgetOverrideVariable,
     overrideMilliseconds: widened ? requested : null,
     clampedToHardMaximum,
@@ -710,7 +736,13 @@ async function runCapturedVerification(command: string, target: CaptureTarget | 
     return Object.freeze({ capture, recorded: Object.freeze({ ok: false, reason: binding.reason.split(':')[0] || 'capture_binding_refused', message: binding.reason }) });
   }
   const captureCwd = binding?.ok ? binding.cwd : cwd;
-  // Only the full suite takes the per-host slot; every capture runs under the budget model.
+  // Only a ticket-bound full-suite capture takes the per-host slot; every capture runs under the
+  // budget model. SQ-74 ruled that an ad-hoc full-suite run (no --ticket, or `npm run test:full`
+  // straight from a shell) does not contend for the slot: the slot serialises recorded captures,
+  // a slot held by test-full itself would deadlock the capture that spawns it, and load from
+  // scoped runs, other projects and non-Sidequest processes would still go unserialised. The
+  // in-test waits instead scale with the measured load (capacityScaledDeadlineMilliseconds), which
+  // covers foreign load whatever its source.
   const capture = preflight || (target && isFullSuiteCommand(command)
     ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem, options)
     : await runBudgetedCapture(command, captureCwd, (options.resolveBudget || captureBudget)(command), undefined, options.announce));
@@ -823,6 +855,6 @@ async function main() {
   process.exitCode = capture.exitCode === 0 && (!target || recorded?.ok) ? 0 : 2;
 }
 
-module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, acquireCaptureSlot, isFullSuiteCommand, isTestSuiteCommand, captureBudgetClass, captureBudget, captureHardMaximumMilliseconds, runBudgetedCapture, fullSuiteCaptureTimeoutMilliseconds, recordCapture, verifiedRevision };
+module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, acquireCaptureSlot, isFullSuiteCommand, isTestSuiteCommand, captureBudgetClass, captureBudget, captureHardMaximumMilliseconds, runBudgetedCapture, fullSuiteCaptureTimeoutMilliseconds, effectiveTestWorkers, capacityScaledDeadlineMilliseconds, recordCapture, verifiedRevision };
 
 if (require.main === module) void main();
