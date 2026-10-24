@@ -2330,13 +2330,48 @@ function wavePullRequestText(repo: string, tickets: any[]) {
   return { title, body };
 }
 
-// SQ-106 reconcile hooks here: today an integrate on a wave that already
-// awaits merge returns the recorded PR unchanged, with no git or gh call.
+// Integration failures the reconcile records against a wave's PR. The PR stays
+// the wave's PR: a later integrate re-reads it (a re-run check can still merge
+// it through auto-merge) instead of opening a second one.
+const PR_RECONCILE_FAILURES = new Set(['wave_ci_failed', 'wave_pr_closed_unmerged']);
+const PR_MERGED_STATE = 'merged';
+
+// A pending submission whose recorded PR decides its delivery: awaiting merge,
+// refused by the reconcile, or merged but not yet closed. A reconcile record
+// binds only while the participant is still in the wave that opened the PR; a
+// participant reassembled into a new wave delivers through that wave's own PR.
+function holdsWavePr(ticket: any) {
+  const integration = ticket?.submission?.integration;
+  if (!pendingSubmission(ticket) || !integration?.pr) return false;
+  if (integration.outcome === AWAITING_MERGE_OUTCOME) return true;
+  const reconciled = integration.outcome === 'failed'
+    ? PR_RECONCILE_FAILURES.has(integration.reason)
+    : integration.mode === 'pr' && (integration.outcome === 'delivered' || integration.outcome === 'verified');
+  return reconciled && integration.pr.branch === waveBranchName(ticket.submission.wave?.id);
+}
+
+function awaitingMergeResult(slug: any, waveId: string, participants: string[], pr: any, message: string, extra: any = {}) {
+  const current = participants.map((ref: string) => getTicket(slug, ref));
+  return {
+    ok: true,
+    state: AWAITING_MERGE_OUTCOME,
+    existing: true,
+    waveId,
+    participants,
+    pr,
+    tickets: current,
+    ...(current.length === 1 ? { ticket: current[0] } : {}),
+    ...extra,
+    message,
+  };
+}
+
+// The wave PR that the requested refs already hold, or null when none does.
+// A subset of that wave is refused; the exact participant set is returned for
+// reconcileWavePr, which asks GitHub what became of the PR.
 function existingWavePr(slug: any, refs: string[]) {
   const tickets = refs.map((ref) => getTicket(slug, ref)).filter(Boolean);
-  const holder = tickets.find((ticket: any) => pendingSubmission(ticket)
-    && ticket.submission.integration?.outcome === AWAITING_MERGE_OUTCOME
-    && ticket.submission.integration?.pr);
+  const holder = tickets.find(holdsWavePr);
   if (!holder) return null;
   const waveId = String(holder.submission.wave?.id || '');
   const pr = readWavePr(slug, waveId) || { ...holder.submission.integration.pr };
@@ -2349,20 +2384,272 @@ function existingWavePr(slug: any, refs: string[]) {
       tickets,
       waveId,
       pr,
-      message: `${holder.ref} is awaiting merge of PR #${pr.number} (${pr.url}) for wave ${waveId}; integrate that wave's exact participant set (${participants.join(', ')}).`,
+      message: `${holder.ref} holds PR #${pr.number} (${pr.url}) for wave ${waveId}; integrate that wave's exact participant set (${participants.join(', ')}).`,
     };
   }
-  const current = participants.map((ref: string) => getTicket(slug, ref));
+  return { ok: true, waveId, participants, pr, holder };
+}
+
+// Writes one integration patch onto every participant in one transaction.
+function writeWaveIntegration(slug: any, participants: string[], patch: (integration: any, ticket: any) => any, wavePatch?: (wave: any) => void) {
+  const now = new Date().toISOString();
+  return transaction(() => {
+    for (const ref of participants) {
+      const ticket = getTicket(slug, ref);
+      if (!pendingSubmission(ticket)) continue;
+      ticket.submission.integration = patch(Object.assign({}, ticket.submission.integration || {}), ticket);
+      if (wavePatch && ticket.submission.wave) wavePatch(ticket.submission.wave);
+      ticket.updatedAt = now;
+      putTicket(slug, ticket);
+      queueEventNotification(slug, ticket, 'status', 'integration');
+    }
+    return participants.map((ref: string) => getTicket(slug, ref));
+  });
+}
+
+const RECONCILE_CLEARED_FIELDS = ['reason', 'failingChecks', 'completedAt', 'message', 'verify'];
+
+function withoutReconcileFailure(integration: any) {
+  const next = Object.assign({}, integration);
+  for (const key of RECONCILE_CLEARED_FIELDS) delete next[key];
+  return next;
+}
+
+// Exit 0 means reachable. Any other exit (1, or 128 for an object the fetch did
+// not bring) means the merge commit is not on the fetched target.
+function commitReachableFrom(repo: string, commit: string, ref: string) {
+  try {
+    integrationGit(repo, ['merge-base', '--is-ancestor', commit, ref]);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+const FULL_COMMIT_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+// US-3 "Reconcile": integrate on a wave that holds a PR asks GitHub what became
+// of it. MERGED records the merge commit as the wave's delivery so the caller
+// closes every participant through the normal integration close; OPEN with
+// pending or passing checks is still awaiting merge; failing checks and a PR
+// closed unmerged are refused and recorded. Nothing is pushed and no PR is opened.
+async function reconcileWavePr(slug: any, requested: string[], channel: PrDeliveryChannel, opts: any) {
+  const repo = String(readMeta(slug)?.path || '');
+  const firstTicket = getTicket(slug, requested[0]);
+  if (!repo) return { ok: false, reason: 'integration_target_unavailable', ticket: firstTicket };
+  let lock: string;
+  try {
+    lock = deliveryLockPath(repo);
+  } catch (error: any) {
+    return { ok: false, reason: 'integration_target_unavailable', ticket: firstTicket, message: integrationGitError(error) };
+  }
+  const lockLease = acquireLock(lock, { wait: false });
+  if (!lockLease) return deliveryInProgress(firstTicket);
+  try {
+    lockLease.refresh();
+    // Re-read under the lock: a concurrent integrate may have settled the wave.
+    const found: any = existingWavePr(slug, requested);
+    if (!found) {
+      return { ok: false, reason: 'submission_required', ticket: getTicket(slug, requested[0]), message: `${requested.join(', ')} no longer hold a pending wave PR; a concurrent integrate already reconciled it.` };
+    }
+    if (!found.ok) return found;
+    const { waveId, participants, pr } = found;
+    const current = participants.map((ref: string) => getTicket(slug, ref));
+    const scope: any = Object.assign({ waveId, participants, pr, ticket: current[0] }, current.length === 1 ? {} : { tickets: current });
+    if (channel.invalid) return prDeliveryUnavailable(`the board deliveryChannel cannot be resolved: ${channel.invalid}`, scope);
+    const remote = String(channel.remote || '');
+    // The PR merges into the base it was opened against, even if the board target changed since.
+    const target = String(pr.base || channel.target || '');
+    if (!isSafeRefComponent(remote)) return prDeliveryUnavailable(`remote ${JSON.stringify(remote)} is not a safe remote name.`, scope);
+    if (!isSafeBranchName(target)) return prDeliveryUnavailable(`target ${JSON.stringify(target)} is not a safe branch name.`, scope);
+
+    const port: GitHubPrPort = opts.prPort || gitHubPrPort || createGhPrPort();
+    let status: any;
+    try {
+      status = await port.viewPr({ cwd: repo, number: Number(pr.number) });
+    } catch (error: any) {
+      return prDeliveryUnavailable(`gh pr view failed for PR #${pr.number}: ${prPortFailureCause(error)}. Wave ${waveId} keeps its recorded PR state; nothing was recorded.`, scope);
+    }
+    lockLease.refresh();
+    if (!status || Number(status.number) !== Number(pr.number)) {
+      return prDeliveryUnavailable(`gh pr view for PR #${pr.number} returned ${status ? `PR #${status.number}` : 'no PR'}; nothing was recorded.`, scope);
+    }
+    const observedAt = new Date().toISOString();
+    const failingChecks: string[] = Array.isArray(status.failingChecks) ? status.failingChecks.map((name: any) => String(name)).filter(Boolean) : [];
+    const recordedMerge = current.some((ticket: any) => ticket.submission.integration?.mode === 'pr' && ticket.submission.integration?.outcome !== 'failed' && ticket.submission.integration?.outcome !== AWAITING_MERGE_OUTCOME);
+    if (recordedMerge && status.state !== 'MERGED') {
+      return prDeliveryUnavailable(`the board recorded the merge of PR #${pr.number}, but GitHub now reports it ${status.state}; nothing was recorded.`, scope);
+    }
+
+    if (status.state === 'MERGED') {
+      return reconcileMergedWavePr(slug, repo, lockLease, { waveId, participants, pr, status, remote, target, observedAt, failingChecks, scope });
+    }
+
+    if (status.state === 'CLOSED') {
+      const closedPr = Object.assign({}, pr, { state: 'CLOSED', observedAt });
+      const tickets = writeWaveIntegration(slug, participants, (integration) => Object.assign(integration, {
+        outcome: 'failed',
+        reason: 'wave_pr_closed_unmerged',
+        pr: closedPr,
+        completedAt: observedAt,
+      }));
+      return Object.assign({}, scope, {
+        ok: false,
+        reason: 'wave_pr_closed_unmerged',
+        pr: closedPr,
+        ticket: tickets[0],
+        ...(tickets.length === 1 ? {} : { tickets }),
+        message: `PR #${pr.number} (${pr.url}) for wave ${waveId} was closed without merging; nothing was delivered. ${participants.join(', ')} stay pending: rework them with a fresh candidate or close them with supersede_submission after an integrated replacement. If the PR is reopened, integrate re-reads it.`,
+      });
+    }
+
+    if (status.checks === 'failure') {
+      const named = failingChecks.length ? failingChecks.join(', ') : 'an unnamed check';
+      const verification = Object.freeze({
+        kind: 'suite',
+        status: 'failed_check' as const,
+        evidence: `PR #${pr.number} (${pr.url}) required checks failed: ${named}.`,
+        failureIdentities: Object.freeze(failingChecks.slice()),
+      });
+      // The PR's checks are the wave gate: record their failure as the wave's delivery verdict.
+      const gate = recordSubmissionWaveDelivery(slug, participants, { source: 'git', value: String(status.headSha || pr.headSha), observedAt }, verification);
+      const failedPr = Object.assign({}, pr, { checks: 'failure', failingChecks, observedHeadSha: status.headSha, observedAt });
+      const tickets = writeWaveIntegration(slug, participants, (integration) => Object.assign(integration, {
+        outcome: 'failed',
+        reason: 'wave_ci_failed',
+        failingChecks,
+        pr: failedPr,
+        verify: verification,
+        completedAt: observedAt,
+      }));
+      return Object.assign({}, scope, {
+        ok: false,
+        reason: 'wave_ci_failed',
+        pr: failedPr,
+        failingChecks,
+        verify: verification,
+        ...(gate.delivery ? { wave: gate.delivery } : {}),
+        ticket: tickets[0],
+        ...(tickets.length === 1 ? {} : { tickets }),
+        message: `Wave ${waveId} failed its CI gate on PR #${pr.number} (${pr.url}); failing checks: ${named}. Recorded the gate failure; ${participants.join(', ')} stay pending: rework them with a fixed candidate or close them with supersede_submission after an integrated replacement. If the checks are re-run, integrate re-reads the PR.`,
+      });
+    }
+
+    // OPEN with pending or passing checks: the PR still awaits its merge.
+    const failed = current.filter((ticket: any) => ticket.submission.integration?.outcome !== AWAITING_MERGE_OUTCOME);
+    if (failed.length) {
+      // A re-run check or a reopened PR: the wave is awaiting merge again.
+      const { observedHeadSha: _staleHead, ...openPr } = pr;
+      writeWaveIntegration(slug, participants, (integration) => Object.assign(withoutReconcileFailure(integration), {
+        outcome: AWAITING_MERGE_OUTCOME,
+        pr: Object.assign({}, openPr, { state: 'OPEN', checks: status.checks, failingChecks: [], observedAt }),
+      }), (wave) => {
+        if (wave.delivery?.state !== 'delivered') {
+          delete wave.delivery;
+          wave.state = wave.gate?.state || wave.state;
+        }
+      });
+      const restored = readWavePr(slug, waveId) || pr;
+      return awaitingMergeResult(slug, waveId, participants, restored, `Wave ${waveId} is awaiting merge of PR #${pr.number} (${pr.url}) again; checks are ${status.checks}. No new PR was opened.`, { checks: status.checks });
+    }
+    return awaitingMergeResult(slug, waveId, participants, pr, `Wave ${waveId} is already awaiting merge of PR #${pr.number} (${pr.url}); checks are ${status.checks}. No new PR was opened.`, { checks: status.checks });
+  } finally {
+    lockLease.refresh();
+    releaseLock(lock, lockLease);
+  }
+}
+
+// MERGED: the merge commit must be on <remote>/<target> before the board calls
+// the wave delivered. The delivery record then satisfies the integration close.
+function reconcileMergedWavePr(slug: any, repo: string, lockLease: any, input: any) {
+  const { waveId, participants, pr, status, remote, target, observedAt, failingChecks, scope } = input;
+  const mergeCommit = String(status.mergeCommit || '').trim().toLowerCase();
+  if (!FULL_COMMIT_RE.test(mergeCommit)) {
+    return prDeliveryUnavailable(`gh reported PR #${pr.number} merged without a usable merge commit (${JSON.stringify(status.mergeCommit)}); nothing was recorded.`, scope);
+  }
+  const trackingRef = `refs/remotes/${remote}/${target}`;
+  try {
+    remoteGit(repo, ['remote', 'get-url', remote]);
+    remoteGit(repo, ['fetch', '--no-tags', remote, `+refs/heads/${target}:${trackingRef}`]);
+  } catch (error: any) {
+    return prDeliveryUnavailable(`cannot fetch ${remote}/${target} to confirm the merge of PR #${pr.number}: ${integrationGitError(error)}. Nothing was recorded.`, scope);
+  }
+  lockLease.refresh();
+  if (!commitReachableFrom(repo, mergeCommit, trackingRef)) {
+    return Object.assign({}, scope, {
+      ok: false,
+      reason: 'wave_merge_unreachable',
+      mergeCommit,
+      message: `GitHub reports PR #${pr.number} (${pr.url}) merged as ${mergeCommit}, but that commit is not reachable from ${remote}/${target} after a fetch; nothing was recorded. Confirm where the PR merged, then integrate again.`,
+    });
+  }
+  const upstream = `${remote}/${target}`;
+  const checksNote = status.checks === 'failure' && failingChecks.length ? ` Checks failing at merge (not required by the merge gate): ${failingChecks.join(', ')}.` : '';
+  const verification = Object.freeze({
+    kind: 'suite',
+    status: 'passed' as const,
+    evidence: `PR #${pr.number} (${pr.url}) merged into ${upstream} as ${mergeCommit}; its required checks gated the merge.${checksNote}`,
+  });
+  const delivered = recordSubmissionWaveDelivery(slug, participants, { source: 'git', value: mergeCommit, observedAt }, verification);
+  if (!delivered.ok) {
+    return Object.assign({}, scope, {
+      ok: false,
+      reason: (delivered as any).reason || 'wave_delivery_failed',
+      message: `PR #${pr.number} merged as ${mergeCommit}, but wave ${waveId} delivery could not be recorded: ${(delivered as any).message || (delivered as any).reason || delivered.delivery?.state}.`,
+    });
+  }
+  const mergedPr = Object.assign({}, pr, {
+    state: 'MERGED',
+    mergeCommit,
+    mergedHeadSha: status.headSha,
+    checks: status.checks,
+    failingChecks,
+    observedAt,
+  });
+  // A singleton caller verifies the delivery itself (verifyIntegration flips
+  // delivered to verified), exactly as local single-ticket delivery does; a wave
+  // records verified directly, as local wave delivery does.
+  const singleton = participants.length === 1;
+  const tickets = writeWaveIntegration(slug, participants, (integration, ticket) => Object.assign(withoutReconcileFailure(integration), {
+    mode: 'pr',
+    outcome: singleton ? 'delivered' : 'verified',
+    targetBranch: target,
+    targetUpstream: upstream,
+    pinnedRef: String(ticket.submission.gitRef || submissionGitRef(ticket)),
+    pinnedCommit: String(ticket.submission.commit || '').toLowerCase(),
+    ...(Array.isArray(ticket.submission.changedPaths) ? { changedPaths: ticket.submission.changedPaths.slice() } : {}),
+    deliveredAt: observedAt,
+    ...(singleton ? {} : { verifiedAt: observedAt }),
+    resultingHead: mergeCommit,
+    deliveryCommit: mergeCommit,
+    evidence: pr.url,
+    verify: verification,
+    pr: mergedPr,
+  }));
+  const pinnedCommits = tickets.map((ticket: any) => ticket.submission.integration.pinnedCommit);
   return {
     ok: true,
-    state: AWAITING_MERGE_OUTCOME,
-    existing: true,
+    state: PR_MERGED_STATE,
     waveId,
     participants,
-    pr,
-    tickets: current,
-    ...(current.length === 1 ? { ticket: current[0] } : {}),
-    message: `Wave ${waveId} is already awaiting merge of PR #${pr.number} (${pr.url}); no new PR was opened.`,
+    pr: mergedPr,
+    tickets,
+    ...(singleton ? { ticket: tickets[0] } : {}),
+    wave: delivered.delivery,
+    integration: {
+      mode: 'pr',
+      targetBranch: target,
+      targetUpstream: upstream,
+      resultingHead: mergeCommit,
+      deliveryCommit: mergeCommit,
+      evidence: pr.url,
+      pr: mergedPr,
+      participants,
+      pinnedCommits,
+      ...(singleton ? { pinnedRef: tickets[0].submission.integration.pinnedRef, pinnedCommit: pinnedCommits[0] } : {}),
+      verify: verification,
+    },
+    message: `PR #${pr.number} (${pr.url}) merged as ${mergeCommit} on ${upstream}; wave ${waveId} is delivered and ${participants.join(', ')} close through integration.`,
   };
 }
 
@@ -2425,7 +2712,7 @@ async function integrateSubmissionPr(slug: any, refs: string[], channel: PrDeliv
   const requested = Array.from(new Set(refs.map((ref) => String(ref || '').trim()).filter(Boolean)));
   if (!requested.length) return { ok: false, reason: 'wave_participants_required', message: 'Delivery requires one or more assembled participant refs.' };
   const existing = existingWavePr(slug, requested);
-  if (existing) return existing;
+  if (existing) return existing.ok ? reconcileWavePr(slug, requested, channel, opts) : existing;
   const firstTicket = getTicket(slug, requested[0]);
   if (channel.invalid) return prDeliveryUnavailable(`the board deliveryChannel cannot be resolved: ${channel.invalid}`, { ticket: firstTicket });
   const remote = String(channel.remote || '');
@@ -2469,9 +2756,14 @@ async function integrateSubmissionPr(slug: any, refs: string[], channel: PrDeliv
   if (!lockLease) return deliveryInProgress(tickets[0]);
   try {
     lockLease.refresh();
-    // A concurrent integrate may have opened the PR between the check above and this lock.
-    const raced = existingWavePr(slug, requested);
-    if (raced) return raced;
+    // A concurrent integrate may have opened the PR between the check above and
+    // this lock. It was just opened, so report it as recorded; the next integrate reconciles it.
+    const raced: any = existingWavePr(slug, requested);
+    if (raced) {
+      return raced.ok
+        ? awaitingMergeResult(slug, raced.waveId, raced.participants, raced.pr, `Wave ${raced.waveId} is already awaiting merge of PR #${raced.pr.number} (${raced.pr.url}); no new PR was opened.`)
+        : raced;
+    }
 
     const candidates: any[] = [];
     for (const ticket of tickets) {

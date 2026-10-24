@@ -106,7 +106,8 @@ function waveAssemblyAck(slug, result) {
 function deliveredAck(slug, result, integration, changed = {}) {
   const delivery = compactIntegrationDelivery(integration);
   const commits = Array.isArray(delivery.pinnedCommits) ? delivery.pinnedCommits : delivery.pinnedCommit ? [delivery.pinnedCommit] : [];
-  const message = commits.length ? `Delivered ${commits.join(", ")} to ${delivery.targetBranch || "the integration target"}.` : delivery.sourceRevision ? `Delivered source revision ${delivery.sourceRevision.source}:${delivery.sourceRevision.value}.` : "Delivered the submitted candidate.";
+  const merged = delivery.mode === "pr" && delivery.pr?.mergeCommit ? delivery.pr : null;
+  const message = merged ? `Delivered ${commits.join(", ") || "the wave"} to ${delivery.targetBranch || "the integration target"} through PR #${merged.number} (${merged.url}), merged as ${merged.mergeCommit}.` : commits.length ? `Delivered ${commits.join(", ")} to ${delivery.targetBranch || "the integration target"}.` : delivery.sourceRevision ? `Delivered source revision ${delivery.sourceRevision.source}:${delivery.sourceRevision.value}.` : "Delivered the submitted candidate.";
   return mutationAck(slug, result, {
     action: "delivered",
     delivery,
@@ -204,7 +205,7 @@ function prDeliveryMode(slug) {
     return false;
   }
 }
-const PR_DELIVERY_REFUSAL_KEYS = ["cause", "pr", "waveId", "branch", "conflictedPaths"];
+const PR_DELIVERY_REFUSAL_KEYS = ["cause", "pr", "waveId", "branch", "conflictedPaths", "failingChecks", "mergeCommit"];
 function prDeliveryRefusalFields(delivery) {
   const fields = {};
   for (const key of PR_DELIVERY_REFUSAL_KEYS) {
@@ -222,6 +223,7 @@ function awaitingMergeAck(slug, delivery) {
     participantRefs: delivery.participants,
     tickets: tickets.map((entry) => entry ? { ref: entry.ref, status: entry.status } : null),
     ...delivery.existing ? { existing: true } : {},
+    ...delivery.checks ? { checks: delivery.checks } : {},
     message: delivery.message
   });
 }
@@ -1012,7 +1014,7 @@ const tools = [
           return groupPrDelivery ? Object.assign(mutationAck(slug, delivery2), prDeliveryRefusalFields(delivery2)) : mutationAck(slug, delivery2);
         }
         if (delivery2.state === "awaiting-merge") return awaitingMergeAck(slug, delivery2);
-        const reason2 = `Delivered assembled wave ${refs.join(", ")} via ${delivery2.integration.mode}.`;
+        const reason2 = delivery2.state === "merged" ? `Delivered assembled wave ${refs.join(", ")} via PR #${delivery2.pr.number} (${delivery2.pr.url}), merged as ${delivery2.pr.mergeCommit}. Verify passed: ${delivery2.integration.verify.evidence}` : `Delivered assembled wave ${refs.join(", ")} via ${delivery2.integration.mode}.`;
         const ticketsBeforeClosure = refs.map((ref) => store.getTicket(slug, ref));
         const closures = refs.map((ref) => store.completeTicketAsControlPlane(slug, ref, { by, reason: reason2, purpose: "integration" }));
         const failedClosure = closures.find((closure) => !closure.ok);

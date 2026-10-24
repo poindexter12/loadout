@@ -3213,6 +3213,22 @@ function abandonUnconsumedPreparedDispatchForGrooming(slug?: any, idOrRef?: any)
   });
 }
 
+// PR delivery (US-3): a wave reconciled as merged records its merge commit on
+// every participant's integration. The integration close carries it as the
+// completion's delivery, so audit release detection reads the merge commit.
+function prMergeDelivery(ticket: any) {
+  const integration = ticket?.submission?.integration;
+  if (integration?.mode !== 'pr' || !integration.deliveryCommit || !integration.pr?.mergeCommit) return null;
+  return {
+    commit: integration.deliveryCommit,
+    targetBranch: integration.targetBranch,
+    targetRef: integration.targetUpstream,
+    integrationRevision: { source: 'git', value: integration.resultingHead || integration.deliveryCommit },
+    evidence: integration.evidence || integration.pr.url,
+    pr: { number: integration.pr.number, url: integration.pr.url },
+  };
+}
+
 function completeTicketAsControlPlane(slug?: any, idOrRef?: any, opts?: any) {
   opts = opts || {};
   const purpose = String(opts.purpose || '').trim();
@@ -3352,9 +3368,11 @@ function completeTicketAsControlPlane(slug?: any, idOrRef?: any, opts?: any) {
     message: missingReleaseFragmentMessage(ticket.ref, missingFragment.fragmentPath, missingFragment.plugins),
     ticket,
   };
+  let mergedPrDelivery: any = null;
   if (purpose === 'integration') {
     const admitted = validateIntegrationSubmission(slug, idOrRef, { requireDeliveredWave: true });
     if (!admitted.ok) return admitted;
+    mergedPrDelivery = prMergeDelivery(admitted.ticket);
   }
   const recorded = delivery;
   const advisory = purpose === 'integration' && ticket.highStakes && !recordedReviewPass(ticket) && !linkedReviewPass(slug, ticket)
@@ -3376,7 +3394,7 @@ function completeTicketAsControlPlane(slug?: any, idOrRef?: any, opts?: any) {
           ...(recorded.upstream ? { upstream: recorded.upstream } : {}),
           ...(recorded.identity ? { identity: recorded.identity } : {}),
         },
-      } : {},
+      } : mergedPrDelivery ? { delivery: mergedPrDelivery } : {},
     ),
     ...(recorded?.ok ? { recordedDelivery: recorded } : {}),
   }));
