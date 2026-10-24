@@ -176,6 +176,19 @@ atomic: each subagent claims a different ticket, and any race just sends the los
 - **Resume Continuation checkpoints with a fresh dispatch.** Executors create a Continuation checkpoint around 100 tool rounds by committing verified declared-scope work, writing a `Continuation checkpoint` comment with the commit, files touched, next steps, and verification state, then releasing to `todo`. On a natural wakeup, use `pulse` and the latest comment to confirm that header, commit, and no live claim. Read the checkpoint before `dispatch <ref>`, then spawn its returned continuation unchanged so it gets a fresh token and context. The dispatch validates the registered retained worktree against the repository before carrying it forward, replays a retained checkpoint onto an advanced integration target, and reports its exact Git validation evidence if it must fall back. A rebase conflict stops the executor for escalation, without resetting the retained checkpoint or resolving toward either side. A live claim means the checkpoint has not completed, so do not launch beside it; use the normal salvage path if that worker stopped.
 - **Record wave links from board results.** Never write an `SQ-n` ref you did not read back from a board response. File related tickets first, collect their returned refs, then use `update` or, preferably, `link` (`blocks`, `depends-on`, or `related`) to record relationships. Links are board data, so they stay correct without prose cross-references.
 - **Read liveness from the board, not notifications.** Notifications wake the orchestrator but do not prove executor state. An idle notification can describe a working, dead, or already-finished executor, so read board truth before acting: use `pulse <ref>` for the ticket's `{claim:{by,at,ageMs}|null, comments, lastComment, git:{commit,dirty}|null}` state. Until `pulse` is available, read claim age, comments, and `git log`. If several tickets need checking, use `changes --since <iso>` for the `{tickets:[...]}` delta, sorted oldest first.
+- **Rule out host sleep before calling a stall or death.** Wall-clock silence is not executor silence when
+  the host slept. A laptop in Clamshell Sleep on battery runs executors only during seconds-long
+  maintenance DarkWakes, so an in-flight model request outlives its DarkWake and Claude Code's stream
+  watchdog later records `[Request interrupted by user]`. That is not a model, gateway, or route failure.
+  `pulse` and `changes` check the host sleep log (`pmset -g log` on macOS, a wall-versus-monotonic clock gap
+  elsewhere) for the silent window and report liveness `host_sleep`, and a watchdog death during sleep
+  records `failureShape: host_sleep`. On `host_sleep`: keep the claim, `SendMessage` the same executor to
+  continue once the host is awake, and never repoint categories, change model routes, or count the attempt
+  against the route. Claim backstops count only awake time, so the sweep will not release a sleeping
+  claim.
+- **Keep the host awake for long unattended runs.** Run the orchestrating session under `caffeinate -is`
+  (or keep the machine on AC power with the lid open). With the lid closed on battery every in-flight turn
+  dies, whatever the route.
 - **Read completion from the board.** An executor stop notification wakes the orchestrator; its terminal
   submit or done state is the completion signal. Do not expect or request a routine
   `SendMessage` report. Read a submission's canonical report body or a done completion comment for what changed, verification evidence, commit hash or

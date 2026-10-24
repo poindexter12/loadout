@@ -1,6 +1,8 @@
 "use strict";
+const { defaultHostSleep } = require("../host-sleep.js");
 function createClaims(dependencies) {
   const {
+    hostSleep: injectedHostSleep,
     completionTreeCheck,
     dispatchDelta,
     dispatchState,
@@ -229,6 +231,17 @@ ${evidence.outputTail}`;
     const idleMs = claimIdleAge(ticket, atMs);
     const dispatch = dispatchState(ticket);
     const verification = claimVerification(ticket);
+    const idleBeyond = (thresholdMs) => {
+      if (!(idleMs > thresholdMs)) return false;
+      const latest = claimActivityMs(ticket);
+      if (!Number.isFinite(latest)) return true;
+      try {
+        const slept = (injectedHostSleep || defaultHostSleep()).overlap(latest, atMs).sleptMs;
+        return idleMs - (Number.isFinite(slept) ? slept : 0) > thresholdMs;
+      } catch (_error) {
+        return true;
+      }
+    };
     if (observedStop(dispatch, claim)) {
       return { kind: "observed_stop", idleMs, at: dispatch.terminalAt, reason: "its executor has a durable died outcome while still holding the claim" };
     }
@@ -236,21 +249,21 @@ ${evidence.outputTail}`;
       return { kind: "missing_worktree", idleMs, reason: "its isolated executor worktree no longer exists" };
     }
     if (verification) {
-      if (idleMs > claimAbandonMs()) {
+      if (idleBeyond(claimAbandonMs())) {
         return { kind: "abandoned_verifying", idleMs, at: verification.startedAt, reason: "its verification marker never completed past the unobserved-death backstop" };
       }
       return null;
     }
     if (dispatch) {
-      if (idleMs > claimAbandonMs()) {
+      if (idleBeyond(claimAbandonMs())) {
         return { kind: "abandoned", idleMs, reason: "no board activity from the claim holder past the unobserved-death backstop" };
       }
       return null;
     }
-    if (idleMs > claimIdleMs()) {
+    if (idleBeyond(claimIdleMs())) {
       return { kind: "idle", idleMs, reason: "no board activity from the claim holder and no executor dispatch exists" };
     }
-    if (idleMs > claimAbandonMs()) {
+    if (idleBeyond(claimAbandonMs())) {
       return { kind: "abandoned", idleMs, reason: "no board activity from the claim holder past the unobserved-death backstop" };
     }
     return null;

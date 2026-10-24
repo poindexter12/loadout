@@ -3,6 +3,7 @@
 const { execFileSync } = require('node:child_process');
 const { canonicalPreparedDispatchExecutor } = require('../prepared-dispatch.js');
 const { readPrWatchState } = require('./project-watch.js');
+const { HOST_SLEEP_GUIDANCE, defaultHostSleep, reclassifyLivenessForHostSleep } = require('../host-sleep.js');
 
 function createGitHubCiRunsProvider(projectPath: string, execute = execFileSync) {
   const command = (program: string, arguments_: string[]) => execute(program, arguments_, {
@@ -60,6 +61,7 @@ function createPulse(dependencies: any) {
     execFileSync,
     findAwaitingMergeWaves,
     getTicket,
+    hostSleep: injectedHostSleep,
     listTickets,
     normalizeRoute,
     oracleProjection,
@@ -179,7 +181,41 @@ function createPulse(dependencies: any) {
     return attempt ? { at: attempt.terminalAt, source: attempt.terminalSource || null } : null;
   }
 
-  function livenessPulse(ticket?: any, dispatch?: any, claim?: any, death?: any) {
+  // Host sleep first (SQ-164): every silence-derived state below is wall-clock math, and a
+  // host in Clamshell Sleep produces exactly that silence with nothing wrong with the
+  // executor or its model route. A recorded death keeps its state unless its own failure
+  // shape is host_sleep; dead-by-reclaimable, stalled, and claim-held unknown are re-read
+  // against the host sleep log for the silent window before they are reported.
+  function livenessPulse(ticket?: any, dispatch?: any, claim?: any, death?: any, now = Date.now()) {
+    const liveness = wallClockLiveness(ticket, dispatch, claim, death);
+    if (death) {
+      if (deathFailureShape(dispatch) !== 'host_sleep') return liveness;
+      return { state: 'host_sleep', evidence: `died outcome recorded as host_sleep${death.source ? ` by ${death.source}` : ''}: the host slept while the request was in flight; ${HOST_SLEEP_GUIDANCE}` };
+    }
+    const quietMs = Number.isFinite(claim?.boardQuietMs) ? claim.boardQuietMs : Number.isFinite(claim?.idleMs) ? claim.idleMs : null;
+    const silenceDerived = liveness.state === 'stalled'
+      || (liveness.state === 'dead' && Boolean(claim?.reclaimable))
+      || (liveness.state === 'unknown' && Boolean(claim));
+    const windowStart = claim ? (quietMs == null ? null : now - quietMs) : (dispatch?.boundAt || dispatch?.launchedAt || null);
+    if (!silenceDerived || windowStart == null) return liveness;
+    const hostSleep = injectedHostSleep || defaultHostSleep();
+    return reclassifyLivenessForHostSleep(liveness, {
+      silenceDerived,
+      windowStart,
+      windowEnd: now,
+      overlap: (start: unknown, end: unknown) => hostSleep.overlap(start, end),
+    });
+  }
+
+  function deathFailureShape(dispatch?: any) {
+    if (!dispatch) return null;
+    if (dispatch.outcome === 'died' && dispatch.terminalAt) return dispatch.failureShape || null;
+    const attempt = (Array.isArray(dispatch.attempts) ? dispatch.attempts : [])
+      .slice().reverse().find((entry: any) => entry?.outcome === 'died' && entry.terminalAt);
+    return attempt?.failureShape || null;
+  }
+
+  function wallClockLiveness(ticket?: any, dispatch?: any, claim?: any, death?: any) {
     if (death) return { state: 'dead', evidence: `died outcome recorded${death.source ? ` by ${death.source}` : ''}` };
     if (claim?.reclaimable) return { state: 'dead', evidence: `claim is reclaimable: ${claim.reclaimable}` };
     if (claim?.verifying) return { state: 'alive', evidence: 'verification marker is active' };
@@ -289,7 +325,7 @@ function createPulse(dependencies: any) {
     const now = Date.now();
     const claim = projectedClaim(ticket, now);
     const died = dispatchDeath(dispatch);
-    const liveness = livenessPulse(ticket, dispatch, claim, died);
+    const liveness = livenessPulse(ticket, dispatch, claim, died, now);
     const warnings = [...storyContractDriftWarnings(ticket), ...storyDecisionLogWarnings(ticket, slug), ...scopeDriftWarnings(slug, ticket)];
     // `compactPulse` keeps only four dispatch fields but passes `warnings` through, so a
     // derived verify requirement is announced here too: the default (compact) read is where
@@ -374,7 +410,7 @@ function createPulse(dependencies: any) {
         const warnings = [...storyContractDriftWarnings(ticket), ...storyDecisionLogWarnings(ticket, slug)];
         const dispatch = dispatchState(ticket);
         const claim = claimPulse(ticket, nowMs);
-        const liveness = livenessPulse(ticket, dispatch, claim, dispatchDeath(dispatch));
+        const liveness = livenessPulse(ticket, dispatch, claim, dispatchDeath(dispatch), nowMs);
         return {
           ref: ticket.ref,
           title: ticket.title,
@@ -406,6 +442,7 @@ function createPulse(dependencies: any) {
     boundedExcerpt,
     changesPayload,
     commentHistory,
+    livenessPulse,
     pulsePayload,
   };
 }

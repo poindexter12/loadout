@@ -28,6 +28,11 @@ process.env.SIDEQUEST_AGENTS_DIR = sidequestTestAgentsHome;
 // its own local fixture server.
 delete process.env.ANTHROPIC_BASE_URL;
 
+// Claim backstops and pulse liveness discount host sleep (SQ-164) by reading the real
+// `pmset -g log` on darwin. A developer laptop's own sleep history must never shift
+// fixture timing, so suites run with detection off; host-sleep.test.ts injects events.
+process.env.SIDEQUEST_HOST_SLEEP_DETECTION = '0';
+
 process.once('exit', () => {
   try {
     for (const dir of [sidequestTestHome, sidequestTestAgentsHome]) {

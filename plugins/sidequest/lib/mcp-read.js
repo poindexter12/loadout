@@ -156,7 +156,7 @@ const tools = [
   },
   {
     name: "pulse",
-    description: "Compact liveness read: status, claim, latest comment, dispatch state, invalidated wave state, git activity.",
+    description: "Compact liveness read: status, claim, latest comment, dispatch state, invalidated wave state, git activity. liveness host_sleep = host slept: keep claim, never change routes.",
     inputSchema: {
       type: "object",
       properties: {

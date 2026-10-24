@@ -3,6 +3,7 @@ const { canonicalPreparedDispatchExecutor } = require("../prepared-dispatch.js")
 const { forcedClaimReleaseGuidance } = require("../refusal-guidance.js");
 const { classifyVerificationKind, verificationRequirement } = require("../kernel/verification.js");
 const { resolveSuite } = require("../suite-resolver.js");
+const { defaultHostSleep } = require("../host-sleep.js");
 const { FILESYSTEM_SNAPSHOT_SOURCE, withPrecomputedFilesystemSnapshot } = require("../source-revision-capability.js");
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationOutcome } = require("../kernel/review-binding");
 function unscopedWriteCannotAutoApprove(ticket, options) {
@@ -755,7 +756,11 @@ function createDispatch(dependencies) {
       reason: opts.releaseReason || null,
       evidence: opts.releaseEvidence || null
     } : null;
-    const failureShape = opts?.failureShape || release?.kind || classifyDispatchFailure(opts?.error);
+    const attemptStart = state.claimedAt || state.boundAt || state.launchedAt || state.preparedAt || null;
+    const hostSleep = opts?.hostSleep || defaultHostSleep();
+    const failureShape = opts?.failureShape || release?.kind || classifyDispatchFailure(opts?.error, {
+      hostSleptDuring: () => Boolean(attemptStart) && hostSleep.sleptDuring(attemptStart, at)
+    });
     state.outcome = outcome;
     state.failureShape = failureShape;
     state.terminalAt = at;

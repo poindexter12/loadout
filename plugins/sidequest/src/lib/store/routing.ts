@@ -419,10 +419,26 @@ function claudeQuotaFailure(error?: any) {
   return null;
 }
 
-function classifyDispatchFailure(error?: any) {
+// A watchdog-shaped death ("[Request interrupted by user]", a stream idle timeout, or a
+// silent process death) is what host sleep leaves behind: the request outlived the
+// DarkWake that sent it (SQ-163). When the caller can say the host slept during the
+// attempt, that death is host_sleep, which no fallback or terminal-agent route keys on.
+const WATCHDOG_FAILURE = /request interrupted by user|stream (?:idle )?(?:timeout|timed out|watchdog)|stream (?:stalled|idle)/;
+
+function hostSleptDuringFailure(context?: any) {
+  const value = context?.hostSleptDuring;
+  try {
+    return Boolean(typeof value === 'function' ? value() : value);
+  } catch (_error: unknown) {
+    return false;
+  }
+}
+
+function classifyDispatchFailure(error?: any, context?: any) {
   const text = String(error || '').trim();
-  if (!text) return 'process_death';
+  if (!text) return hostSleptDuringFailure(context) ? 'host_sleep' : 'process_death';
   const normalized = text.toLowerCase();
+  if (WATCHDOG_FAILURE.test(normalized) && hostSleptDuringFailure(context)) return 'host_sleep';
   if (claudeQuotaFailure(text)) return 'quota_exhausted';
   if (/prompt is too long|request too large \(max 32mb\)|context (?:length|window).*(?:exceed|too (?:large|long)|overflow)|maximum context/.test(normalized)) return 'context_overflow';
   if (/\bmax(?:imum)?[_ -]?(?:output[_ -]?)?tokens?\b/.test(normalized)) return 'max_tokens';
