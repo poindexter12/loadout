@@ -460,7 +460,7 @@ test('SQ-349: an inline briefing ends with a measured launch budget naming its l
   assert.match(transport, new RegExp(`this briefing is ${briefing.length} chars, about ${Math.ceil(briefing.length / 4)} tokens`));
   const largest = /Largest sections: (.+?)\. The ambient surface/.exec(transport);
   assert.ok(largest, 'the budget names its largest sections');
-  assert.match(largest[1], /^"This ticket" 9\d{3} chars, "Newest ticket evidence and comments \(newest first\)" 5\d{3} chars, "Dispatch, claim, worktree, lifecycle, and verification safety" 3\d{3} chars$/);
+  assert.match(largest![1] ?? '', /^"This ticket" 9\d{3} chars, "Newest ticket evidence and comments \(newest first\)" 5\d{3} chars, "Dispatch, claim, worktree, lifecycle, and verification safety" 3\d{3} chars$/);
   // A briefing under the warn fraction does not cry wolf.
   assert.doesNotMatch(transport, /Launch budget warning/);
 });

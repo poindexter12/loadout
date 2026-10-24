@@ -1491,12 +1491,13 @@ function briefingSectionSizes(briefing?: any): Array<{ heading: string; chars: n
   const pattern = /^## (.+)$/gm;
   const starts: Array<{ heading: string; index: number }> = [];
   let match: RegExpExecArray | null;
-  while ((match = pattern.exec(text)) !== null) starts.push({ heading: match[1].trim(), index: match.index });
-  if (!starts.length || starts[0].index > 0) starts.unshift({ heading: '(preamble)', index: 0 });
+  while ((match = pattern.exec(text)) !== null) starts.push({ heading: (match[1] ?? '').trim(), index: match.index });
+  if (!starts.length || starts[0]!.index > 0) starts.unshift({ heading: '(preamble)', index: 0 });
   for (let index = 0; index < starts.length; index += 1) {
-    const end = index + 1 < starts.length ? starts[index + 1].index : text.length;
-    const chars = end - starts[index].index;
-    if (chars > 0) sections.push({ heading: starts[index].heading, chars });
+    const start = starts[index]!;
+    const end = index + 1 < starts.length ? starts[index + 1]!.index : text.length;
+    const chars = end - start.index;
+    if (chars > 0) sections.push({ heading: start.heading, chars });
   }
   return sections;
 }
