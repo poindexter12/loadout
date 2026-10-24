@@ -13,11 +13,14 @@ const execNames = require('../lib/exec-names');
 const { claimRefusalMessage } = require('../lib/refusal-guidance');
 const { assertSidequestInstall, assertDispatchTransport } = require('../lib/dispatch-preflight');
 const { canonicalPreparedDispatchExecutor } = require('../lib/prepared-dispatch');
+const { ensureLiveCwd } = require('../lib/cwd-guard');
 
 const { fail, resolveProject, workerId, sessionId } = require('./sidequest-cmd-shared');
 async function cmdDispatch(opts: any, positional: any) {
   const idOrRef = positional[0];
   if (!idOrRef) fail('dispatch: pass a ticket ref, e.g. sidequest dispatch SQ-12.');
+  // A deleted cwd would otherwise throw ENOENT from process.cwd() below (SQ-368).
+  if (!ensureLiveCwd().ok) fail('dispatch: the working directory no longer exists and no surviving directory could be entered. Restart from a checkout that exists.');
   const { slug, meta } = await resolveProject(opts);
   const ticket = store.getTicket(slug, idOrRef);
   const descriptionError = store.dispatchDescriptionError(ticket);
