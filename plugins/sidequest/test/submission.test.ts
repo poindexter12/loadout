@@ -380,6 +380,7 @@ test('SQ-81: MCP submit accepts a capture when only an unreleased release fragme
     assert.strictEqual(accepted.ok, true, accepted.message);
   } finally {
     fs.rmSync(capture.logPath, { force: true });
+    cleanBranch();
   }
 });
 
@@ -394,6 +395,7 @@ test('SQ-81: MCP submit rejects a capture followed by a release fragment and sou
     assert.strictEqual(refused.reason, 'verification_capture_required');
   } finally {
     fs.rmSync(capture.logPath, { force: true });
+    cleanBranch();
   }
 });
 
@@ -405,6 +407,7 @@ test('SQ-81: MCP submit rejects a capture followed only by a source change', asy
     assert.strictEqual(refused.reason, 'verification_capture_required');
   } finally {
     fs.rmSync(capture.logPath, { force: true });
+    cleanBranch();
   }
 });
 
