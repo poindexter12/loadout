@@ -2055,6 +2055,38 @@
             "mode"
           ]
         },
+        "issueMirror": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "labels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "categories": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "stories": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "labelMap": {
+              "type": "object"
+            }
+          }
+        },
         "integrationVerifyTimeoutMs": {
           "type": "integer"
         },
