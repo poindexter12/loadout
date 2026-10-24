@@ -150,6 +150,17 @@ async function resolveRunningServer() {
   return { action: 'reap', reason: 'dead', existing };
 }
 
+const DASHBOARD_START_POLL_MS = 150;
+const DASHBOARD_START_DEFAULT_DEADLINE_MS = 9_000;
+
+// How long ensureServer waits for a freshly spawned dashboard to answer. Production keeps the
+// fixed default; a caller running under contention (the test suite, SQ-65) passes a deadline
+// derived from the machine's load through SIDEQUEST_DASHBOARD_START_DEADLINE_MS instead.
+function dashboardStartDeadlineMilliseconds(env: NodeJS.ProcessEnv = process.env): number {
+  const requested = Number(env.SIDEQUEST_DASHBOARD_START_DEADLINE_MS);
+  return Number.isInteger(requested) && requested > 0 ? requested : DASHBOARD_START_DEFAULT_DEADLINE_MS;
+}
+
 // Return the URL of a running dashboard, starting a detached one if needed.
 async function ensureServer(requestedPort: any) {
   const running = await resolveRunningServer();
@@ -163,14 +174,15 @@ async function ensureServer(requestedPort: any) {
   const child = spawn(process.execPath, args, { cwd: os.homedir(), detached: true, stdio: 'ignore', windowsHide: true });
   child.unref();
 
-  for (let i = 0; i < 60; i++) {
-    await delay(150);
+  const deadline = Date.now() + dashboardStartDeadlineMilliseconds();
+  do {
+    await delay(DASHBOARD_START_POLL_MS);
     const info = store.readServerInfo();
     if (info && info.port && isVersionAtLeast(info.version, PLUGIN_VERSION)) {
       const health = await checkHealth(info.port);
       if (health && isRecordedServer(health, info) && isVersionAtLeast(health.version, PLUGIN_VERSION)) return info.url || `http://127.0.0.1:${info.port}`;
     }
-  }
+  } while (Date.now() < deadline);
   throw new Error('the dashboard server did not start in time');
 }
 
@@ -261,4 +273,4 @@ async function cmdStop() {
  * ------------------------------------------------------------------ */
 
 
-module.exports = { PLUGIN_VERSION, cmdDashboard, cmdServe, cmdStop };
+module.exports = { PLUGIN_VERSION, cmdDashboard, cmdServe, cmdStop, dashboardStartDeadlineMilliseconds };

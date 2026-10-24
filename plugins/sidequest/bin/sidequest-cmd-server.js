@@ -129,6 +129,12 @@ async function resolveRunningServer() {
   if (current && current.pid === existing.pid) store.clearServerInfo();
   return { action: "reap", reason: "dead", existing };
 }
+const DASHBOARD_START_POLL_MS = 150;
+const DASHBOARD_START_DEFAULT_DEADLINE_MS = 9e3;
+function dashboardStartDeadlineMilliseconds(env = process.env) {
+  const requested = Number(env.SIDEQUEST_DASHBOARD_START_DEADLINE_MS);
+  return Number.isInteger(requested) && requested > 0 ? requested : DASHBOARD_START_DEFAULT_DEADLINE_MS;
+}
 async function ensureServer(requestedPort) {
   const running = await resolveRunningServer();
   if (running && running.action === "reuse") {
@@ -140,14 +146,15 @@ async function ensureServer(requestedPort) {
   if (port) args.push("--port", String(port));
   const child = spawn(process.execPath, args, { cwd: os.homedir(), detached: true, stdio: "ignore", windowsHide: true });
   child.unref();
-  for (let i = 0; i < 60; i++) {
-    await delay(150);
+  const deadline = Date.now() + dashboardStartDeadlineMilliseconds();
+  do {
+    await delay(DASHBOARD_START_POLL_MS);
     const info = store.readServerInfo();
     if (info && info.port && isVersionAtLeast(info.version, PLUGIN_VERSION)) {
       const health = await checkHealth(info.port);
       if (health && isRecordedServer(health, info) && isVersionAtLeast(health.version, PLUGIN_VERSION)) return info.url || `http://127.0.0.1:${info.port}`;
     }
-  }
+  } while (Date.now() < deadline);
   throw new Error("the dashboard server did not start in time");
 }
 function openBrowser(targetUrl) {
@@ -216,4 +223,4 @@ async function cmdStop() {
   }
   store.clearServerInfo();
 }
-module.exports = { PLUGIN_VERSION, cmdDashboard, cmdServe, cmdStop };
+module.exports = { PLUGIN_VERSION, cmdDashboard, cmdServe, cmdStop, dashboardStartDeadlineMilliseconds };
