@@ -290,3 +290,107 @@ test('SQ-323: the refusal quotes each required test name and an unaffected <name
   });
   assert.equal(completion.ok, true, completion.message);
 });
+
+// SQ-144: a diff line is attributed to a test only when it falls inside that
+// test's own declaration span. Fixture suites are authored through
+// fixtureTestDefinition so their lines are never read as definitions here.
+function requiredTestNamesAfterChange(by: string, base: string, candidate: string) {
+  resetFixtureTree();
+  commitBaseFile('test/adjacent.test.js', base);
+  const ticket = createClaimedMixedChangeTicket(by, ['lib/fixture.js', 'test/adjacent.test.js']);
+  fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'adjacent.test.js'), candidate);
+  assert.equal(store.addComment(slug, ticket.ref, { by, body: genuineControl('adjacent fixture'), source: 'mcp' }).ok, true);
+  const refusal = store.addComment(slug, ticket.ref, {
+    by,
+    body: '[sidequest:verify-complete] passed: fixture verification passed.',
+    source: 'mcp',
+  });
+  return { ticket, refusal };
+}
+
+function completeWithTestMarker(by: string, ref: string, name: string) {
+  assert.equal(store.addComment(slug, ref, { by, body: `[sidequest:negative-control-test] failed ${name}`, source: 'mcp' }).ok, true);
+  const completion = store.addComment(slug, ref, {
+    by,
+    body: '[sidequest:verify-complete] passed: fixture verification passed.',
+    source: 'mcp',
+  });
+  assert.equal(completion.ok, true, completion.message);
+  git(['checkout', '--', 'test/adjacent.test.js']);
+}
+
+test('SQ-144: of two adjacent tests only the one whose body changed is required, not its untouched neighbour', () => {
+  const firstName = 'first adjacent test keeps its body';
+  const secondName = 'second adjacent test changes its body';
+  const firstTest = [
+    `${fixtureTestDefinition}('${firstName}', () => {`,
+    '  assert.equal(1, 1);',
+    '});',
+  ];
+  const base = [
+    "const assert = require('node:assert');",
+    '',
+    ...firstTest,
+    '',
+    `${fixtureTestDefinition}('${secondName}', () => {`,
+    '  assert.equal(2, 2);',
+    '});',
+    '',
+  ].join('\n');
+  // The first test's lines are byte-identical; a helper and a comment land
+  // between the two tests and the second test's body changes.
+  const candidate = [
+    "const assert = require('node:assert');",
+    '',
+    ...firstTest,
+    '',
+    'function expectedSecond() {',
+    '  return 2;',
+    '}',
+    '',
+    '// the second test reads its value from the helper',
+    `${fixtureTestDefinition}('${secondName}', () => {`,
+    '  assert.equal(expectedSecond(), 2);',
+    '});',
+    '',
+  ].join('\n');
+  const by = 'sq-144-adjacent-body';
+  const { ticket, refusal } = requiredTestNamesAfterChange(by, base, candidate);
+  assert.equal(refusal.reason, 'negative_control_test_required', refusal.message);
+  assert.ok(refusal.message.includes(JSON.stringify(secondName)), refusal.message);
+  assert.ok(!refusal.message.includes(JSON.stringify(firstName)), `untouched first test was required: ${refusal.message}`);
+  completeWithTestMarker(by, ticket.ref, secondName);
+});
+
+test('SQ-144: a deletion inside one test and a blank line above the next leave the following test unrequired', () => {
+  const secondName = 'middle test loses a line';
+  const thirdName = 'last test stays untouched';
+  const third = [
+    `${fixtureTestDefinition}('${thirdName}', () => {`,
+    '  assert.equal(3, 3);',
+    '});',
+    '',
+  ];
+  const base = [
+    "const assert = require('node:assert');",
+    `${fixtureTestDefinition}('${secondName}', () => {`,
+    '  assert.equal(2, 2);',
+    '  assert.ok(true);',
+    '});',
+    ...third,
+  ].join('\n');
+  const candidate = [
+    "const assert = require('node:assert');",
+    `${fixtureTestDefinition}('${secondName}', () => {`,
+    '  assert.equal(2, 2);',
+    '});',
+    '',
+    ...third,
+  ].join('\n');
+  const by = 'sq-144-deletion-neighbour';
+  const { ticket, refusal } = requiredTestNamesAfterChange(by, base, candidate);
+  assert.equal(refusal.reason, 'negative_control_test_required', refusal.message);
+  assert.ok(refusal.message.includes(JSON.stringify(secondName)), refusal.message);
+  assert.ok(!refusal.message.includes(JSON.stringify(thirdName)), `untouched next test was required: ${refusal.message}`);
+  completeWithTestMarker(by, ticket.ref, secondName);
+});

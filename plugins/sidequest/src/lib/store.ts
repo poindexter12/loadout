@@ -792,6 +792,132 @@ function testDefinitionName(line: string, extension: string) {
   return '';
 }
 
+// Index of the `)` that closes the call whose `(` sits at `openIndex`, or -1
+// when the source never balances it. Strings, template literals (with nested
+// `${...}` code), comments and backslash escapes are skipped, so a paren in
+// test data or a regex such as `/\(/` does not move the boundary.
+function matchingCallParen(source: string, openIndex: number) {
+  let depth = 0;
+  let braceDepth = 0;
+  let inTemplate = false;
+  const interpolations: number[] = [];
+  let index = openIndex;
+  while (index < source.length) {
+    const char = source[index];
+    const next = source[index + 1];
+    if (char === '\\') {
+      index += 2;
+      continue;
+    }
+    if (inTemplate) {
+      if (char === '`') inTemplate = false;
+      else if (char === '$' && next === '{') {
+        interpolations.push(braceDepth);
+        inTemplate = false;
+        index += 2;
+        continue;
+      }
+      index += 1;
+      continue;
+    }
+    if (char === '\'' || char === '"') {
+      index += 1;
+      while (index < source.length && source[index] !== char && source[index] !== '\n') index += source[index] === '\\' ? 2 : 1;
+      index += 1;
+      continue;
+    }
+    if (char === '`') {
+      inTemplate = true;
+    } else if (char === '/' && next === '/') {
+      const end = source.indexOf('\n', index);
+      index = end === -1 ? source.length : end;
+      continue;
+    } else if (char === '/' && next === '*') {
+      const end = source.indexOf('*/', index + 2);
+      index = end === -1 ? source.length : end + 2;
+      continue;
+    } else if (char === '{') {
+      braceDepth += 1;
+    } else if (char === '}') {
+      if (interpolations.length && interpolations.at(-1) === braceDepth) {
+        interpolations.pop();
+        inTemplate = true;
+      } else {
+        braceDepth -= 1;
+      }
+    } else if (char === '(') {
+      depth += 1;
+    } else if (char === ')') {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+    index += 1;
+  }
+  return -1;
+}
+
+// Each test definition with the 1-based line range of its own declaration:
+// from the `test(`/`def test_` line to the line that closes it. A diff line is
+// attributed to a test only when it falls inside this span (SQ-144), never to
+// whichever definition merely precedes it.
+function testDefinitionSpans(source: string, extension: string) {
+  const lines = source.split(/\r?\n/);
+  const lineStarts: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    lineStarts.push(offset);
+    offset += line.length + 1;
+  }
+  const lineOfOffset = (target: number) => {
+    let low = 0;
+    let high = lineStarts.length - 1;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if ((lineStarts[mid] ?? 0) <= target) low = mid;
+      else high = mid - 1;
+    }
+    return low + 1;
+  };
+  const normalized = lines.join('\n');
+  const spans: Array<{ start: number; end: number; name: string }> = [];
+  lines.forEach((line: string, index: number) => {
+    const name = testDefinitionName(line, extension);
+    if (!name) return;
+    const start = index + 1;
+    let end = 0;
+    if (CALL_STYLE_TEST_EXTENSIONS.has(extension)) {
+      const match = line.match(CALL_STYLE_TEST_DEFINITION);
+      const openIndex = (lineStarts[index] ?? 0) + (match?.index ?? 0) + (match?.[0].indexOf('(') ?? 0);
+      const closeIndex = matchingCallParen(normalized, openIndex);
+      if (closeIndex !== -1) end = lineOfOffset(closeIndex);
+    } else {
+      const indent = (line.match(/^\s*/)?.[0] ?? '').length;
+      end = start;
+      for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+        const body = lines[cursor] ?? '';
+        if (!body.trim()) continue;
+        if ((body.match(/^\s*/)?.[0] ?? '').length <= indent) break;
+        end = cursor + 1;
+      }
+    }
+    spans.push({ start, end, name });
+  });
+  // An unbalanced call (the scanner lost its place) ends where the next
+  // definition starts, or at the end of the file.
+  spans.forEach((span, index) => {
+    if (span.end) return;
+    const following = spans.slice(index + 1).find((entry) => entry.start > span.start);
+    span.end = following ? following.start - 1 : lines.length;
+  });
+  return spans;
+}
+
+function innermostTestSpan(spans: Array<{ start: number; end: number; name: string }>, ...lines: number[]) {
+  return spans
+    .filter((span) => lines.every((line) => span.start <= line && line <= span.end))
+    .reduce<{ start: number; end: number; name: string } | null>((best, span) => (!best || span.start > best.start ? span : best), null);
+}
+
 function changedTestNames(delta?: any, changedPaths?: any[]) {
   if (!delta?.workspace) return [];
   const names = new Set<string>();
@@ -815,10 +941,7 @@ function changedTestNames(delta?: any, changedPaths?: any[]) {
     } catch (_: any) {
       continue;
     }
-    const definitions = source.split(/\r?\n/).map((line: string, index: number) => {
-      const name = testDefinitionName(line, extension);
-      return name ? { line: index + 1, name } : null;
-    }).filter(Boolean) as Array<{ line: number; name: string }>;
+    const spans = testDefinitionSpans(source, extension);
     try {
       execFileSync('git', ['cat-file', '-e', `${delta.workspace.base}:${file}`], {
         cwd: delta.workspace.root,
@@ -826,38 +949,37 @@ function changedTestNames(delta?: any, changedPaths?: any[]) {
         windowsHide: true,
       });
     } catch (_: any) {
-      for (const definition of definitions) names.add(definition.name);
+      for (const span of spans) names.add(span.name);
       continue;
     }
+    // Only added and removed lines count, and only when they sit inside a
+    // test's own declaration span. A helper, comment or blank line between two
+    // tests belongs to neither, and the line after a hunk is never consulted,
+    // so an untouched neighbouring test is not reported as modified (SQ-144).
     let newLine = 0;
-    let changedInHunk = false;
-    const addNearestDefinition = (line: number) => {
-      const definition = definitions.filter((entry) => entry.line <= line).at(-1);
-      if (definition) names.add(definition.name);
-    };
     for (const line of diff.split(/\r?\n/)) {
-      const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
       if (hunk) {
-        if (changedInHunk) addNearestDefinition(newLine);
         newLine = Number(hunk[1]);
-        changedInHunk = false;
+        // A pure deletion leaves no added line to place. `+N,0` names the line
+        // the removed block followed, so the deletion is inside a test only
+        // when that line and the one after it share the test's span.
+        if (hunk[2] === '0') {
+          const span = innermostTestSpan(spans, newLine, newLine + 1);
+          if (span) names.add(span.name);
+        }
         continue;
       }
       if (line.startsWith('+') && !line.startsWith('+++')) {
-        changedInHunk = true;
         const addedName = testDefinitionName(line.slice(1), extension);
         if (addedName) names.add(addedName);
-        addNearestDefinition(newLine);
+        const span = innermostTestSpan(spans, newLine);
+        if (span) names.add(span.name);
         newLine += 1;
-        continue;
-      }
-      if (line.startsWith('-') && !line.startsWith('---')) {
-        changedInHunk = true;
         continue;
       }
       if (line.startsWith(' ')) newLine += 1;
     }
-    if (changedInHunk) addNearestDefinition(newLine);
   }
   return Array.from(names);
 }
