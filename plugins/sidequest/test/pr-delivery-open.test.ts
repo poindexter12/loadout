@@ -89,7 +89,7 @@ function assemble(board: Board, refs: string[], waveId: string) {
   return wave;
 }
 
-type Call = { op: 'create' | 'auto'; cwd: string; head?: string; base?: string; title?: string; body?: string; number?: number };
+type Call = { op: 'create' | 'auto' | 'view'; cwd: string; head?: string; base?: string; title?: string; body?: string; number?: number };
 
 function fakePort(opts: { failCreate?: Error; failAuto?: Error; firstNumber?: number } = {}) {
   const calls: Call[] = [];
@@ -98,6 +98,7 @@ function fakePort(opts: { failCreate?: Error; failAuto?: Error; firstNumber?: nu
     calls,
     creates: () => calls.filter((call) => call.op === 'create'),
     autos: () => calls.filter((call) => call.op === 'auto'),
+    views: () => calls.filter((call) => call.op === 'view'),
     async createPr(o: { cwd: string; head: string; base: string; title: string; body: string }) {
       calls.push({ op: 'create', ...o });
       if (opts.failCreate) throw opts.failCreate;
@@ -108,8 +109,19 @@ function fakePort(opts: { failCreate?: Error; failAuto?: Error; firstNumber?: nu
       calls.push({ op: 'auto', ...o });
       if (opts.failAuto) throw opts.failAuto;
     },
-    async viewPr() {
-      throw new Error('opening a PR never views one');
+    // Re-integrating a wave that holds a PR reconciles it (SQ-106): the PR is
+    // still open with its checks pending, so the wave stays awaiting merge.
+    async viewPr(o: { cwd: string; number: number }) {
+      calls.push({ op: 'view', ...o });
+      return {
+        number: o.number,
+        url: `https://github.com/example/repo/pull/${o.number}`,
+        state: 'OPEN' as const,
+        headSha: 'f'.repeat(40),
+        mergeCommit: null,
+        checks: 'pending' as const,
+        failingChecks: [],
+      };
     },
   };
 }
@@ -201,6 +213,7 @@ test('pr mode opens one PR for an assembled wave with auto-merge and leaves main
   assert.deepEqual(again.pr, result.pr);
   assert.equal(port.creates().length, 1, 'idempotent re-integrate opens no second PR');
   assert.equal(port.autos().length, 1);
+  assert.deepEqual(port.views().map((call) => call.number), [100], 're-integrate reads the recorded PR once');
   assert.equal(remoteBranch(board, branch).split(/\s+/)[0], head, 'branch never re-pushed');
 
   // A subset of an awaiting wave is refused, never opened separately.
@@ -397,6 +410,7 @@ test('CLI integrate opens the PR through gh and reports awaiting merge', () => {
     'case "$1 $2" in',
     '  "pr create") cat > /dev/null; echo "https://github.com/example/repo/pull/41" ;;',
     '  "pr merge") exit 0 ;;',
+    '  "pr view") echo \'{"number":41,"url":"https://github.com/example/repo/pull/41","state":"OPEN","headRefOid":"abc","mergeCommit":null,"statusCheckRollup":[]}\' ;;',
     '  *) echo "unexpected gh $*" >&2; exit 1 ;;',
     'esac',
     '',
@@ -424,5 +438,8 @@ test('CLI integrate opens the PR through gh and reports awaiting merge', () => {
   const again = runCli(['integrate', candidate.ref, '--by', 'orchestrator']);
   assert.equal(again.status, 0, again.stderr + again.stdout);
   assert.match(again.stdout, /already awaiting merge: PR #41 https:\/\/github\.com\/example\/repo\/pull\/41/);
-  assert.equal(fs.readFileSync(log, 'utf8').trim().split('\n').length, 2, 'no gh call on re-integrate');
+  // Re-integrating only reads the PR back (SQ-106 reconcile): no create, no merge.
+  const againCalls = fs.readFileSync(log, 'utf8').trim().split('\n');
+  assert.equal(againCalls.length, 3, againCalls.join('\n'));
+  assert.equal(againCalls[2], 'pr view 41 --json number,url,state,headRefOid,mergeCommit,statusCheckRollup');
 });

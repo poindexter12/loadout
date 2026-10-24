@@ -2894,6 +2894,18 @@ function abandonUnconsumedPreparedDispatchForGrooming(slug, idOrRef) {
     return { ok: true, ticket, abandoned: true };
   });
 }
+function prMergeDelivery(ticket) {
+  const integration = ticket?.submission?.integration;
+  if (integration?.mode !== "pr" || !integration.deliveryCommit || !integration.pr?.mergeCommit) return null;
+  return {
+    commit: integration.deliveryCommit,
+    targetBranch: integration.targetBranch,
+    targetRef: integration.targetUpstream,
+    integrationRevision: { source: "git", value: integration.resultingHead || integration.deliveryCommit },
+    evidence: integration.evidence || integration.pr.url,
+    pr: { number: integration.pr.number, url: integration.pr.url }
+  };
+}
 function completeTicketAsControlPlane(slug, idOrRef, opts) {
   opts = opts || {};
   const purpose = String(opts.purpose || "").trim();
@@ -3019,9 +3031,11 @@ function completeTicketAsControlPlane(slug, idOrRef, opts) {
     message: missingReleaseFragmentMessage(ticket.ref, missingFragment.fragmentPath, missingFragment.plugins),
     ticket
   };
+  let mergedPrDelivery = null;
   if (purpose === "integration") {
     const admitted = validateIntegrationSubmission(slug, idOrRef, { requireDeliveredWave: true });
     if (!admitted.ok) return admitted;
+    mergedPrDelivery = prMergeDelivery(admitted.ticket);
   }
   const recorded = delivery;
   const advisory = purpose === "integration" && ticket.highStakes && !recordedReviewPass(ticket) && !linkedReviewPass(slug, ticket) ? HIGH_STAKES_REVIEW_WARNING : null;
@@ -3041,7 +3055,7 @@ function completeTicketAsControlPlane(slug, idOrRef, opts) {
           ...recorded.upstream ? { upstream: recorded.upstream } : {},
           ...recorded.identity ? { identity: recorded.identity } : {}
         }
-      } : {}
+      } : mergedPrDelivery ? { delivery: mergedPrDelivery } : {}
     ),
     ...recorded?.ok ? { recordedDelivery: recorded } : {}
   }));
