@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('node:crypto');
 const { execFileSync, spawn, spawnSync } = require('node:child_process');
+const { waitForCapacity, capacityWaitTimeoutMessage } = require('./_capacity-deadline.js');
 
 // A throwaway store home so the SubagentStop hook (which loads lib/store.js as a
 // subprocess and inherits this env) reads a fixture board, never the real one. The
@@ -172,21 +173,16 @@ function runHookProcessForBudget(script?: any, payload?: any, envOverrides?: any
 const WAIT_FOR_PATH_PER_TEST_WORKER_MS = 2_000;
 const WAIT_FOR_PATH_FLOOR_MS = 60_000;
 
-function testWorkerConcurrency(): number {
-  const argument = process.execArgv.find((value: string) => value.startsWith('--test-concurrency='));
-  const requested = Number(argument?.slice('--test-concurrency='.length));
-  return Number.isInteger(requested) && requested > 0 ? requested : os.availableParallelism();
-}
-
 async function waitForPath(file: string): Promise<void> {
   // Detached workers run slower under host load than worker count predicts; the poll returns
-  // as soon as the file lands, so the floor only lengthens a failure.
-  const deadline = Date.now() + Math.max(WAIT_FOR_PATH_FLOOR_MS, WAIT_FOR_PATH_PER_TEST_WORKER_MS * testWorkerConcurrency());
-  while (Date.now() < deadline) {
-    if (fs.existsSync(file)) return;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  throw new Error(`Timed out waiting for ${file}`);
+  // as soon as the file lands, so the floor only lengthens a failure. SQ-74: the per-worker
+  // term also scales with the measured load, the way the capture budget around it does.
+  const result = await waitForCapacity(() => fs.existsSync(file), {
+    perTestWorkerMilliseconds: WAIT_FOR_PATH_PER_TEST_WORKER_MS,
+    floorMilliseconds: WAIT_FOR_PATH_FLOOR_MS,
+    pollMilliseconds: 5,
+  });
+  if (!result.ready) throw new Error(capacityWaitTimeoutMessage(file, result));
 }
 
 function publishStateLock(lockDirectory: string, ownerPid: number): string {

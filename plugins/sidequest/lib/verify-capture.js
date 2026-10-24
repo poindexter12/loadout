@@ -41,17 +41,27 @@ function captureBudgetClass(command) {
   if (isFullSuiteCommand(command)) return "full-suite";
   return isTestSuiteCommand(command) ? "test-suite" : "command";
 }
+function otherRunnableThreads(loadAverage) {
+  return typeof loadAverage === "number" && Number.isFinite(loadAverage) && loadAverage > 0 ? loadAverage : 0;
+}
+function effectiveTestWorkers(testConcurrency, availableParallelism, loadAverage) {
+  return Math.min(
+    testConcurrency,
+    Math.max(minimumEffectiveTestWorkers, availableParallelism * testConcurrency / (testConcurrency + otherRunnableThreads(loadAverage)))
+  );
+}
+function capacityScaledDeadlineMilliseconds(perTestWorkerMilliseconds, testWorkers, availableParallelism = os.availableParallelism(), loadAverage = os.loadavg()[0] || 0) {
+  const workers = Number.isFinite(testWorkers) && testWorkers > 0 ? testWorkers : 1;
+  const capacityScale = workers / effectiveTestWorkers(workers, availableParallelism, loadAverage);
+  return Math.round(perTestWorkerMilliseconds * workers * capacityScale);
+}
 function captureBudget(command, availableParallelism = os.availableParallelism(), loadAverage = os.loadavg()[0] || 0, rawOverride = process.env[phaseBudgetOverrideVariable]) {
   const budgetClass = captureBudgetClass(command);
   const testConcurrency = Math.min(maximumTestConcurrency, Math.max(minimumTestConcurrency, availableParallelism));
-  const otherRunnableThreads = typeof loadAverage === "number" && Number.isFinite(loadAverage) && loadAverage > 0 ? loadAverage : 0;
-  const effectiveTestWorkers = Math.min(
-    testConcurrency,
-    Math.max(minimumEffectiveTestWorkers, availableParallelism * testConcurrency / (testConcurrency + otherRunnableThreads))
-  );
+  const effectiveWorkers = effectiveTestWorkers(testConcurrency, availableParallelism, loadAverage);
   const capacityPhaseBudgetMilliseconds = Math.min(
     maximumTestPhaseTimeoutMilliseconds,
-    Math.round(baselineTestPhaseDurationMilliseconds * maximumTestConcurrency / effectiveTestWorkers * testPhaseBudgetSafetyFactor)
+    Math.round(baselineTestPhaseDurationMilliseconds * maximumTestConcurrency / effectiveWorkers * testPhaseBudgetSafetyFactor)
   );
   const measuredPhaseBudgetMilliseconds = budgetClass === "command" ? 0 : capacityPhaseBudgetMilliseconds;
   const requestedText = typeof rawOverride === "string" ? rawOverride.trim() : "";
@@ -79,8 +89,8 @@ function captureBudget(command, availableParallelism = os.availableParallelism()
     phaseBudgetMilliseconds,
     hardMaximumMilliseconds: captureHardMaximumMilliseconds,
     availableParallelism,
-    loadAverage: otherRunnableThreads,
-    effectiveTestWorkers,
+    loadAverage: otherRunnableThreads(loadAverage),
+    effectiveTestWorkers: effectiveWorkers,
     overrideVariable: phaseBudgetOverrideVariable,
     overrideMilliseconds: widened ? requested : null,
     clampedToHardMaximum,
@@ -617,5 +627,5 @@ async function main() {
   report(capture, recorded);
   process.exitCode = capture.exitCode === 0 && (!target || recorded?.ok) ? 0 : 2;
 }
-module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, acquireCaptureSlot, isFullSuiteCommand, isTestSuiteCommand, captureBudgetClass, captureBudget, captureHardMaximumMilliseconds, runBudgetedCapture, fullSuiteCaptureTimeoutMilliseconds, recordCapture, verifiedRevision };
+module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, acquireCaptureSlot, isFullSuiteCommand, isTestSuiteCommand, captureBudgetClass, captureBudget, captureHardMaximumMilliseconds, runBudgetedCapture, fullSuiteCaptureTimeoutMilliseconds, effectiveTestWorkers, capacityScaledDeadlineMilliseconds, recordCapture, verifiedRevision };
 if (require.main === module) void main();
