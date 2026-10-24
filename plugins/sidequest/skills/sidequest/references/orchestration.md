@@ -256,8 +256,8 @@ atomic: each subagent claims a different ticket, and any race just sends the los
   executor with anything heavier than a `SendMessage` (releasing, sweeping, redispatching) is a
   process failure, not caution. The costs to keep honest:
   idle notifications wake the lead at full context, and teams-style flows can run several times the
-  token spend of plain subagents, so answer executor questions promptly and retire terminal teammates
-  only after consuming board evidence. After spawning, end the
+  token spend of plain subagents, so answer executor questions promptly and let terminal executors end
+  on their own. After spawning, end the
   turn. Its stop notification is the only wakeup. On the next natural wakeup, whether a stop notification,
   user message, or other task notification, make opportunistic liveness checks for work that has run about
   5–8 minutes or longer. Never hold a session open with foreground or background `sleep`, blocking
@@ -271,11 +271,12 @@ atomic: each subagent claims a different ticket, and any race just sends the los
   lifecycle. Native Agent completion arrives on its own; at natural wakeups use `changes --since` / `pulse`,
   and read the artifact only after terminal board evidence. A genuine one-shot readiness watch for a local
   server or build is fine; waiting on an executor through a side channel is not.
-- **Retire terminal teammates.** Once terminal board evidence has been consumed and its submission report,
-  done comment, or recovery handoff has been preserved, call `TaskStop({ task_id: "<agent name>" })` once for
-  that exact native teammate. This is a Claude Code host action, not a Sidequest tool. It applies to submitted,
-  done, released, failed-before-claim, and superseded attempts. Never stop a live claim, retained continuation,
-  or candidate awaiting integration. Do not wake a completed executor, poll FleetView, or create a cleanup loop.
+- **Never `TaskStop` an executor.** A terminal executor has already stopped by the time its SubagentStop
+  verdict arrives, so there is nothing to retire. Its dispatch name is a `SendMessage` address, not a
+  `TaskStop` task id: `TaskStop({ task_id: "<agent name>" })` returns "No task found with ID" or, where it
+  resolves, raises a permission prompt the user rejects. `TaskStop` is only for background shell tasks you
+  started yourself. Never stop a live claim, retained continuation, or candidate awaiting integration. Do not
+  wake a completed executor, poll FleetView, or create a cleanup loop.
   A `READY_FOR_INTEGRATION` verdict additionally queues the ticket for the publish transaction
   ([publishing.md](publishing.md)) — publish the wave's submissions in one batch; never respawn an executor for a
   submitted ticket. Sweep ALL finished executors, not just the one that notified, so session exit only stops live work.

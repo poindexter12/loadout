@@ -47,7 +47,7 @@ function main(): void {
   const sessionId = stringField(data, 'session_id', 'sessionId') || process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || '';
   const dispatchedIds = sessionDispatchIds(sessionId);
   if (sidequestTaskId(data.tool_input.task_id, dispatchedIds) || sidequestTaskId(data.tool_input.id, dispatchedIds)) {
-    writeDeny('PreToolUse', 'sidequest: native Agent results arrive automatically. Use pulse <ref> / changes --since for liveness. Use TaskStop only after terminal board evidence.');
+    writeDeny('PreToolUse', 'sidequest: native Agent results arrive automatically. Use pulse <ref> / changes --since for liveness. Never TaskStop an executor; it ends on its own.');
   }
 }
 
