@@ -40,7 +40,7 @@ const { createPulse } = require("./store/pulse.js");
 const { createRouting } = require("./store/routing.js");
 const { createTickets } = require("./store/tickets.js");
 const { createSubmissions } = require("./store/submissions.js");
-const { createDispatch, preparedVerificationRequirement } = require("./store/dispatch.js");
+const { createDispatch, preparedVerificationRequirement, pinnedVerifierNotice } = require("./store/dispatch.js");
 const { createPaths } = require("./store/paths.js");
 const { resolveSidequestHome } = require("./claude-home.js");
 const { createCache } = require("./store/cache.js");
@@ -366,7 +366,9 @@ function dispatchUncertaintyWarnings(...args) {
 }
 function dispatchWarnings(ticket, slug) {
   const project = !slug && process.env.CLAUDE_PROJECT_DIR ? findProject(process.env.CLAUDE_PROJECT_DIR) : null;
-  return warningsLayer.dispatchWarnings(ticket, slug || (project?.ok ? project.slug : null));
+  const warnings = warningsLayer.dispatchWarnings(ticket, slug || (project?.ok ? project.slug : null));
+  const pinned = pinnedVerifierNotice(ticket);
+  return pinned ? [...warnings, pinned] : warnings;
 }
 function dispatchDeclaredFiles(...args) {
   return warningsLayer.dispatchDeclaredFiles(...args);

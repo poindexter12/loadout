@@ -68,7 +68,7 @@ const { createPulse } = require('./store/pulse.js');
 const { createRouting } = require('./store/routing.js');
 const { createTickets } = require('./store/tickets.js');
 const { createSubmissions } = require('./store/submissions.js');
-const { createDispatch, preparedVerificationRequirement } = require('./store/dispatch.js');
+const { createDispatch, preparedVerificationRequirement, pinnedVerifierNotice } = require('./store/dispatch.js');
 const { createPaths } = require('./store/paths.js');
 const { resolveSidequestHome } = require('./claude-home.js');
 const { createCache } = require('./store/cache.js');
@@ -286,7 +286,13 @@ function staleWorktreeCwdWarning(...args: any[]) { return warningsLayer.staleWor
 function dispatchUncertaintyWarnings(...args: any[]) { return warningsLayer.dispatchUncertaintyWarnings(...args); }
 function dispatchWarnings(ticket?: any, slug?: any) {
   const project = !slug && process.env.CLAUDE_PROJECT_DIR ? findProject(process.env.CLAUDE_PROJECT_DIR) : null;
-  return warningsLayer.dispatchWarnings(ticket, slug || (project?.ok ? project.slug : null));
+  const warnings = warningsLayer.dispatchWarnings(ticket, slug || (project?.ok ? project.slug : null));
+  // SQ-362: this is the only warnings array BOTH the MCP dispatch handler and the CLI present, so
+  // it is where the pinned verify command becomes visible at dispatch time. Appended last and
+  // worded without the phrase "verify command" so it ranks below the real defect warnings and is
+  // the first thing dropped if a dispatch is already over the presented-warning budget.
+  const pinned = pinnedVerifierNotice(ticket);
+  return pinned ? [...warnings, pinned] : warnings;
 }
 function dispatchDeclaredFiles(...args: any[]) { return warningsLayer.dispatchDeclaredFiles(...args); }
 function externalDeclaredFiles(...args: any[]) { return warningsLayer.externalDeclaredFiles(...args); }

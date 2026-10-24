@@ -32,7 +32,21 @@ function preparedVerificationRequirement(ticket: any, projectPath: string) {
   const recorded = String(ticket?.executorVerify || '').trim();
   const declaredKind = String(ticket?.executorVerifyKind || 'command').trim().toLowerCase();
   const artifact = String(ticket?.executorAttestationArtifact || '').trim();
-  const suite = !recorded || declaredKind === 'suite' ? namedSuiteForTicket(ticket, projectPath) : null;
+  // SQ-362: a ticket that records a runnable verifier of its own KEEPS it, whatever kind it
+  // declares. `executorVerifyKind: 'suite'` used to resolve the plugin's named suite as well,
+  // and `verificationRequirement` prefers a resolved suite over the recorded command -- so a
+  // ticket whose two verify fields were both populated, mutually consistent, and correct on
+  // inspection dispatched against the whole plugin suite instead, with nothing said at filing
+  // time, at dispatch time, or in the briefing. Observed on SQ-324: two Opus attempts, roughly
+  // two hours and ~270k tokens spent on `npm ci` plus the full suite in place of a ~54s gate,
+  // and the only way to see it was to read `dispatch.verificationRequirement` afterwards.
+  // Dispatch was also the ONLY surface that behaved this way: the pending-submission re-pin
+  // (store/tickets.ts), the briefing's legacy fallback (agentsync.ts) and work.ts all pass the
+  // recorded command through under kind `suite`, and the MCP `verifyKind` schema already
+  // promises that "command and suite execute a validated command". The named suite stays the
+  // fallback for a ticket that records nothing runnable of its own, which is still derived and
+  // still announced by `verificationDerivation` below.
+  const suite = recorded ? null : namedSuiteForTicket(ticket, projectPath);
   const attestation = declaredKind === 'attestation' && Boolean(artifact);
   const legacyWithoutVerifier = !recorded && !suite && !attestation;
   const kind = legacyWithoutVerifier ? 'custom' : classifyVerificationKind(recorded, declaredKind);
@@ -74,6 +88,29 @@ function verificationDerivationWarning(ref: any, derivation: any) {
     + `${derivation.reason}. Pinned ${derivation.kind} command: ${JSON.stringify(derivation.command)}`
     + `${derivation.suite ? ` (named suite ${derivation.suite})` : ''}. `
     + `The executor must run exactly this to submit; re-pin it with update({ref, verify}) if it is not the gate you intended.`;
+}
+
+// SQ-362: the precedence half of that defect is only half the cost. What made it expensive is
+// that NOTHING echoed the command a dispatch had just pinned. `prepared.warnings` carries the
+// derivation notice above, but neither the MCP dispatch handler nor the CLI reads that array --
+// both build their output from `dispatchWarnings` -- so the gate an executor was about to be held
+// to was invisible to the orchestrator until someone read the stored dispatch row by hand. This
+// states it on every dispatch that pins a runnable command, derived or not. Kinds that execute
+// nothing (manual, document, attestation, review, link, schema, custom) are left silent: there is
+// no command to be surprised by, and a warning per dispatch would crowd the presented warning
+// budget for no gain.
+function pinnedVerifierNotice(ticket?: any) {
+  // `dispatchState` lives inside `createDispatch`, and this has to be callable from store.ts
+  // without a dependency bundle, so the same shape check is spelled out here.
+  const state = ticket && ticket.dispatch && typeof ticket.dispatch === 'object' ? ticket.dispatch : null;
+  const requirement = state?.verificationRequirement;
+  const command = String(requirement?.command || '').trim();
+  if (!command) return null;
+  const source = state?.verificationDerivation
+    ? 'DERIVED by the board, not taken from the ticket'
+    : "the ticket's own executorVerify";
+  return `${String(ticket?.ref || 'this ticket')}: dispatch pinned the ${requirement.kind} verifier ${JSON.stringify(command)} (${source}). `
+    + 'The executor must run exactly this through the capture wrapper to submit; re-pin it with update({ref, verify}) now if it is not the gate you intended.';
 }
 
 function requirementsMatch(left: any, right: any) {
@@ -3464,4 +3501,7 @@ function reconcileLaunchedDispatches(sessionId?: any, opts?: any) {
 // preview (SQ-356): the preview has to report the SAME pinned verifier and evidence directory a real
 // dispatch would record, and reimplementing either would make the preview a second code path that
 // reassures without reflecting reality.
-module.exports = { createDispatch, unscopedWriteCannotAutoApprove, preparedVerificationRequirement };
+// pinnedVerifierNotice is exported for store.dispatchWarnings (SQ-362): the dispatch-time echo of
+// the pinned command has to ride the one warnings array both the MCP dispatch handler and the CLI
+// actually read.
+module.exports = { createDispatch, unscopedWriteCannotAutoApprove, preparedVerificationRequirement, pinnedVerifierNotice };

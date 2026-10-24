@@ -28,6 +28,14 @@ Documentation screenshots come ONLY from the committed pipeline (`docs/screensho
 
 Use the Write and Edit tools for file changes rather than `cat >` or `cat >>` redirection: shell redirection is not allowlisted here, and allowlisting it would auto-approve writes to any path.
 
+## Context is not a reason to stop
+
+Autocompact is on. A long session summarizes itself and keeps going, so running low on context is a normal condition, not a blocker and not an event worth narrating.
+
+Do not stop work, wind down, or offer to hand off because context is running out. Do not ask whether to write a handoff — if a handoff is wanted it will be asked for, by name or with `/remember`. Context-usage warnings in tool output are for your own pacing: keep exploration tight and prefer reading summary lines over dumping whole files, then carry on with the task.
+
+Keep working until the work is done, the user redirects, or something genuinely blocks it — a failing check, a missing credential, a decision only the user can make. Those are worth surfacing. Remaining tokens are not.
+
 ## Platform support
 
 Windows is abandoned as a supported platform (decision 2026-09-15).

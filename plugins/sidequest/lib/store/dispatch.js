@@ -22,7 +22,7 @@ function preparedVerificationRequirement(ticket, projectPath) {
   const recorded = String(ticket?.executorVerify || "").trim();
   const declaredKind = String(ticket?.executorVerifyKind || "command").trim().toLowerCase();
   const artifact = String(ticket?.executorAttestationArtifact || "").trim();
-  const suite = !recorded || declaredKind === "suite" ? namedSuiteForTicket(ticket, projectPath) : null;
+  const suite = recorded ? null : namedSuiteForTicket(ticket, projectPath);
   const attestation = declaredKind === "attestation" && Boolean(artifact);
   const legacyWithoutVerifier = !recorded && !suite && !attestation;
   const kind = legacyWithoutVerifier ? "custom" : classifyVerificationKind(recorded, declaredKind);
@@ -50,6 +50,14 @@ function verificationDerivation(ticket, requirement) {
 function verificationDerivationWarning(ref, derivation) {
   if (!derivation) return null;
   return `${String(ref || "this ticket")}: the executor verify requirement was DERIVED, not taken from the ticket, because ${derivation.reason}. Pinned ${derivation.kind} command: ${JSON.stringify(derivation.command)}${derivation.suite ? ` (named suite ${derivation.suite})` : ""}. The executor must run exactly this to submit; re-pin it with update({ref, verify}) if it is not the gate you intended.`;
+}
+function pinnedVerifierNotice(ticket) {
+  const state = ticket && ticket.dispatch && typeof ticket.dispatch === "object" ? ticket.dispatch : null;
+  const requirement = state?.verificationRequirement;
+  const command = String(requirement?.command || "").trim();
+  if (!command) return null;
+  const source = state?.verificationDerivation ? "DERIVED by the board, not taken from the ticket" : "the ticket's own executorVerify";
+  return `${String(ticket?.ref || "this ticket")}: dispatch pinned the ${requirement.kind} verifier ${JSON.stringify(command)} (${source}). The executor must run exactly this through the capture wrapper to submit; re-pin it with update({ref, verify}) now if it is not the gate you intended.`;
 }
 function requirementsMatch(left, right) {
   return JSON.stringify(left || null) === JSON.stringify(right || null);
@@ -2823,4 +2831,4 @@ function createDispatch(dependencies) {
     ticketEvidenceDirectory
   };
 }
-module.exports = { createDispatch, unscopedWriteCannotAutoApprove, preparedVerificationRequirement };
+module.exports = { createDispatch, unscopedWriteCannotAutoApprove, preparedVerificationRequirement, pinnedVerifierNotice };

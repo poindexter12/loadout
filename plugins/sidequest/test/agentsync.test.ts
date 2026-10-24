@@ -2012,3 +2012,54 @@ test('SQ-356: the briefing CLI refuses without a token and renders with --dry-ru
   assert.notEqual(tokenless.status, 0);
   assert.match(`${tokenless.stderr}${tokenless.stdout}`, /--dry-run/);
 });
+
+test('SQ-333: the verification gate leads the briefing and names the pinned run as the only one submit accepts', () => {
+  clearCatalog();
+  const root = tmpDir();
+  const briefing = agentsync.renderTicketBriefing({
+    ref: 'SQ-3330', title: 'Gate prominence', model: 'opus', effort: 'high', category: {},
+    executorVerify: 'npm run test:files test/agentsync.test.ts',
+    dispatch: { sharedTree: false, baseCommit: 'd'.repeat(40), integrationTarget: { mode: 'local', branch: 'main' } },
+  }, 'verification-gate-token', undefined, root);
+
+  // Prominence: an executor plans verification from the top of the briefing, so the gate has to
+  // precede the claim call, the worktree contract, and the task itself.
+  const gate = briefing.indexOf('## Verification gate: read this before choosing how to verify');
+  assert.ok(gate >= 0, 'briefing renders a verification gate section');
+  assert.ok(gate < briefing.indexOf('Claim first with this exact call'), 'the gate precedes the claim call');
+  assert.ok(gate < briefing.indexOf('Worktree isolation contract'), 'the gate precedes the worktree contract');
+  assert.ok(briefing.indexOf('Command: npm run test:files test/agentsync.test.ts') < briefing.indexOf('Claim first with this exact call'));
+  assert.ok(briefing.indexOf('verify-capture.js') < briefing.indexOf('Execution survival:'));
+
+  // Content: the gate is the only run submit accepts, and a broader suite beside it is waste.
+  assert.match(briefing, /ONLY run that produces the capture record submit requires/);
+  assert.match(briefing, /a passing full suite neither substitutes for it nor satisfies the gate/);
+  assert.match(briefing, /wasted work, not extra rigour/);
+  assert.match(briefing, /pinned gate that took eight seconds/);
+
+  // A wrapper that greps the wrong failure marker is a silent false-green, so the recorded
+  // capture, not the executor's own scan of runner output, is the verdict.
+  assert.match(briefing, /recorded capture is the verdict, so read that record instead of parsing the runner's output/);
+  assert.match(briefing, /silent false-green is strictly worse than a lost verdict/);
+
+  // The moved content left the safety section rather than being duplicated into both.
+  assert.equal(briefing.split('this is the pinned verifier').length - 1, 1);
+  assert.doesNotMatch(briefing, /## Dispatch, claim, worktree, lifecycle, and verification safety/);
+});
+
+test('SQ-333: a manual verifier gets the gate section without capture-wrapper guidance', () => {
+  clearCatalog();
+  const root = tmpDir();
+  const briefing = agentsync.renderTicketBriefing({
+    ref: 'SQ-3331', title: 'Manual gate', model: 'opus', effort: 'high', category: {},
+    executorVerify: 'manual: checked the rendered page',
+    executorVerifyKind: 'command',
+    dispatch: { sharedTree: false, baseCommit: 'e'.repeat(40), integrationTarget: { mode: 'local', branch: 'main' } },
+  }, 'manual-gate-token', undefined, root);
+
+  assert.ok(briefing.indexOf('## Verification gate: read this before choosing how to verify') < briefing.indexOf('Claim first with this exact call'));
+  assert.match(briefing, /record evidence against that contract rather than against a suite you picked yourself/);
+  assert.match(briefing, /Legacy verifier: manual\. Record evidence matching: checked the rendered page\./);
+  assert.doesNotMatch(briefing, /verify-capture\.js/);
+  assert.doesNotMatch(briefing, /ONLY run that produces the capture record/);
+});
