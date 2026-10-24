@@ -1363,7 +1363,12 @@ test('small-ticket lifecycle retires three optional board round trips', () => {
   assert.match(briefing, /runs in and records your bound worktree whatever directory you start it from/);
   assert.match(briefing, /commit the candidate with the board commit tool first, then run the wrapper/);
   assert.match(briefing, /A backgrounded verify's completion does not wake you, so going idle on it parks the claim indefinitely/);
-  assert.match(briefing, /use bounded foreground until-loops instead of backgrounding or going idle/);
+  // SQ-225: the pinned wrapper runs detached so the Bash ceiling cannot kill it, and the
+  // executor resumes it in the foreground rather than inventing an until-loop.
+  assert.match(briefing, /verify-capture\.js" --base64 \S+ --project "[^"]+" --ticket "SQ-1619" --detach in the FOREGROUND/);
+  assert.match(briefing, /so the 10-minute Bash ceiling cannot kill it/);
+  assert.match(briefing, /If it prints verify=running \(exit 75\), the capture is still going: do not start another, rerun the --resume command it prints in the FOREGROUND/);
+  assert.doesNotMatch(briefing, /bounded foreground until-loops/);
   assert.doesNotMatch(briefing, /only for background verification/);
   assert.match(briefing, /verify-start\] before it only for an expected no-op/);
   assert.match(briefing, /always post \[sidequest:verify-complete\]/);
