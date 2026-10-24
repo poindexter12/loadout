@@ -55,6 +55,7 @@ test('scopeRequest fully granted comment has no refusal clause', () => {
 
   assert.equal(result.state, 'granted');
   assert.deepEqual(result.refused, []);
+  assert.doesNotMatch(result.message || '', /refused/i);
   assert.doesNotMatch(comment, /refused/i);
   assert.match(comment, /Auto-approved/);
 });
