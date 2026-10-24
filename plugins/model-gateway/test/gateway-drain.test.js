@@ -191,10 +191,21 @@ test('confirmed legacy worker supports restart through the drain fallback', asyn
   const { port } = await startGateway(t, 'serve-worker', environment, {
     isolatedOverrides: { CODEX_GATEWAY_ANTHROPIC_UPSTREAM: `http://127.0.0.1:${upstreamPort}` },
   });
-  const script = `require(${JSON.stringify(require.resolve('../lib/process-supervision.js'))}).restartWorkerWithDrain({ quiet: true, timeout: 2000 }).then(result => console.log(JSON.stringify(result)))`;
+  // SQ-336: under host load the real owner probes (netstat/lsof, then ps) were
+  // measured at 10-15s per spawn, so the default 2s CODEX_GATEWAY_PROBE_TIMEOUT_MS
+  // budget ran out, resolvePortOwner returned 'unknown', and the controller
+  // refused ("could not confirm the owner") before ever reaching /restart -> 404
+  // -> drain. Give the probes, and the idle shim's drain exit, a budget that
+  // covers that latency. Owner confirmation stays real (no injected resolver),
+  // and both waits return as soon as they succeed, so an idle host pays nothing.
+  const script = `require(${JSON.stringify(require.resolve('../lib/process-supervision.js'))}).restartWorkerWithDrain({ quiet: true, timeout: 30000 }).then(result => console.log(JSON.stringify(result)))`;
   const controller = spawnGatewayProcess(t, process.execPath, ['-e', script], {
     env: environment,
-    isolatedOverrides: { CODEX_GATEWAY_PORT: String(port), CODEX_GATEWAY_WORKER_PORT: String(port) },
+    isolatedOverrides: {
+      CODEX_GATEWAY_PORT: String(port),
+      CODEX_GATEWAY_WORKER_PORT: String(port),
+      CODEX_GATEWAY_PROBE_TIMEOUT_MS: '60000',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
