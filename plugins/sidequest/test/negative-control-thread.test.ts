@@ -150,6 +150,52 @@ test('negative control ignores same-line prose that denies an import or collecti
   assert.equal(completion.ok, true, completion.message);
 });
 
+test('SQ-198: a negation reaches every item of a negated list on the marker line', () => {
+  git(['checkout', '--', 'lib/fixture.js', 'test/fixture.test.js']);
+  const by = 'sq-198-negated-list';
+  const ticket = createClaimedMixedChangeTicket(by);
+  fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), `${fixtureTestDefinition}('${matchingTestName}', () => {});\n`);
+
+  const negatedListControl = [
+    `[sidequest:negative-control] target=lib/fixture.js:1; assertion=${matchingTestName}; npm run test:files test/fixture.test.js failed=1, all genuine assertion mismatches, not TypeError, ImportError, a module resolution failure, or a collection error`,
+    `[sidequest:negative-control-test] failed ${matchingTestName}`,
+  ].join('\n');
+  assert.equal(store.addComment(slug, ticket.ref, { by, body: negatedListControl, source: 'mcp' }).ok, true);
+
+  const completion = store.addComment(slug, ticket.ref, {
+    by,
+    body: '[sidequest:verify-complete] passed: fixture verification passed.',
+    source: 'mcp',
+  });
+  assert.equal(completion.ok, true, completion.message);
+});
+
+test('SQ-198: a negation in an earlier clause does not hide a reported failure kind', () => {
+  for (const [index, tail] of [
+    'the failure was not an assertion mismatch but a collection error in test/fixture.test.js',
+    'the runner did not reach assertion code because of a collection error in test/fixture.test.js',
+    'not an import error. A collection error stopped the file from loading',
+  ].entries()) {
+    git(['checkout', '--', 'lib/fixture.js', 'test/fixture.test.js']);
+    const by = `sq-198-earlier-clause-${index}`;
+    const ticket = createClaimedMixedChangeTicket(by);
+    fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), `${fixtureTestDefinition}('${matchingTestName}', () => {});\n`);
+    const control = [
+      `[sidequest:negative-control] target=lib/fixture.js:1; assertion=${matchingTestName}; npm run test:files test/fixture.test.js failed=1; ${tail}`,
+      `[sidequest:negative-control-test] failed ${matchingTestName}`,
+    ].join('\n');
+    assert.equal(store.addComment(slug, ticket.ref, { by, body: control, source: 'mcp' }).ok, true);
+
+    const completion = store.addComment(slug, ticket.ref, {
+      by,
+      body: '[sidequest:verify-complete] passed: fixture verification passed.',
+      source: 'mcp',
+    });
+    assert.equal(completion.ok, false, tail);
+    assert.equal(completion.reason, 'negative_control_collection_error', tail);
+  }
+});
+
 test('negative control test names unescape source string literals instead of demanding literal backslashes', () => {
   const by = 'sq-2485-c47a1dbe9f03';
   const ticket = createClaimedMixedChangeTicket(by);

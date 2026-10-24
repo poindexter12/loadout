@@ -730,9 +730,27 @@ function isTestSidePath(file?: any) {
     || /(?:^|\/)[^/]+\.(?:test|spec)\.[^/]+$/.test(normalized);
 }
 
+// A clause ends at sentence punctuation followed by whitespace, a bracket, a
+// dash, or a contrastive/causal connective. Commas and "or" do not end it, so
+// a negation reaches every item of a negated list ("not TypeError,
+// ImportError, or a collection error"), while "not X but a collection error"
+// and "did not load because of a collection error" still report one (SQ-198).
+const NEGATIVE_CONTROL_CLAUSE_BOUNDARY = /[.;:!?](?=\s|$)|[()[\]—–]|\s-\s|(?<![\w-])(?:but|however|although|though|whereas|because|since|due\s+to|caused\s+by|which|so|then)(?![\w-])/gi;
+const NEGATIVE_CONTROL_NEGATION_CUE = /(?<![\w-])(?:none|no|not|never|without|neither|nor|rather\s+than|instead\s+of)(?![\w-])|n['’]?t(?![\w-])/i;
+
 function negativeControlFailureKindNegated(text: string, matchIndex: number) {
-  const preceding = text.slice(Math.max(0, matchIndex - 40), matchIndex);
-  return /\b(?:none|no|not|n't|never|isn'?t|aren'?t|wasn'?t|weren'?t|without|neither)\b/i.test(preceding);
+  const preceding = text.slice(0, matchIndex);
+  let clauseStart = 0;
+  for (const boundary of preceding.matchAll(NEGATIVE_CONTROL_CLAUSE_BOUNDARY)) clauseStart = (boundary.index || 0) + boundary[0].length;
+  return NEGATIVE_CONTROL_NEGATION_CUE.test(preceding.slice(clauseStart));
+}
+
+function negativeControlReportsFailureKind(text: string, pattern: RegExp) {
+  // Every mention counts: a negated first mention must not hide a genuine one.
+  for (const match of text.matchAll(pattern)) {
+    if (!negativeControlFailureKindNegated(text, match.index || 0)) return true;
+  }
+  return false;
 }
 
 function negativeControlFailureKind(markerLine?: unknown) {
@@ -743,10 +761,8 @@ function negativeControlFailureKind(markerLine?: unknown) {
   // that negates them, e.g. "none is an import or collection error") must
   // not be mistaken for a reported failure kind.
   const text = String(markerLine || '');
-  const importMatch = /\bimport\s*error\b/i.exec(text);
-  if (importMatch && !negativeControlFailureKindNegated(text, importMatch.index)) return 'import_error';
-  const collectionMatch = /\bcollection\s+(?:error|failed|failure)\b/i.exec(text);
-  if (collectionMatch && !negativeControlFailureKindNegated(text, collectionMatch.index)) return 'collection_error';
+  if (negativeControlReportsFailureKind(text, /\bimport\s*error\b/gi)) return 'import_error';
+  if (negativeControlReportsFailureKind(text, /\bcollection\s+(?:error|failed|failure)\b/gi)) return 'collection_error';
   return '';
 }
 

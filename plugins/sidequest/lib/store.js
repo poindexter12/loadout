@@ -789,16 +789,24 @@ function isTestSidePath(file) {
   const normalized = String(file || "").replace(/\\/g, "/").toLowerCase();
   return /(^|\/)(?:test|tests|__tests__)(?:\/|$)/.test(normalized) || /(?:^|\/)[^/]+\.(?:test|spec)\.[^/]+$/.test(normalized);
 }
+const NEGATIVE_CONTROL_CLAUSE_BOUNDARY = /[.;:!?](?=\s|$)|[()[\]—–]|\s-\s|(?<![\w-])(?:but|however|although|though|whereas|because|since|due\s+to|caused\s+by|which|so|then)(?![\w-])/gi;
+const NEGATIVE_CONTROL_NEGATION_CUE = /(?<![\w-])(?:none|no|not|never|without|neither|nor|rather\s+than|instead\s+of)(?![\w-])|n['’]?t(?![\w-])/i;
 function negativeControlFailureKindNegated(text, matchIndex) {
-  const preceding = text.slice(Math.max(0, matchIndex - 40), matchIndex);
-  return /\b(?:none|no|not|n't|never|isn'?t|aren'?t|wasn'?t|weren'?t|without|neither)\b/i.test(preceding);
+  const preceding = text.slice(0, matchIndex);
+  let clauseStart = 0;
+  for (const boundary of preceding.matchAll(NEGATIVE_CONTROL_CLAUSE_BOUNDARY)) clauseStart = (boundary.index || 0) + boundary[0].length;
+  return NEGATIVE_CONTROL_NEGATION_CUE.test(preceding.slice(clauseStart));
+}
+function negativeControlReportsFailureKind(text, pattern) {
+  for (const match of text.matchAll(pattern)) {
+    if (!negativeControlFailureKindNegated(text, match.index || 0)) return true;
+  }
+  return false;
 }
 function negativeControlFailureKind(markerLine) {
   const text = String(markerLine || "");
-  const importMatch = /\bimport\s*error\b/i.exec(text);
-  if (importMatch && !negativeControlFailureKindNegated(text, importMatch.index)) return "import_error";
-  const collectionMatch = /\bcollection\s+(?:error|failed|failure)\b/i.exec(text);
-  if (collectionMatch && !negativeControlFailureKindNegated(text, collectionMatch.index)) return "collection_error";
+  if (negativeControlReportsFailureKind(text, /\bimport\s*error\b/gi)) return "import_error";
+  if (negativeControlReportsFailureKind(text, /\bcollection\s+(?:error|failed|failure)\b/gi)) return "collection_error";
   return "";
 }
 function unescapeJsStringLiteral(raw) {
