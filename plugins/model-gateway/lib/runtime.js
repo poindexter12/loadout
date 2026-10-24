@@ -70,6 +70,12 @@ const GROK_ENDPOINT = process.env.CODEX_GATEWAY_GROK_ENDPOINT || grokBackend.GRO
 // its own concern). 18766 keeps it off Docker's common 8080 default.
 const ANTIGRAVITY_ENDPOINT = process.env.CODEX_GATEWAY_ANTIGRAVITY_ENDPOINT || 'http://127.0.0.1:18766';
 const REPO = 'raine/claude-code-proxy';
+// Earliest claude-code-proxy release that maps a context overflow to HTTP 413
+// request_too_large (commit 968cbe2, first tagged in v0.1.14; v0.1.13 has none).
+// Below this the proxy signals overflow with an older, differently-shaped error;
+// `ensure` nudges the user (once, fail-soft) to re-run setup, which fetches latest.
+// Compared numerically (see semverLt); a string compare would read '0.1.9' as
+// newer than '0.1.14'.
 const MIN_PROXY_VERSION = '0.1.14';
 const ANTHROPIC_UPSTREAM = process.env.CODEX_GATEWAY_ANTHROPIC_UPSTREAM || 'https://api.anthropic.com';
 const REQUEST_ROUTE_LOG = process.env.CODEX_GATEWAY_REQUEST_LOG !== '0';

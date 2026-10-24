@@ -28,22 +28,20 @@
  */
 
 const { fork, spawn, spawnSync } = require('node:child_process');
-const { StringDecoder } = require('node:string_decoder');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
 const https = require('node:https');
-const net = require('node:net');
 const path = require('node:path');
-const zlib = require('node:zlib');
 const { writeFileAtomically } = require('./atomic-file.js');
-const { createGatewayUsageEmitter, recordRequestBodyHighWater } = require('./usage-observability.js');
 const grokBackend = require('./grok-backend.js');
 const {
   canReplaceInstalledCliPath, CLAUDE_CONFIG_DIR, CLI_PATH, GATEWAY_MODELS_CACHE, MODEL_WINDOW_POLICY,
   gatewayAdvertisedWindow, gatewayClientModelId, gatewayDiscoveryModels, readGatewayDiscoveryCache,
   resolveGatewayModelPolicy, sameGatewayDiscoveryModels, SOCKET_PATH, resolveNewestInstalledCliPath,
   syncGatewayDiscoveryCache,
+  STATE, LOGS, BIN_DIR, WIRING_CONFIG_PATH, SHIM_FAILURE_PATH, CODEX_UPSTREAM_BLOCK_PATH, PLUGIN_VERSION,
+  PROXY_BIN, REPO, MIN_PROXY_VERSION, REQUEST_ROUTE_LOG_PATH,
 } = require('./runtime.js');
 const { latestHookWaitCutShort, latestObservedLifecycleExit, lifecycleLogPath, recordGatewayLifecycle } = require('./lifecycle-diagnostics.js');
 // Catalog row/readiness shape is shared with request-worker.js — see catalog.js
@@ -53,15 +51,8 @@ const {
   modelCatalogDetails, readJsonFile,
 } = require('./catalog.js');
 
-// Must stay in lockstep with runtime.js STATE: this module owns the proxy
-// binary, wiring config and logs, so a homedir join here would put two account
-// trees back on one binary and one wiring.json.
-const STATE = path.join(CLAUDE_CONFIG_DIR, 'model-gateway');
-const LOGS = path.join(STATE, 'logs');
-const BIN_DIR = path.join(STATE, 'bin');
-const WIRING_CONFIG_PATH = path.join(STATE, 'wiring.json');
-const SHIM_FAILURE_PATH = path.join(STATE, 'shim-supervisor-failure.txt');
-const CODEX_UPSTREAM_BLOCK_PATH = path.join(STATE, 'codex-upstream-blocked.json');
+// STATE and every path under it are owned by runtime.js (imported above), so this
+// module and the request worker cannot drift onto different account trees.
 const ENSURE_LOCK_PATH = path.join(STATE, 'ensure.lock');
 const ENSURE_RESULT_PATH = path.join(STATE, 'ensure.lastResult.json');
 // tryClaimEnsureLock's create (openSync 'wx') and its pid write (writeSync) are
@@ -83,50 +74,12 @@ const ENSURE_LOCK_WRITE_GRACE_MS = 2000;
 // after startupWaitMsFor + 8s (~20s) -- so a slow-but-live holder is never robbed
 // mid-recovery.
 const ENSURE_LOCK_MAX_AGE_MS = 150 * ENSURE_LOCK_WRITE_GRACE_MS; // 5 minutes
-const PLUGIN_VERSION = readPluginVersion();
-const PROXY_BIN = path.join(BIN_DIR, 'claude-code-proxy');
 const PROXY_SERVING_VERSION_PATH = path.join(STATE, 'proxy-serving-version.txt');
 // Per-account ports (SQ-175): one definition, in runtime.js. This file used to
 // carry its own fixed 18764/18765 copy, which would have kept every account on
 // one listener even after runtime.js learned to separate them.
 const { PROXY_PORT, PUBLIC_SHIM_PORT, SHIM_PORT } = require('./runtime.js');
 const QUIET_STARTUP_WAIT_MS = 12000;
-// Advertised ids are `claude-` + the backend's own id (`claude-gpt-5.6-sol`,
-// `claude-grok-4.5`). The `claude-` part is not decoration: Claude Code's
-// gateway model discovery drops every id that doesn't start with claude/
-// anthropic, so an unprefixed id vanishes from /model.
-//
-// Real Anthropic ids share that prefix, so the `claude-` prefix alone can NEVER
-// decide a route — matching on it would send claude.ai traffic to the Codex
-// proxy. The backend family segment decides: `gpt-*` is Codex, `grok-*` is
-// Grok, anything else passes through untouched. (runtime.js owns PREFIX and the
-// per-backend prefixes; catalog.js is the only consumer here.)
-const CODEX_FAMILY_RE = /^gpt-/;
-// Pre-3.x advertised the backend name too (`claude-codex-gpt-5.6-sol`). Claude
-// Code persists the selected model per project, so those ids outlive the
-// upgrade in every already-wired project; keep resolving them.
-const LEGACY_CODEX_PREFIX = 'claude-codex-';
-const GROK_ENDPOINT = process.env.CODEX_GATEWAY_GROK_ENDPOINT || grokBackend.GROK_ENDPOINT;
-const REPO = 'raine/claude-code-proxy';
-// Earliest claude-code-proxy release that maps a context overflow to HTTP 413
-// request_too_large (commit 968cbe2, first tagged in v0.1.14; v0.1.13 has none).
-// Below this the proxy signals overflow with an older, differently-shaped error;
-// `ensure` nudges the user (once, fail-soft) to re-run setup, which fetches latest.
-// Compared numerically (see semverLt); a string compare would read '0.1.9' as
-// newer than '0.1.14'.
-const MIN_PROXY_VERSION = '0.1.14';
-const ANTHROPIC_UPSTREAM = process.env.CODEX_GATEWAY_ANTHROPIC_UPSTREAM || 'https://api.anthropic.com';
-// Enabled by default because route logs are metadata-only: never write prompts,
-// tool payloads, auth, or arbitrary headers. Set to `0` to opt out; a running shim
-// picks this up at its next natural restart. See requestRouteLog below.
-const REQUEST_ROUTE_LOG = process.env.CODEX_GATEWAY_REQUEST_LOG !== '0';
-const REQUEST_ROUTE_LOG_PATH = process.env.CODEX_GATEWAY_REQUEST_LOG_PATH || path.join(LOGS, 'request-routes.jsonl');
-const DISPATCH_ROUTE_CACHE_PATH = process.env.CODEX_GATEWAY_DISPATCH_CACHE_PATH || path.join(STATE, 'dispatch-routes.json');
-const LIST_DISPATCH_MODEL = process.env.CODEX_GATEWAY_LIST_DISPATCH_MODEL === '1';
-const ROUTE_TELEMETRY_ENABLED = process.env.CLAUDE_CODE_PROPAGATE_TRACEPARENT === '1';
-const ROUTE_TELEMETRY_TIMEOUT_MS = 500;
-const TRACE_HEADERS = ['traceparent', 'tracestate', 'baggage'];
-const AUTH_HEADERS = ['authorization', 'proxy-authorization', 'x-api-key', 'cookie'];
 
 const {
   COMPAT_BASE_URL, COMPAT_HOST, COMPAT_PORT, DEFAULT_BASE_URL, HOSTS_BLOCK_END, HOSTS_BLOCK_LINE, LEGACY_DEFAULT_BASE_URL,
@@ -227,12 +180,6 @@ function flushHookOutput() {
 // Flushes first so a die() from anywhere inside the hook path still emits what was buffered; otherwise the
 // buffering below would turn a mid-run failure into total silence.
 function die(m, code) { flushHookOutput(); console.error('model-gateway: ' + m); process.exit(code == null ? 1 : code); }
-function readPluginVersion() {
-  try {
-    const { version } = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '.claude-plugin', 'plugin.json'), 'utf8'));
-    return typeof version === 'string' ? version : null;
-  } catch { return null; }
-}
 function mkdirs() { for (const d of [STATE, LOGS, BIN_DIR]) fs.mkdirSync(d, { recursive: true }); }
 
 // Cross-process mutual exclusion for `ensure`. There is no other serialization
@@ -355,6 +302,15 @@ const {
   addManagedHostsBlock, configureRemoteControl, detectHostsCompat, findConflictingHostsMappings, hostsFilePath,
   managedHostsBlock, parseHostsCompatBlock, parseHostsCompatEntry, removeManagedHostsBlock, remoteControlCommand,
 } = require('./remote-control.js');
+// The upstream-block/readiness helpers, the shim health probe and dispatch-route
+// parsing have one copy, in request-worker.js; this module imports (and
+// re-exports) them instead of keeping copies that drift (SQ-35).
+const {
+  clearUpstreamBlocked, DispatchSessionRouteCache, dispatchModelFromRawBody, dispatchRouteFromMessages,
+  effectiveCodexSentryPolicy, fetchShimHealth, hasOpenAiRejectionEvidence, noteCodexRequestSuccess,
+  noteCodexUpstreamRejection, readinessState, readUpstreamBlocked, runWorker, servingShimVersion,
+  setUpstreamBlocked,
+} = require('./request-worker.js');
 function compatibilityPortOwnerIdentifiers() {
   const portLookup = spawnSync('lsof', ['-nP', `-iTCP:${COMPAT_PORT}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8', windowsHide: true });
   if (portLookup.status !== 0) return [];
@@ -424,47 +380,9 @@ const CODEX_READINESS_MESSAGES = {
   'upstream-blocked': () => `Codex is blocked by an OpenAI rejection. Run \`node "${CLI_PATH}" setup\`; if it persists, wait for a claude-code-proxy update or explicitly re-route this ticket. Codex tickets remain blocked.`,
 };
 
-function readUpstreamBlocked() {
-  const blocked = readJsonFile(CODEX_UPSTREAM_BLOCK_PATH);
-  return blocked?.state === 'upstream-blocked' ? blocked : null;
-}
-
-function setUpstreamBlocked({ statusCode, evidence }) {
-  mkdirs();
-  const blocked = {
-    state: 'upstream-blocked',
-    observedAt: new Date().toISOString(),
-    statusCode,
-    evidence,
-  };
-  fs.writeFileSync(CODEX_UPSTREAM_BLOCK_PATH, JSON.stringify(blocked) + '\n');
-  return blocked;
-}
-
-function clearUpstreamBlocked() {
-  try { fs.rmSync(CODEX_UPSTREAM_BLOCK_PATH); } catch { /* absent */ }
-}
-
-function noteCodexRequestSuccess() {
-  clearUpstreamBlocked();
-}
-
 // The probe itself now lives in lib/process-supervision.js. This file used to keep a
 // private byte-identical copy whose `catch { return false; }` made a timeout, a
 // refused connection and a non-200 status indistinguishable (SQ-63).
-
-function readinessState(checks, upstreamBlocked) {
-  if (!checks.proxyBinary) return 'binary-missing';
-  // Before every other check: a foreign shim on this port also makes the proxy,
-  // auth and version answers describe the other account, not this one.
-  if (checks.foreignShimOwner) return 'foreign-shim-owner';
-  if (!checks.proxyModels) return 'proxy-down';
-  if (!checks.codexAuth) return 'auth-missing';
-  if (!checks.shimRunning) return 'shim-down';
-  if (!checks.servingVersionMatches) return 'serving-version-mismatch';
-  if (upstreamBlocked) return 'upstream-blocked';
-  return 'ready';
-}
 
 async function getCodexReadiness({
   binaryPresent = fs.existsSync(PROXY_BIN),
@@ -510,23 +428,6 @@ async function getCodexReadiness({
     upstreamBlocked,
     health,
   };
-}
-
-function hasOpenAiRejectionEvidence(statusCode, headers, body) {
-  if (![401, 403, 429].includes(statusCode)) return false;
-  const headerNames = Object.keys(headers || {});
-  if (headerNames.some((name) => name.toLowerCase().startsWith('x-openai-') || name.toLowerCase() === 'openai-processing-ms')) return true;
-  return /\bopenai\b/i.test(Buffer.from(body || '').toString());
-}
-
-function noteCodexUpstreamRejection(statusCode, headers, body) {
-  if (!hasOpenAiRejectionEvidence(statusCode, headers, body)) return false;
-  const headerNames = Object.keys(headers || {}).map((name) => name.toLowerCase())
-    .filter((name) => name.startsWith('x-openai-') || name === 'openai-processing-ms' || name === 'content-type');
-  const evidence = headerNames.length ? `headers:${headerNames.join(',')}` : 'body:openai';
-  setUpstreamBlocked({ statusCode, evidence });
-  console.error(`model-gateway: Codex request had an unambiguous OpenAI rejection (status ${statusCode}; ${evidence}); readiness is upstream-blocked.`);
-  return true;
 }
 
 // ------------------------------------------------------------------- setup
@@ -1275,17 +1176,6 @@ async function startAll({
   });
 }
 
-async function fetchShimHealth() {
-  try {
-    const r = await fetchUrl(`http://127.0.0.1:${SHIM_PORT}/healthz`, { timeout: 2000 });
-    return JSON.parse(r.body.toString());
-  } catch { return null; }
-}
-
-function servingShimVersion(health) {
-  return health?.supervisorVersion || health?.version || null;
-}
-
 function shimNeedsRestart(installedVersion, health) {
   if (health?.proxyRecovery !== true) return true;
   const running = parseSemver(servingShimVersion(health));
@@ -1793,278 +1683,6 @@ async function doctor({
   if (!status.ok) process.exitCode = 1;
 }
 
-// ---------------------------------------------------------------- the shim
-
-// claude-code-proxy v0.1.10 has no /v1/models route, so the shim owns the
-// catalog: $CLAUDE_CONFIG_DIR/model-gateway/models.json if present, else the Codex ids
-// its README documents. A future proxy /v1/models takes precedence over both.
-const PLAN_TOOLS = ['EnterPlanMode', 'ExitPlanMode'];
-
-const DEFAULT_MODELS = [
-  'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra',
-];
-
-// Claude Code 2.1.261 ignores settings-file CLAUDE_CODE_MAX_CONTEXT_TOKENS for
-// its unrecognized-model resolver. Codex rows therefore use Claude Code's [1m]
-// spelling, chosen from the same context table used for max_input_tokens. The
-// worker sentry retains backend headroom because that spelling is a 1M client
-// window rather than the backend's exact 920k limit.
-const CODEX_SENTRY_ENABLED = process.env.CODEX_GATEWAY_SENTRY !== '0';
-const configuredCompactTrigger = Number(process.env.CODEX_GATEWAY_COMPACT_TRIGGER);
-const CODEX_COMPACT_HEADROOM = 40000;
-const configuredSseHeartbeatSeconds = Number(process.env.CODEX_GATEWAY_SSE_HEARTBEAT_S);
-const SSE_HEARTBEAT_MS = Number.isFinite(configuredSseHeartbeatSeconds) && configuredSseHeartbeatSeconds >= 0
-  ? configuredSseHeartbeatSeconds * 1000
-  : 20000;
-const configuredWebSocketUpgradeRetries = Number(process.env.CODEX_GATEWAY_WS_UPGRADE_RETRIES);
-const WEBSOCKET_UPGRADE_RETRIES = Number.isInteger(configuredWebSocketUpgradeRetries) && configuredWebSocketUpgradeRetries >= 0
-  ? configuredWebSocketUpgradeRetries
-  : 2;
-const configuredWebSocketUpgradeRetryDelayMs = Number(process.env.CODEX_GATEWAY_WS_UPGRADE_RETRY_DELAY_MS);
-const WEBSOCKET_UPGRADE_RETRY_DELAY_MS = Number.isFinite(configuredWebSocketUpgradeRetryDelayMs) && configuredWebSocketUpgradeRetryDelayMs >= 0
-  ? configuredWebSocketUpgradeRetryDelayMs
-  : 250;
-
-// Claude Code's own compaction system prompt, verbatim from the querySource:
-// "compact" call site in CLI 2.1.220. claude-code-proxy keys its compaction
-// handling off the same literal, so the two stay in step.
-const COMPACTION_SYSTEM_PROMPT = 'You are a helpful AI assistant tasked with summarizing conversations.';
-// A Codex compaction turn dies mid-stream far more often than a normal turn,
-// and claude-code-proxy cannot recover it. Its streaming path is WebSocket-only
-// (config.rs codex_transport() defaults to WebSocket; mod.rs routes every
-// stream:true request to live_stream_response), and that path can only retry
-// BEFORE its first non-empty chunk. After that, an upstream socket that closes
-// without a terminal event becomes an SSE error carrying the raw detail slug
-// websocket_missing_terminal (websocket.rs missing_terminal_error), which
-// Claude Code surfaces as a failed compaction. Compaction is one long
-// single-shot generation over the largest body in the session, so it sits in
-// that unrecoverable window for minutes. Buffering the translated stream for
-// compaction only lets us retry the whole turn while the client has seen
-// nothing; normal turns keep streaming live.
-const COMPACT_STREAM_GUARD = process.env.CODEX_GATEWAY_COMPACT_STREAM_GUARD !== '0';
-const configuredCompactStreamRetries = Number(process.env.CODEX_GATEWAY_COMPACT_STREAM_RETRIES);
-const COMPACT_STREAM_RETRIES = Number.isInteger(configuredCompactStreamRetries) && configuredCompactStreamRetries >= 0
-  ? configuredCompactStreamRetries
-  : 2;
-const configuredCompactStreamRetryDelayMs = Number(process.env.CODEX_GATEWAY_COMPACT_STREAM_RETRY_DELAY_MS);
-const COMPACT_STREAM_RETRY_DELAY_MS = Number.isFinite(configuredCompactStreamRetryDelayMs) && configuredCompactStreamRetryDelayMs >= 0
-  ? configuredCompactStreamRetryDelayMs
-  : 250;
-const configuredCompactStreamMaxBytes = Number(process.env.CODEX_GATEWAY_COMPACT_STREAM_MAX_BYTES);
-const COMPACT_STREAM_MAX_BYTES = Number.isFinite(configuredCompactStreamMaxBytes) && configuredCompactStreamMaxBytes > 0
-  ? configuredCompactStreamMaxBytes
-  : 16 * 1024 * 1024;
-// Retrying these would re-send a body the backend has already refused on its
-// merits; they pass straight through to the client instead.
-const COMPACT_FATAL_ERROR_TYPES = new Set([
-  'invalid_request_error',
-  'authentication_error',
-  'permission_error',
-  'not_found_error',
-  'request_too_large',
-  'rate_limit_error',
-  'billing_error',
-]);
-
-function systemPromptText(system) {
-  if (typeof system === 'string') return system;
-  if (!Array.isArray(system)) return '';
-  return system.map((block) => (block && typeof block.text === 'string' ? block.text : '')).join('\n');
-}
-
-function isCompactionRequest(payload) {
-  return !!payload && payload.stream === true
-    && systemPromptText(payload.system).includes(COMPACTION_SYSTEM_PROMPT);
-}
-
-function sseErrorFrame(type, message) {
-  const event = { type: 'error', error: { type, message } };
-  return `event: error\ndata: ${JSON.stringify(event)}\n\n`;
-}
-
-function upstreamErrorMessage(body, statusCode) {
-  try {
-    const parsed = JSON.parse(body.toString());
-    const detail = parsed?.error?.message || parsed?.message;
-    if (typeof detail === 'string' && detail) return `model-gateway: upstream returned ${statusCode}: ${detail}`;
-  } catch { /* not JSON */ }
-  return `model-gateway: upstream returned ${statusCode} with no readable error body`;
-}
-
-function noteCompactEvent(attempt, event) {
-  if (!event || typeof event !== 'object') return;
-  if (event.type === 'message_stop') attempt.terminal = true;
-  if (event.type !== 'error') return;
-  attempt.sawError = true;
-  if (COMPACT_FATAL_ERROR_TYPES.has(event.error?.type)) attempt.fatal = true;
-}
-
-const ROUTE_MARKER_RE = /\[(sidequest-route) model=([a-z0-9][a-z0-9.-]{0,63})(?: effort=(low|medium|high|xhigh|max))?\]/g;
-const configuredDispatchCacheTtlMs = Number(process.env.CODEX_GATEWAY_DISPATCH_CACHE_TTL_MS);
-const DISPATCH_CACHE_TTL_MS = Number.isFinite(configuredDispatchCacheTtlMs) && configuredDispatchCacheTtlMs > 0
-  ? configuredDispatchCacheTtlMs
-  : 4 * 60 * 60 * 1000;
-const configuredDispatchCacheMaxSessions = Number(process.env.CODEX_GATEWAY_DISPATCH_CACHE_MAX_SESSIONS);
-const DISPATCH_CACHE_MAX_SESSIONS = Number.isInteger(configuredDispatchCacheMaxSessions) && configuredDispatchCacheMaxSessions > 0
-  ? configuredDispatchCacheMaxSessions
-  : 500;
-
-class DispatchSessionRouteCache {
-  constructor({
-    ttlMs = DISPATCH_CACHE_TTL_MS,
-    maxSessions = DISPATCH_CACHE_MAX_SESSIONS,
-    now = Date.now,
-    cachePath = null,
-  } = {}) {
-    this.ttlMs = ttlMs;
-    this.maxSessions = maxSessions;
-    this.now = now;
-    this.cachePath = cachePath;
-    this.routes = new Map();
-    this.load();
-  }
-
-  get(requestIdentity) {
-    if (!requestIdentity) return null;
-    const entry = this.routes.get(requestIdentity);
-    if (!entry) return null;
-    const now = this.now();
-    if (now - entry.lastUsedAt >= this.ttlMs) {
-      this.routes.delete(requestIdentity);
-      this.persist();
-      return null;
-    }
-    entry.lastUsedAt = now;
-    this.routes.delete(requestIdentity);
-    this.routes.set(requestIdentity, entry);
-    this.persist();
-    return { model: entry.model, effort: entry.effort };
-  }
-
-  set(requestIdentity, route) {
-    if (!requestIdentity || !route || !validDispatchRoute(route)) return;
-    const now = this.now();
-    this.prune(now);
-    this.routes.delete(requestIdentity);
-    this.routes.set(requestIdentity, { model: route.model, effort: route.effort, lastUsedAt: now });
-    this.prune(now);
-    this.persist();
-  }
-
-  load() {
-    if (!this.cachePath) return;
-    try {
-      const stored = JSON.parse(fs.readFileSync(this.cachePath, 'utf8'));
-      if (!stored || stored.version !== 1 || !Array.isArray(stored.routes)) return;
-      for (const entry of stored.routes) {
-        const [key, route] = Array.isArray(entry) ? entry : [];
-        if (typeof key !== 'string' || !Number.isFinite(route?.lastUsedAt) || !validDispatchRoute(route)) continue;
-        this.routes.set(key, { model: route.model, effort: route.effort, lastUsedAt: route.lastUsedAt });
-      }
-      this.prune(this.now());
-      this.persist();
-    } catch {}
-  }
-
-  prune(now) {
-    for (const [key, entry] of this.routes) {
-      if (now - entry.lastUsedAt >= this.ttlMs) this.routes.delete(key);
-    }
-    while (this.routes.size > this.maxSessions) this.routes.delete(this.routes.keys().next().value);
-  }
-
-  persist() {
-    if (!this.cachePath) return;
-    try {
-      fs.mkdirSync(path.dirname(this.cachePath), { recursive: true });
-      writeFileAtomically(this.cachePath, JSON.stringify({ version: 1, routes: [...this.routes] }) + '\n', { mode: 0o600 });
-    } catch {}
-  }
-}
-
-function validDispatchRoute(route) {
-  return typeof route?.model === 'string'
-    && /^[a-z0-9][a-z0-9.-]{0,63}$/.test(route.model)
-    && (route.effort == null || ['low', 'medium', 'high', 'xhigh', 'max'].includes(route.effort));
-}
-
-function sessionIdFromMetadata(metadata) {
-  const userId = metadata && typeof metadata.user_id === 'string' ? metadata.user_id : null;
-  if (!userId) return null;
-  try {
-    const parsed = JSON.parse(userId);
-    return safeMetadataId(parsed && parsed.session_id);
-  } catch {}
-  const marker = '_session_';
-  const markerIndex = userId.lastIndexOf(marker);
-  return markerIndex >= 0 ? safeMetadataId(userId.slice(markerIndex + marker.length)) : null;
-}
-
-function dispatchRequestIdentity(req, payload) {
-  const headerSessionId = safeMetadataId(requestHeader(req, 'x-claude-code-session-id'));
-  const sessionId = headerSessionId || sessionIdFromMetadata(payload && payload.metadata);
-  if (!sessionId) return null;
-  const agentId = safeMetadataId(requestHeader(req, 'x-claude-code-agent-id'));
-  const parentAgentId = safeMetadataId(requestHeader(req, 'x-claude-code-parent-agent-id'));
-  return {
-    key: !agentId && parentAgentId ? null : JSON.stringify([sessionId, agentId]),
-    parentKey: agentId && parentAgentId && agentId !== parentAgentId
-      ? JSON.stringify([sessionId, parentAgentId])
-      : null,
-    sessionId,
-    agentId,
-    parentAgentId,
-    sessionSource: headerSessionId ? 'header' : 'metadata',
-  };
-}
-
-function routeMarkersInText(text, markers = []) {
-  const matcher = new RegExp(ROUTE_MARKER_RE);
-  let match;
-  while ((match = matcher.exec(text))) markers.push({ model: match[2], effort: match[3] || null });
-  return markers;
-}
-
-function onlyRoute(markers) {
-  return markers.length === 1 ? markers[0] : null;
-}
-
-function dispatchRouteFromRawBody(raw) {
-  return onlyRoute(routeMarkersInText(String(raw)));
-}
-
-function dispatchModelFromRawBody(raw) {
-  const route = dispatchRouteFromRawBody(raw);
-  return route ? route.model : null;
-}
-
-// The legitimate marker lives in the dispatch briefing, so only user-authored
-// text counts. tool_result blocks can echo marker-shaped text from a fixture,
-// log, or diff and must not influence the next request's route (SQ-375).
-function dispatchRouteMarkersFromMessages(messages) {
-  if (!Array.isArray(messages)) return [];
-  const markers = [];
-  for (const message of messages) {
-    if (!message || message.role !== 'user') continue;
-    const content = message.content;
-    if (typeof content === 'string') {
-      routeMarkersInText(content, markers);
-      continue;
-    }
-    if (!Array.isArray(content)) continue;
-    for (const block of content) {
-      if (block && block.type === 'text' && typeof block.text === 'string') {
-        routeMarkersInText(block.text, markers);
-      }
-    }
-  }
-  return markers;
-}
-
-function dispatchRouteFromMessages(messages) {
-  return onlyRoute(dispatchRouteMarkersFromMessages(messages));
-}
-
 // ------------------------------------------------------------ model catalog
 //
 // sidequest (same marketplace) auto-discovers Codex models by reading this
@@ -2208,171 +1826,8 @@ async function catalogCommand() {
   else log(JSON.stringify(catalog, null, 2));
 }
 
-function loopbackTelemetryEndpoint() {
-  if (!ROUTE_TELEMETRY_ENABLED) return null;
-  const explicit = process.env.CODEX_GATEWAY_TELEMETRY_ENDPOINT;
-  if (explicit === '0') return null;
-  let raw = explicit || process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
-  let appendTracesPath = false;
-  if (!raw && process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
-    raw = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
-    appendTracesPath = true;
-  }
-  if (!raw) raw = 'http://127.0.0.1:4318/v1/traces';
-  try {
-    const endpoint = new URL(raw);
-    const hostname = endpoint.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-    const loopback = hostname === 'localhost' || hostname === '::1' || /^127(?:\.\d{1,3}){3}$/.test(hostname);
-    if (!loopback || !['http:', 'https:'].includes(endpoint.protocol)) return null;
-    if (hostname === 'localhost') endpoint.hostname = '127.0.0.1';
-    if (appendTracesPath) endpoint.pathname = `${endpoint.pathname.replace(/\/$/, '')}/v1/traces`;
-    endpoint.search = '';
-    endpoint.hash = '';
-    return endpoint;
-  } catch {
-    return null;
-  }
-}
+// ---------------------------------------------------------------- the shim
 
-function parseIncomingTraceparent(headers) {
-  if (!ROUTE_TELEMETRY_ENABLED) return null;
-  const value = headers.traceparent;
-  if (typeof value !== 'string') return null;
-  const match = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})(-[0-9a-f-]+)?$/.exec(value.trim());
-  if (!match || match[1] === 'ff' || (match[1] === '00' && match[5])) return null;
-  if (/^0{32}$/.test(match[2]) || /^0{16}$/.test(match[3])) return null;
-  return { traceId: match[2], parentSpanId: match[3], flags: parseInt(match[4], 16) };
-}
-
-function safeMetadataId(value, maxLength = 128) {
-  if (typeof value !== 'string' || value.length < 1 || value.length > maxLength) return null;
-  return /^[a-zA-Z0-9][a-zA-Z0-9._:/\[\]-]*$/.test(value) ? value : null;
-}
-
-function otlpAttribute(key, value) {
-  if (value == null) return null;
-  if (typeof value === 'boolean') return { key, value: { boolValue: value } };
-  if (typeof value === 'number') {
-    if (Number.isInteger(value)) return { key, value: { intValue: String(value) } };
-    return { key, value: { doubleValue: value } };
-  }
-  return { key, value: { stringValue: String(value) } };
-}
-
-function postRouteSpan(endpoint, span) {
-  if (!endpoint) return;
-  try {
-    const body = JSON.stringify({
-      resourceSpans: [{
-        resource: { attributes: [otlpAttribute('service.name', 'model-gateway')] },
-        scopeSpans: [{
-          scope: { name: 'loadout.codex-gateway' },
-          spans: [span],
-        }],
-      }],
-    });
-    const client = endpoint.protocol === 'https:' ? https : http;
-    const telemetryReq = client.request(endpoint, {
-      method: 'POST',
-      agent: false,
-      headers: {
-        'content-type': 'application/json',
-        'content-length': Buffer.byteLength(body),
-      },
-    }, (telemetryRes) => telemetryRes.resume());
-    telemetryReq.on('socket', (socket) => socket.unref());
-    telemetryReq.on('error', () => {});
-    telemetryReq.setTimeout(ROUTE_TELEMETRY_TIMEOUT_MS, () => telemetryReq.destroy());
-    telemetryReq.end(body);
-  } catch {}
-}
-
-function routeStatus(statusCode, override) {
-  if (override) return override;
-  if (!Number.isInteger(statusCode)) return 'upstream_error';
-  if (statusCode >= 500) return 'server_error';
-  if (statusCode >= 400) return 'client_error';
-  return 'ok';
-}
-
-function buildRouteTelemetry(req) {
-  const endpoint = loopbackTelemetryEndpoint();
-  if (!endpoint) return { setRoute() {}, finish() {} };
-  const incoming = parseIncomingTraceparent(req.headers);
-  const traceId = incoming?.traceId || crypto.randomBytes(16).toString('hex');
-  const spanId = crypto.randomBytes(8).toString('hex');
-  const parentSpanId = incoming?.parentSpanId || null;
-  const routeId = crypto.randomUUID();
-  const sessionId = safeMetadataId(requestHeader(req, 'x-claude-code-session-id'));
-  const startedAt = BigInt(Date.now()) * 1000000n;
-  const started = process.hrtime.bigint();
-  let route = {};
-  let finished = false;
-  return {
-    setRoute(nextRoute) {
-      route = { ...nextRoute };
-    },
-    finish(statusCode, statusOverride = null) {
-      if (finished) return;
-      finished = true;
-      try {
-        const elapsed = process.hrtime.bigint() - started;
-        const durationMs = Number(elapsed) / 1000000;
-        const status = routeStatus(statusCode, statusOverride);
-        const attributes = [
-          otlpAttribute('source', 'codex-gateway'),
-          otlpAttribute('source_event_id', routeId),
-          otlpAttribute('source_schema', '1'),
-          otlpAttribute('event_name', 'codex_gateway.route'),
-          otlpAttribute('route_id', routeId),
-          otlpAttribute('trace_id', traceId),
-          otlpAttribute('span_id', spanId),
-          otlpAttribute('parent_span_id', parentSpanId),
-          otlpAttribute('trace_linked', !!incoming),
-          otlpAttribute('session_id', sessionId),
-          otlpAttribute('selected_model', safeMetadataId(route.selectedModel)),
-          otlpAttribute('effective_model', safeMetadataId(route.effectiveModel)),
-          otlpAttribute('backend', ['codex', 'anthropic'].includes(route.backend) ? route.backend : null),
-          otlpAttribute('effort', ['low', 'medium', 'high', 'xhigh', 'max'].includes(route.effort) ? route.effort : null),
-          otlpAttribute('fallback', route.fallback === true),
-          otlpAttribute('via', ['direct', 'dispatch', 'dispatch-cached'].includes(route.via) ? route.via : null),
-          otlpAttribute('status', status),
-          otlpAttribute('status_code', Number.isInteger(statusCode) ? statusCode : null),
-          otlpAttribute('duration_ms', durationMs),
-        ].filter(Boolean);
-        const endedAt = startedAt + elapsed;
-        postRouteSpan(endpoint, {
-          traceId,
-          spanId,
-          ...(parentSpanId ? { parentSpanId } : {}),
-          ...(incoming ? { flags: incoming.flags } : {}),
-          name: 'codex-gateway.route',
-          kind: 2,
-          startTimeUnixNano: startedAt.toString(),
-          endTimeUnixNano: endedAt.toString(),
-          attributes,
-          events: [{ timeUnixNano: endedAt.toString(), name: 'codex-gateway.route', attributes }],
-          status: { code: status === 'ok' ? 1 : 2 },
-        });
-      } catch {}
-    },
-  };
-}
-
-function createRouteTelemetry(req) {
-  try {
-    return buildRouteTelemetry(req);
-  } catch {
-    return { setRoute() {}, finish() {} };
-  }
-}
-
-function requestHeader(req, name) {
-  const value = req.headers[name];
-  return typeof value === 'string' ? value : null;
-}
-
-const { effectiveCodexSentryPolicy, runWorker } = require('./request-worker.js');
 function runShim() {
   mkdirs();
   const supervisorStartedAt = new Date().toISOString();
