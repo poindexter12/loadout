@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
 
-const { applyPermissionAllowlist, enablePermissionAutomation, permissionAutomationEnabled } = require('../lib/permission-allowlist.js');
+const { applyPermissionAllowlist, enablePermissionAutomation, normalizedCommandPrefix, permissionAutomationEnabled, runsNeverLearnGit } = require('../lib/permission-allowlist.js');
 const { readDecisions } = require('../lib/state.js');
 const { slugForProject } = require('../lib/paths.js');
 
@@ -169,13 +169,11 @@ test('a destructive command in a later command position still condemns the finge
   const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
 
   assert.equal(result.additions.length, 0);
+  // Multi-statement commands (pipes, chains, `{}` groups) earn no fingerprint at all.
   assert.deepEqual(result.blocked.map((entry) => entry.fingerprint).sort(), [
-    'permission:Bash:find .',
-    'permission:Bash:npm test',
     'permission:Bash:psql',
-    'permission:Bash:rg',
   ]);
-  assert.deepEqual(result.blocked.map((entry) => entry.vetoReason), Array(4).fill(null), 'each of these is blocked by a sighting, not by rule shape');
+  assert.deepEqual(result.blocked.map((entry) => entry.vetoReason), [null], 'blocked by a sighting, not by rule shape');
   assert.equal(
     result.blocked.find((entry) => entry.fingerprint === 'permission:Bash:psql').destructiveCommand,
     'psql -c "drop table users"',
@@ -233,7 +231,8 @@ test('compound-command fragments never earn wildcard rules', async () => {
   const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
 
   assert.equal(result.additions.length, 0);
-  assert.deepEqual(result.blocked.map((entry) => entry.vetoReason), Array(2).fill('command fragment'));
+  assert.equal(normalizedCommandPrefix('&& printf ready'), null, 'a leading operator earns no fingerprint');
+  assert.equal(normalizedCommandPrefix('echo "---'), null, 'an unterminated quote earns no fingerprint');
 });
 
 test('path-shaped command arguments retain their case in the fingerprint', async () => {
@@ -374,4 +373,46 @@ test('a rule already covered by an existing deny is never re-added', async () =>
   assert.equal(result.additions.length, 0, 'the fingerprint is already covered by an existing deny rule');
   const after = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
   assert.equal(after.permissions.allow, undefined);
+});
+
+test('SQ-360: `echo hi && git push` never earns `Bash(echo hi:*)`', async () => {
+  assert.equal(normalizedCommandPrefix('echo hi && git push'), null, 'a chained command has no single rule key');
+  const projectDir = temporaryProject();
+  enablePermissionAutomation(projectDir);
+  const environment = writeWindow(projectDir, Array.from({ length: 3 }, () => permissionTranscript('echo hi && git push')));
+
+  const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
+
+  assert.equal(result.additions.length, 0);
+  assert.equal(fs.existsSync(path.join(projectDir, '.claude', 'settings.local.json')) && /echo hi/.test(fs.readFileSync(path.join(projectDir, '.claude', 'settings.local.json'), 'utf8')), false);
+});
+
+test('SQ-360 item 2: syntax, wrappers, redirect writers, and flags never key a rule', () => {
+  for (const command of ['for n in a b; do echo "$n"; done', 'while true; do ls; done', 'if true; then ls; fi', '(cd sub && ls)', '{ ls; }', 'command ls -la', 'eval ls', 'env FOO=1 ls', 'cat > out.txt', 'cat >> out.txt', '-rf build']) {
+    assert.equal(normalizedCommandPrefix(command), null, command);
+  }
+  assert.equal(normalizedCommandPrefix('git status --short'), 'git status', 'a plain command still keys a rule');
+});
+
+test('SQ-360 item 3: leading assignments are stripped, substitutions never promote their tail', () => {
+  assert.equal(normalizedCommandPrefix('FOO=bar npm test'), 'npm test');
+  assert.equal(normalizedCommandPrefix('BR=$(git rev-parse --abbrev-ref HEAD) && git push origin "$BR"'), null);
+  assert.equal(normalizedCommandPrefix('BR=$(git rev-parse HEAD)'), null, 'the substitution tail is never the rule key');
+  assert.equal(normalizedCommandPrefix('npm run build\nnpm test'), null, 'a multi-line command is more than one statement');
+});
+
+test('SQ-360 item 4: the never-learn git check sees every statement and substitution', async () => {
+  assert.equal(runsNeverLearnGit('echo hi && git push'), true);
+  assert.equal(runsNeverLearnGit('X=$(git push)'), true);
+  assert.equal(runsNeverLearnGit('npm test\ngit reset --hard'), true);
+  assert.equal(runsNeverLearnGit('git status && git log'), false);
+
+  const projectDir = temporaryProject();
+  enablePermissionAutomation(projectDir);
+  const environment = writeWindow(projectDir, Array.from({ length: 3 }, () => permissionTranscript('timeout 30 git push origin main')));
+  const result = await applyPermissionAllowlist({ projectPath: projectDir, env: environment });
+
+  assert.equal(result.additions.length, 0);
+  assert.equal(result.blocked[0]?.fingerprint, 'permission:Bash:timeout 30');
+  assert.equal(result.blocked[0]?.vetoReason, 'ref-mutating git command');
 });
