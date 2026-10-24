@@ -1248,8 +1248,7 @@ async function stripRegenerableQuarantineDirectories(worktree: string): Promise<
   const removed: string[] = [];
   for (const directory of await regenerableQuarantineDirectories(worktree)) {
     try {
-      const status = await fs.lstat(directory);
-      if (!status.isDirectory()) continue;
+      if (!await directoryChainWithoutSymlinks(worktree, directory)) continue;
       await fs.rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
       removed.push(directory);
     } catch (error: any) {
@@ -1283,48 +1282,52 @@ async function quarantineCandidate(entry: any, message: string, options: any): P
 
 type UnsafeWorktreeSymlink = { path: string; target: string };
 
+// Recursive removal unlinks a symlink met INSIDE the tree; it never follows it.
+// That holds for every deleter the sweep uses: `git worktree remove [--force]`,
+// `fs.rm({ recursive: true })` and `rm -rf` all lstat each entry and unlink a link
+// in place (SQ-82 measured all three on darwin with escaping file and directory
+// links, including one inside node_modules: every outside target survived). So a
+// nested symlink, wherever it points, cannot cause deletion outside the worktree,
+// and proving the tree free of escaping links would cost a full traversal (91% of
+// it node_modules) for no safety. The hazards that remain are path-based:
+//   1. the removal root itself being a link, so the deleter is pointed elsewhere;
+//   2. deleting a named descendant whose ANCESTOR component is a link, because
+//      path resolution follows intermediate links. The quarantine strip is the
+//      only such deleter, and `directoryChainWithoutSymlinks` guards it.
+// This check covers (1) at planning time, so --dry-run and execute agree, at a
+// constant cost per candidate.
 async function unsafeWorktreeSymlink(worktree: string): Promise<UnsafeWorktreeSymlink | null> {
-  let root: string;
+  let status: import('node:fs').Stats;
   try {
-    root = await fs.realpath(worktree);
+    status = await fs.lstat(worktree);
   } catch (_) {
     return { path: '.', target: 'unresolvable worktree root' };
   }
-
-  async function inspect(pathname: string): Promise<UnsafeWorktreeSymlink | null> {
-    let status: import('node:fs').Stats;
+  if (status.isSymbolicLink()) {
+    let target: string;
     try {
-      status = await fs.lstat(pathname);
+      target = await fs.realpath(worktree);
     } catch (_) {
-      return { path: path.relative(worktree, pathname) || '.', target: 'unreadable path' };
+      target = 'dangling symlink';
     }
-    if (status.isSymbolicLink()) {
-      try {
-        const target = await fs.realpath(pathname);
-        if (!pathIsInside(root, target)) {
-          return { path: path.relative(worktree, pathname) || '.', target };
-        }
-      } catch (_) {
-        // A dangling symlink is removed as a link; it cannot cause deletion outside the worktree.
-      }
-      return null;
-    }
-    if (!status.isDirectory()) return null;
-
-    let entries: import('node:fs').Dirent[];
-    try {
-      entries = await fs.readdir(pathname, { withFileTypes: true });
-    } catch (_) {
-      return { path: path.relative(worktree, pathname) || '.', target: 'unreadable directory' };
-    }
-    for (const entry of entries) {
-      const unsafe = await inspect(path.join(pathname, entry.name));
-      if (unsafe) return unsafe;
-    }
-    return null;
+    return { path: '.', target };
   }
+  if (!status.isDirectory()) return { path: '.', target: 'worktree root is not a directory' };
+  return null;
+}
 
-  return inspect(worktree);
+// Every component from `root` down to `candidate` must be a real directory. A link
+// anywhere on that chain would make `fs.rm(candidate)` delete through it.
+async function directoryChainWithoutSymlinks(root: string, candidate: string): Promise<boolean> {
+  const relative = path.relative(root, candidate);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return false;
+  let current = root;
+  for (const component of relative.split(path.sep)) {
+    current = path.join(current, component);
+    const status = await fs.lstat(current);
+    if (status.isSymbolicLink() || !status.isDirectory()) return false;
+  }
+  return true;
 }
 
 function blockedByUnsafeSymlink(entry: any, unsafe: UnsafeWorktreeSymlink): void {
@@ -1965,4 +1968,4 @@ async function sweep(repo: string, tickets: any[], options: any = {}): Promise<a
   };
 }
 
-module.exports = { DEFAULT_MIN_AGE_MS, DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_MS, DEFAULT_RECOVERY_RETENTION_AGE_MS, DEFAULT_RECOVERY_RETENTION_MAX_PER_AGENT, gitBashPath, canonicalPath, liveSweepSessionPaths, worktreeRoot, legacyWorktreeRoot, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, namedWorktreePath, agentWorktreeRoots, parseWorktreeList, isAgentWorktree, ignoredPathsMissingFromWorktree, provisionWorktree, preferredWorktreeIntegrationTarget, classifyWorktree, advanceIntegrationBranch, reclaimUnclaimedDispatchWorktree, quarantineCandidate, storageStatus, sweep };
+module.exports = { DEFAULT_MIN_AGE_MS, DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_MS, DEFAULT_RECOVERY_RETENTION_AGE_MS, DEFAULT_RECOVERY_RETENTION_MAX_PER_AGENT, gitBashPath, canonicalPath, liveSweepSessionPaths, worktreeRoot, legacyWorktreeRoot, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, namedWorktreePath, agentWorktreeRoots, parseWorktreeList, isAgentWorktree, ignoredPathsMissingFromWorktree, provisionWorktree, preferredWorktreeIntegrationTarget, classifyWorktree, advanceIntegrationBranch, reclaimUnclaimedDispatchWorktree, quarantineCandidate, directoryChainWithoutSymlinks, storageStatus, sweep };
