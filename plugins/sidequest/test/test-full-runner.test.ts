@@ -140,6 +140,18 @@ function isGroupProbeable(groupId: number) {
   }
 }
 
+async function reapOwnedProcessGroup(groupId: number) {
+  if (!isGroupProbeable(groupId)) return;
+  try { process.kill(-groupId, 'SIGTERM'); } catch (_: unknown) {}
+  await delay(50);
+  if (isGroupProbeable(groupId)) {
+    try { process.kill(-groupId, 'SIGKILL'); } catch (_: unknown) {}
+  }
+  const deadline = Date.now() + SETTLED_BUDGET_MILLISECONDS;
+  while (isGroupProbeable(groupId) && Date.now() < deadline) await delay(20);
+  assert.equal(isGroupProbeable(groupId), false, `owned process group ${groupId} survived fixture cleanup`);
+}
+
 function silently(options: OwnedPhaseOptions): OwnedPhaseOptions {
   return { forwardStdout: () => {}, forwardStderr: () => {}, ...options };
 }
@@ -378,7 +390,13 @@ test('the supervisor control protocol accepts only its finite transitions', { ..
   }
 });
 
-test('the node 22 protocol alphabet rejects every length-three sequence except phase-started then phase-exit', { ...posixOnly, timeout: 180_000 }, async () => {
+test('the node 22 protocol alphabet rejects every length-three sequence except phase-started then phase-exit', { ...posixOnly, timeout: 180_000 }, async (t?: any) => {
+  const fixtureGroups = new Set<number>();
+  // A runner deadline cancels this long fan-out in the middle of arbitrary rows. The hooks
+  // must still reap every detached supervisor group before the test temp root is removed.
+  t.after(async () => {
+    await Promise.all([...fixtureGroups].map((groupId) => reapOwnedProcessGroup(groupId)));
+  });
   const frames = [
     { type: 'phase-started', pid: 12345 },
     { type: 'phase-exit', status: 0, signal: null },
@@ -421,6 +439,9 @@ test('the node 22 protocol alphabet rejects every length-three sequence except p
       terminationGraceMilliseconds: 25,
       cleanupDrainMilliseconds: 50,
       supervisorModulePath,
+      onPhaseStarted: (identity) => {
+        if (identity.ownedGroupId !== null) fixtureGroups.add(identity.ownedGroupId);
+      },
     }));
     const isOnlyGreenSequence = sequence.length === 2 && sequence[0] === frames[0] && sequence[1] === frames[1];
     const isGreen = result.status === 0 && result.error === null && result.cleanupError === null && result.timedOut === false;
