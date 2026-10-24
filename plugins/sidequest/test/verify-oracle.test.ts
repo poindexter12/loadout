@@ -207,6 +207,86 @@ test('a ticket whose verify is derived says so in pulse and names the derived co
   assert.ok(!(repinned.warnings || []).some((entry: string) => /DERIVED/.test(entry)));
 });
 
+test('a ticket that records its own verifier keeps it under verifyKind: suite', () => {
+  // SQ-362: `executorVerifyKind: 'suite'` ALSO resolved the plugin's named suite, and
+  // `verificationRequirement` prefers a resolved suite over the recorded command, so a ticket
+  // with both verify fields populated and mutually consistent dispatched against the whole
+  // plugin suite. Nothing warned; the only way to see it was to read
+  // `dispatch.verificationRequirement` afterwards. On SQ-324 that cost two Opus attempts, about
+  // two hours and ~270k tokens of `npm ci` plus a flaky full suite in place of a ~54s gate.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-oracle-suite-kind-'));
+  fs.mkdirSync(path.join(root, 'plugins', 'sq362-suite', 'src'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'sq362-root', version: '0.0.0' }));
+  fs.writeFileSync(
+    path.join(root, 'plugins', 'sq362-suite', 'package.json'),
+    JSON.stringify({
+      name: 'sq362-suite',
+      version: '0.0.0',
+      scripts: { 'test:full': 'node --version', 'test:files': 'node --version' },
+    }),
+  );
+  fs.writeFileSync(path.join(root, 'plugins', 'sq362-suite', 'src', 'thing.ts'), 'export const thing = 1;\n');
+  execFileSync('git', ['init', '--quiet', '-b', 'main'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'SQ-362 Test'], { cwd: root });
+  execFileSync('git', ['add', '.'], { cwd: root });
+  execFileSync('git', ['commit', '--quiet', '-m', 'seed suite-kind fixture'], { cwd: root });
+  const slug = store.ensureProject(root, 'suite kind keeps its command').slug;
+  store.setCategory({
+    id: 'sq362.suitekind',
+    name: 'SQ-362 suite kind',
+    route: { model: 'sonnet', effort: 'high' },
+    fallback: null,
+    enabled: true,
+  });
+
+  const targeted = 'cd plugins/sq362-suite && npm run test:files -- test/thing.test.ts';
+  const ticket = store.createTicket(slug, {
+    title: 'targeted gate declared as a suite',
+    category: 'sq362.suitekind',
+    files: ['plugins/sq362-suite/src/thing.ts'],
+    executorVerify: targeted,
+    executorVerifyKind: 'suite',
+    source: 'test',
+  });
+  const prepared = store.prepareDispatch(slug, ticket.ref);
+  const requirement = prepared.ticket.dispatch.verificationRequirement;
+
+  // The ticket's own command is what gets pinned. Before the fix this was
+  // `cd plugins/sq362-suite && npm run test:full`, the resolved named suite.
+  assert.equal(requirement.command, targeted);
+  assert.equal(requirement.kind, 'suite');
+  assert.equal(requirement.suite, undefined, 'a recorded command must not be replaced by a resolved named suite');
+  assert.doesNotMatch(requirement.command, /test:full/);
+
+  // Nothing was derived, so nothing claims it was.
+  assert.equal(prepared.ticket.dispatch.verificationDerivation, undefined);
+  assert.ok(!(prepared.warnings || []).some((entry: string) => /DERIVED/.test(entry)));
+
+  // The diagnosability half: the dispatch surface the orchestrator actually reads has to name
+  // the command that was pinned, whether or not it was derived. `dispatchWarnings` is that
+  // surface for both the MCP handler and the CLI.
+  const echo = store.dispatchWarnings(prepared.ticket, slug).find((entry: string) => /dispatch pinned the/.test(entry));
+  assert.ok(echo, `the dispatch warnings must echo the pinned verifier, got ${JSON.stringify(store.dispatchWarnings(prepared.ticket, slug))}`);
+  assert.ok(echo.includes(JSON.stringify(targeted)), 'the echo must quote the exact pinned command');
+  assert.match(echo, /the ticket's own executorVerify/);
+
+  // A ticket that records nothing still falls through to the named suite, and the echo says the
+  // command was derived rather than declared. That sibling case is unchanged by this fix.
+  const silent = store.createTicket(slug, {
+    title: 'no verifier of its own',
+    category: 'sq362.suitekind',
+    files: ['plugins/sq362-suite/src/thing.ts'],
+    source: 'test',
+  });
+  const derived = store.prepareDispatch(slug, silent.ref);
+  assert.match(derived.ticket.dispatch.verificationRequirement.command, /npm run test:full/);
+  assert.equal(derived.ticket.dispatch.verificationDerivation.suite, 'sq362-suite');
+  const derivedEcho = store.dispatchWarnings(derived.ticket, slug).find((entry: string) => /dispatch pinned the/.test(entry));
+  assert.ok(derivedEcho, 'a derived requirement is echoed too');
+  assert.match(derivedEcho, /DERIVED by the board, not taken from the ticket/);
+});
+
 test('a more specific oracle refusal still wins over the empty-command refusal', () => {
   const slug = project('oracle precedence');
 
