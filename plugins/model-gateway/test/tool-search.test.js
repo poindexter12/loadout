@@ -3,21 +3,27 @@
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const http = require('node:http');
-const net = require('node:net');
 const path = require('node:path');
 const test = require('node:test');
 const { spawnGatewayProcess } = require('./support.js');
 
 const CLI = path.join(__dirname, '..', 'bin', 'model-gateway.js');
 
-function freePort() {
+function waitForListeningPort(child) {
   return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close(() => resolve(port));
-    });
+    let buffered = '';
+    const timeout = setTimeout(() => reject(new Error(`model-gateway did not report a listening port: ${buffered}`)), 5000);
+    const onData = (chunk) => {
+      buffered += chunk;
+      const match = buffered.match(/listening on 127\.0\.0\.1:(\d+)/);
+      if (!match) return;
+      clearTimeout(timeout);
+      child.stdout.off('data', onData);
+      resolve(Number(match[1]));
+    };
+    child.stdout.on('data', onData);
+    child.once('error', (error) => { clearTimeout(timeout); reject(error); });
+    child.once('exit', (code, signal) => { clearTimeout(timeout); reject(new Error(`model-gateway exited before reporting a listening port (${code ?? signal}): ${buffered}`)); });
   });
 }
 
@@ -66,8 +72,7 @@ function tool(name, deferLoading) {
 }
 
 test('Codex tool search resolves references while Anthropic passthrough stays byte-identical', async (t) => {
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
+  let shimPort;
   const forwardedToCodex = [];
   const proxy = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/v1/models') {
@@ -82,7 +87,7 @@ test('Codex tool search resolves references while Anthropic passthrough stays by
       res.end(JSON.stringify({ type: 'message', model: 'gpt-5.6-sol', content: [] }));
     });
   });
-  await new Promise((resolve) => proxy.listen(proxyPort, '127.0.0.1', resolve));
+  const proxyPort = await new Promise((resolve) => proxy.listen(0, '127.0.0.1', () => resolve(proxy.address().port)));
   t.after(() => proxy.close());
 
   let forwardedToAnthropic;
@@ -103,15 +108,16 @@ test('Codex tool search resolves references while Anthropic passthrough stays by
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PORT: '0',
       CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
       CODEX_GATEWAY_ANTHROPIC_UPSTREAM: `http://127.0.0.1:${anthropicPort}`,
       CODEX_GATEWAY_REQUEST_LOG: '0',
       CODEX_GATEWAY_SENTRY: '0',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  shimPort = await waitForListeningPort(child);
   await waitForHealthz(shimPort);
 
   const models = JSON.parse((await request(shimPort, '/v1/models')).body).data;

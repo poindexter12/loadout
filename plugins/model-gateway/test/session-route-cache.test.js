@@ -4,7 +4,6 @@ const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const http = require('node:http');
-const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
@@ -13,14 +12,25 @@ const { spawnGatewayProcess } = require('./support.js');
 const CLI = path.join(__dirname, '..', 'bin', 'model-gateway.js');
 const { DispatchSessionRouteCache } = require(CLI);
 
-function freePort() {
+function listen(server) {
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
+}
+
+function waitForListeningPort(child) {
   return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close(() => resolve(port));
-    });
+    let buffered = '';
+    const timeout = setTimeout(() => reject(new Error(`model-gateway did not report a listening port: ${buffered}`)), 5000);
+    const onData = (chunk) => {
+      buffered += chunk;
+      const match = buffered.match(/listening on 127\.0\.0\.1:(\d+)/);
+      if (!match) return;
+      clearTimeout(timeout);
+      child.stdout.off('data', onData);
+      resolve(Number(match[1]));
+    };
+    child.stdout.on('data', onData);
+    child.once('error', (error) => { clearTimeout(timeout); reject(error); });
+    child.once('exit', (code, signal) => { clearTimeout(timeout); reject(new Error(`model-gateway exited before reporting a listening port (${code ?? signal}): ${buffered}`)); });
   });
 }
 
@@ -110,8 +120,7 @@ test('dispatch session route cache evicts the least recently used session', () =
 });
 
 test('dispatch model reuses a session route after compaction and logs cache hits', async (t) => {
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
+  let shimPort;
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-session-route-'));
   const routeLog = path.join(logDir, 'routes.jsonl');
   const forwarded = [];
@@ -129,20 +138,21 @@ test('dispatch model reuses a session route after compaction and logs cache hits
       res.end(JSON.stringify({ type: 'message', model: payload.model, content: [] }));
     });
   });
-  await new Promise((resolve) => proxy.listen(proxyPort, '127.0.0.1', resolve));
+  const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
 
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PORT: '0',
       CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
       CODEX_GATEWAY_REQUEST_LOG_PATH: routeLog,
       CODEX_GATEWAY_SENTRY: '0',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  shimPort = await waitForListeningPort(child);
   await waitForHealthz(shimPort);
 
   const canonical = await request(
@@ -201,8 +211,7 @@ test('dispatch model reuses a session route after compaction and logs cache hits
 });
 
 test('dispatch route survives a shim restart before a compacted continuation', async (t) => {
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
+  let shimPort;
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-session-route-restart-'));
   const routeLog = path.join(logDir, 'routes.jsonl');
   const routeCache = path.join(logDir, 'dispatch-routes.json');
@@ -221,19 +230,20 @@ test('dispatch route survives a shim restart before a compacted continuation', a
       res.end(JSON.stringify({ type: 'message', model: payload.model, content: [] }));
     });
   });
-  await new Promise((resolve) => proxy.listen(proxyPort, '127.0.0.1', resolve));
+  const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
 
   const env = {
     ...process.env,
-    CODEX_GATEWAY_PORT: String(shimPort),
+    CODEX_GATEWAY_PORT: '0',
     CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
     CODEX_GATEWAY_REQUEST_LOG_PATH: routeLog,
     CODEX_GATEWAY_DISPATCH_CACHE_PATH: routeCache,
     CODEX_GATEWAY_SENTRY: '0',
   };
-  let child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], { env, stdio: 'ignore' });
+  let child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], { env, stdio: ['ignore', 'pipe', 'ignore'] });
   t.after(() => child.kill());
+  shimPort = await waitForListeningPort(child);
   await waitForHealthz(shimPort);
 
   const initial = await request(
@@ -245,7 +255,8 @@ test('dispatch route survives a shim restart before a compacted continuation', a
   child.kill();
   await new Promise((resolve) => child.once('exit', resolve));
 
-  child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], { env, stdio: 'ignore' });
+  child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], { env, stdio: ['ignore', 'pipe', 'ignore'] });
+  shimPort = await waitForListeningPort(child);
   await waitForHealthz(shimPort);
   const compacted = await request(
     shimPort,
@@ -274,8 +285,7 @@ test('dispatch route survives a shim restart before a compacted continuation', a
 });
 
 test('native Agent route survives repeated tools and the compaction identity transition', async (t) => {
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
+  let shimPort;
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-agent-route-'));
   const routeLog = path.join(logDir, 'routes.jsonl');
   const forwarded = [];
@@ -293,20 +303,21 @@ test('native Agent route survives repeated tools and the compaction identity tra
       res.end(JSON.stringify({ type: 'message', model: payload.model, content: [] }));
     });
   });
-  await new Promise((resolve) => proxy.listen(proxyPort, '127.0.0.1', resolve));
+  const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
 
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PORT: '0',
       CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
       CODEX_GATEWAY_REQUEST_LOG_PATH: routeLog,
       CODEX_GATEWAY_SENTRY: '0',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  shimPort = await waitForListeningPort(child);
   await waitForHealthz(shimPort);
 
   const sessionMetadata = agentMetadata('root-session');
@@ -399,8 +410,7 @@ test('native Agent route survives repeated tools and the compaction identity tra
 });
 
 test('route log identifies parent-only Agent dispatch cache misses', async (t) => {
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
+  let shimPort;
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-parent-agent-'));
   const routeLog = path.join(logDir, 'routes.jsonl');
   const forwarded = [];
@@ -418,20 +428,21 @@ test('route log identifies parent-only Agent dispatch cache misses', async (t) =
       res.end(JSON.stringify({ type: 'message', model: payload.model, content: [] }));
     });
   });
-  await new Promise((resolve) => proxy.listen(proxyPort, '127.0.0.1', resolve));
+  const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
 
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PORT: '0',
       CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
       CODEX_GATEWAY_REQUEST_LOG_PATH: routeLog,
       CODEX_GATEWAY_SENTRY: '0',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  shimPort = await waitForListeningPort(child);
   await waitForHealthz(shimPort);
 
   const parentOnlyHeaders = { 'x-claude-code-parent-agent-id': 'parent-agent' };
@@ -467,8 +478,7 @@ test('route log identifies parent-only Agent dispatch cache misses', async (t) =
 });
 
 test('markerless child agents inherit only their trusted parent route', async (t) => {
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
+  let shimPort;
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-child-route-'));
   const routeLog = path.join(logDir, 'routes.jsonl');
   const routeCache = path.join(logDir, 'dispatch-routes.json');
@@ -499,22 +509,23 @@ test('markerless child agents inherit only their trusted parent route', async (t
       res.end(JSON.stringify({ type: 'message', model: payload.model, content: [] }));
     });
   });
-  await new Promise((resolve) => proxy.listen(proxyPort, '127.0.0.1', resolve));
+  const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
 
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PORT: '0',
       CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
       CODEX_GATEWAY_ANTHROPIC_UPSTREAM: `http://127.0.0.1:${anthropicPort}`,
       CODEX_GATEWAY_REQUEST_LOG_PATH: routeLog,
       CODEX_GATEWAY_DISPATCH_CACHE_PATH: routeCache,
       CODEX_GATEWAY_SENTRY: '0',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  shimPort = await waitForListeningPort(child);
   await waitForHealthz(shimPort);
 
   const parent = await request(
