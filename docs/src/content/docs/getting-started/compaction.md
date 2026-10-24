@@ -37,6 +37,14 @@ Quartermaster's `autoCompactWindow=200000` is an intentional cap for the Codex c
 
 Do not remove that cap casually for `[1m]` or gateway models. Without it, 80% is roughly 736K–800K tokens against the advertised 920K–1M window. The Codex sentry may reject the larger request with HTTP 413 before compaction gets a chance to run. Use `/context` to check the effective cap after changing model or project settings.
 
+## Executor launch budget
+
+Every executor briefing now ends with a launch budget: the briefing's size in characters and estimated tokens, its share of a 167K usable window, and its three largest sections. When the briefing alone passes 10% of that window, it also carries a warning. The executor is told to read only the sections it needs, and to record the measurement before releasing if the work cannot fit. A briefing large enough to move to a file reports that budget in the pointer, so the executor knows the cost before it reads.
+
+The budget leaves out the ambient surface (system prompt, tool, skill, and agent listings, and the CLAUDE.md hierarchy). That is paid before the briefing arrives. On 2026-10-24, twenty Opus executors in one orchestrator session recorded 56K to 59K tokens on their first turn, about 35% of the window, before reading any briefing.
+
+Session-level context monitors that read a statusline bridge file, such as GSD's `gsd-context-monitor`, look the file up by session id. A subagent shares its parent's session id, so every executor sees the orchestrator's usage, not its own. On the same day, executors whose own usage was 57K were shown "CONTEXT CRITICAL: Usage at 100%" and told to ask the user how to proceed. The briefing now tells executors that this number belongs to the orchestrator and is no reason to hand back. If an executor does run out of its own context, its release reason starts with `context exhaustion:`, so the board can tell it apart from a planning blocker.
+
 ## Keep TypeSafe credentials out of settings files
 
 The Sidequest compaction guard does not need a TypeSafe API key or any network request. If you separately enable a TypeSafe feature in the compaction plugin, keep `TYPESAFE_API_KEY` in a 1Password Secure Note named `provider-typesafe` (for example, the `jev` section with its token, scopes, and expiry), or use that plugin's sensitive `userConfig` mechanism for runtime injection.
