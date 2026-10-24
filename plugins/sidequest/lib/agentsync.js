@@ -727,6 +727,42 @@ function dispatchVerifyAmendmentNotice(ticket) {
   const when = [at, by ? `by ${by}` : ""].filter(Boolean).join(", ");
   return `Verify amended after this dispatch was prepared${when ? ` (${when})` : ""}: the pinned command and wrapper invocation above are current. A briefing or wrapper invocation copied before the amendment is stale, and a capture of a superseded command is refused. Superseded: ${superseded.length ? superseded.map((command) => JSON.stringify(command)).join(", ") : "<none recorded>"}.`;
 }
+function verificationGateBody(ticket, project) {
+  const pinnedRequirement = ticket?.dispatch?.verificationRequirement || ticket?.lifecycleAttempt?.verificationRequirement || null;
+  const recordedVerifier = String(ticket?.executorVerify || "").trim();
+  const hasLegacyRequirement = Boolean(recordedVerifier || String(ticket?.executorAttestationArtifact || "").trim());
+  const requirement = pinnedRequirement || verificationRequirement({
+    kind: hasLegacyRequirement ? ticket?.executorVerifyKind : "custom",
+    evidence: recordedVerifier || "No exact verifier was recorded.",
+    command: recordedVerifier,
+    artifact: ticket?.executorAttestationArtifact
+  });
+  const verifierPrefix = pinnedRequirement ? "Pinned verifier" : "Legacy verifier";
+  const verifierKind = requirement.kind;
+  const verifierArtifact = requirement.artifact || ticket?.executorAttestationArtifact;
+  const verifierEvidence = requirement.evidenceContract;
+  const verify = verifierKind === "attestation" ? `${verifierPrefix}: attestation. Record actual evidence for ${verifierArtifact || "the declared artifact"}.` : verifierKind === "manual" ? `${verifierPrefix}: manual. Record evidence matching: ${verifierEvidence}.` : requirement.command ? `${verifierPrefix}: ${verifierKind}. Command: ${requirement.command}` : `${verifierPrefix}: ${verifierKind}. Evidence contract: ${verifierEvidence}`;
+  const verifierCommand = requirement.command || "";
+  const amendmentNotice = pinnedRequirement ? dispatchVerifyAmendmentNotice(ticket) : "";
+  const evidenceGuidance = ticketEvidenceGuidance(ticket);
+  const highStakes = ticket?.highStakes ? [
+    "High-stakes verification:",
+    "Enumerate and check EVERY consumer of each changed surface. Run every affected consumer suite, including dashboard build/tests when board payloads change. A review-audit pass is mandatory before integration. These runs are in addition to the pinned gate above, never instead of it."
+  ] : [];
+  return [
+    "## Verification gate: read this before choosing how to verify",
+    verifierCommand ? "One pinned command verifies this ticket. Decide nothing about verification until you have read this section, and run no broader suite ahead of it." : "This ticket has one pinned verification contract. Decide nothing about verification until you have read this section, and record evidence against that contract rather than against a suite you picked yourself.",
+    verify,
+    amendmentNotice,
+    verifierCommand ? "Run it through " + capturedVerifyCommand(verifierCommand, ticket?.ref, project) + " in the FOREGROUND with an explicit generous timeout of up to 600000 ms; this is the pinned verifier. A successful wrapper run records its completed capture identity against this ticket and the checked Git revision, and submit refuses prose or a retyped command without that matching record. " + (ticket?.dispatch?.sharedTree === false && ticket?.dispatch?.workingTreeDelivery !== true ? "This dispatch is isolated, so the wrapper runs in and records your bound worktree whatever directory you start it from, and it refuses before running anything while that worktree has uncommitted changes: commit the candidate with the board commit tool first, then run the wrapper. " : "") + "A backgrounded verify's completion does not wake you, so going idle on it parks the claim indefinitely. If it genuinely exceeds the 10-minute Bash ceiling, use bounded foreground until-loops instead of backgrounding or going idle; post [sidequest:verify-start] before it only for an expected no-op, and always post [sidequest:verify-complete] with status first after it exits. Executors may report evidence only; they cannot replace, skip, or weaken this verifier." : "Record evidence for the pinned verifier. Executors may not replace, skip, or weaken it; skipping requires an authorized bounded waiver recorded as a Diagnostic.",
+    ...verifierCommand ? [
+      "That wrapper run is the gate, not one option among several. It is the ONLY run that produces the capture record submit requires, so a passing full suite neither substitutes for it nor satisfies the gate. Run the pinned command first, and reach for a broader suite only when a focused failure points outside the code you changed. A broad suite run alongside the gate is wasted work, not extra rigour: on SQ-32 an executor spent over an hour on two full suites, one of them killed by its own phase budget, ahead of a pinned gate that took eight seconds, and neither broad run counted for anything at submit. The wrapper prints its own elapsed time, so budget from the gate's measured duration rather than from a full suite's.",
+      `The wrapper's recorded capture is the verdict, so read that record instead of parsing the runner's output yourself. A summary that greps for TAP "not ok" while the runner prints a different failure marker reports exit 0 over a genuine red, and a silent false-green is strictly worse than a lost verdict. Quote the recorded status and the capture log path as your evidence, and take the status you post in [sidequest:verify-complete] from that record rather than from your own scan of the output.`
+    ] : [],
+    evidenceGuidance || "",
+    ...highStakes.length ? [highStakes.join("\n")] : []
+  ].filter(Boolean).join("\n\n");
+}
 function executorSafetyBody(ticket, nonce, tokenFile, project, executor, closeout, worktreeIdentity, readOnlyScratchSpace, worktreeSync) {
   const claimCall = [
     "mcp__plugin_sidequest_board__claim({",
@@ -738,43 +774,17 @@ function executorSafetyBody(ticket, nonce, tokenFile, project, executor, closeou
     `  tokenFile: ${JSON.stringify(tokenFile)}`,
     "})"
   ].join("\n");
-  const pinnedRequirement = ticket.dispatch?.verificationRequirement || ticket.lifecycleAttempt?.verificationRequirement || null;
-  const recordedVerifier = String(ticket.executorVerify || "").trim();
-  const hasLegacyRequirement = Boolean(recordedVerifier || String(ticket.executorAttestationArtifact || "").trim());
-  const requirement = pinnedRequirement || verificationRequirement({
-    kind: hasLegacyRequirement ? ticket.executorVerifyKind : "custom",
-    evidence: recordedVerifier || "No exact verifier was recorded.",
-    command: recordedVerifier,
-    artifact: ticket.executorAttestationArtifact
-  });
-  const verifierPrefix = pinnedRequirement ? "Pinned verifier" : "Legacy verifier";
-  const verifierKind = requirement.kind;
-  const verifierArtifact = requirement.artifact || ticket.executorAttestationArtifact;
-  const verifierEvidence = requirement.evidenceContract;
-  const verify = verifierKind === "attestation" ? `${verifierPrefix}: attestation. Record actual evidence for ${verifierArtifact || "the declared artifact"}.` : verifierKind === "manual" ? `${verifierPrefix}: manual. Record evidence matching: ${verifierEvidence}.` : requirement.command ? `${verifierPrefix}: ${verifierKind}. Command: ${requirement.command}` : `${verifierPrefix}: ${verifierKind}. Evidence contract: ${verifierEvidence}`;
-  const verifierCommand = requirement.command || "";
-  const amendmentNotice = pinnedRequirement ? dispatchVerifyAmendmentNotice(ticket) : "";
-  const evidenceGuidance = ticketEvidenceGuidance(ticket);
-  const highStakes = ticket?.highStakes ? [
-    "High-stakes verification:",
-    "Enumerate and check EVERY consumer of each changed surface. Run every affected consumer suite, including dashboard build/tests when board payloads change. A review-audit pass is mandatory before integration."
-  ] : [];
   const boundReview = boundReviewGuidance(ticket);
   return [
-    "## Dispatch, claim, worktree, lifecycle, and verification safety",
+    "## Dispatch, claim, worktree, and lifecycle safety",
     "Claim first with this exact call. Do not pass direct or replace the prepared executor:",
     ["```javascript", claimCall, "```"].join("\n"),
     ...worktreeIdentity ? [worktreeIdentity] : [],
     ...readOnlyScratchSpace ? [readOnlyScratchSpace] : [],
     ...worktreeSync ? [worktreeSync] : [],
     ...ticketIsolationContract(ticket, project) || [],
-    verify,
-    amendmentNotice,
-    verifierCommand ? "Run it through " + capturedVerifyCommand(verifierCommand, ticket?.ref, project) + " in the FOREGROUND with an explicit generous timeout of up to 600000 ms; this is the pinned verifier. A successful wrapper run records its completed capture identity against this ticket and the checked Git revision, and submit refuses prose or a retyped command without that matching record. " + (ticket?.dispatch?.sharedTree === false && ticket?.dispatch?.workingTreeDelivery !== true ? "This dispatch is isolated, so the wrapper runs in and records your bound worktree whatever directory you start it from, and it refuses before running anything while that worktree has uncommitted changes: commit the candidate with the board commit tool first, then run the wrapper. " : "") + "A backgrounded verify's completion does not wake you, so going idle on it parks the claim indefinitely. If it genuinely exceeds the 10-minute Bash ceiling, use bounded foreground until-loops instead of backgrounding or going idle; post [sidequest:verify-start] before it only for an expected no-op, and always post [sidequest:verify-complete] with status first after it exits. Executors may report evidence only; they cannot replace, skip, or weaken this verifier." : "Record evidence for the pinned verifier. Executors may not replace, skip, or weaken it; skipping requires an authorized bounded waiver recorded as a Diagnostic.",
-    evidenceGuidance || "",
     "Execution survival: Budget tool calls and run the declared verify command early, rather than only at the end. If the budget nears exhaustion after partly completing the contract, commit and submit the verified portion with evidence and plainly name what remains: a partial submission with proof beats a dead run. Never leave verified work uncommitted. Board MCP is the executor lifecycle authority. If its transport is unavailable, do not use the Sidequest CLI or raw Agent as a fallback: reload or reconnect Sidequest, then re-dispatch.",
     "If Sidequest itself misbehaves, such as a refusal that contradicts observed state, a dead retrieval handle, a guard loop, or a reproducible tool error, report it to the user with the reproducing evidence and treat it as an upstream defect. Executors also put that evidence in a ticket comment so the orchestrator sees it. Do not encode a workaround in project rules, hooks, or memory; any unavoidable stopgap must be marked temporary and name the defect it awaits.",
-    ...highStakes.length ? [highStakes.join("\n")] : [],
     boundReview || "",
     closeout || "",
     "Stay within declared scope. This briefing includes the complete task, scope, comments, and contract. Do not use context_page for briefing sections."
@@ -954,6 +964,7 @@ This dispatch deliberately runs in the shared checkout. Write only within the de
     profile: { id: "executor-briefing" },
     revision: Number(ticket?.dispatch?.launchSeq) || 1,
     items: [
+      { id: "verification-gate", kind: "safety", priority: 700, order: 0, body: verificationGateBody(ticket, project) },
       { id: "safety", kind: "safety", priority: 600, order: 1, body: executorSafetyBody(ticket, nonce, ticket?.dispatch?.tokenFile, project, executor, closeout, worktreeIdentity, readOnlyScratchSpace, worktreeSync) + artifactSafety },
       { id: "execution-contract", kind: "contract", priority: 500, order: 2, body: storyContractProjectionBody(snapshot) },
       ...storyLog ? [{ id: "story-decision-log", kind: "evidence", priority: 475, order: 3, body: storyDecisionLogProjectionBody(storyLog) }] : [],
