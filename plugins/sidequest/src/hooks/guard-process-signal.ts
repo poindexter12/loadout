@@ -1,8 +1,12 @@
 #!/usr/bin/env node
-import './shared/sqlite-budget.js';
+import { failClosedOnBoardBusy, refuseWhenBoardBusy } from './shared/sqlite-budget.js';
 import { readStdin, stringField, isRecord } from './shared/input.js';
 import { writeDeny } from './shared/output.js';
 import { withoutHereDocBodies } from './shared/heredocs.js';
+
+// An enforcement guard: if a board read is ever added here, contention must refuse, not allow (SQ-370). Today it
+// decides from the command text alone, so a held board lock never reaches it.
+failClosedOnBoardBusy();
 
 // SQ-224: on 2026-09-28 an executor clearing what it took to be its own stuck `cargo test` killed a
 // different ticket's verify run in another worktree. No in-plugin code path did it: lib/ports/process.js
@@ -212,6 +216,7 @@ function main(): void {
 
 try {
   main();
-} catch (_) {
+} catch (error) {
+  refuseWhenBoardBusy(error);
   process.exit(0);
 }
