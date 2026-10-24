@@ -223,6 +223,9 @@ type CaptureRunOptions = Readonly<{
   resolveBudget?: CaptureBudgetResolver;
   // Where the budget line goes before the command starts; the CLI prints it to stderr.
   announce?: (line: string) => void;
+  // SQ-76: called once, immediately before the command spawns (inside the full-suite slot), so
+  // the capture can snapshot the tree that actually starts the run rather than the tree it queued from.
+  beforeRun?: () => void;
 }>;
 type CaptureTarget =Readonly<{ project: string; ticket: string }>;
 type CaptureRecordResult = Readonly<{
@@ -526,6 +529,7 @@ async function runFullSuiteCapture(command: string, project: string, cwd: string
   try {
     // The budget is derived once the slot is held, so it reflects the load the suite runs
     // under rather than the load while it queued.
+    options.beforeRun?.();
     const budget = (options.resolveBudget || captureBudget)(command);
     capture = await runBudgetedCapture(command, cwd, budget, {
       ...process.env,
@@ -736,6 +740,13 @@ async function runCapturedVerification(command: string, target: CaptureTarget | 
     return Object.freeze({ capture, recorded: Object.freeze({ ok: false, reason: binding.reason.split(':')[0] || 'capture_binding_refused', message: binding.reason }) });
   }
   const captureCwd = binding?.ok ? binding.cwd : cwd;
+  // SQ-76: the tree the command starts from, so the record binds to what ran. It is taken
+  // immediately before the spawn; a run that never started is snapshotted when it is recorded.
+  const started: { before: TreeSnapshot | null } = { before: null };
+  const beforeRun = () => {
+    options.beforeRun?.();
+    if (target && !preflight) started.before = treeSnapshot(captureCwd, true);
+  };
   // Only a ticket-bound full-suite capture takes the per-host slot; every capture runs under the
   // budget model. SQ-74 ruled that an ad-hoc full-suite run (no --ticket, or `npm run test:full`
   // straight from a shell) does not contend for the slot: the slot serialises recorded captures,
@@ -744,10 +755,67 @@ async function runCapturedVerification(command: string, target: CaptureTarget | 
   // in-test waits instead scale with the measured load (capacityScaledDeadlineMilliseconds), which
   // covers foreign load whatever its source.
   const capture = preflight || (target && isFullSuiteCommand(command)
-    ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem, options)
-    : await runBudgetedCapture(command, captureCwd, (options.resolveBudget || captureBudget)(command), undefined, options.announce));
-  const recorded = target ? recordCapture(target, capture, captureCwd, resolution, binding?.ok ? binding.head : undefined) : null;
+    ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem, { ...options, beforeRun })
+    : (beforeRun(), await runBudgetedCapture(command, captureCwd, (options.resolveBudget || captureBudget)(command), undefined, options.announce)));
+  const before = started.before || (target && !preflight ? treeSnapshot(captureCwd, true) : null);
+  const recorded = target ? recordCapture(target, capture, captureCwd, resolution, binding?.ok ? binding.head : undefined, before) : null;
   return Object.freeze({ capture, recorded });
+}
+
+// SQ-76: HEAD is a commit pointer and says nothing about the working tree, so a
+// capture bound to `git:<HEAD>` certified whatever the tree held when it ran: an
+// uncommitted edit, or `git checkout <rev> -- <path>`, ran other code under
+// HEAD's name. A capture now snapshots the tree before it runs and binds to what
+// that snapshot shows. A clean tree binds to `git:<HEAD>` as before. A dirty tree
+// binds to DIRTY_TREE_CANDIDATE_SOURCE, an identity of HEAD plus the exact
+// modifications, which records the run (the sanctioned diagnostic path, e.g.
+// "is base red?") but can never equal a submitted `git:<commit>` candidate, so
+// it never satisfies the submit gate.
+const DIRTY_TREE_CANDIDATE_SOURCE = 'git-dirty-tree';
+type TreeSnapshot = Readonly<{
+  head: string;
+  status: readonly string[];
+  tracked: readonly string[];
+  // Set only on a snapshot taken with its identity, and only when the tree is dirty.
+  dirtyCandidate?: Readonly<{ source: string; value: string }>;
+}>;
+
+function porcelainLines(output: string): string[] {
+  // Porcelain lines are `XY path`; the status column can start with a space, so
+  // the output is split untrimmed.
+  return output.split('\n').filter((line) => line.trim());
+}
+
+// `withIdentity` hashes the modifications themselves; it is taken once, before
+// the command runs, so the identity names the tree that started the run.
+function treeSnapshot(cwd: string, withIdentity = false): TreeSnapshot | null {
+  const head = (gitOutput(cwd, ['rev-parse', '--verify', 'HEAD^{commit}']) || '').toLowerCase();
+  if (!head) return null;
+  const status = gitOutput(cwd, ['status', '--porcelain=v1', '--untracked-files=all'], true);
+  if (status === null) return null;
+  const lines = porcelainLines(status);
+  const snapshot = { head, status: Object.freeze(lines), tracked: Object.freeze(lines.filter((line) => !line.startsWith('??'))) };
+  return Object.freeze(withIdentity && lines.length ? { ...snapshot, dirtyCandidate: dirtyTreeCandidate(cwd, snapshot) } : snapshot);
+}
+
+function dirtyTreeCandidate(cwd: string, snapshot: Readonly<{ head: string; status: readonly string[] }>) {
+  const hash = createHash('sha256').update(snapshot.head).update('\0').update(snapshot.status.join('\n')).update('\0');
+  hash.update(gitOutput(cwd, ['diff', '--binary', 'HEAD'], true) || '');
+  for (const line of snapshot.status) {
+    if (!line.startsWith('??')) continue;
+    const file = line.slice(3);
+    try {
+      hash.update('\0').update(file).update('\0').update(fs.readFileSync(path.join(cwd, file)));
+    } catch (_) {
+      hash.update('\0').update(file).update('\0unreadable');
+    }
+  }
+  return Object.freeze({ source: DIRTY_TREE_CANDIDATE_SOURCE, value: `${snapshot.head}+${hash.digest('hex')}` });
+}
+
+function describeDirtyPaths(lines: readonly string[]): string {
+  const paths = lines.map((line) => line.slice(3).trim()).filter(Boolean);
+  return paths.slice(0, 10).join(', ') + (paths.length > 10 ? `, and ${paths.length - 10} more` : '');
 }
 
 function verifiedRevision(cwd: string) {
@@ -770,23 +838,38 @@ function verifiedRevision(cwd: string) {
 // it ran. The capture records that commit and nothing else: if HEAD moved while
 // the command ran, the run is not recorded rather than certifying a commit that
 // did not run.
-function recordCapture(target: CaptureTarget, capture: VerifyCapture, cwd: string, resolved?: CaptureProjectResolution | null, boundRevision?: string) {
+//
+// `before` is the tree the command started from (SQ-76). With it, a clean start
+// binds to `git:<HEAD>` only if HEAD is unchanged and no tracked file differs
+// from it once the command has finished, and a dirty start binds to the
+// dirty-tree identity, which records the run without satisfying the gate.
+// Untracked files that appear during the run are the run's own output and do
+// not change the code that ran, so the after-check reads tracked files only.
+function recordCapture(target: CaptureTarget, capture: VerifyCapture, cwd: string, resolved?: CaptureProjectResolution | null, boundRevision?: string, before?: TreeSnapshot | null) {
   const store = require('./store.js') as VerificationCaptureStore;
   const resolution = resolved || resolveCaptureProject(target);
   if (!resolution.ok) return { ok: false, reason: resolution.reason };
   const project = resolution.project;
   const ticket = store.getTicket(project.slug, target.ticket);
   const workingTreeCandidate = store.workingTreeDeliveryCandidate(project.slug, ticket);
-  if (!workingTreeCandidate && boundRevision) {
-    const after = verifiedRevision(cwd);
-    if (after?.value !== boundRevision) {
+  const bound = boundRevision || before?.head;
+  if (!workingTreeCandidate && bound) {
+    const after = treeSnapshot(cwd);
+    if (after?.head !== bound) {
       return {
         ok: false,
-        reason: `capture_candidate_moved: the capture for ${target.ticket} was bound to HEAD ${boundRevision} in ${JSON.stringify(path.resolve(cwd))}, but HEAD there is ${after?.value || 'unresolvable'} now that the command has finished, so the run cannot be attributed to a single commit and was not recorded. Leave the worktree alone while the wrapper runs, then rerun it.`,
+        reason: `capture_candidate_moved: the capture for ${target.ticket} was bound to HEAD ${bound} in ${JSON.stringify(path.resolve(cwd))}, but HEAD there is ${after?.head || 'unresolvable'} now that the command has finished, so the run cannot be attributed to a single commit and was not recorded. Leave the worktree alone while the wrapper runs, then rerun it.`,
+      };
+    }
+    if (before && !before.status.length && after.tracked.length) {
+      return {
+        ok: false,
+        reason: `capture_candidate_dirtied: the capture for ${target.ticket} started from a clean tree at HEAD ${bound} in ${JSON.stringify(path.resolve(cwd))}, but tracked files there differ from HEAD now that the command has finished, so HEAD may not be the code that ran and the run was not recorded. Leave the worktree alone while the wrapper runs, restore the tree, then rerun it. Modified: ${describeDirtyPaths(after.tracked)}`,
       };
     }
   }
-  const candidate = workingTreeCandidate?.candidate || (boundRevision ? Object.freeze({ source: 'git', value: boundRevision }) : verifiedRevision(cwd));
+  const dirty = !workingTreeCandidate && before && before.status.length ? (before.dirtyCandidate || dirtyTreeCandidate(cwd, before)) : null;
+  const candidate = workingTreeCandidate?.candidate || dirty || (bound ? Object.freeze({ source: 'git', value: bound }) : verifiedRevision(cwd));
   // A retired agent's worktree keeps its directory after its registration is
   // pruned, so git there resolves no HEAD. Name the checkout that failed rather
   // than the subsystem, so the next occurrence is read as worktree reuse.
@@ -824,6 +907,10 @@ function report(capture: VerifyCapture, recorded?: CaptureRecordResult | null) {
   }
   if (recorded?.ok && recorded.capture) {
     process.stdout.write(`capture=${recorded.capture.id} candidate=${recorded.capture.candidate.source}:${recorded.capture.candidate.value}\n`);
+    if (recorded.capture.candidate.source === DIRTY_TREE_CANDIDATE_SOURCE) {
+      // SQ-76: agent-facing. A dirty-tree record is diagnostic evidence, never a gate pass.
+      process.stdout.write(`capture-diagnostic: the tree had uncommitted changes when this command started, so this capture is bound to that dirty tree (${DIRTY_TREE_CANDIDATE_SOURCE}), not to any commit. It is recorded as evidence and can never satisfy the submit gate. To verify a candidate, commit it with the board commit tool, restore everything else, and rerun the wrapper on the clean tree.\n`);
+    }
     if ((LOAD_ONLY_CAPTURE_STATUSES as readonly string[]).includes(capture.status)) {
       // SQ-179: agent-facing. Name the sanctioned exit so a load-only failure never ends in a hand ref edit.
       process.stdout.write(`capture-waiver: if this ${capture.status} came only from host load and reruns keep failing, do not hand-edit refs/sidequest; keep the claim, comment this capture's evidence, and ask the orchestrator to post "${CAPTURE_WAIVER_MARKER} capture=${recorded.capture.id} signature=${captureFailureSignature(capture)} authority=<who>; <reason and evidence>" on ${recorded.capture.ticket || 'the ticket'}, then resubmit this same candidate.\n`);

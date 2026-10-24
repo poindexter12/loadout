@@ -15,6 +15,7 @@ const { execFileSync, spawn } = require('node:child_process');
 const { runVerifyCapture, runCapturedVerification, recordCapture, shellCommand, captureSlotDirectory, acquireCaptureSlot, fullSuiteCaptureTimeoutMilliseconds, captureBudget, captureBudgetClass, captureHardMaximumMilliseconds, runBudgetedCapture, effectiveTestWorkers, capacityScaledDeadlineMilliseconds } = require('../lib/verify-capture.js');
 const { waitForCapacity, capacityWaitTimeoutMessage, capacityWaitDeadlineMilliseconds, testWorkerConcurrency } = require('./_capacity-deadline.js');
 const store = require('../lib/store.js');
+const { commandVerificationResult } = require('../lib/kernel/verification.js');
 const SIDEQUEST_DIR = path.resolve(__dirname, '..');
 
 function deleteLog(capture: { logPath: string }) {
@@ -760,6 +761,8 @@ test('verification capture resolves a stale worktree --project back to the ticke
   execFileSync('git', ['worktree', 'add', '--detach', '--quiet', agentWorktree, 'HEAD'], { cwd: project, windowsHide: true });
   const registeredActiveSlot = path.join(captureSlotDirectory(project), 'active');
   fs.writeFileSync(path.join(agentWorktree, 'suite.js'), `const fs = require('node:fs'); fs.writeFileSync(${JSON.stringify(observedSlot)}, String(fs.existsSync(${JSON.stringify(registeredActiveSlot)})));\n`);
+  // SQ-76: the probe suite is committed, so the capture binds to a clean HEAD that is the code that runs.
+  execFileSync('git', ['-c', 'user.name=Sidequest Tests', '-c', 'user.email=sidequest@example.invalid', 'commit', '--quiet', '-am', 'slot probe suite'], { cwd: agentWorktree, windowsHide: true });
   const boardProject = store.ensureProject(project);
   const ticket = store.createTicket(boardProject.slug, {
     title: 'resolve the board from the ticket, not the inherited worktree',
@@ -949,6 +952,120 @@ test('SQ-162: a terminal dispatch no longer binds, so a later capture runs where
     assert.deepEqual(recorded?.capture?.candidate, { source: 'git', value: fixture.base });
     assert.equal(fs.realpathSync(fs.readFileSync(path.join(fixture.project, 'suite-ran'), 'utf8')), fs.realpathSync(fixture.project));
     assert.equal(fs.existsSync(path.join(fixture.worktree, 'suite-ran')), false);
+    fs.rmSync(capture.logPath, { force: true });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// SQ-76 fixture: a board project run in place (no isolated dispatch), the path
+// whose capture used to bind `git:<HEAD>` whatever the working tree held.
+function inPlaceCaptureFixture(prefix: string, suiteBody: string) {
+  const project = captureFixtureProject(prefix, suiteBody);
+  const git = (...args: string[]) => String(execFileSync('git', args, { cwd: project, encoding: 'utf8', windowsHide: true })).trim();
+  const commit = (message: string) => git('-c', 'user.name=Sidequest Tests', '-c', 'user.email=sidequest@example.invalid', 'commit', '--quiet', '-am', message);
+  const boardProject = store.ensureProject(project);
+  const ticket = store.createTicket(boardProject.slug, {
+    title: 'capture binds to the tree that ran',
+    files: ['suite.js'],
+    category: 'coding.normal',
+    executorVerifyKind: 'command',
+    executorVerify: 'node suite.js',
+  });
+  const gate = (candidate: { source: string; value: string }) => {
+    const current = store.getTicket(boardProject.slug, ticket.ref);
+    return commandVerificationResult({ kind: 'command', command: 'node suite.js' }, 'node suite.js', current.verificationCaptures || [], ticket.ref, candidate, String(current.dispatchNonce || ''));
+  };
+  const cleanup = () => fs.rmSync(project, { recursive: true, force: true });
+  return { project, slug: boardProject.slug, ticket, git, commit, gate, cleanup };
+}
+
+test('SQ-76: a capture started with an uncommitted in-scope edit is recorded against the dirty tree, never as git:HEAD', async () => {
+  const fixture = inPlaceCaptureFixture('sq-76-uncommitted-', 'process.exit(0);\n');
+  try {
+    const head = fixture.git('rev-parse', 'HEAD');
+    fs.appendFileSync(path.join(fixture.project, 'suite.js'), '// uncommitted edit that runs\n');
+    const { capture, recorded } = await runCapturedVerification('node suite.js', { project: fixture.project, ticket: fixture.ticket.ref }, fixture.project);
+    assert.equal(capture.status, 'passed', capture.evidence);
+    assert.equal(recorded?.ok, true, recorded?.reason);
+    assert.equal(recorded?.capture?.candidate.source, 'git-dirty-tree');
+    assert.notDeepEqual(recorded?.capture?.candidate, { source: 'git', value: head }, 'the dirty run is not certified as HEAD');
+    assert.match(recorded?.capture?.candidate.value || '', new RegExp(`^${head}\\+[0-9a-f]{64}$`), 'the identity names the base HEAD plus the exact modifications');
+    const gated = fixture.gate({ source: 'git', value: head });
+    assert.equal(gated.result.status, 'failed_check');
+    assert.equal(gated.diagnostic?.code, 'verification_capture_required', 'the dirty-tree capture does not satisfy the gate for HEAD');
+    fs.rmSync(capture.logPath, { force: true });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('SQ-76: a capture after git checkout <rev> -- <path> does not bind to HEAD as though clean', async () => {
+  const fixture = inPlaceCaptureFixture('sq-76-checkout-path-', 'process.exit(0);\n');
+  try {
+    const green = fixture.git('rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(fixture.project, 'suite.js'), 'process.exit(1);\n');
+    fixture.commit('red candidate');
+    const red = fixture.git('rev-parse', 'HEAD');
+    // The ticket's shape: HEAD stays on the red commit while the tree runs the green revision's code.
+    fixture.git('checkout', green, '--', 'suite.js');
+    assert.equal(fixture.git('rev-parse', 'HEAD'), red, 'HEAD did not move');
+    const { capture, recorded } = await runCapturedVerification('node suite.js', { project: fixture.project, ticket: fixture.ticket.ref }, fixture.project);
+    assert.equal(capture.status, 'passed', 'the borrowed green code passes');
+    assert.equal(recorded?.ok, true, recorded?.reason);
+    assert.equal(recorded?.capture?.candidate.source, 'git-dirty-tree');
+    assert.ok(!(store.getTicket(fixture.slug, fixture.ticket.ref).verificationCaptures || []).some((entry: { candidate: { source: string; value: string } }) => entry.candidate.source === 'git' && entry.candidate.value === red), 'no capture certifies the red HEAD');
+    assert.equal(fixture.gate({ source: 'git', value: red }).diagnostic?.code, 'verification_capture_required', 'the red commit cannot submit on the borrowed green');
+    fs.rmSync(capture.logPath, { force: true });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('SQ-76: the diagnostic run is recorded and reported as evidence that can never satisfy the gate', () => {
+  const fixture = inPlaceCaptureFixture('sq-76-diagnostic-', 'process.exit(0);\n');
+  try {
+    const head = fixture.git('rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(fixture.project, 'diagnostic-probe.txt'), 'is base red?\n');
+    const result = require('node:child_process').spawnSync(process.execPath, [path.join(SIDEQUEST_DIR, 'lib', 'verify-capture.js'), '--base64', Buffer.from('node suite.js').toString('base64'), '--project', fixture.project, '--ticket', fixture.ticket.ref], { cwd: fixture.project, encoding: 'utf8', windowsHide: true });
+    assert.match(result.stdout, /^verify=passed exit=0/m, result.stdout + result.stderr);
+    assert.match(result.stdout, /^capture=\S+ candidate=git-dirty-tree:/m);
+    assert.match(result.stdout, /^capture-diagnostic: .*can never satisfy the submit gate/m);
+    assert.equal(fixture.gate({ source: 'git', value: head }).diagnostic?.code, 'verification_capture_required');
+    // Control: the same command on the clean tree is gate-satisfying, so the refusal above is the dirt.
+    fs.rmSync(path.join(fixture.project, 'diagnostic-probe.txt'));
+    const clean = require('node:child_process').spawnSync(process.execPath, [path.join(SIDEQUEST_DIR, 'lib', 'verify-capture.js'), '--base64', Buffer.from('node suite.js').toString('base64'), '--project', fixture.project, '--ticket', fixture.ticket.ref], { cwd: fixture.project, encoding: 'utf8', windowsHide: true });
+    assert.match(clean.stdout, new RegExp(`^capture=\\S+ candidate=git:${head}$`, 'm'), clean.stdout + clean.stderr);
+    assert.doesNotMatch(clean.stdout, /capture-diagnostic/);
+    assert.equal(fixture.gate({ source: 'git', value: head }).result.status, 'passed');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('SQ-76: a capture whose tracked files change while the command runs is not recorded', async () => {
+  const fixture = inPlaceCaptureFixture('sq-76-dirtied-', `require('node:fs').writeFileSync('package.json', '{}');\n`);
+  try {
+    const head = fixture.git('rev-parse', 'HEAD');
+    const { capture, recorded } = await runCapturedVerification('node suite.js', { project: fixture.project, ticket: fixture.ticket.ref }, fixture.project);
+    assert.equal(capture.status, 'passed', capture.evidence);
+    assert.equal(recorded?.ok, false);
+    assert.match(recorded?.reason || '', new RegExp(`^capture_candidate_dirtied: .*clean tree at HEAD ${head}.*Modified: package\\.json`));
+    assert.equal((store.getTicket(fixture.slug, fixture.ticket.ref).verificationCaptures || []).length, 0, 'HEAD is not certified');
+    fs.rmSync(capture.logPath, { force: true });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('SQ-76: untracked output the command writes does not spoil a clean capture', async () => {
+  const fixture = inPlaceCaptureFixture('sq-76-run-output-', `require('node:fs').writeFileSync('suite-ran', 'yes');\n`);
+  try {
+    const head = fixture.git('rev-parse', 'HEAD');
+    const { capture, recorded } = await runCapturedVerification('node suite.js', { project: fixture.project, ticket: fixture.ticket.ref }, fixture.project);
+    assert.equal(capture.status, 'passed', capture.evidence);
+    assert.equal(recorded?.ok, true, recorded?.reason);
+    assert.deepEqual(recorded?.capture?.candidate, { source: 'git', value: head });
     fs.rmSync(capture.logPath, { force: true });
   } finally {
     fixture.cleanup();
