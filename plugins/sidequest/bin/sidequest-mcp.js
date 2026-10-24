@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 "use strict";
+const { ensureLiveCwd } = require("../lib/cwd-guard.js");
+ensureLiveCwd();
 const mcp = require("../lib/mcp.js");
 const CLIENT_HEARTBEAT_INTERVAL_MILLISECONDS = 6e4;
 const CLIENT_HEARTBEAT_TIMEOUT_MILLISECONDS = 1e4;
@@ -126,6 +128,7 @@ function main() {
     return false;
   };
   const dispatchMessage = (message) => {
+    ensureLiveCwd();
     const operation = Promise.resolve(mcp.handleRequest(message, { sendNotification: writeMessage })).then(
       (response) => {
         writeMessage(response);
