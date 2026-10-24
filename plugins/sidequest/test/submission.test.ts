@@ -338,6 +338,79 @@ test('MCP submit requires a completed capture for the declared executor verifier
   }
 });
 
+// SQ-81: a green capture at A survives a later commit B only when A is B's ancestor and the
+// A..B diff touches nothing outside `.release/unreleased/`.
+async function captureThenCommit(title: string, files: Record<string, string>) {
+  cleanBranch();
+  fs.mkdirSync(path.join(PROJECT_DIR, 'test'), { recursive: true });
+  fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'scoped-surface.test.js'), '');
+  const command = 'node --test test/scoped-surface.test.js';
+  const t = addTicket(title, { executorVerify: command, files: ['README.md', 'src/'] });
+  const by = `sq-81-${t.ref}`;
+  const base = git(['rev-parse', 'HEAD']);
+  fs.writeFileSync(path.join(PROJECT_DIR, 'README.md'), `${title}\n`);
+  git(['add', 'README.md']);
+  git(['commit', '-m', `${t.ref} candidate`]);
+  const captured = git(['rev-parse', 'HEAD']);
+  pin(t, captured);
+  assert.strictEqual(store.claimTicket(slug, t.ref, by, { direct: true, reason: 'The submission fixture requires a local direct claim.' }).ok, true);
+  const capture = await runVerifyCapture(command, PROJECT_DIR);
+  assert.strictEqual(capture.status, 'passed');
+  const recorded = recordCapture({ project: PROJECT_DIR, ticket: t.ref }, capture, PROJECT_DIR);
+  assert.strictEqual(recorded.ok, true, recorded.message);
+  assert.strictEqual(recorded.capture.candidate.value, captured);
+  for (const [rawFile, body] of Object.entries(files)) {
+    const file = rawFile.replace('{ref}', t.ref);
+    fs.mkdirSync(path.dirname(path.join(PROJECT_DIR, file)), { recursive: true });
+    fs.writeFileSync(path.join(PROJECT_DIR, file), body);
+    git(['add', file]);
+  }
+  git(['commit', '-m', `${t.ref} follow-up`]);
+  const tip = git(['rev-parse', 'HEAD']);
+  pin(t, tip);
+  const submit = () => callMcp('submit', { project: PROJECT_DIR, ref: t.ref, by, commit: tip, base, worktree: PROJECT_DIR, verify: command, body: 'SQ-81 fragment carry fixture.' });
+  return { submit, capture, captured, tip };
+}
+
+test('SQ-81: MCP submit accepts a capture when only an unreleased release fragment follows it', async () => {
+  const { submit, capture, captured, tip } = await captureThenCommit('fragment only follows capture', { '.release/unreleased/{ref}.md': '---\nsidequest: patch\n---\nfixture\n' });
+  try {
+    assert.notStrictEqual(captured, tip);
+    const accepted = await submit();
+    assert.strictEqual(accepted.ok, true, accepted.message);
+  } finally {
+    fs.rmSync(capture.logPath, { force: true });
+    cleanBranch();
+  }
+});
+
+test('SQ-81: MCP submit rejects a capture followed by a release fragment and source change in one commit', async () => {
+  const { submit, capture } = await captureThenCommit('fragment plus source follows capture', {
+    '.release/unreleased/{ref}.md': '---\nsidequest: patch\n---\nfixture\n',
+    'src/changed.js': 'module.exports = 1;\n',
+  });
+  try {
+    const refused = await submit();
+    assert.strictEqual(refused.ok, false);
+    assert.strictEqual(refused.reason, 'verification_capture_required');
+  } finally {
+    fs.rmSync(capture.logPath, { force: true });
+    cleanBranch();
+  }
+});
+
+test('SQ-81: MCP submit rejects a capture followed only by a source change', async () => {
+  const { submit, capture } = await captureThenCommit('source only follows capture', { 'src/changed.js': 'module.exports = 2;\n' });
+  try {
+    const refused = await submit();
+    assert.strictEqual(refused.ok, false);
+    assert.strictEqual(refused.reason, 'verification_capture_required');
+  } finally {
+    fs.rmSync(capture.logPath, { force: true });
+    cleanBranch();
+  }
+});
+
 test('SQ-179: an orchestrator capture waiver admits a load-only failed capture; self-authored and mis-signed waivers stay refused', async () => {
   const command = 'node -e "process.exit(1)"';
   const t = addTicket('load-only capture failure', { executorVerify: command, files: ['README.md'] });

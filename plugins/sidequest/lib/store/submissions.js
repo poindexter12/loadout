@@ -1118,6 +1118,33 @@ ${verify.outputTail}` : null
       throw error;
     }
   }
+  const RELEASE_FRAGMENT_DIR = ".release/unreleased/";
+  function releaseFragmentOnlyAncestors(repo, captures, submitted) {
+    const target = String(submitted || "").trim().toLowerCase();
+    if (!repo || !SUBMISSION_COMMIT_RE.test(target)) return [];
+    const carried = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const capture of captures) {
+      if (capture?.candidate?.source !== "git") continue;
+      const value = String(capture.candidate.value || "").trim().toLowerCase();
+      if (!SUBMISSION_COMMIT_RE.test(value) || value === target || seen.has(value)) continue;
+      seen.add(value);
+      try {
+        if (!isAncestorCommit(repo, value, target)) continue;
+        const changed = integrationGit(repo, ["diff", "--name-only", "--no-renames", "-z", value, target]).split("\0").filter(Boolean);
+        if (changed.length && changed.every((file) => file.startsWith(RELEASE_FRAGMENT_DIR) && file.length > RELEASE_FRAGMENT_DIR.length)) carried.push(value);
+      } catch (_) {
+        continue;
+      }
+    }
+    return carried;
+  }
+  function captureCarryRepo(slug, opts) {
+    const worktree = String(opts?.worktree || "").trim();
+    if (worktree && path.isAbsolute(worktree) && fs.existsSync(worktree)) return worktree;
+    const projectPath = String(readMeta(slug)?.path || "").trim();
+    return projectPath && fs.existsSync(projectPath) ? projectPath : null;
+  }
   function reviewedCandidateDescendant(repo, ticket, requestedInteraction) {
     const interaction = String(requestedInteraction || "").trim();
     if (!interaction || !SUBMISSION_COMMIT_RE.test(interaction)) return { applicable: false };
@@ -2347,8 +2374,12 @@ ${verify.outputTail}` : null
       })
     });
   }
-  function submissionVerificationResult(ticket, sourceRevision, verify, candidateCommit, by) {
+  function submissionVerificationResult(ticket, sourceRevision, verify, candidateCommit, by, repo) {
     const requirement = pinnedVerificationRequirement(ticket);
+    const captureOptions = () => ({
+      ...captureWaiverOptions(ticket, by),
+      carriedCandidates: releaseFragmentOnlyAncestors(repo || null, recordedVerificationCaptures(ticket), String(candidateCommit || ""))
+    });
     const evidence = String(verify || "").trim();
     if (requirement.kind === "attestation" || sourceRevision != null) {
       const artifact = sourceRevision ? sourceRevision.value : requirement.artifact;
@@ -2376,7 +2407,7 @@ ${verify.outputTail}` : null
       return commandVerificationResult(requirement, evidence, recordedVerificationCaptures(ticket), ticket.ref, {
         source: "git",
         value: String(candidateCommit || "").trim().toLowerCase()
-      }, String(ticket.dispatchNonce || ""), captureWaiverOptions(ticket, by));
+      }, String(ticket.dispatchNonce || ""), captureOptions());
     }
     if (requirement.command) {
       const error2 = verifyCommandError(requirement.command);
@@ -2390,7 +2421,7 @@ ${verify.outputTail}` : null
       return commandVerificationResult(requirement, evidence, recordedVerificationCaptures(ticket), ticket.ref, {
         source: "git",
         value: String(candidateCommit || "").trim().toLowerCase()
-      }, String(ticket.dispatchNonce || ""), captureWaiverOptions(ticket, by));
+      }, String(ticket.dispatchNonce || ""), captureOptions());
     }
     if (requirement.kind === "custom" && requirement.evidenceContract === "legacy project verifier was not recorded" && !evidence) {
       return { result: { kind: "custom", status: "passed", evidence: requirement.evidenceContract }, expectedEvidence: null };
@@ -2403,7 +2434,7 @@ ${verify.outputTail}` : null
     const adapterFacts = opts.admissionFacts || {};
     const sourceRevisionFacts = sourceRevision && isSourceRevisionAdapterFacts(opts.admissionFacts) ? opts.admissionFacts : null;
     const sourceRevisionResolution = sourceRevisionFacts?.baseline || null;
-    const verification = withExpectedCommandDetail(submissionVerificationResult(ticket, sourceRevision, verify, opts.commit, by));
+    const verification = withExpectedCommandDetail(submissionVerificationResult(ticket, sourceRevision, verify, opts.commit, by, captureCarryRepo(slug, opts)));
     const completion = sourceRevision ? { ok: true } : completionTreeCheck(slug, ticket, { explicitNoOp: range?.noOp === true });
     const admitted = adapterFacts.admittedScope || executionScope(slug, ticket);
     const scope = adapterFacts.scope || commitScope.ticketCommitScope(admitted, ticket.files, ticket.ref);

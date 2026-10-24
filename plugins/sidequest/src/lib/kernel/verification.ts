@@ -187,7 +187,11 @@ const CAPTURE_WAIVER_REASON_MIN = 20;
 const CAPTURE_WAIVER_LINE = /^\[sidequest:capture-waiver\]\s+capture=(\S+)\s+signature=(\S+)\s+authority=([^;]+);\s*(.*)$/i;
 
 export type CaptureWaiverComment = Readonly<{ by?: unknown; body?: unknown; id?: unknown }>;
-export type CaptureWaiverOptions = Readonly<{ comments?: readonly CaptureWaiverComment[]; excludedAuthors?: readonly string[] }>;
+// SQ-81: `carriedCandidates` names earlier candidates whose capture the submitted candidate
+// inherits. The caller (store/submissions.ts) proves each one is an ancestor whose diff to the
+// submitted candidate touches only `.release/unreleased/`, so the kernel stays git-free and
+// widens candidate equality to exactly those proven commits, never to a path pattern.
+export type CaptureWaiverOptions = Readonly<{ comments?: readonly CaptureWaiverComment[]; excludedAuthors?: readonly string[]; carriedCandidates?: readonly string[] }>;
 type CaptureWaiverMarker = Readonly<{ captureId: string; signature: string; authority: string; reason: string; by: string }>;
 
 export function captureFailureSignature(capture: Readonly<{ status: string; exitCode?: number | null }>): string {
@@ -373,10 +377,13 @@ export function commandVerificationResult(requirement: VerificationRequirement, 
       diagnostic: Object.freeze({ code: 'executor_verify_mismatch', message, retryable: true }),
     });
   }
+  const carried = new Set((waiverOptions.carriedCandidates || []).map((value) => String(value || '').trim().toLowerCase()).filter(Boolean));
+  const sameCandidate = (capture: CompletedVerificationCapture) => capture.candidate.source === candidate.source
+    && (capture.candidate.value === candidate.value
+      || (candidate.source === 'git' && carried.has(String(capture.candidate.value || '').toLowerCase())));
   const sameIdentity = (capture: CompletedVerificationCapture) => capture.ticket === ticket
     && capture.command === command
-    && capture.candidate.source === candidate.source
-    && capture.candidate.value === candidate.value
+    && sameCandidate(capture)
     && capture.dispatchNonce === dispatchNonce;
   const completedCapture = captures.find((capture) => sameIdentity(capture) && capture.status === 'passed');
   if (!completedCapture) {
@@ -415,7 +422,7 @@ export function commandVerificationResult(requirement: VerificationRequirement, 
         });
       }
     }
-    const message = `No completed passed verification capture exists for ${ticket}, dispatch attempt ${dispatchNonce || '<none>'}, ${candidate.source}:${candidate.value}, and declared command ${JSON.stringify(command)}. Run ${JSON.stringify(command)} through the dispatched verify-capture wrapper again after finalizing that candidate, then resubmit.${verifyCaptureRecoveryGuidance(command, ticket, project)}${captureWaiverGuidance(ticket, eligible, rejected)}`;
+    const message = `No completed passed verification capture exists for ${ticket}, dispatch attempt ${dispatchNonce || '<none>'}, ${candidate.source}:${candidate.value}, and declared command ${JSON.stringify(command)}. Run ${JSON.stringify(command)} through the dispatched verify-capture wrapper again after finalizing that candidate, then resubmit. An earlier capture carries forward only when that capture's commit is an ancestor of the candidate and the diff between them touches nothing outside .release/unreleased/, so commit the release fragment as its own commit after a green capture rather than with other changes.${verifyCaptureRecoveryGuidance(command, ticket, project)}${captureWaiverGuidance(ticket, eligible, rejected)}`;
     return Object.freeze({
       result: Object.freeze({ kind: requirement.kind, status: 'failed_check' as const, evidence: message, command, failureIdentities: Object.freeze(['verification:capture-required']) }),
       expectedEvidence: null,

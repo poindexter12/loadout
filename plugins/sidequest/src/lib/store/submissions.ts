@@ -1354,6 +1354,41 @@ function isAncestorCommit(repo: string, ancestor: string, descendant: string) {
   }
 }
 
+// SQ-81: a release fragment written after a green capture moves the tip, and the capture is
+// bound to the commit it ran on. The carry is checked, not trusted: an earlier captured
+// candidate is inherited only when it is an ancestor of the submitted candidate AND every
+// path in their diff sits under `.release/unreleased/`. A fragment plus any other path in the
+// same range (renames counted as both sides) carries nothing. Any git failure carries nothing.
+const RELEASE_FRAGMENT_DIR = '.release/unreleased/';
+
+function releaseFragmentOnlyAncestors(repo: string | null, captures: any[], submitted: string): string[] {
+  const target = String(submitted || '').trim().toLowerCase();
+  if (!repo || !SUBMISSION_COMMIT_RE.test(target)) return [];
+  const carried: string[] = [];
+  const seen = new Set<string>();
+  for (const capture of captures) {
+    if (capture?.candidate?.source !== 'git') continue;
+    const value = String(capture.candidate.value || '').trim().toLowerCase();
+    if (!SUBMISSION_COMMIT_RE.test(value) || value === target || seen.has(value)) continue;
+    seen.add(value);
+    try {
+      if (!isAncestorCommit(repo, value, target)) continue;
+      const changed = integrationGit(repo, ['diff', '--name-only', '--no-renames', '-z', value, target]).split('\0').filter(Boolean);
+      if (changed.length && changed.every((file) => file.startsWith(RELEASE_FRAGMENT_DIR) && file.length > RELEASE_FRAGMENT_DIR.length)) carried.push(value);
+    } catch (_) {
+      continue;
+    }
+  }
+  return carried;
+}
+
+function captureCarryRepo(slug: any, opts: any): string | null {
+  const worktree = String(opts?.worktree || '').trim();
+  if (worktree && path.isAbsolute(worktree) && fs.existsSync(worktree)) return worktree;
+  const projectPath = String(readMeta(slug)?.path || '').trim();
+  return projectPath && fs.existsSync(projectPath) ? projectPath : null;
+}
+
 // A reviewed candidate descendant is a commit the reviewer made ON TOP of the
 // pinned candidate (for example a one-line fix found in review), touching only
 // submitted paths. It is typically delivered as a squash of candidate plus fix,
@@ -2766,8 +2801,12 @@ function withExpectedCommandDetail(verification: any) {
   });
 }
 
-function submissionVerificationResult(ticket: any, sourceRevision: any, verify: any, candidateCommit?: any, by?: any) {
+function submissionVerificationResult(ticket: any, sourceRevision: any, verify: any, candidateCommit?: any, by?: any, repo?: string | null) {
   const requirement = pinnedVerificationRequirement(ticket);
+  const captureOptions = () => ({
+    ...captureWaiverOptions(ticket, by),
+    carriedCandidates: releaseFragmentOnlyAncestors(repo || null, recordedVerificationCaptures(ticket), String(candidateCommit || '')),
+  });
   const evidence = String(verify || '').trim();
   if (requirement.kind === 'attestation' || sourceRevision != null) {
     const artifact = sourceRevision ? sourceRevision.value : requirement.artifact;
@@ -2799,7 +2838,7 @@ function submissionVerificationResult(ticket: any, sourceRevision: any, verify: 
     return commandVerificationResult(requirement, evidence, recordedVerificationCaptures(ticket), ticket.ref, {
       source: 'git',
       value: String(candidateCommit || '').trim().toLowerCase(),
-    }, String(ticket.dispatchNonce || ''), captureWaiverOptions(ticket, by));
+    }, String(ticket.dispatchNonce || ''), captureOptions());
   }
   if (requirement.command) {
     const error = verifyCommandError(requirement.command);
@@ -2813,7 +2852,7 @@ function submissionVerificationResult(ticket: any, sourceRevision: any, verify: 
     return commandVerificationResult(requirement, evidence, recordedVerificationCaptures(ticket), ticket.ref, {
       source: 'git',
       value: String(candidateCommit || '').trim().toLowerCase(),
-    }, String(ticket.dispatchNonce || ''), captureWaiverOptions(ticket, by));
+    }, String(ticket.dispatchNonce || ''), captureOptions());
   }
   if (requirement.kind === 'custom' && requirement.evidenceContract === 'legacy project verifier was not recorded' && !evidence) {
     return { result: { kind: 'custom', status: 'passed', evidence: requirement.evidenceContract }, expectedEvidence: null };
@@ -2831,7 +2870,7 @@ function submissionAdmissionDecision(slug: any, ticket: any, by: string, opts: a
     ? opts.admissionFacts
     : null;
   const sourceRevisionResolution = sourceRevisionFacts?.baseline || null;
-  const verification = withExpectedCommandDetail(submissionVerificationResult(ticket, sourceRevision, verify, opts.commit, by));
+  const verification = withExpectedCommandDetail(submissionVerificationResult(ticket, sourceRevision, verify, opts.commit, by, captureCarryRepo(slug, opts)));
   const completion = sourceRevision
     ? { ok: true }
     : completionTreeCheck(slug, ticket, { explicitNoOp: range?.noOp === true });
