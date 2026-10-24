@@ -27,11 +27,10 @@ const {
   codexContextWindow, codexContextWindowModelId, mkdirs,
   resolveGatewayModelPolicy, resolveNewestInstalledCliPath,
 } = require('./runtime.js');
-// Catalog row/readiness shape is shared with commands.js — see catalog.js for
-// why these live there and why the write/read shells below do not.
+// Catalog row/readiness shape is shared with commands.js — see catalog.js. The
+// catalog write/read shells live only in commands.js (SQ-35).
 const {
-  CATALOG_PATH, CATALOG_SCHEMA_VERSION, CATALOG_STALE_MS, buildCatalog, catalogReadiness, gatewayModel,
-  getGrokReadiness, modelCatalogDetails, readJsonFile,
+  catalogReadiness, gatewayModel, getGrokReadiness, readJsonFile,
 } = require('./catalog.js');
 
 // Both the boot catalog and refreshModels() gate their Grok rows on this, and
@@ -614,96 +613,6 @@ function dispatchRouteMarkersFromMessages(messages) {
 
 function dispatchRouteFromMessages(messages) {
   return onlyRoute(dispatchRouteMarkersFromMessages(messages));
-}
-
-// ------------------------------------------------------------ model catalog
-//
-// sidequest (same marketplace) auto-discovers Codex models by reading this
-// file: $CLAUDE_CONFIG_DIR/model-gateway/catalog.json. Shape is a frozen contract
-// (see plugins/sidequest/lib/discovery.js) — don't change it casually.
-
-function catalogSchemaVersion(catalog) {
-  if (!catalog || typeof catalog !== 'object') return null;
-  const version = catalog.schemaVersion ?? catalog.schema;
-  return Number.isInteger(version) && version > 0 ? version : null;
-}
-
-function catalogModelIds(catalog) {
-  return new Set(
-    Array.isArray(catalog?.models)
-      ? catalog.models.filter((model) => typeof model?.id === 'string').map((model) => model.id)
-      : [],
-  );
-}
-
-function mergeSubsetCatalog(existing, catalog) {
-  if (catalogSchemaVersion(existing) !== CATALOG_SCHEMA_VERSION || !Array.isArray(existing.models)) return catalog;
-
-  const existingIds = catalogModelIds(existing);
-  const fetchedIds = catalogModelIds(catalog);
-  const isStrictSubset = fetchedIds.size < existingIds.size && [...fetchedIds].every((id) => existingIds.has(id));
-  if (!isStrictSubset) return catalog;
-
-  // A removal-only response is indistinguishable from a stale writer. Adding a model makes the response authoritative, so intentional replacement can still remove entries.
-  const preserved = existing.models.filter((model) => typeof model?.id === 'string' && !fetchedIds.has(model.id));
-  const models = [...catalog.models, ...preserved];
-  const providers = { ...catalog.providers };
-  for (const model of preserved) {
-    if (typeof model.provider === 'string' && !providers[model.provider] && existing.providers?.[model.provider]) {
-      providers[model.provider] = existing.providers[model.provider];
-    }
-  }
-  log(`catalog: preserved ${preserved.map((model) => model.id).join(', ')} from a subset write`);
-  return { ...catalog, models, providers, codexReadiness: providers.codex ?? null };
-}
-
-function writeCatalogFile(catalogPath, catalog) {
-  const existing = readJsonFile(catalogPath);
-  const storedVersion = catalogSchemaVersion(existing);
-  if (storedVersion != null && storedVersion > CATALOG_SCHEMA_VERSION) {
-    throw new Error(`refusing to overwrite catalog schema ${storedVersion} at ${catalogPath}; this gateway supports schema ${CATALOG_SCHEMA_VERSION}, upgrade required`);
-  }
-  const nextCatalog = mergeSubsetCatalog(existing, catalog);
-  writeFileAtomically(catalogPath, JSON.stringify(nextCatalog, null, 2) + '\n');
-  return nextCatalog;
-}
-
-async function fetchShimModelIds() {
-  // the shim's own refreshModels() can still be mid-flight right after
-  // /healthz starts answering; retry once, short, before giving up
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const r = await fetchUrl(`http://127.0.0.1:${SHIM_PORT}/v1/models`, { timeout: 3000 });
-    if (r.status !== 200) throw new Error(`shim /v1/models returned ${r.status}`);
-    const ids = (JSON.parse(r.body.toString()).data || []).map((m) => m.id).filter((id) => modelCatalogDetails(id) != null);
-    if (ids.length || attempt === 1) return ids;
-    await new Promise((res) => setTimeout(res, 300));
-  }
-  return [];
-}
-
-async function writeCatalog() {
-  const ids = await fetchShimModelIds();
-  if (!ids.length) return null;
-  const readiness = await getCodexReadiness();
-  const catalog = buildCatalog(ids, readiness);
-  mkdirs();
-  return writeCatalogFile(CATALOG_PATH, catalog);
-}
-
-function readCatalog() {
-  return readJsonFile(CATALOG_PATH);
-}
-
-async function catalogCommand() {
-  const jsonOut = flag('--json');
-  let catalog = readCatalog();
-  const stale = !catalog || (Date.now() - Date.parse(catalog.updatedAt || 0) > CATALOG_STALE_MS);
-  if (stale && (await shimHealthy())) {
-    catalog = (await writeCatalog().catch(() => null)) || catalog;
-  }
-  if (!catalog) die('no catalog available yet (run setup or start first)');
-  if (jsonOut) process.stdout.write(JSON.stringify(catalog) + '\n');
-  else log(JSON.stringify(catalog, null, 2));
 }
 
 // dns.resolve4()/resolve6() query DNS directly and, unlike dns.lookup() (what
@@ -2423,4 +2332,8 @@ module.exports = {
   createAuthStatusCache, createHostsBypassResolver, createRequestRouteLogWriter, effectiveCodexSentryPolicy, gatewayModel, getCodexReadiness, isAuthedAsync, runWorker,
   probeUnixSocketLive, reclaimStaleUnixSocket,
   codexRateLimitBody, codexRateLimitMessage, upstreamConnectErrorMessage,
+  // Shared with lib/commands.js, which imports these instead of keeping copies (SQ-35).
+  DispatchSessionRouteCache, dispatchModelFromRawBody, dispatchRouteFromMessages, fetchShimHealth,
+  servingShimVersion, readUpstreamBlocked, setUpstreamBlocked, clearUpstreamBlocked, noteCodexRequestSuccess,
+  readinessState, hasOpenAiRejectionEvidence, noteCodexUpstreamRejection,
 };
