@@ -37,5 +37,32 @@ Sidequest threads with the GitHub link back. Preserve reporter text unless you a
 it, and do not strip diagnostic error text or hand-edit historical changelogs or generated release
 history.
 
+## Automatic issue mirroring
+
+Hand-linking stays the rule for issues that already exist. The mirror handles the other direction,
+filing a GitHub issue for board tickets a user would care about. It is off unless the project's
+`board_config` carries an `issueMirror` with `enabled: true` and a filter of `labels`, `categories`,
+or `stories`. A ticket mirrors when it matches any of them, and review, audit, research, lookup,
+exploration, planning, and grooming categories never match unless that exact category is listed.
+
+What this means when you file a ticket: **set `labels` on `add`/`update` for work a user would see.**
+Use `bug` for a defect in shipped behavior and `feature` for new user-visible capability. Leave both
+off for internal fix-ups, refactors, reviews, spikes, and planning. The mirror has no way to infer
+this, so a defect filed without a `bug` label is a defect that never reaches the issue tracker, and a
+`feature` label on an internal cleanup publishes an issue nobody wanted.
+
+Mirroring creates the issue and records it as an ordinary external link, the same record `issue_link`
+writes. Everything after that is the linked-issue lifecycle already described above, so there is no
+second sync path, and a ticket already linked by hand is left alone. Reruns never duplicate: the
+stored link is the key.
+
+The issue is a sanitized rendering, never a copy. Only the ticket title and description are
+published, and both are scrubbed against the authoring rule above before they leave the machine. A
+rendering that still trips the detector is skipped with a warning rather than published, so a
+mirrored issue is never a reason to relax that rule when you later comment on it by hand.
+
+Planning costs no GitHub call: `audit` reports `would create issue for <ref> ...` from board state,
+and only `audit --apply` creates anything.
+
 Short version: **Jira says *what* to build; sidequest is *how you execute it* here.** One doesn't
 substitute for the other.

@@ -150,6 +150,54 @@ function normalizeDeliveryChannel(value?: any) {
   return normalized;
 }
 
+// Filtered GitHub issue mirror (SQ-98). Off unless a board turns it on, and a
+// board that turns it on still has to name the labels, categories or stories
+// that qualify: an empty filter mirrors nothing rather than everything.
+const ISSUE_MIRROR_DEFAULT_LABEL_MAP = Object.freeze({ bug: 'bug', feature: 'enhancement' });
+const ISSUE_MIRROR_LIST_MAX = 50;
+
+function issueMirrorList(value: any, field: string) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error(`issueMirror.${field} must be an array of strings.`);
+  const seen = new Set();
+  const normalized: any[] = [];
+  for (const entry of value) {
+    const item = String(entry == null ? '' : entry).trim().toLowerCase().slice(0, 80);
+    if (!item || seen.has(item)) continue;
+    seen.add(item);
+    normalized.push(item);
+  }
+  if (normalized.length > ISSUE_MIRROR_LIST_MAX) throw new Error(`issueMirror.${field} accepts at most ${ISSUE_MIRROR_LIST_MAX} entries.`);
+  return normalized;
+}
+
+function normalizeIssueMirror(value?: any) {
+  if (value == null) return { enabled: false, labels: [], categories: [], stories: [], labelMap: Object.assign({}, ISSUE_MIRROR_DEFAULT_LABEL_MAP) };
+  if (typeof value !== 'object' || Array.isArray(value)) throw new Error('issueMirror must be an object: { enabled, labels, categories, stories, labelMap }.');
+  const labelMap: Record<string, string> = Object.assign({}, ISSUE_MIRROR_DEFAULT_LABEL_MAP);
+  if (value.labelMap != null) {
+    if (typeof value.labelMap !== 'object' || Array.isArray(value.labelMap)) throw new Error('issueMirror.labelMap must map a ticket label to a GitHub label.');
+    for (const [key, mapped] of Object.entries(value.labelMap)) {
+      const ticketLabel = String(key || '').trim().toLowerCase();
+      const githubLabel = String(mapped == null ? '' : mapped).trim();
+      if (!ticketLabel) continue;
+      if (!githubLabel) delete labelMap[ticketLabel];
+      else labelMap[ticketLabel] = githubLabel.slice(0, 80);
+    }
+  }
+  const normalized = {
+    enabled: value.enabled === true,
+    labels: issueMirrorList(value.labels, 'labels'),
+    categories: issueMirrorList(value.categories, 'categories'),
+    stories: issueMirrorList(value.stories, 'stories'),
+    labelMap,
+  };
+  if (normalized.enabled && !normalized.labels.length && !normalized.categories.length && !normalized.stories.length) {
+    throw new Error('issueMirror.enabled needs at least one of labels, categories, or stories; an empty filter would mirror nothing.');
+  }
+  return normalized;
+}
+
 // The one resolver later tickets read: { mode, remote, target } with defaults
 // local / origin / the board's integrationBranch. Accepts a board slug, the
 // stored project meta, or a boardConfig result. Returns null for an unknown
@@ -357,6 +405,7 @@ function boardConfig(slug?: any) {
     integrationBranch: normalizeIntegrationBranch(meta.integrationBranch),
     delivery: normalizeDeliveryMode(meta.delivery),
     deliveryChannel: resolveDeliveryConfig(meta),
+    issueMirror: normalizeIssueMirror(meta.issueMirror),
     integrationVerifyTimeoutMs: normalizeIntegrationVerifyTimeoutMs(meta.integrationVerifyTimeoutMs),
     integrationVerifyTimeoutMaxMs: MAX_INTEGRATION_VERIFY_TIMEOUT_MS,
     worktreeIsolation: normalizeWorktreeIsolation(meta.worktreeIsolation),
@@ -415,6 +464,11 @@ function setBoardConfig(slug?: any, patch?: any) {
       if (patch.deliveryChannel == null) delete meta.deliveryChannel;
       else meta.deliveryChannel = normalizeDeliveryChannel(patch.deliveryChannel);
     }
+    if (Object.prototype.hasOwnProperty.call(patch, 'issueMirror')) {
+      // Replaces the whole filter; null clears it back to off with the default label map.
+      if (patch.issueMirror == null) delete meta.issueMirror;
+      else meta.issueMirror = normalizeIssueMirror(patch.issueMirror);
+    }
     if (Object.prototype.hasOwnProperty.call(patch, 'integrationVerifyTimeoutMs')) {
       meta.integrationVerifyTimeoutMs = normalizeIntegrationVerifyTimeoutMs(patch.integrationVerifyTimeoutMs);
     }
@@ -466,7 +520,7 @@ function effectiveScope(slug?: any, filesOrTicket?: any) {
 }
 
 
-  return { defaultProjectName, normalizeAlwaysInScope, normalizeReadOnlyDeniedTools, normalizeGeneratedPairPath, normalizeGeneratedPairs, generatedPathFor, trackedGeneratedPaths, derivedGeneratedPairs, defaultAlwaysInScope, normalizeDeliveryMode, normalizeDeliveryChannel, resolveDeliveryConfig, normalizeIntegrationMode, normalizeIntegrationBranch, normalizeWorktreeIsolation, normalizeWorktreeBase, normalizeNotIntegratedSalvageAgeHours, normalizeWorktreeRecoveryRetentionAgeHours, normalizeWorktreeRecoveryRetentionMaxPerAgent, normalizeAutoApproveTestScope, normalizeAutoApproveScope, normalizeWorktreeSetup, normalizeWorktreeDependencyPaths, normalizeIntegrationVerifyTimeoutMs, hasOriginRemote, integrationBranchExists, integrationTarget, integrationTargetCommit, normalizeBoardName, boardConfig, setBoardConfig, effectiveScope };
+  return { defaultProjectName, normalizeAlwaysInScope, normalizeReadOnlyDeniedTools, normalizeGeneratedPairPath, normalizeGeneratedPairs, generatedPathFor, trackedGeneratedPaths, derivedGeneratedPairs, defaultAlwaysInScope, normalizeDeliveryMode, normalizeDeliveryChannel, resolveDeliveryConfig, normalizeIssueMirror, normalizeIntegrationMode, normalizeIntegrationBranch, normalizeWorktreeIsolation, normalizeWorktreeBase, normalizeNotIntegratedSalvageAgeHours, normalizeWorktreeRecoveryRetentionAgeHours, normalizeWorktreeRecoveryRetentionMaxPerAgent, normalizeAutoApproveTestScope, normalizeAutoApproveScope, normalizeWorktreeSetup, normalizeWorktreeDependencyPaths, normalizeIntegrationVerifyTimeoutMs, hasOriginRemote, integrationBranchExists, integrationTarget, integrationTargetCommit, normalizeBoardName, boardConfig, setBoardConfig, effectiveScope };
 }
 
 module.exports = { createConfig };

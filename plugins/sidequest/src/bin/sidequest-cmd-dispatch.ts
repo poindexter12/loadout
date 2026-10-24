@@ -287,6 +287,16 @@ async function cmdBoardConfig(opts: any) {
   if (opts['worktree-dependency-paths'] != null) {
     try { patch.worktreeDependencyPaths = JSON.parse(opts['worktree-dependency-paths']); } catch (_: any) { fail('board-config: --worktree-dependency-paths must be a JSON array of { path, mode } entries.'); }
   }
+  // The mirror filter is a whole record, like deliveryChannel: "off" clears it,
+  // and anything else is the complete filter so turning one knob cannot leave a
+  // half-written filter publishing tickets nobody chose.
+  if (opts['issue-mirror'] != null) {
+    const value = String(opts['issue-mirror']).trim();
+    if (value === 'off' || value === 'none') patch.issueMirror = null;
+    else {
+      try { patch.issueMirror = JSON.parse(value); } catch (_: any) { fail('board-config: --issue-mirror must be "off" or a JSON object { enabled, labels, categories, stories, labelMap }.'); }
+    }
+  }
   const result = Object.keys(patch).length
     ? store.setBoardConfig(slug, patch)
     : { ok: true, config: store.boardConfig(slug) };
@@ -303,6 +313,8 @@ async function cmdBoardConfig(opts: any) {
   console.log(`integration branch: ${payload.integrationBranch}`);
   console.log(`delivery: ${payload.delivery}`);
   console.log(`delivery channel: ${payload.deliveryChannel.mode} (remote ${payload.deliveryChannel.remote}, base ${payload.deliveryChannel.target})`);
+  const mirror = payload.issueMirror || { enabled: false };
+  console.log(`issue mirror: ${mirror.enabled ? `on (labels ${mirror.labels.join(', ') || 'none'}; categories ${mirror.categories.join(', ') || 'none'}; stories ${mirror.stories.join(', ') || 'none'})` : 'off'}`);
   console.log(`integration verify timeout: ${payload.integrationVerifyTimeoutMs}ms`);
   console.log(`worktree isolation: ${payload.worktreeIsolation ? 'enabled' : 'disabled'}`);
   console.log(`worktree base: ${payload.worktreeBase}`);

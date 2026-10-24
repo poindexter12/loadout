@@ -440,6 +440,17 @@ const tools = [
           },
           required: ["mode"]
         },
+        issueMirror: {
+          type: ["object", "null"],
+          description: "Opt-in mirror of matching tickets to GitHub issues on the origin repo, sanitized and filtered. Off unless enabled is true and at least one of labels/categories/stories is set. Review/audit/research categories need naming in categories; a label alone never matches them. A write replaces the whole filter; null clears it.",
+          properties: {
+            enabled: { type: "boolean" },
+            labels: { type: "array", items: { type: "string" }, description: 'Ticket labels that qualify, e.g. ["bug","feature"].' },
+            categories: { type: "array", items: { type: "string" } },
+            stories: { type: "array", items: { type: "string" } },
+            labelMap: { type: "object", description: 'Ticket label to GitHub label. Defaults bug->bug, feature->enhancement; "" drops one.' }
+          }
+        },
         integrationVerifyTimeoutMs: { type: "integer" },
         worktreeIsolation: { type: "boolean", description: "false runs executors in the shared checkout (default true)." },
         worktreeBase: { type: "string", enum: ["auto", "origin-main", "local-main"], description: "Isolated-worktree base." },
@@ -474,6 +485,7 @@ const tools = [
       if (args.integrationBranch != null) patch.integrationBranch = args.integrationBranch;
       if (args.delivery != null) patch.delivery = args.delivery;
       if (args.deliveryChannel !== void 0) patch.deliveryChannel = args.deliveryChannel;
+      if (args.issueMirror !== void 0) patch.issueMirror = args.issueMirror;
       if (args.integrationVerifyTimeoutMs != null) patch.integrationVerifyTimeoutMs = args.integrationVerifyTimeoutMs;
       if (args.worktreeIsolation !== void 0) patch.worktreeIsolation = args.worktreeIsolation;
       if (args.worktreeBase !== void 0) patch.worktreeBase = args.worktreeBase;
