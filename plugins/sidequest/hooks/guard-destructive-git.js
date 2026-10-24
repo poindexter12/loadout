@@ -412,10 +412,14 @@ function defaultBranch(repo, remote) {
 function currentBranch(repo) {
   return gitOutput(repo, ["branch", "--show-current"]);
 }
+var upstreams = /* @__PURE__ */ new Map();
 function upstream(repo) {
+  if (upstreams.has(repo)) return upstreams.get(repo) ?? null;
   const ref = gitOutput(repo, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
   const slash = ref.indexOf("/");
-  return slash > 0 ? { remote: ref.slice(0, slash), branch: ref.slice(slash + 1) } : null;
+  const found = slash > 0 ? { remote: ref.slice(0, slash), branch: ref.slice(slash + 1) } : null;
+  upstreams.set(repo, found);
+  return found;
 }
 function isRemote(repo, name) {
   return !!gitOutput(repo, ["remote", "get-url", name]);
@@ -489,14 +493,16 @@ function main() {
   const input = readStdin();
   if (!input || !["Bash", "PowerShell"].includes(stringField(input, "tool_name"))) return;
   const command = withoutHereDocBodies(commandText(input));
-  const repo = repoRoot(targetRepo(command, stringField(input, "cwd")));
+  if (!/\bgit\b/i.test(command)) return;
   const publication = publicationAction(command, stringField(input, "cwd"));
   if (publication && !publish.publishLockOwnedBySession(publication.repo, stringField(input, "session_id"))) {
     writeDeny("PreToolUse", publicationRefusal(publication.label, publication.repo));
     return;
   }
   const label = destructive(command);
-  if (!label || !sharedCheckout(repo)) return;
+  if (!label) return;
+  const repo = repoRoot(targetRepo(command, stringField(input, "cwd")));
+  if (!sharedCheckout(repo)) return;
   const dirty = dirtyPaths(repo);
   if (dirty.length) writeDeny("PreToolUse", destructiveRefusal(label, repo, dirty));
 }

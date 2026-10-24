@@ -2619,6 +2619,42 @@ test('fail-closed guard: force-exec-bypass denies an executor call it cannot che
   assertBoardContentionDeny(result, 'force-exec-bypass');
 });
 
+test('fail-closed guard: guard-shared-tree-commit denies an executor raw commit it cannot check while the board lock is held', async () => {
+  // SQ-370: this guard reads the board to find the executor's shared-tree claim. Before the fix its catch swallowed
+  // the lock error and the raw commit went through unchecked.
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-fail-closed-shared-commit-'));
+  gitFixture(['init', '-q', '-b', 'main'], repo);
+  const result = await runGuardUnderBoardLock(
+    GUARD_SHARED_TREE_COMMIT,
+    executorPayload('Bash', { command: 'git commit -m unchecked' }, repo),
+  );
+  assertBoardContentionDeny(result, 'guard-shared-tree-commit');
+});
+
+test('guard-destructive-git spawns no git for a command that cannot destroy work or publish (SQ-370)', async () => {
+  // Every Bash call runs this guard under the harness's 10s hook timeout, and a guard killed there decides nothing.
+  // A slow git must therefore never be on the path of a plain command: the fake git records each invocation.
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-370-slow-git-'));
+  const marker = path.join(bin, 'git-invoked');
+  const fakeGit = path.join(bin, 'git');
+  fs.writeFileSync(fakeGit, `#!/bin/sh\necho "$*" >> "${marker}"\nsleep 3\nexit 1\n`, { mode: 0o755 });
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-370-plain-cwd-'));
+  for (const command of ['ls', 'git log --oneline -1', 'git status --short']) {
+    const started = Date.now();
+    const result = await runHookProcessForBudget(
+      path.join(HOOKS, 'guard-destructive-git.js'),
+      { hook_event_name: 'PreToolUse', session_id: `sq-370-${crypto.randomUUID()}`, tool_name: 'Bash', tool_input: { command }, cwd },
+      { PATH: `${bin}${path.delimiter}${process.env.PATH || ''}` },
+    );
+    const elapsedMs = Date.now() - started;
+    assert.equal(result.status, 0, `${command}: ${result.stderr}`);
+    assert.equal(result.stdout.trim(), '', `${command} must be allowed silently: ${result.stdout}`);
+    const invoked = fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8') : '';
+    assert.equal(invoked, '', `${command} must not spawn git, but the guard ran: ${invoked}`);
+    assert.ok(elapsedMs < 1000, `${command} took ${elapsedMs}ms; the guard must answer a non-git-write command without waiting on git`);
+  }
+});
+
 test('fail-closed guard: guard-home-delete, guard-process-signal and read-only git stay unrefused while the board lock is held', async () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-fail-closed-read-'));
   gitFixture(['init', '-q', '-b', 'main'], repo);
