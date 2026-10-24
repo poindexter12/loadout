@@ -178,33 +178,122 @@ test('sweep plans and removes worktrees with internal dependency symlinks', asyn
   }
 });
 
-test('sweep reports an external symlink during planning and execution', async () => {
+// SQ-82: removal unlinks a nested symlink in place, so an escaping link inside the
+// tree is removed as a link and its target survives. Refusing such a tree bought no
+// safety and cost a full traversal per candidate.
+test('sweep removes a worktree holding nested escaping symlinks and leaves their targets intact', async () => {
   const { repository, baseCommit, worktreeRoot } = repositoryFixture();
   const worktree = createAgentWorktree(repository, worktreeRoot, 'external-symlink');
   const ticket = integratedTicket('SQ-EXTERNAL-SYMLINK', 'external-symlink', worktree, baseCommit);
-  const outside = path.join(repository, 'outside');
-  fs.mkdirSync(outside);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-worktree-outside-'));
+  fs.mkdirSync(path.join(outside, 'deep'));
+  fs.writeFileSync(path.join(outside, 'deep', 'precious.txt'), 'keep\n');
   fs.symlinkSync(outside, path.join(worktree, 'escape'));
+  fs.mkdirSync(path.join(worktree, 'node_modules'), { recursive: true });
+  fs.symlinkSync(outside, path.join(worktree, 'node_modules', 'escaping-package'));
+  fs.symlinkSync(path.join(outside, 'deep', 'precious.txt'), path.join(worktree, 'file-escape'));
+  try {
+    const planned = await worktrees.sweep(repository, [ticket], { execute: false, minAgeMs: 0, integrationTarget });
+    const plannedEntry = planned.entries.find((candidate: any) => worktrees.canonicalPath(candidate.path) === worktrees.canonicalPath(worktree));
+    assert.equal(plannedEntry.action, 'remove');
+    assert.equal(planned.skipped.some((candidate: any) => worktrees.canonicalPath(candidate.path) === worktrees.canonicalPath(worktree)), false);
+
+    const executed = await worktrees.sweep(repository, [ticket], { execute: true, minAgeMs: 0, integrationTarget });
+    assert.deepEqual(executed.removed.map((candidate: string) => worktrees.canonicalPath(candidate)), [worktrees.canonicalPath(worktree)]);
+    assert.equal(fs.existsSync(worktree), false);
+    assert.equal(fs.readFileSync(path.join(outside, 'deep', 'precious.txt'), 'utf8'), 'keep\n');
+  } finally {
+    if (fs.existsSync(worktree)) git(repository, ['worktree', 'remove', '--force', worktree]);
+    fs.rmSync(repository, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('sweep refuses a worktree whose root is a symlink, in planning and execution', async () => {
+  const { repository, baseCommit, worktreeRoot } = repositoryFixture();
+  const worktree = createAgentWorktree(repository, worktreeRoot, 'root-symlink');
+  const ticket = integratedTicket('SQ-ROOT-SYMLINK', 'root-symlink', worktree, baseCommit);
+  // Candidate selection canonicalizes paths, so a root link leaving the worktree roots is
+  // never a candidate; one pointing at a sibling directory inside them still is.
+  const relocated = path.join(worktreeRoot, 'agent-root-symlink-target');
+  fs.renameSync(worktree, relocated);
+  fs.symlinkSync(relocated, worktree);
   try {
     const planned = await worktrees.sweep(repository, [ticket], { execute: false, minAgeMs: 0, integrationTarget });
     const plannedEntry = planned.entries.find((candidate: any) => worktrees.canonicalPath(candidate.path) === worktrees.canonicalPath(worktree));
     assert.equal(plannedEntry.action, 'keep');
-    assert.equal(plannedEntry.reason, 'symlink_outside_worktree:escape');
+    assert.equal(plannedEntry.reason, 'symlink_outside_worktree:.');
     const skipped = planned.skipped.find((candidate: any) => worktrees.canonicalPath(candidate.path) === worktrees.canonicalPath(worktree));
-    assert.equal(skipped.path, worktrees.canonicalPath(worktree));
-    assert.equal(skipped.classification, 'ticket_done');
     assert.equal(skipped.guard, 'symlink_outside_worktree');
-    assert.deepEqual(skipped.evidence, { path: 'escape', target: await fs.promises.realpath(outside) });
-    assert.equal(skipped.reason, 'symlink_outside_worktree:escape');
+    assert.deepEqual(skipped.evidence, { path: '.', target: await fs.promises.realpath(relocated) });
 
     const executed = await worktrees.sweep(repository, [ticket], { execute: true, minAgeMs: 0, integrationTarget });
     const executedEntry = executed.entries.find((candidate: any) => worktrees.canonicalPath(candidate.path) === worktrees.canonicalPath(worktree));
     assert.equal(executedEntry.reason, plannedEntry.reason);
     assert.deepEqual(executed.removed, []);
-    assert.equal(fs.existsSync(worktree), true);
+    assert.equal(fs.existsSync(path.join(relocated, 'README.md')), true);
   } finally {
+    if (fs.lstatSync(worktree, { throwIfNoEntry: false })) fs.rmSync(worktree, { force: true });
+    if (fs.existsSync(relocated)) fs.renameSync(relocated, worktree);
     if (fs.existsSync(worktree)) git(repository, ['worktree', 'remove', '--force', worktree]);
     fs.rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test('sweep plans a worktree with a populated node_modules without traversing it', async () => {
+  const { repository, baseCommit, worktreeRoot } = repositoryFixture();
+  const worktree = createAgentWorktree(repository, worktreeRoot, 'populated-modules');
+  const ticket = integratedTicket('SQ-POPULATED-MODULES', 'populated-modules', worktree, baseCommit);
+  const modules = path.join(worktree, 'node_modules');
+  fs.mkdirSync(path.join(modules, '.bin'), { recursive: true });
+  for (let index = 0; index < 200; index += 1) {
+    const pkg = path.join(modules, `pkg-${index}`, 'lib');
+    fs.mkdirSync(pkg, { recursive: true });
+    fs.writeFileSync(path.join(pkg, 'index.js'), 'module.exports = 1;\n');
+    fs.symlinkSync(`../pkg-${index}/lib/index.js`, path.join(modules, '.bin', `tool-${index}`));
+  }
+  const fsPromises = require('node:fs/promises');
+  const originalReaddir = fsPromises.readdir;
+  const originalLstat = fsPromises.lstat;
+  const realModules = fs.realpathSync(modules);
+  const touched: string[] = [];
+  const record = (pathname: unknown) => {
+    const value = String(pathname);
+    if (value.startsWith(modules) || value.startsWith(realModules)) touched.push(value);
+  };
+  fsPromises.readdir = (pathname: any, ...rest: any[]) => { record(pathname); return originalReaddir.call(fsPromises, pathname, ...rest); };
+  fsPromises.lstat = (pathname: any, ...rest: any[]) => { record(pathname); return originalLstat.call(fsPromises, pathname, ...rest); };
+  try {
+    const planned = await worktrees.sweep(repository, [ticket], { execute: false, minAgeMs: 0, integrationTarget });
+    const plannedEntry = planned.entries.find((candidate: any) => worktrees.canonicalPath(candidate.path) === worktrees.canonicalPath(worktree));
+    assert.equal(plannedEntry.action, 'remove');
+    // The SessionStart sweep's budget (SIDEQUEST_SWEEP_DEADLINE_MS, default 2500ms) is
+    // dominated by git spawns, so wall-clock is asserted structurally: the safety guard
+    // performs a constant number of filesystem calls per candidate and never enters
+    // node_modules, however large it is.
+    assert.deepEqual(touched, [], 'the safety guard must not visit node_modules');
+  } finally {
+    fsPromises.readdir = originalReaddir;
+    fsPromises.lstat = originalLstat;
+    if (fs.existsSync(worktree)) git(repository, ['worktree', 'remove', '--force', worktree]);
+    fs.rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test('quarantine strip refuses a regenerable directory reached through a symlinked ancestor', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-worktree-chain-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-worktree-outside-'));
+  fs.mkdirSync(path.join(outside, 'node_modules'));
+  fs.mkdirSync(path.join(root, 'real', 'node_modules'), { recursive: true });
+  fs.symlinkSync(outside, path.join(root, 'linked'));
+  try {
+    assert.equal(await worktrees.directoryChainWithoutSymlinks(root, path.join(root, 'real', 'node_modules')), true);
+    assert.equal(await worktrees.directoryChainWithoutSymlinks(root, path.join(root, 'linked', 'node_modules')), false);
+    assert.equal(await worktrees.directoryChainWithoutSymlinks(root, path.join(root, 'linked')), false);
+    assert.equal(await worktrees.directoryChainWithoutSymlinks(root, path.dirname(root)), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
   }
 });
 
