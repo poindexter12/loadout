@@ -259,6 +259,19 @@ function recoverCreatedWorktree(repository, sessionId, target, error) {
   if (recovery.cleanup?.reclaimed) return null;
   return `worktree recovery preserved the checkout because ${recovery.cleanup?.message || recovery.cleanup?.reason || "cleanup authority is incomplete"}`;
 }
+function rollbackUncreatedWorktree(sessionId, worktree, error) {
+  const store = require(runtimeModule("store"));
+  const rollback = store.rollbackDispatchWorktreeCreation(sessionId, { worktree, error });
+  if (rollback.ok) {
+    return `; ${rollback.ref} was rolled back to todo because this hook created no checkout, claim or agent, so dispatch it again with no recovery flags`;
+  }
+  if (rollback.reason === "dispatch_binding_unavailable") return "";
+  return `; its launched attempt could not be rolled back (${rollback.reason}), so dispatch still reads it as live: retire it with \`sidequest dispatch <ref> --recovery-evidence "${"worktree lease refused creation"}"\``;
+}
+function refuseCreation(reason, sessionId, worktree) {
+  const message = `worktree lease refused creation: ${reason}`;
+  return new Error(`${message}${rollbackUncreatedWorktree(sessionId, worktree, message)}`);
+}
 function main() {
   return createWorktreeMain();
 }
@@ -273,7 +286,7 @@ async function createWorktreeMain() {
   const worktrees = require(runtimeModule("worktrees"));
   const binding = bindCreation(cwdRepositoryFor(cwd), sessionId, name, worktrees.namedWorktreePath);
   if (!binding.ok || !binding.ref || !binding.baseline || !binding.repository || !binding.worktree) {
-    throw new Error(`worktree lease refused creation: ${binding.reason || "dispatch binding is incomplete"}`);
+    throw refuseCreation(binding.reason || "dispatch binding is incomplete", sessionId, null);
   }
   const boundCreation = {
     ...binding,
@@ -283,7 +296,7 @@ async function createWorktreeMain() {
     worktree: binding.worktree
   };
   const decision = leaseKernel.worktreeCreateDecision(preparedWorktreeLease(boundCreation, name));
-  if (!decision.allowed) throw new Error(`worktree lease refused creation: ${decision.reason}`);
+  if (!decision.allowed) throw refuseCreation(decision.reason, sessionId, boundCreation.worktree);
   const created = createWorktree(boundCreation, name);
   if (created) {
     try {

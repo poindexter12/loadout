@@ -238,6 +238,32 @@ function recoverCreatedWorktree(repository: string, sessionId: string, target: s
   return `worktree recovery preserved the checkout because ${recovery.cleanup?.message || recovery.cleanup?.reason || 'cleanup authority is incomplete'}`;
 }
 
+// SQ-255. Both refusals below fire before `git worktree add` runs, so there is no checkout, no claim and no
+// agent to protect: the launched attempt is a record of a runtime that does not exist. Left standing it is
+// permanently undispatchable, because the binding it holds names a worktree path the harness never offers
+// again. Roll it back here and say so in the refusal, which is the orchestrator's entire interface to this
+// failure. `worktree` is passed when the hook got far enough to bind one, so that case can never be
+// ambiguous; without it the session id is the only key the stale path has not invalidated.
+function rollbackUncreatedWorktree(sessionId: string, worktree: string | null, error: unknown): string {
+  const store = require(runtimeModule('store')) as {
+    rollbackDispatchWorktreeCreation: (
+      sessionId: string,
+      opts: { worktree?: string | null; error?: unknown },
+    ) => { ok: boolean; reason?: string; ref?: string };
+  };
+  const rollback = store.rollbackDispatchWorktreeCreation(sessionId, { worktree, error });
+  if (rollback.ok) {
+    return `; ${rollback.ref} was rolled back to todo because this hook created no checkout, claim or agent, so dispatch it again with no recovery flags`;
+  }
+  if (rollback.reason === 'dispatch_binding_unavailable') return '';
+  return `; its launched attempt could not be rolled back (${rollback.reason}), so dispatch still reads it as live: retire it with \`sidequest dispatch <ref> --recovery-evidence "${'worktree lease refused creation'}"\``;
+}
+
+function refuseCreation(reason: string, sessionId: string, worktree: string | null): Error {
+  const message = `worktree lease refused creation: ${reason}`;
+  return new Error(`${message}${rollbackUncreatedWorktree(sessionId, worktree, message)}`);
+}
+
 function main(): Promise<void> {
   return createWorktreeMain();
 }
@@ -256,7 +282,7 @@ async function createWorktreeMain(): Promise<void> {
   };
   const binding = bindCreation(cwdRepositoryFor(cwd), sessionId, name, worktrees.namedWorktreePath);
   if (!binding.ok || !binding.ref || !binding.baseline || !binding.repository || !binding.worktree) {
-    throw new Error(`worktree lease refused creation: ${binding.reason || 'dispatch binding is incomplete'}`);
+    throw refuseCreation(binding.reason || 'dispatch binding is incomplete', sessionId, null);
   }
   const boundCreation: CreationBinding & Required<Pick<CreationBinding, 'ref' | 'baseline' | 'repository' | 'worktree'>> = {
     ...binding,
@@ -266,7 +292,7 @@ async function createWorktreeMain(): Promise<void> {
     worktree: binding.worktree,
   };
   const decision = leaseKernel.worktreeCreateDecision(preparedWorktreeLease(boundCreation, name));
-  if (!decision.allowed) throw new Error(`worktree lease refused creation: ${decision.reason}`);
+  if (!decision.allowed) throw refuseCreation(decision.reason, sessionId, boundCreation.worktree);
   const created = createWorktree(boundCreation, name);
   if (created) {
     try {

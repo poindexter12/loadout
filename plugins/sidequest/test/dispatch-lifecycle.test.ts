@@ -2882,4 +2882,130 @@ test('preparing a dispatch does not hold the board write lock across its Git and
   assert.equal(store.releaseTicket(slug, ticket.ref, 'lock-hold-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
 });
 
+// SQ-255. `dispatch` refused a row as a live attempt and sent the orchestrator to `--recovery-evidence`,
+// and that route refused the same row as "not an active attempt". Two refusals, no third route. These pin
+// the invariant that makes that unreachable: a live-attempt refusal must name a recovery step the recovery
+// gate accepts, and the two gates must read the same liveness field.
+function liveAttemptRefusal(ref: string, sessionId: string) {
+  try {
+    store.prepareDispatch(slug, ref, { sessionId });
+  } catch (error: any) {
+    return String(error?.message || error);
+  }
+  return null;
+}
+
+test('SQ-255: a live-attempt refusal and the recovery-evidence refusal cannot both be reachable for one row', () => {
+  // (a) launched, nothing bound. (b) bound by WorktreeCreate without a recorded checkout identity: the
+  // shape the hook used to leave behind. Both are the shapes `dispatch` calls live.
+  const rows: { ref: string; label: string }[] = [];
+  const unbound = createFixture('SQ-255 launched and unbound');
+  const unboundSession = 'sq255-gate-unbound';
+  const preparedUnbound = store.prepareDispatch(slug, unbound.ref, { sessionId: unboundSession });
+  assert.equal(store.recordDispatchLaunch(slug, unbound.ref, {
+    token: preparedUnbound.token,
+    executor: preparedUnbound.ticket.dispatchExecutor,
+    sessionId: unboundSession,
+    agentName: 'sq255-gate-unbound-agent',
+  }).ok, true);
+  rows.push({ ref: unbound.ref, label: 'launched and unbound' });
+
+  const stranded = createFixture('SQ-255 bound without a completed checkout');
+  const strandedSession = 'sq255-gate-stranded';
+  const preparedStranded = store.prepareDispatch(slug, stranded.ref, { sessionId: strandedSession });
+  assert.equal(store.recordDispatchLaunch(slug, stranded.ref, {
+    token: preparedStranded.token,
+    executor: preparedStranded.ticket.dispatchExecutor,
+    sessionId: strandedSession,
+    agentName: 'sq255-gate-stranded-agent',
+  }).ok, true);
+  assert.equal(store.bindDispatchWorktreeCreation(
+    slug,
+    strandedSession,
+    path.join(SIDEQUEST_HOME, 'sq255-gate-stranded-worktree'),
+  ).ok, true);
+  rows.push({ ref: stranded.ref, label: 'bound by WorktreeCreate without a completed checkout' });
+
+  for (const row of rows) {
+    const refusal = liveAttemptRefusal(row.ref, `${row.ref}-replacement`);
+    assert.ok(refusal, `${row.label} must still be refused as a live attempt`);
+    assert.match(refusal!, /already has a live dispatch attempt/, row.label);
+    // The contradiction was this phrase appearing in a refusal that had just called the row live.
+    assert.ok(
+      !refusal!.includes('not an active attempt'),
+      `a row dispatch calls live must never also be described as not an active attempt: ${refusal}`,
+    );
+    // Whatever route the refusal names has to be one the recovery gate accepts.
+    assert.ok(refusal!.includes('--recovery-evidence'), `${row.label} must name its recovery route: ${refusal}`);
+    let recovered: any = null;
+    try {
+      recovered = store.prepareDispatch(slug, row.ref, {
+        sessionId: `${row.ref}-recovered`,
+        recoveryEvidence: `SQ-255 gate agreement: ${row.label}`,
+      });
+    } catch (error: any) {
+      assert.fail(`the route the refusal named must work for ${row.label}: ${error?.message || error}`);
+    }
+    assert.equal(typeof recovered.token, 'string', row.label);
+  }
+});
+
+test('SQ-255: a launched-unbound attempt reports exactly one supported recovery step, and that step works', () => {
+  const ticket = createFixture('SQ-255 one supported recovery step');
+  const sessionId = 'sq255-single-route';
+  const prepared = store.prepareDispatch(slug, ticket.ref, { sessionId });
+  assert.equal(store.recordDispatchLaunch(slug, ticket.ref, {
+    token: prepared.token,
+    executor: prepared.ticket.dispatchExecutor,
+    sessionId,
+    agentName: 'sq255-single-route-agent',
+  }).ok, true);
+
+  const refusal = liveAttemptRefusal(ticket.ref, 'sq255-single-route-replacement');
+  assert.ok(refusal, 'a launched attempt is still refused');
+  const routes = (refusal!.match(/--recovery-evidence/g) || []).length;
+  assert.equal(routes, 1, `exactly one recovery route, not a menu the orchestrator has to choose from: ${refusal}`);
+  // An unbound attempt never bound a runtime, so the host task-failure route cannot apply to it and must
+  // not be offered: following it would pass a task id this attempt never recorded.
+  assert.ok(!refusal!.includes('--recovery-task-id'), `an unbound attempt must not be offered the task-id route: ${refusal}`);
+  assert.ok(!refusal!.includes('Wait for that executor'), `an attempt with no runtime has nothing to wait for: ${refusal}`);
+
+  // And the one step it names clears the ticket for a plain re-dispatch.
+  const again = store.prepareDispatch(slug, ticket.ref, {
+    sessionId: 'sq255-single-route-after',
+    recoveryEvidence: 'SQ-255: the spawn never reached a runtime.',
+  });
+  assert.equal(typeof again.token, 'string');
+  assert.equal(again.ticket.dispatch.outcome, 'prepared');
+});
+
+// SQ-255. Built directly, with no hook involved: a launched row, unbound and unclaimed, whose token is gone
+// (the SQ-80 shape). The live gate used to read only `launchedAt || boundAt`, so `dispatch` refused it as a
+// live attempt while its own tail and `--recovery-evidence` both answered "not an active attempt".
+test('SQ-255: a launched row whose token is gone is not live, so neither contradictory refusal is reachable', () => {
+  const ticket = createFixture('SQ-255 tokenless launched row');
+  const sessionId = 'sq255-tokenless';
+  const prepared = store.prepareDispatch(slug, ticket.ref, { sessionId });
+  assert.equal(store.recordDispatchLaunch(slug, ticket.ref, {
+    token: prepared.token,
+    executor: prepared.ticket.dispatchExecutor,
+    sessionId,
+    agentName: 'sq255-tokenless-agent',
+  }).ok, true);
+  // No store API clears a token on a launched row, so write the row directly, as hooks.test.ts does.
+  const database = require('../lib/db.js').openDb(SIDEQUEST_HOME);
+  const row = database.prepare('SELECT data FROM tickets WHERE id = ?').get(ticket.id);
+  const data = JSON.parse(row.data);
+  data.dispatchNonce = null;
+  database.prepare('UPDATE tickets SET data = ? WHERE id = ?').run(JSON.stringify(data), ticket.id);
+  assert.equal(store.getTicket(slug, ticket.ref).dispatchNonce ?? null, null, 'the fixture cleared the token');
+  assert.equal(store.getTicket(slug, ticket.ref).dispatch.outcome, 'launched');
+
+  const refusal = liveAttemptRefusal(ticket.ref, 'sq255-tokenless-replacement');
+  assert.equal(refusal, null, `a tokenless row has no runtime that can ever claim it, so it is not a live attempt: ${refusal}`);
+  const again = store.getTicket(slug, ticket.ref);
+  assert.equal(typeof again.dispatchNonce, 'string', 'plain dispatch minted a fresh token');
+  assert.equal(again.dispatch.outcome, 'prepared');
+});
+
 export {};
