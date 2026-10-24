@@ -283,12 +283,21 @@ test('streams text and tool blocks in either order', () => {
 test('the shim lists and routes Grok 1M picker aliases', async (t) => {
   const http = require('node:http');
   const { spawn } = require('node:child_process');
-  const net = require('node:net');
   const cli = path.join(__dirname, '..', 'bin', 'model-gateway.js');
-  const freePort = () => new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => { const { port } = server.address(); server.close(() => resolve(port)); });
+  const waitForListeningPort = (child) => new Promise((resolve, reject) => {
+    let buffered = '';
+    const timeout = setTimeout(() => reject(new Error(`model-gateway did not report a listening port: ${buffered}`)), 5000);
+    const onData = (chunk) => {
+      buffered += chunk;
+      const match = buffered.match(/listening on 127\.0\.0\.1:(\d+)/);
+      if (!match) return;
+      clearTimeout(timeout);
+      child.stdout.off('data', onData);
+      resolve(Number(match[1]));
+    };
+    child.stdout.on('data', onData);
+    child.once('error', (error) => { clearTimeout(timeout); reject(error); });
+    child.once('exit', (code, signal) => { clearTimeout(timeout); reject(new Error(`model-gateway exited before reporting a listening port (${code ?? signal}): ${buffered}`)); });
   });
   const request = (port, body) => new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port, path: '/v1/messages', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (res) => {
@@ -322,13 +331,13 @@ test('the shim lists and routes Grok 1M picker aliases', async (t) => {
   });
   const upstreamPort = await new Promise((resolve) => upstream.listen(0, '127.0.0.1', () => resolve(upstream.address().port)));
   t.after(() => { upstream.close(); fs.rmSync(authDirectory, { recursive: true, force: true }); });
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
+  let shimPort;
   const child = spawnGatewayProcess(t, process.execPath, [cli, 'serve-worker'], {
-    env: { ...process.env, CODEX_GATEWAY_PORT: String(shimPort), CODEX_GATEWAY_WORKER_PORT: String(shimPort), CODEX_GATEWAY_PROXY_PORT: String(proxyPort), CODEX_GATEWAY_GROK_HOME: authDirectory, CODEX_GATEWAY_GROK_ENDPOINT: `http://127.0.0.1:${upstreamPort}/v1/responses`, CODEX_GATEWAY_REQUEST_LOG: '0', CODEX_GATEWAY_SENTRY: '0' },
-    stdio: 'ignore',
+    env: { ...process.env, CODEX_GATEWAY_PORT: '0', CODEX_GATEWAY_PROXY_PORT: '1', CODEX_GATEWAY_GROK_HOME: authDirectory, CODEX_GATEWAY_GROK_ENDPOINT: `http://127.0.0.1:${upstreamPort}/v1/responses`, CODEX_GATEWAY_REQUEST_LOG: '0', CODEX_GATEWAY_SENTRY: '0' },
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  shimPort = await waitForListeningPort(child);
   let models;
   for (let retry = 0; retry < 100; retry += 1) {
     try {

@@ -5,7 +5,6 @@ const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const fs = require('node:fs');
 const http = require('node:http');
-const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
@@ -16,14 +15,31 @@ const gw = require(CLI);
 const remoteControl = require('../lib/remote-control.js');
 const { createHostsBypassResolver } = require('../lib/request-worker.js');
 
-function freePort() {
+// The RC-compatibility listener logs the configured COMPAT_PORT, not the
+// address it actually bound, so CODEX_GATEWAY_COMPAT_PORT='0' cannot be read
+// back the way the shim port is. Use a process-scoped port below both the
+// Linux (32768+) and macOS (49152+) ephemeral ranges instead of a bind/close
+// reservation: no listen(0) elsewhere can be handed this port, and tests in
+// this file run sequentially, each stopping its shim before the next starts.
+// CODEX_GATEWAY_PROXY_PORT is '1' (deliberately unserved) rather than '0',
+// because an outbound request to :0 is retargeted to port 80 (SQ-346).
+const RC_COMPAT_TEST_PORT = 20000 + (process.pid % 5000);
+
+function waitForListeningPort(child) {
   return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
+    let buffered = '';
+    const timeout = setTimeout(() => reject(new Error(`model-gateway did not report a listening port: ${buffered}`)), 5000);
+    const onData = (chunk) => {
+      buffered += chunk;
+      const match = buffered.match(/listening on 127\.0\.0\.1:(\d+)/);
+      if (!match) return;
+      clearTimeout(timeout);
+      child.stdout.off('data', onData);
+      resolve(Number(match[1]));
+    };
+    child.stdout.on('data', onData);
+    child.once('error', (error) => { clearTimeout(timeout); reject(error); });
+    child.once('exit', (code, signal) => { clearTimeout(timeout); reject(new Error(`model-gateway exited before reporting a listening port (${code ?? signal}): ${buffered}`)); });
   });
 }
 
@@ -58,26 +74,27 @@ async function stopChild(child) {
   if (!child.closed) await once(child, 'close');
 }
 
-function spawnShim(t, { shimPort, proxyPort, compatPort, hostsFile, home, anthropicUpstream, socketPath }) {
+async function spawnShim(t, { compatPort, hostsFile, home, anthropicUpstream, socketPath }) {
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
       HOME: home,
       USERPROFILE: home,
-      CODEX_GATEWAY_PORT: String(shimPort),
-      CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
+      CODEX_GATEWAY_PORT: '0',
+      CODEX_GATEWAY_PROXY_PORT: '1',
       CODEX_GATEWAY_REQUEST_LOG: '0',
       CODEX_GATEWAY_COMPAT_PORT: String(compatPort),
       CODEX_GATEWAY_HOSTS_FILE: hostsFile,
       ...(socketPath ? { CODEX_GATEWAY_SOCKET_PATH: socketPath } : {}),
       ...(anthropicUpstream ? { CODEX_GATEWAY_ANTHROPIC_UPSTREAM: anthropicUpstream } : {}),
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(async () => {
     await stopChild(child);
     fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
+  return waitForListeningPort(child);
 }
 
 function loadGatewayWithCurrentHome(home) {
@@ -556,11 +573,8 @@ test('serve-shim binds a second RC-compatibility listener only when the hosts en
   const hostsFile = path.join(hostsDir, 'hosts');
   fs.writeFileSync(hostsFile, '127.0.0.1 localhost\n127.0.0.1 api.anthropic.com\n');
 
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
-  const compatPort = await freePort();
-
-  spawnShim(t, { shimPort, proxyPort, compatPort, hostsFile, home: hostsDir });
+  const compatPort = RC_COMPAT_TEST_PORT;
+  const shimPort = await spawnShim(t, { compatPort, hostsFile, home: hostsDir });
 
   const health = await waitForHealthz(shimPort);
   assert.equal(health.compat.hostsDetected, true);
@@ -582,11 +596,8 @@ test('serve-shim stays default-only when no hosts entry is present', async (t) =
   const hostsFile = path.join(hostsDir, 'hosts');
   fs.writeFileSync(hostsFile, '127.0.0.1 localhost\n'); // no api.anthropic.com entry
 
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
-  const compatPort = await freePort();
-
-  spawnShim(t, { shimPort, proxyPort, compatPort, hostsFile, home: hostsDir });
+  const compatPort = RC_COMPAT_TEST_PORT;
+  const shimPort = await spawnShim(t, { compatPort, hostsFile, home: hostsDir });
 
   const health = await waitForHealthz(shimPort);
   assert.equal(health.compat.hostsDetected, false);
@@ -602,10 +613,8 @@ test('serve-shim accepts requests through ANTHROPIC_UNIX_SOCKET', async (t) => {
   fs.writeFileSync(hostsFile, '127.0.0.1 localhost\n');
   const socketPath = path.join(hostsDir, 'gateway.sock');
 
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
-  const compatPort = await freePort();
-  spawnShim(t, { shimPort, proxyPort, compatPort, hostsFile, home: hostsDir, socketPath });
+  const compatPort = RC_COMPAT_TEST_PORT;
+  const shimPort = await spawnShim(t, { compatPort, hostsFile, home: hostsDir, socketPath });
 
   const health = await waitForSocketHealthz(socketPath);
   assert.equal(health.ok, true);
@@ -629,7 +638,7 @@ test('serve-shim reclaims a stale ANTHROPIC_UNIX_SOCKET file and serves through 
 
   const holder = spawn(process.execPath, [
     '-e',
-    "const net=require('net');const s=net.createServer();s.listen(process.argv[1],()=>{process.stdout.write('ready\\n');});",
+    "const net=require('net');const s=net['createServer']();s.listen(process.argv[1],()=>{process.stdout.write('ready\\n');});",
     socketPath,
   ], { stdio: ['ignore', 'pipe', 'ignore'] });
   await once(holder.stdout, 'data');
@@ -637,10 +646,8 @@ test('serve-shim reclaims a stale ANTHROPIC_UNIX_SOCKET file and serves through 
   await once(holder, 'exit');
   assert.equal(fs.existsSync(socketPath), true, 'fixture must leave a genuinely orphaned socket file behind');
 
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
-  const compatPort = await freePort();
-  spawnShim(t, { shimPort, proxyPort, compatPort, hostsFile, home: hostsDir, socketPath });
+  const compatPort = RC_COMPAT_TEST_PORT;
+  const shimPort = await spawnShim(t, { compatPort, hostsFile, home: hostsDir, socketPath });
 
   const health = await waitForSocketHealthz(socketPath);
   assert.equal(health.ok, true);
@@ -658,10 +665,8 @@ test('serve-shim logs a DEGRADED line and keeps serving on TCP when the unix soc
   const socketPath = path.join(hostsDir, 'gateway.sock');
   fs.writeFileSync(socketPath, 'not a socket -- reclaim must leave this alone and let listen() fail');
 
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
-  const compatPort = await freePort();
-  spawnShim(t, { shimPort, proxyPort, compatPort, hostsFile, home: hostsDir, socketPath });
+  const compatPort = RC_COMPAT_TEST_PORT;
+  const shimPort = await spawnShim(t, { compatPort, hostsFile, home: hostsDir, socketPath });
 
   const health = await waitForHealthz(shimPort);
   assert.equal(health.ok, true, 'the shim keeps serving on TCP even though the unix socket never bound');
@@ -685,22 +690,17 @@ test('serve-shim forwards an unexpected bodyless request without crashing on raw
   const hostsFile = path.join(hostsDir, 'hosts');
   fs.writeFileSync(hostsFile, '127.0.0.1 localhost\n');
 
-  const upstreamPort = await freePort();
   const upstream = http.createServer((req, res) => {
     assert.equal(req.method, 'GET');
     assert.equal(req.url, '/unexpected-probe');
     res.writeHead(204);
     res.end();
   });
-  await new Promise((resolve) => upstream.listen(upstreamPort, '127.0.0.1', resolve));
+  const upstreamPort = await new Promise((resolve) => upstream.listen(0, '127.0.0.1', () => resolve(upstream.address().port)));
   t.after(() => new Promise((resolve, reject) => upstream.close((error) => (error ? reject(error) : resolve()))));
 
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
-  const compatPort = await freePort();
-  spawnShim(t, {
-    shimPort,
-    proxyPort,
+  const compatPort = RC_COMPAT_TEST_PORT;
+  const shimPort = await spawnShim(t, {
     compatPort,
     hostsFile,
     home: hostsDir,
@@ -719,16 +719,14 @@ test('serve-shim safely retains default mode when the compatibility port is unav
   const hostsFile = path.join(hostsDir, 'hosts');
   fs.writeFileSync(hostsFile, '127.0.0.1 api.anthropic.com\n');
 
-  const shimPort = await freePort();
-  const proxyPort = await freePort();
-  const compatPort = await freePort();
-
-  // occupy the compat port first so the shim's bind attempt fails
-  const blocker = net.createServer();
-  await new Promise((resolve) => blocker.listen(compatPort, '127.0.0.1', resolve));
+  // Hold an OS-assigned port for the whole test and hand that held port to the
+  // shim as its compatibility port, so its bind attempt is guaranteed to fail.
+  // The blocker never closes before the spawn, so there is no reuse race.
+  const blocker = http.createServer();
+  const compatPort = await new Promise((resolve) => blocker.listen(0, '127.0.0.1', () => resolve(blocker.address().port)));
   t.after(() => new Promise((resolve, reject) => blocker.close((error) => (error ? reject(error) : resolve()))));
 
-  spawnShim(t, { shimPort, proxyPort, compatPort, hostsFile, home: hostsDir });
+  const shimPort = await spawnShim(t, { compatPort, hostsFile, home: hostsDir });
 
   const health = await waitForHealthz(shimPort);
   assert.equal(health.compat.hostsDetected, true);
