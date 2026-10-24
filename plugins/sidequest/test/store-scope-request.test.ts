@@ -46,3 +46,15 @@ test('scopeRequest identifies refused tracked source as outside declared files',
   assert.match(comment, /The refused path is outside this ticket's declared files/);
   assert.doesNotMatch(comment, /Verification evidence belongs in/);
 });
+
+test('scopeRequest fully granted comment has no refusal clause', () => {
+  const fixture = createClaimedDispatch();
+  const requestedPath = 'plugins/sidequest/src/lib/store/scope-helper.ts';
+  const result = fixture.store.requestScope(fixture.project, fixture.ticket.ref, 'scope-source-worker', [requestedPath]);
+  const comment = fixture.store.getTicket(fixture.project, fixture.ticket.ref).comments.at(-1).body;
+
+  assert.equal(result.state, 'granted');
+  assert.deepEqual(result.refused, []);
+  assert.doesNotMatch(comment, /refused/i);
+  assert.match(comment, /Auto-approved/);
+});
