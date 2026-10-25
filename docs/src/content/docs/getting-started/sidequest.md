@@ -152,6 +152,8 @@ With PR delivery, the flow is:
 2. The pull request runs CI. The aggregate `test-gate` check is the wave gate. The tickets remain awaiting merge rather than being marked delivered.
 3. Run `integrate` again after the PR merges. Sidequest reconciles the PR, verifies the merge commit reached the target branch, and closes the participating tickets. `sidequest watch` or ticket pulse can alert you when the PR becomes merged or fails, with guidance to run `integrate` to close it.
 
+If `integrate` is interrupted while opening the PR, for example the process is killed after the push or after auto-merge was enabled, just run `integrate` again. Sidequest records the open before it pushes, so the rerun picks up the branch or PR it already made instead of refusing it. A branch or PR that does not match that record still refuses, and Sidequest never force-pushes over it.
+
 Before enabling PR delivery, the repository must have GitHub auto-merge enabled, a ruleset requiring the aggregate `test-gate` check, and an authenticated `gh` CLI with permission to fetch, push, open PRs, and enable auto-merge. Auto-merge is a GitHub request, not proof that the PR landed. If it appears green but does not merge, explicitly merge the PR when policy allows and confirm that the target branch actually moved before running `integrate` again.
 
 PR delivery never silently falls back to a local merge. Common outcomes are:
