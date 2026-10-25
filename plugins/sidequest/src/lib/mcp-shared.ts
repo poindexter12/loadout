@@ -757,6 +757,35 @@ function boundedReadPayload(tool: string, payload: any) {
   return visible;
 }
 
+// SQ-320: dispatch warnings are agent-facing contract, not decoration. They are the only
+// notice channel a dispatch result has (Dispatch update lines such as a fresh Codex pin or
+// a PYTHONIOENCODING write ride here), and presentWarnings has already marked them served
+// for this session, so a warning dropped here never comes back. The compact dispatch
+// therefore carries every warning whole, exempt from the small spawn-payload budget, and
+// only the hard MCP ceiling can cut the list. When it does, the cut is never silent:
+// `warningsOmitted` counts what was left out and `warningsRetrieval` is a context_page
+// handle that returns the complete list.
+function compactDispatchWarnings(project: string, compact: any, warnings: any, maxBytes = COMPACT_RESULT_MAX_BYTES) {
+  const all = (Array.isArray(warnings) ? warnings : []).map((warning) => String(warning)).filter(Boolean);
+  if (!all.length) return compact;
+  const whole = Object.assign({}, compact, { warnings: all });
+  if (mcpPayloadBytes(whole) <= maxBytes) return whole;
+  const warningsRetrieval = snapshotContextRetrieval({
+    tool: 'dispatch', project: String(project || '<global>'), kind: 'rows', field: 'warnings', position: 0, value: all, reason: 'budget', cursor: 0,
+  });
+  const marked = (retained: string[]) => Object.assign({}, compact, {
+    warnings: retained,
+    warningsOmitted: all.length - retained.length,
+    warningsRetrieval,
+  });
+  const retained: string[] = [];
+  for (const warning of all) {
+    if (mcpPayloadBytes(marked([...retained, warning])) > maxBytes) break;
+    retained.push(warning);
+  }
+  return marked(retained);
+}
+
 function compactCategoryBody(category: any, field: string, project: string) {
   const value = String(category[field] || '');
   if (utf8ByteLength(value) <= CONTEXT_ROW_EXCERPT_BYTES) return { [field]: value };
@@ -1069,6 +1098,7 @@ module.exports = {
   snapshotContextRetrieval,
   resolveContextPage,
   boundedReadPayload,
+  compactDispatchWarnings,
   MAX_CONTEXT_PAGE_BYTES,
   categoryListEntry,
   pageArguments,

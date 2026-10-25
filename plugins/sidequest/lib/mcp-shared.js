@@ -675,6 +675,33 @@ function boundedReadPayload(tool, payload) {
   }
   return visible;
 }
+function compactDispatchWarnings(project, compact, warnings, maxBytes = COMPACT_RESULT_MAX_BYTES) {
+  const all = (Array.isArray(warnings) ? warnings : []).map((warning) => String(warning)).filter(Boolean);
+  if (!all.length) return compact;
+  const whole = Object.assign({}, compact, { warnings: all });
+  if (mcpPayloadBytes(whole) <= maxBytes) return whole;
+  const warningsRetrieval = snapshotContextRetrieval({
+    tool: "dispatch",
+    project: String(project || "<global>"),
+    kind: "rows",
+    field: "warnings",
+    position: 0,
+    value: all,
+    reason: "budget",
+    cursor: 0
+  });
+  const marked = (retained2) => Object.assign({}, compact, {
+    warnings: retained2,
+    warningsOmitted: all.length - retained2.length,
+    warningsRetrieval
+  });
+  const retained = [];
+  for (const warning of all) {
+    if (mcpPayloadBytes(marked([...retained, warning])) > maxBytes) break;
+    retained.push(warning);
+  }
+  return marked(retained);
+}
 function compactCategoryBody(category, field, project) {
   const value = String(category[field] || "");
   if (utf8ByteLength(value) <= CONTEXT_ROW_EXCERPT_BYTES) return { [field]: value };
@@ -973,6 +1000,7 @@ module.exports = {
   snapshotContextRetrieval,
   resolveContextPage,
   boundedReadPayload,
+  compactDispatchWarnings,
   MAX_CONTEXT_PAGE_BYTES,
   categoryListEntry,
   pageArguments,

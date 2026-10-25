@@ -51,6 +51,7 @@ const {
   pageRows,
   pagedPayload,
   compactPulse,
+  compactDispatchWarnings,
   requiredText,
   requiredFinalReport,
   boundedSubmissionText,
@@ -334,7 +335,7 @@ const tools: ToolDefinition[] = [
         recoveryTaskId: { type: 'string', description: 'The failed task id from a host task-failure notification. When it matches the bound runtime of the unclaimed attempt being retired, recoveryEvidence applies at once instead of waiting out the claim-idle backstop.' },
         claimHolder: { type: 'string', description: 'The exact by identity holding the live claim being recovered.' },
         worktree: { type: 'string', description: 'The resumed executor\'s linked worktree path for live-claim recovery.' },
-        full: { type: 'boolean', description: 'Include token, executor, warnings, and recovery details.' },
+        full: { type: 'boolean', description: 'Include token, executor, and recovery details. Warnings ride the compact result too; if any are cut, warningsOmitted and warningsRetrieval say so.' },
       },
       required: ['ref'],
     },
@@ -387,11 +388,11 @@ const tools: ToolDefinition[] = [
         spawn,
       };
       const warnings = store.presentWarnings(prepared.ticket, store.dispatchWarnings(prepared.ticket, slug), sessionId);
-      if (!args.full) {
-        const withWarnings = warnings.length ? Object.assign({}, compact, { warnings }) : compact;
-        // Compact dispatches must keep a bounded spawn payload. Warnings ride only when they fit the MCP ceiling.
-        return Buffer.byteLength(JSON.stringify(withWarnings, null, 2)) <= 1200 ? withWarnings : compact;
-      }
+      // SQ-320: warnings ride the compact result whole. They are already capped by
+      // presentWarnings and marked served for this session, so dropping them to fit the
+      // small spawn budget lost them for good; only the hard MCP ceiling may cut them, and
+      // then with a warningsOmitted count and a warningsRetrieval handle.
+      if (!args.full) return compactDispatchWarnings(slug, compact, warnings);
       return {
         project: slug,
         projectPath: meta.path,
