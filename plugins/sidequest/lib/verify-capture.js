@@ -660,22 +660,159 @@ function report(capture, recorded) {
     }
   }
 }
+const detachedRunsDirectoryName = "sidequest-verify-capture-runs";
+const detachedWaitDefaultMilliseconds = 54e4;
+const detachedWaitMaximumMilliseconds = 57e4;
+const detachedPollMilliseconds = 500;
+const DETACHED_STILL_RUNNING_EXIT = 75;
+function optionValue(args, name) {
+  const index = args.indexOf(name);
+  return index >= 0 ? String(args[index + 1] || "").trim() : "";
+}
+function detachedWaitMilliseconds(args) {
+  const requested = optionValue(args, "--wait-ms");
+  if (!/^\d+$/.test(requested)) return detachedWaitDefaultMilliseconds;
+  return Math.min(detachedWaitMaximumMilliseconds, Number(requested));
+}
+function detachedChildArguments(args, exitFile) {
+  const kept = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "--detach") continue;
+    if (args[index] === "--wait-ms" || args[index] === "--exit-file") {
+      index += 1;
+      continue;
+    }
+    kept.push(String(args[index]));
+  }
+  return [...kept, "--exit-file", exitFile];
+}
+function writeExitFile(exitFile, exitCode) {
+  if (!exitFile) return;
+  const temporary = `${exitFile}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify({ exitCode, completedAt: (/* @__PURE__ */ new Date()).toISOString() }));
+  fs.renameSync(temporary, exitFile);
+}
+function startDetachedCapture(args, cwd) {
+  const { spawn } = require("node:child_process");
+  const root = path.join(os.tmpdir(), detachedRunsDirectoryName);
+  fs.mkdirSync(root, { recursive: true });
+  const runDirectory = fs.mkdtempSync(path.join(root, "run-"));
+  const output = fs.openSync(path.join(runDirectory, "output.log"), "a");
+  try {
+    const child = spawn(process.execPath, [...process.execArgv, __filename, ...detachedChildArguments(args, path.join(runDirectory, "exit.json"))], {
+      cwd,
+      env: process.env,
+      detached: true,
+      stdio: ["ignore", output, output],
+      windowsHide: true
+    });
+    if (!child.pid) throw new Error("the detached capture did not start");
+    const run = { pid: child.pid, startedAt: Date.now(), cwd };
+    fs.writeFileSync(path.join(runDirectory, "run.json"), JSON.stringify(run));
+    child.unref();
+    return Object.freeze({ runDirectory, pid: child.pid });
+  } finally {
+    fs.closeSync(output);
+  }
+}
+function readDetachedRun(runDirectory) {
+  try {
+    const run = JSON.parse(fs.readFileSync(path.join(runDirectory, "run.json"), "utf8"));
+    return Number.isInteger(run?.pid) && run.pid > 0 ? run : null;
+  } catch (_) {
+    return null;
+  }
+}
+function readDetachedExit(runDirectory) {
+  try {
+    const exit = JSON.parse(fs.readFileSync(path.join(runDirectory, "exit.json"), "utf8"));
+    return Number.isInteger(exit?.exitCode) ? exit.exitCode : null;
+  } catch (_) {
+    return null;
+  }
+}
+function detachedOutput(runDirectory) {
+  try {
+    return fs.readFileSync(path.join(runDirectory, "output.log"), "utf8");
+  } catch (_) {
+    return "";
+  }
+}
+function resumeCommand(runDirectory) {
+  return `node ${JSON.stringify(__filename)} --resume ${JSON.stringify(runDirectory)}`;
+}
+async function awaitDetachedCapture(runDirectory, waitMilliseconds, write = (text) => process.stdout.write(text)) {
+  const run = readDetachedRun(runDirectory);
+  if (!run) {
+    write(`verify=lost exit=2 reason=${JSON.stringify(`detached_run_unknown: ${runDirectory} holds no detached verify-capture run record, so there is nothing to wait for. Start the wrapper again with --detach.`)}
+`);
+    return 2;
+  }
+  const deadline = Date.now() + waitMilliseconds;
+  for (; ; ) {
+    const exitCode = readDetachedExit(runDirectory);
+    if (exitCode !== null) {
+      write(detachedOutput(runDirectory));
+      return exitCode;
+    }
+    if (!captureSlotProcessLiveness.isAlive(run.pid, run.startedAt)) {
+      const lateExit = readDetachedExit(runDirectory);
+      if (lateExit !== null) {
+        write(detachedOutput(runDirectory));
+        return lateExit;
+      }
+      write(detachedOutput(runDirectory));
+      write(`verify=lost exit=2 reason=${JSON.stringify(`detached_run_lost: the detached verify-capture process ${run.pid} ended without writing an exit status, so the capture did not complete and nothing new was recorded by it. Its output is above. Start the wrapper again with --detach.`)}
+`);
+      return 2;
+    }
+    if (Date.now() >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(detachedPollMilliseconds, Math.max(1, deadline - Date.now()))));
+  }
+  const elapsed = Math.max(0, Date.now() - run.startedAt);
+  write(`verify=running exit=${DETACHED_STILL_RUNNING_EXIT} pid=${run.pid} elapsedMs=${elapsed} run=${runDirectory}
+`);
+  write(`verify-resume: the capture is still running detached under its own budget, and the Bash ceiling cannot stop it. Do not start another one. Rerun this in the FOREGROUND with a 600000 ms timeout until it prints a final verify= line: ${resumeCommand(runDirectory)}
+`);
+  return DETACHED_STILL_RUNNING_EXIT;
+}
 async function main() {
   const args = process.argv.slice(2);
+  if (args[0] === "--resume") {
+    const runDirectory = String(args[1] || "").trim();
+    process.exitCode = runDirectory ? await awaitDetachedCapture(path.resolve(runDirectory), detachedWaitMilliseconds(args)) : 2;
+    if (!runDirectory) process.stderr.write("Usage: node verify-capture.js --resume <run directory> [--wait-ms <milliseconds>]\n");
+    return;
+  }
   const encoded = args[0] === "--base64" ? args[1] : "";
   const command = encoded ? Buffer.from(encoded, "base64").toString("utf8").trim() : "";
   if (!command) {
-    process.stderr.write("Usage: node verify-capture.js --base64 <base64 verify command> [--project <path> --ticket <ref>]\n");
+    process.stderr.write("Usage: node verify-capture.js --base64 <base64 verify command> [--project <path> --ticket <ref>] [--detach [--wait-ms <milliseconds>]]\n       node verify-capture.js --resume <run directory> [--wait-ms <milliseconds>]\n");
     process.exitCode = 2;
     return;
   }
-  const target = captureTarget(args);
-  const { capture, recorded } = await runCapturedVerification(command, target, process.cwd(), fs, {
-    announce: (line) => process.stderr.write(`${line}
+  if (args.includes("--detach")) {
+    const { runDirectory, pid } = startDetachedCapture(args, process.cwd());
+    process.stderr.write(`verify-capture: detached run ${runDirectory} pid=${pid}; waiting up to ${detachedWaitMilliseconds(args)}ms in the foreground.
+`);
+    process.exitCode = await awaitDetachedCapture(runDirectory, detachedWaitMilliseconds(args));
+    return;
+  }
+  const exitFile = optionValue(args, "--exit-file");
+  try {
+    const target = captureTarget(args);
+    const { capture, recorded } = await runCapturedVerification(command, target, process.cwd(), fs, {
+      announce: (line) => process.stderr.write(`${line}
 `)
-  });
-  report(capture, recorded);
-  process.exitCode = capture.exitCode === 0 && (!target || recorded?.ok) ? 0 : 2;
+    });
+    report(capture, recorded);
+    process.exitCode = capture.exitCode === 0 && (!target || recorded?.ok) ? 0 : 2;
+  } catch (error) {
+    process.stdout.write(`verify=error exit=2 reason=${JSON.stringify(String(error?.message || error))}
+`);
+    process.exitCode = 2;
+  }
+  writeExitFile(exitFile, Number(process.exitCode));
 }
-module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, acquireCaptureSlot, isFullSuiteCommand, isTestSuiteCommand, captureBudgetClass, captureBudget, captureHardMaximumMilliseconds, runBudgetedCapture, fullSuiteCaptureTimeoutMilliseconds, effectiveTestWorkers, capacityScaledDeadlineMilliseconds, recordCapture, verifiedRevision };
+module.exports = { awaitDetachedCapture, detachedChildArguments, DETACHED_STILL_RUNNING_EXIT, runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, acquireCaptureSlot, isFullSuiteCommand, isTestSuiteCommand, captureBudgetClass, captureBudget, captureHardMaximumMilliseconds, runBudgetedCapture, fullSuiteCaptureTimeoutMilliseconds, effectiveTestWorkers, capacityScaledDeadlineMilliseconds, recordCapture, verifiedRevision };
 if (require.main === module) void main();

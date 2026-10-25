@@ -1217,3 +1217,149 @@ test.describe('SQ-367: a catalog aged past the stale window', () => {
     }
   });
 });
+
+// SQ-225: a capture whose own budget outlives the Bash tool's 600000ms ceiling must not die with
+// the Bash call. `--detach` runs it in its own process group and waits in the foreground for a
+// bounded time; `--resume` waits again and relays the capture's own verdict.
+const VERIFY_CAPTURE_SCRIPT = path.join(SIDEQUEST_DIR, 'lib', 'verify-capture.js');
+const DETACHED_RESUME_WAIT_MS = '570000';
+
+function slowPassingCommand(directory: string, delayMilliseconds: number): Readonly<{ command: string; marker: string }> {
+  const script = path.join(directory, 'slow-pass.js');
+  const marker = path.join(directory, 'finished');
+  fs.writeFileSync(script, `setTimeout(() => { require('node:fs').writeFileSync(process.argv[2], 'done'); }, ${delayMilliseconds});\n`);
+  return Object.freeze({ command: nodeCommand(script, marker), marker });
+}
+
+function removeDetachedEvidence(stdout: string, runDirectory: string | undefined): void {
+  const details = /^details=(.*)$/m.exec(stdout)?.[1];
+  if (details) fs.rmSync(details, { force: true });
+  if (runDirectory) fs.rmSync(runDirectory, { recursive: true, force: true });
+}
+
+function resumeDetached(runDirectory: string) {
+  return require('node:child_process').spawnSync(process.execPath, [VERIFY_CAPTURE_SCRIPT, '--resume', runDirectory, '--wait-ms', DETACHED_RESUME_WAIT_MS], {
+    encoding: 'utf8',
+    env: process.env,
+    windowsHide: true,
+  });
+}
+
+test('SQ-225: a detached capture survives its wrapper process group being killed and --resume relays its verdict', { skip: process.platform === 'win32' }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-detach-kill-'));
+  let runDirectory: string | undefined;
+  let resumed = '';
+  try {
+    const { command, marker } = slowPassingCommand(directory, 1_500);
+    // The wrapper leads its own process group, standing in for the Bash call the harness kills at its ceiling.
+    const wrapper = spawn(process.execPath, [VERIFY_CAPTURE_SCRIPT, '--base64', Buffer.from(command).toString('base64'), '--detach', '--wait-ms', DETACHED_RESUME_WAIT_MS], {
+      cwd: directory,
+      env: process.env,
+      detached: true,
+      windowsHide: true,
+    });
+    const announced = await new Promise<string>((resolve, reject) => {
+      let stderr = '';
+      wrapper.stdout.resume();
+      wrapper.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf8');
+        const match = /^verify-capture: detached run (\S+) pid=\d+;/m.exec(stderr);
+        if (match) resolve(String(match[1]));
+      });
+      wrapper.once('error', reject);
+      wrapper.once('close', (status: number | null) => reject(new Error(`the wrapper finished (status ${status}) without announcing a detached run, so it ran attached to the call that would be killed:\n${stderr}`)));
+    });
+    runDirectory = announced;
+    process.kill(-wrapper.pid, 'SIGKILL');
+    const result = resumeDetached(runDirectory);
+    resumed = result.stdout;
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /^verify=passed exit=0$/m);
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'done', 'the verify command ran to completion after its wrapper was killed');
+  } finally {
+    removeDetachedEvidence(resumed, runDirectory);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('SQ-225: a detached capture still running at the wait bound reports verify=running with a resume command and exit 75', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-detach-running-'));
+  let runDirectory: string | undefined;
+  let resumed = '';
+  try {
+    const { command, marker } = slowPassingCommand(directory, 1_500);
+    const started = require('node:child_process').spawnSync(process.execPath, [VERIFY_CAPTURE_SCRIPT, '--base64', Buffer.from(command).toString('base64'), '--detach', '--wait-ms', '0'], {
+      cwd: directory,
+      encoding: 'utf8',
+      env: process.env,
+      windowsHide: true,
+    });
+    const running = /^verify=running exit=75 pid=\d+ elapsedMs=\d+ run=(.+)$/m.exec(started.stdout);
+    runDirectory = running?.[1];
+    assert.equal(started.status, 75, `${started.stdout}\n${started.stderr}`);
+    assert.ok(runDirectory, started.stdout);
+    assert.match(started.stdout, /^verify-resume: the capture is still running detached under its own budget, and the Bash ceiling cannot stop it\. Do not start another one\. Rerun this in the FOREGROUND with a 600000 ms timeout until it prints a final verify= line: node ".+verify-capture\.js" --resume ".+"$/m);
+    assert.doesNotMatch(started.stdout, /^verify=passed/m);
+    const result = resumeDetached(String(runDirectory));
+    resumed = result.stdout;
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /^verify=passed exit=0$/m);
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'done');
+  } finally {
+    removeDetachedEvidence(resumed, runDirectory);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('SQ-225: a detached capture relays a failing verdict with the capture exit code', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-detach-fail-'));
+  let stdout = '';
+  let stderr = '';
+  try {
+    const command = `"${process.execPath}" -e "process.exit(3)"`;
+    const result = require('node:child_process').spawnSync(process.execPath, [VERIFY_CAPTURE_SCRIPT, '--base64', Buffer.from(command).toString('base64'), '--detach', '--wait-ms', DETACHED_RESUME_WAIT_MS], {
+      cwd: directory,
+      encoding: 'utf8',
+      env: process.env,
+      windowsHide: true,
+    });
+    stdout = result.stdout;
+    stderr = result.stderr;
+    assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /^verify=failed_suite exit=3 /m);
+  } finally {
+    const run = /^verify-capture: detached run (\S+) pid=/m.exec(String(stderr));
+    removeDetachedEvidence(stdout, run?.[1]);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('SQ-225: --resume reports a run that ended without an exit status as lost, and an unknown run as unknown', async () => {
+  const { awaitDetachedCapture } = require('../lib/verify-capture.js');
+  const runDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-detach-lost-'));
+  try {
+    const exited = require('node:child_process').spawnSync(process.execPath, ['-e', ''], { windowsHide: true });
+    fs.writeFileSync(path.join(runDirectory, 'run.json'), JSON.stringify({ pid: exited.pid, startedAt: Date.now(), cwd: runDirectory }));
+    fs.writeFileSync(path.join(runDirectory, 'output.log'), 'partial wrapper output\n');
+    let written = '';
+    const status = await awaitDetachedCapture(runDirectory, 60_000, (text: string) => { written += text; });
+    assert.equal(status, 2);
+    assert.match(written, /partial wrapper output/);
+    assert.match(written, /^verify=lost exit=2 reason=".*detached_run_lost: the detached verify-capture process \d+ ended without writing an exit status/m);
+
+    fs.rmSync(path.join(runDirectory, 'run.json'));
+    written = '';
+    assert.equal(await awaitDetachedCapture(runDirectory, 60_000, (text: string) => { written += text; }), 2);
+    assert.match(written, /^verify=lost exit=2 reason=".*detached_run_unknown/m);
+  } finally {
+    fs.rmSync(runDirectory, { recursive: true, force: true });
+  }
+});
+
+test('SQ-225: the detached child keeps every capture argument but drops the detach-only options', () => {
+  const { detachedChildArguments } = require('../lib/verify-capture.js');
+  assert.deepEqual(
+    detachedChildArguments(['--base64', 'ZWNobw==', '--detach', '--project', '/repo', '--wait-ms', '1000', '--ticket', 'SQ-1'], '/runs/run-1/exit.json'),
+    ['--base64', 'ZWNobw==', '--project', '/repo', '--ticket', 'SQ-1', '--exit-file', '/runs/run-1/exit.json'],
+  );
+});
