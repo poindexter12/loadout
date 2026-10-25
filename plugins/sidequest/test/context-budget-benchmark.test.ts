@@ -153,7 +153,28 @@ test('end-to-end context budgets preserve real storage, retrieval, and model sea
   });
   const dispatch = await callToolRaw('dispatch', { project, ref: orientationTicket.ref });
   assert.ok(!dispatch.isError, dispatch.content?.[0]?.text);
-  assert.ok(payloadBytes(dispatch.content[0].text) <= 1320, `dispatch is ${payloadBytes(dispatch.content[0].text)} bytes`);
+  // SQ-380: SQ-320 made dispatch warnings ride the compact result whole, deliberately exempt
+  // from the spawn-payload budget, because presentWarnings marks them served and a dropped
+  // warning never comes back. Before SQ-320 this fixture's two warnings (the in-flight
+  // fixture.ts overlap with tickets[0] and the executorVerify pin notice) pushed the result
+  // past the old 1200-byte ride-along ceiling, so they were silently dropped and this cap only
+  // ever measured the 1154-byte spawn payload. They now add 444 bytes (1154 -> 1598). Trimming
+  // them back under 1320 would mean cutting or gutting the warnings SQ-320 guarantees, so the
+  // budget is split instead of loosened: the 1320 cap still bounds everything except
+  // `warnings`, the warnings must arrive whole and unmarked, and the full result has its own
+  // cap with ~5% headroom over today's 1598 so longer warning prose is still policed.
+  const dispatchText = dispatch.content[0].text;
+  const dispatchPayload = JSON.parse(dispatchText);
+  assert.ok(Array.isArray(dispatchPayload.warnings), 'compact dispatch must carry its warnings (SQ-320)');
+  assert.equal(dispatchPayload.warnings.length, 2, `expected the overlap and verify-pin warnings, got ${JSON.stringify(dispatchPayload.warnings)}`);
+  assert.match(dispatchPayload.warnings.join('\n'), /overlaps in-flight/);
+  assert.match(dispatchPayload.warnings.join('\n'), /pinned the command verifier/);
+  assert.equal(dispatchPayload.warningsOmitted, undefined, 'warnings must ride whole, not cut');
+  assert.equal(dispatchPayload.warningsRetrieval, undefined, 'warnings must ride whole, not cut');
+  const { warnings: _dispatchWarnings, ...dispatchSpawnPayload } = dispatchPayload;
+  const dispatchSpawnBytes = payloadBytes(JSON.stringify(dispatchSpawnPayload, null, 2));
+  assert.ok(dispatchSpawnBytes <= 1320, `dispatch without warnings is ${dispatchSpawnBytes} bytes`);
+  assert.ok(payloadBytes(dispatchText) <= 1680, `dispatch is ${payloadBytes(dispatchText)} bytes`);
 
   const context = hookOutput("output.writeContext('SessionStart', 'Recover with the typed board call. ' + '🙂'.repeat(4000))");
   const contextText = context.hookSpecificOutput.additionalContext;
