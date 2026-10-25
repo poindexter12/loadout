@@ -124,6 +124,54 @@ test('preparing a ticket without a recorded verifier pins the legacy custom requ
   assert.equal(store.releaseTicket(slug, ticket.ref, 'no-verifier-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
 });
 
+test('dispatching past unblocked higher-priority ready work names it, and priorityOverride records the reason (SQ-348)', () => {
+  const create = (title: string, priority: string) => store.createTicket(slug, { title, priority, category: 'dispatch.lifecycle', files: ['tracked.js'], source: 'test' });
+  const target = create('priority target', 'normal');
+  const waiting = create('priority waiting high', 'high');
+  const blocked = create('priority blocked high', 'high');
+  const blocker = create('priority open blocker', 'low');
+  const inFlight = create('priority urgent already dispatched', 'urgent');
+  const lower = create('priority lower', 'low');
+  const created = [target, waiting, blocked, blocker, inFlight, lower];
+  try {
+    assert.equal(store.linkTickets(slug, blocked.ref, 'blocked-by', blocker.ref).ok, true);
+    const urgentPrepared = store.prepareDispatch(slug, inFlight.ref);
+    assert.equal(urgentPrepared.ticket.dispatch.outcome, 'prepared');
+
+    const prepared = store.prepareDispatch(slug, target.ref);
+    // Only the unblocked, undispatched, strictly higher ticket is waiting: the blocked high, the urgent
+    // whose own dispatch is in flight, and the lower ticket are not.
+    assert.deepEqual(store.dispatchHigherPriorityReady(prepared.ticket, slug), [{ ref: waiting.ref, priority: 'high' }]);
+    const warnings = store.dispatchWarnings(prepared.ticket, slug);
+    assert.match(warnings[0], new RegExp(`^dispatch priority: ${target.ref} is normal priority, .*waiting undispatched: ${waiting.ref} \\(high\\)\\.`));
+    assert.match(warnings[0], /pass priorityOverride/);
+    for (const ref of [blocked.ref, blocker.ref, inFlight.ref, lower.ref]) assert.doesNotMatch(warnings[0], new RegExp(`${ref}\\b`));
+    // The notice ranks with the defect warnings, so a crowded result keeps it.
+    assert.match(store.presentWarnings(prepared.ticket, warnings, 'sq-348-priority-session').join('\n'), /^dispatch priority:/m);
+    assert.equal(store.releaseTicket(slug, target.ref, 'priority-target-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
+
+    // Releasing the urgent's dispatch puts it back in the waiting band, most urgent first.
+    assert.equal(store.releaseTicket(slug, inFlight.ref, 'priority-urgent-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
+    const reprepared = store.prepareDispatch(slug, target.ref);
+    assert.deepEqual(store.dispatchHigherPriorityReady(reprepared.ticket, slug).map((item: any) => item.ref), [inFlight.ref, waiting.ref]);
+    assert.equal(store.releaseTicket(slug, target.ref, 'priority-target-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
+
+    const overridden = store.prepareDispatch(slug, target.ref, { priorityOverride: '  the user named this ticket  ' });
+    assert.equal(overridden.ticket.dispatch.priorityOverride.reason, 'the user named this ticket');
+    assert.deepEqual(store.dispatchHigherPriorityReady(overridden.ticket, slug), []);
+    assert.doesNotMatch(store.dispatchWarnings(overridden.ticket, slug).join('\n'), /dispatch priority:/);
+    assert.equal(store.releaseTicket(slug, target.ref, 'priority-override-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
+
+    // The top band is never told about lower work.
+    const top = store.prepareDispatch(slug, inFlight.ref);
+    assert.deepEqual(store.dispatchHigherPriorityReady(top.ticket, slug), []);
+    assert.equal(store.releaseTicket(slug, inFlight.ref, 'priority-top-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
+  } finally {
+    // Archived so the higher-priority fixtures never leak a priority notice into later dispatch tests.
+    for (const ticket of created) store.archiveTicket(slug, ticket.ref, { source: 'test' });
+  }
+});
+
 test('executors cannot prepare a shared-tree child dispatch while the orchestrator can', () => {
   const executorSessionId = `executor-dispatch-guard-${Date.now()}`;
   const orchestratorSessionId = `orchestrator-dispatch-guard-${Date.now()}`;

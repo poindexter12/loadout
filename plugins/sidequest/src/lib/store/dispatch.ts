@@ -1160,6 +1160,59 @@ function expiredPreparedDispatch(state?: any, now?: any) {
   return Number.isFinite(preparedAt) && now - preparedAt > preparedDispatchTtlMs();
 }
 
+// SQ-348: `ready` and `claimNext` both hand out urgent, then high, then normal, then low, but
+// `dispatch` takes an explicit ref, so an orchestrator picking a wave by file-overlap cluster could
+// start a normal while unblocked highs sat waiting, and nothing said so. This names that waiting
+// work. `readySet` is the board's own ready list, so it already excludes done, archived, parked
+// (pending submission), actively claimed, and blocked-by-open tickets. What it still contains that
+// is not actually waiting is filtered here: the ticket being dispatched, a ticket awaiting an oracle
+// verdict, and a ticket whose own dispatch is already in flight (prepared and not expired, launched,
+// or bound), which is how the rest of the same wave looks while it is being dispatched in order.
+const DISPATCH_PRIORITY_RANK: Record<string, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+
+function dispatchPriorityRank(priority?: any) {
+  const key = String(priority || '').toLowerCase();
+  return Object.prototype.hasOwnProperty.call(DISPATCH_PRIORITY_RANK, key) ? (DISPATCH_PRIORITY_RANK[key] ?? 9) : 9;
+}
+
+function dispatchInFlight(state?: any, now = Date.now()) {
+  return Boolean(state && state.outcome && !state.terminalAt && !expiredPreparedDispatch(state, now));
+}
+
+function higherPriorityReadyWork(ticket?: any, readySet?: any, now = Date.now()) {
+  if (!ticket) return [];
+  const rank = dispatchPriorityRank(ticket.priority);
+  return (Array.isArray(readySet) ? readySet : [])
+    .filter((candidate: any) => candidate && candidate.id !== ticket.id && candidate.ref !== ticket.ref)
+    .filter((candidate: any) => dispatchPriorityRank(candidate.priority) < rank)
+    .filter((candidate: any) => candidate.status !== 'awaiting-oracle')
+    .filter((candidate: any) => !dispatchInFlight(dispatchState(candidate), now))
+    .sort((left: any, right: any) => dispatchPriorityRank(left.priority) - dispatchPriorityRank(right.priority)
+      || String(left.createdAt).localeCompare(String(right.createdAt)))
+    .map((candidate: any) => ({ ref: candidate.ref, priority: candidate.priority }));
+}
+
+// The waiting work a dispatch result reports: empty when nothing outranks the ticket, and empty when
+// this attempt recorded a priorityOverride reason, because the orchestrator already said why.
+function dispatchPriorityBypass(ticket?: any, readySet?: any, now = Date.now()) {
+  if (dispatchState(ticket)?.priorityOverride) return [];
+  return higherPriorityReadyWork(ticket, readySet, now);
+}
+
+const PRIORITY_NOTICE_REF_LIMIT = 8;
+
+function priorityBypassNotice(ticket?: any, readySet?: any, now = Date.now()) {
+  const waiting = dispatchPriorityBypass(ticket, readySet, now);
+  if (!waiting.length) return null;
+  const listed = waiting.slice(0, PRIORITY_NOTICE_REF_LIMIT).map((item: any) => `${item.ref} (${item.priority})`).join(', ');
+  const more = waiting.length > PRIORITY_NOTICE_REF_LIMIT ? `, and ${waiting.length - PRIORITY_NOTICE_REF_LIMIT} more` : '';
+  return `dispatch priority: ${String(ticket?.ref || 'this ticket')} is ${String(ticket?.priority || 'unprioritized')} priority, `
+    + `but unblocked ready work at a higher priority is waiting undispatched: ${listed}${more}. `
+    + 'The board hands work out urgent, then high, then normal, then low; dispatch those first. '
+    + 'When this ticket is the right call anyway (the user named it, or a listed ticket is blocked in practice), '
+    + 'pass priorityOverride with that reason on the dispatch so the board records it.';
+}
+
 function recentNoCommitAttemptSelection(state?: any) {
   const attempts = Array.isArray(state?.attempts) ? state.attempts : [];
   const recent: any[] = [];
@@ -1741,6 +1794,9 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
   }
   const verifyError = dispatchVerifyCommandError(found, projectPath);
   if (verifyError) throw new Error(verifyError);
+  // SQ-348: the stated reason this dispatch goes ahead of higher-priority ready work. It is recorded
+  // on the dispatch row, and a recorded reason is what silences the priority notice for this attempt.
+  const priorityOverride = String(opts.priorityOverride ?? '').trim();
   const installCheck = projectPath ? assertSidequestInstall(projectPath) : null;
   const preparedPluginInstall = installCheck?.installPath || null;
   const preparedPluginIdentity = installCheck?.identity || null;
@@ -2069,6 +2125,7 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
           ...(worktreeWarning ? { worktreeWarning } : {}),
           ...(pythonIoEncoding.written ? { pythonIoEncoding } : {}),
           ...(opts.dispatchSkew ? { dispatchSkew: opts.dispatchSkew } : {}),
+          ...(priorityOverride ? { priorityOverride: { reason: priorityOverride, at: now } } : {}),
           declaredFiles,
           ...(!sharedTree && releasedContinuation?.continuation ? {
             continuation: releasedContinuation.continuation,
@@ -2468,6 +2525,7 @@ function recoverDispatchQuotaFailure(slug?: any, idOrRef?: any, opts?: any) {
       route: dispatchRouteState(fallback.model, fallback.effort, fallback.exec),
       storyContract: state.storyContract || storyExecutionContract(t.storyId ? getStory(slug, t.storyId) : null),
       ...(state.storyContractDrift ? { storyContractDrift: state.storyContractDrift } : {}),
+      ...(state.priorityOverride ? { priorityOverride: state.priorityOverride } : {}),
       preparedAt: now,
       launchedAt: null,
       boundAt: null,
@@ -3610,6 +3668,10 @@ function reconcileLaunchedDispatches(sessionId?: any, opts?: any) {
     prepareDispatch,
     setDispatchPlanObserver,
     syncLiveDispatchVerification,
+    // SQ-348: store.dispatchWarnings and the dispatch result read these with the board's ready list.
+    higherPriorityReadyWork,
+    dispatchPriorityBypass,
+    priorityBypassNotice,
     readDispatchBriefing,
     recoverLiveClaimDispatch,
     recordDispatchLaunch,

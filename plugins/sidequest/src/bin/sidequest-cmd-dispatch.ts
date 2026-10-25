@@ -35,6 +35,7 @@ async function cmdDispatch(opts: any, positional: any) {
       ...(Object.hasOwn(opts, 'shared-tree') ? { sharedTree: opts['shared-tree'] === true } : {}),
       allowRepeatFailure: !!opts['allow-repeat-failure'],
       allowUnscoped: !!opts['allow-unscoped'],
+      ...(typeof opts['priority-override'] === 'string' ? { priorityOverride: opts['priority-override'] } : {}),
       recoveryEvidence: opts['recovery-evidence'],
       recoveryTaskId: opts['recovery-task-id'],
       source: 'cli',
@@ -54,6 +55,8 @@ async function cmdDispatch(opts: any, positional: any) {
   // warning (cross-ticket state, sibling scope overlap, verify, worktree visibility) was
   // silently absent from the CLI JSON.
   const warnings = store.dispatchWarnings(prepared.ticket, slug);
+  // SQ-348: the same structured priority field the MCP dispatch result carries.
+  const higherPriorityReady = store.dispatchHigherPriorityReady(prepared.ticket, slug);
   if (unverifiedTransport) {
     warnings.push('dispatch warning: --unverified-transport was used — this does NOT prove any session will have the Sidequest board MCP connected; a fresh native Agent could still receive zero board tools.');
   }
@@ -69,6 +72,7 @@ async function cmdDispatch(opts: any, positional: any) {
     tokenPrefix: prepared.token.slice(0, 12),
     token: prepared.token,
     recovery: prepared.recovery || null,
+    ...(higherPriorityReady.length ? { higherPriorityReady } : {}),
     warnings: presentedWarnings,
     spawn,
     guidance: prepared.recovery

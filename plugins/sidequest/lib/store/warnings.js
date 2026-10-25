@@ -1519,7 +1519,7 @@ ${String(ticket?.description || "")}`;
   }
   function warningPriority(warning) {
     const text = String(warning || "");
-    if (/verify command|no file scope|outside the repo worktree|worktree visibility/i.test(text)) return 3;
+    if (/^dispatch priority:|verify command|no file scope|outside the repo worktree|worktree visibility/i.test(text)) return 3;
     if (/build output|consumer|anchor|declared file scope|executor context/i.test(text)) return 2;
     return 1;
   }

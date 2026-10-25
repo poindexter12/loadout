@@ -35,6 +35,7 @@ async function cmdDispatch(opts, positional) {
       ...Object.hasOwn(opts, "shared-tree") ? { sharedTree: opts["shared-tree"] === true } : {},
       allowRepeatFailure: !!opts["allow-repeat-failure"],
       allowUnscoped: !!opts["allow-unscoped"],
+      ...typeof opts["priority-override"] === "string" ? { priorityOverride: opts["priority-override"] } : {},
       recoveryEvidence: opts["recovery-evidence"],
       recoveryTaskId: opts["recovery-task-id"],
       source: "cli",
@@ -51,6 +52,7 @@ async function cmdDispatch(opts, positional) {
   const dispatchState = prepared.ticket.dispatch || {};
   const spawn2 = agentsync.agentSpawn(dispatchState.launchName, isolation, resolved && resolved.model, agent, prompt, dispatchState.description);
   const warnings = store.dispatchWarnings(prepared.ticket, slug);
+  const higherPriorityReady = store.dispatchHigherPriorityReady(prepared.ticket, slug);
   if (unverifiedTransport) {
     warnings.push("dispatch warning: --unverified-transport was used — this does NOT prove any session will have the Sidequest board MCP connected; a fresh native Agent could still receive zero board tools.");
   }
@@ -66,6 +68,7 @@ async function cmdDispatch(opts, positional) {
     tokenPrefix: prepared.token.slice(0, 12),
     token: prepared.token,
     recovery: prepared.recovery || null,
+    ...higherPriorityReady.length ? { higherPriorityReady } : {},
     warnings: presentedWarnings,
     spawn: spawn2,
     guidance: prepared.recovery ? `Claude quota fallback prepared from ${prepared.recovery.failedModel} to ${prepared.recovery.model}·${prepared.recovery.effort}. Pass spawn unchanged; category policy is unchanged.` : `Pass spawn unchanged to Agent; it claims ${prepared.ticket.ref} with --executor ${agent} and its dispatched token file.`
