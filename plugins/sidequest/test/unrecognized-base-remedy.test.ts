@@ -40,9 +40,11 @@ const commitScope = require('../lib/commit-scope.js') as {
     message?: string;
   };
 };
-const { submissionRangeFailureMessage } = require('../lib/mcp-lifecycle.js') as {
+const { submissionRangeFailureMessage, collectGitSubmissionFacts } = require('../lib/mcp-lifecycle.js') as {
   submissionRangeFailureMessage(ticket: any, range: any, gitRef: string): string;
+  collectGitSubmissionFacts(options: Record<string, unknown>): any;
 };
+const store = require('../lib/store.js');
 
 function git(repoRoot: string, args: string[]): string {
   return execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8', windowsHide: true }).trim();
@@ -186,4 +188,60 @@ test('SQ-184: with no recorded dispatch base at all, the remedy keeps its generi
   const ticket = { ref: 'SQ-184-TEST-3', dispatch: {} };
   const message = submissionRangeFailureMessage(ticket, range, gitRef);
   assert.match(message, /use the recorded the pinned dispatch base commit recorded in the dispatch/);
+});
+
+// SQ-287. Repro (jacaranda-platform SQ-2, 2026-10-08): an executor committed a fix on top of an open
+// PR's head. Submitting with no base measured the range from the integration target and swallowed the
+// PR's own out-of-scope paths; submitting with `--base <PR head>` refused unrecognized_base because the
+// PR head is not on the integration target. No board path admitted the candidate. A ticket that names
+// its base (SQ-286) is forked from the recorded commit, and submit now treats that commit as the range
+// boundary, so scope is checked over base..candidate only.
+test('SQ-287: a candidate built on the ticket\'s named PR branch is admitted with scope checked over base..candidate', () => {
+  const root = repo();
+  const mainTip = git(root, ['rev-parse', 'HEAD']);
+  git(root, ['checkout', '--quiet', '-b', 'feat/pr-branch']);
+  fs.mkdirSync(path.join(root, 'laya'));
+  fs.writeFileSync(path.join(root, 'laya', 'app.txt'), 'pr work outside the ticket scope\n');
+  git(root, ['add', '.']);
+  git(root, ['commit', '--quiet', '-m', 'open pull request work']);
+  const prTip = git(root, ['rev-parse', 'HEAD']);
+  git(root, ['checkout', '--quiet', 'main']);
+
+  const slug = store.ensureProject(root, 'sq-287 named base submit').slug;
+  store.setCategory({ id: 'sq287-base', name: 'sq287 base', route: { model: 'sonnet', effort: 'medium' }, fallback: null, enabled: true, readonly: false });
+  store.setBoardConfig(slug, { worktreeBase: 'local-main', integrationBranch: 'main', worktreeIsolation: true });
+
+  const onPr = store.createTicket(slug, { title: 'fix on top of the PR', category: 'sq287-base', files: ['install.sh'], baseRef: 'feat/pr-branch', source: 'test' });
+  store.prepareDispatch(slug, onPr.ref, { sessionId: 'sq287-pr', sharedTree: false });
+  const ticket = store.getTicket(slug, onPr.ref);
+  assert.deepEqual(ticket.dispatch.baseRef, { ref: 'feat/pr-branch', commit: prTip });
+
+  const worktree = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sq-287-executor-')), 'executor');
+  git(root, ['worktree', 'add', '--quiet', '-b', 'sq287-executor', worktree, prTip]);
+  fs.writeFileSync(path.join(worktree, 'install.sh'), '#!/bin/sh\necho fixed\n');
+  git(worktree, ['add', 'install.sh']);
+  git(worktree, ['commit', '--quiet', '-m', 'fix on the PR']);
+  const candidate = git(worktree, ['rev-parse', 'HEAD']);
+  const gitRef = `refs/sidequest/${onPr.ref}`;
+  git(worktree, ['update-ref', gitRef, candidate]);
+
+  const defaulted = collectGitSubmissionFacts({ slug, ticket, root: worktree, commit: candidate, gitRef });
+  assert.equal(defaulted.range.ok, true, `default range must start at the named base: ${JSON.stringify(defaulted.range)}`);
+  assert.equal(defaulted.range.base, prTip, 'the default range starts at the named PR head, not the integration target');
+  assert.deepEqual(defaulted.range.changedPaths, ['install.sh'], 'the PR\'s inherited paths are not charged to this ticket');
+
+  const explicit = collectGitSubmissionFacts({ slug, ticket, root: worktree, commit: candidate, gitRef, base: prTip });
+  assert.equal(explicit.range.ok, true, `--base <named PR head> must not refuse unrecognized_base: ${JSON.stringify(explicit.range)}`);
+  assert.equal(explicit.range.base, prTip);
+  assert.deepEqual(explicit.range.changedPaths, ['install.sh']);
+
+  // Unchanged: a ticket that names no base still may not pick an arbitrary off-target base.
+  const plain = store.createTicket(slug, { title: 'no named base', category: 'sq287-base', files: ['install.sh'], source: 'test' });
+  store.prepareDispatch(slug, plain.ref, { sessionId: 'sq287-plain', sharedTree: false });
+  const plainTicket = store.getTicket(slug, plain.ref);
+  assert.equal(plainTicket.dispatch.baseCommit, mainTip);
+  const refused = collectGitSubmissionFacts({ slug, ticket: plainTicket, root: worktree, commit: candidate, gitRef, base: prTip });
+  assert.equal(refused.range.ok, false);
+  assert.equal(refused.range.reason, 'unrecognized_base');
+  git(root, ['worktree', 'remove', '--force', worktree]);
 });
