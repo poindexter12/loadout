@@ -182,6 +182,9 @@ function waitForHealth(port) {
   });
 }
 
+// Owner-probe budget for fixture processes; see createGatewayTestEnvironment.
+const FIXTURE_PROBE_TIMEOUT_MS = '60000';
+
 const ISOLATED_GATEWAY_ENVIRONMENT_KEYS = [
   'HOME',
   'USERPROFILE',
@@ -250,6 +253,15 @@ function createGatewayTestEnvironment(overrides = {}, isolatedOverrides = {}) {
     CODEX_GATEWAY_DISPATCH_CACHE_PATH: path.join(home, 'dispatch-routes.json'),
     CODEX_GATEWAY_REQUEST_LOG_PATH: path.join(home, 'request-routes.jsonl'),
     CODEX_GATEWAY_TELEMETRY_ENDPOINT: 'http://127.0.0.1:9',
+    // SQ-336/SQ-371: every fixture process that confirms a port owner runs the
+    // real netstat/lsof/ps probes under CODEX_GATEWAY_PROBE_TIMEOUT_MS, whose
+    // production default is 2000ms. Under host load (28-39) those spawns took
+    // 9-16s each, so the owner came back unknown and ensure/stop/restart refused
+    // with "could not confirm the owner" before the behavior under test ran.
+    // Owner confirmation stays real and returns as soon as a probe answers, so
+    // an idle host pays nothing. A test that exercises the timeout refusal
+    // itself lowers this again through isolatedOverrides.
+    CODEX_GATEWAY_PROBE_TIMEOUT_MS: FIXTURE_PROBE_TIMEOUT_MS,
   });
   for (const [key, value] of Object.entries(overrides)) {
     if (!isInheritedGatewayOverride(key, value)) environment[key] = value;
