@@ -1048,7 +1048,13 @@ function negativeControlResult(ticket?: any, expectedTestNames: string[] = []) {
     const waived = markerLine.match(/^\[sidequest:negative-control\]\s+waived\s+(.+)/);
     const waiverReason = waived?.[1]?.trim();
     if (waiverReason) return waiverReason.length >= 20 ? { kind: 'waived' } : { kind: 'short_waiver' };
-    const failed = markerLine.match(/^\[sidequest:negative-control\]\s+target=([^;]+);\s*assertion=([^;]+);\s*(.+?)\s+failed=(\d+)/);
+    // Greedy `.+` for target/assertion backtracks to the LAST "; assertion="
+    // and the LAST "; " before "<command> failed=<n>", which is the real
+    // field boundary for the documented single-line format. A `[^;]+`
+    // field cannot hold a ';' (e.g. a quoted test name like `parses "a;b"`),
+    // which broke the whole-line match and surfaced as a false
+    // missing_target_or_assertion refusal (SQ-213, hit by SQ-199/SQ-201).
+    const failed = markerLine.match(/^\[sidequest:negative-control\]\s+target=(.+);\s*assertion=(.+);\s*(.+?)\s+failed=(\d+)/);
     if (failed) {
       if (!failed[1]?.trim() || !failed[2]?.trim()) return { kind: 'missing_target_or_assertion' };
       if (Number(failed[4]) === 0) return { kind: 'zero_failures' };
