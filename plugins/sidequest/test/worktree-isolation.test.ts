@@ -2467,3 +2467,66 @@ test('SQ-308: one session with live worktree dispatches on two boards can spawn 
     }
   }
 });
+
+// SQ-286. A ticket asked for a fix on top of an open PR branch, and its isolated executor's worktree was
+// created from the integration target instead, so none of the PR's code was there. A ticket can now name
+// its base; an isolated dispatch forks from exactly that commit, and a dispatch that cannot honor the
+// named base refuses instead of silently starting from main.
+test('SQ-286: an isolated dispatch forks from the base ref its ticket names, or refuses', () => {
+  const repository = initRepo('sq-ticket-base-');
+  const git = (args: string[], cwd = repository) => execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true }).trim();
+  const commit = (message: string) => {
+    fs.appendFileSync(path.join(repository, 'README.md'), `${message}\n`);
+    git(['add', 'README.md']);
+    git(['commit', '--quiet', '-m', message]);
+    return git(['rev-parse', 'HEAD']);
+  };
+  const mainTip = git(['rev-parse', 'HEAD']);
+  git(['checkout', '--quiet', '-b', 'feat/pr-branch']);
+  const prTip = commit('open pull request work');
+  git(['checkout', '--quiet', 'main']);
+  assert.notEqual(prTip, mainTip, 'the PR branch must sit off the integration target');
+
+  const baseSlug = store.ensureProject(repository, 'ticket base ref').slug;
+  store.setCategory({ id: 'ticket-base', name: 'ticket base', route: { model: 'sonnet', effort: 'medium' }, fallback: null, enabled: true, readonly: false });
+  store.setBoardConfig(baseSlug, { worktreeBase: 'local-main', integrationBranch: 'main', worktreeIsolation: true });
+
+  const plain = store.createTicket(baseSlug, { title: 'no named base', category: 'ticket-base', files: ['README.md'], source: 'test' });
+  store.prepareDispatch(baseSlug, plain.ref, { sessionId: 'sq286-plain', sharedTree: false });
+  assert.equal(store.getTicket(baseSlug, plain.ref).dispatch.baseCommit, mainTip, 'a ticket with no named base still forks the integration target');
+
+  const onPr = store.createTicket(baseSlug, { title: 'fix on top of the PR', category: 'ticket-base', files: ['README.md'], baseRef: 'feat/pr-branch', source: 'test' });
+  assert.equal(store.getTicket(baseSlug, onPr.ref).baseRef, 'feat/pr-branch', 'the ticket records the base it names');
+  const prepared = store.prepareDispatch(baseSlug, onPr.ref, { sessionId: 'sq286-pr', sharedTree: false });
+  const dispatched = store.getTicket(baseSlug, onPr.ref).dispatch;
+  assert.equal(dispatched.baseCommit, prTip, 'the isolated worktree baseline is the named PR branch tip, not the integration target');
+  assert.deepEqual(dispatched.baseRef, { ref: 'feat/pr-branch', commit: prTip });
+  const briefing = agentsync.renderTicketBriefing(store.getTicket(baseSlug, onPr.ref), prepared.token, baseSlug, repository);
+  assert.ok(briefing.includes(`feat/pr-branch`) && briefing.includes(`git reset --hard ${prTip}`), `the briefing must bring the worktree onto the named base: ${briefing}`);
+
+  // A base the board cannot resolve is refused before any token is minted.
+  const missing = store.createTicket(baseSlug, { title: 'unknown base', category: 'ticket-base', files: ['README.md'], baseRef: 'feat/never-pushed', source: 'test' });
+  assert.throws(
+    () => store.prepareDispatch(baseSlug, missing.ref, { sessionId: 'sq286-missing', sharedTree: false }),
+    /names base ref "feat\/never-pushed"[\s\S]*does not resolve to a commit/,
+  );
+  assert.equal(store.getTicket(baseSlug, missing.ref).dispatchNonce, null, 'a refused base mints no token');
+
+  // A shared-checkout dispatch runs on whatever the checkout holds, so it cannot honor a named base.
+  const shared = store.createTicket(baseSlug, { title: 'shared base', category: 'ticket-base', files: ['README.md'], baseRef: 'feat/pr-branch', source: 'test' });
+  assert.throws(
+    () => store.prepareDispatch(baseSlug, shared.ref, { sessionId: 'sq286-shared', sharedTree: true }),
+    /names base ref "feat\/pr-branch"[\s\S]*isolated worktree/,
+  );
+  assert.equal(store.getTicket(baseSlug, shared.ref).dispatchNonce, null, 'a refused shared-tree base mints no token');
+
+  // An option-shaped ref is refused at filing, so it can never reach git as a flag.
+  assert.throws(
+    () => store.createTicket(baseSlug, { title: 'flag base', category: 'ticket-base', files: ['README.md'], baseRef: '--upload-pack=x', source: 'test' }),
+    /base ref/,
+  );
+
+  // Clearing the base restores the integration-target fork.
+  store.updateTicket(baseSlug, shared.ref, { baseRef: null });
+  assert.equal(store.getTicket(baseSlug, shared.ref).baseRef, null);
+});

@@ -6,6 +6,7 @@ const { resolveSuite } = require("../suite-resolver.js");
 const { defaultHostSleep } = require("../host-sleep.js");
 const { FILESYSTEM_SNAPSHOT_SOURCE, withPrecomputedFilesystemSnapshot } = require("../source-revision-capability.js");
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationOutcome } = require("../kernel/review-binding");
+const { normalizeTicketBaseRef } = require("./tickets.js");
 function unscopedWriteCannotAutoApprove(ticket, options) {
   const { dispatchReadOnly, normalizeFiles, autoApproveScope } = options;
   return !dispatchReadOnly(ticket) && !normalizeFiles(ticket?.files).length && (!Array.isArray(autoApproveScope) || !autoApproveScope.length);
@@ -1030,6 +1031,18 @@ function createDispatch(dependencies) {
       stdio: ["ignore", "pipe", "ignore"]
     }).trim();
   }
+  function resolveTicketBaseRef(projectPath, ticketRef, baseRef) {
+    const candidates = [baseRef];
+    if (!baseRef.startsWith("refs/")) candidates.push(`refs/remotes/origin/${baseRef}`);
+    for (const candidate of candidates) {
+      try {
+        const commit = gitOutput(projectPath, ["rev-parse", "--verify", "--quiet", `${candidate}^{commit}`]);
+        if (/^[0-9a-f]{40,64}$/.test(commit)) return commit;
+      } catch (_) {
+      }
+    }
+    throw new Error(`prepare dispatch: ${ticketRef} names base ref "${baseRef}", which does not resolve to a commit in ${projectPath} (tried ${candidates.join(", ")}). The worktree will not silently start from the integration target instead. Fetch the branch into the project checkout first, name it exactly (for example origin/<branch> or a commit hash), or clear the ticket's baseRef to fork the integration target.`);
+  }
   function registeredWorktrees(repository) {
     return gitOutput(repository, ["worktree", "list", "--porcelain"]).split(/\r?\n\r?\n/).map((entry) => /^worktree\s+(.+)$/m.exec(entry)?.[1]).filter((worktree) => Boolean(worktree)).map((worktree) => canonicalPath(worktree));
   }
@@ -1544,6 +1557,11 @@ function createDispatch(dependencies) {
       if (t.workingTreeDelivery === true && !sharedTree) {
         throw new Error(`prepare dispatch: ${t.ref} declares a working-tree deliverable and must run in the shared checkout. Re-dispatch with sharedTree:true.`);
       }
+      const namedBaseRef = reviewTargetState ? null : normalizeTicketBaseRef(t.baseRef);
+      if (namedBaseRef && (sharedTree || nonRepoOutput)) {
+        throw new Error(`prepare dispatch: ${t.ref} names base ref "${namedBaseRef}", and only an isolated worktree can start from a named base; this dispatch would run ${nonRepoOutput ? "without a repository checkout" : "in the shared checkout, which holds whatever is checked out there"}. Re-dispatch with sharedTree:false on a board with worktree isolation enabled, or clear the ticket's baseRef.`);
+      }
+      const namedBaseCommit = namedBaseRef ? resolveTicketBaseRef(String(projectPath || ""), t.ref, namedBaseRef) : null;
       const runtimeRefusal = sharedTree ? sharedTreeRuntimeRefusal(t, projectPath, opts.runtimeCwd, Boolean(worktreeIsolation)) : null;
       if (runtimeRefusal) throw new Error(runtimeRefusal);
       t.dispatchNonce = mintDispatchToken();
@@ -1601,7 +1619,7 @@ function createDispatch(dependencies) {
       const derivedVerification = verificationDerivation(t, verificationRequirement2);
       const evidenceDirectory = ticketEvidenceDirectory(slug, t.ref, projectPath);
       fs.mkdirSync(evidenceDirectory, { recursive: true, mode: 448 });
-      const baseCommit = reviewTargetState?.candidate.source === "git" ? reviewTargetState.candidate.value : integrationTargetState ? integrationTargetCommit(readMeta(slug)?.path || "", integrationTargetState) : commitScope.headCommit(readMeta(slug)?.path || "");
+      const baseCommit = reviewTargetState?.candidate.source === "git" ? reviewTargetState.candidate.value : namedBaseCommit ? namedBaseCommit : integrationTargetState ? integrationTargetCommit(readMeta(slug)?.path || "", integrationTargetState) : commitScope.headCommit(readMeta(slug)?.path || "");
       const plannedTokenFile = newDispatchTokenFile();
       const planStagedToken = stageDispatchToken(plannedTokenFile, t.dispatchNonce);
       stagedToken = planStagedToken;
@@ -1641,6 +1659,7 @@ function createDispatch(dependencies) {
             // Record the integration target commit so an isolated executor can bring
             // its harness-created worktree forward before changing it.
             baseCommit,
+            ...namedBaseRef && namedBaseCommit ? { baseRef: { ref: namedBaseRef, commit: namedBaseCommit } } : {},
             ...reviewTargetState ? { reviewTarget: t.reviewTarget } : {},
             ...integrationTargetState ? { integrationTarget: integrationTargetState } : {},
             ...localAheadWarning ? { localAheadWarning } : {},

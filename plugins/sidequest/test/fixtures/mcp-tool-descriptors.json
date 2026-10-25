@@ -309,6 +309,10 @@
         "workingTreeDelivery": {
           "type": "boolean"
         },
+        "baseRef": {
+          "type": "string",
+          "maxLength": 255
+        },
         "anchors": {
           "type": "string",
           "maxLength": 4000
@@ -494,6 +498,10 @@
         },
         "workingTreeDelivery": {
           "type": "boolean"
+        },
+        "baseRef": {
+          "type": "string",
+          "maxLength": 255
         },
         "externalDeliverable": {
           "type": "boolean"
