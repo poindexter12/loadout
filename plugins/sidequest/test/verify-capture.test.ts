@@ -149,7 +149,7 @@ test('SQ-74: the in-test worker count comes from --test-concurrency, else the ma
 });
 
 test('SQ-74: an ad-hoc full-suite run does not acquire the verification capture slot', async () => {
-  // Ruling: only a ticket-bound capture takes the per-host slot. A full-suite command run without
+  // Ruling: only a ticket-bound capture takes the per-project slot. A full-suite command run without
   // a ticket must not queue behind a held slot; foreign load is absorbed by the capacity-scaled
   // in-test deadlines instead.
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-74-adhoc-'));
@@ -210,6 +210,80 @@ test('SQ-169: any node --test command or npm test script is classified for the e
   assert.equal(captureBudgetClass('cd plugins/sidequest && npm run test:full'), 'full-suite');
   for (const command of ['npm run check', 'npm run typecheck', 'node scripts/build.mjs', 'node --test-reporter=spec x.js', 'git diff --check']) {
     assert.equal(captureBudgetClass(command), 'command', command);
+  }
+});
+
+// SQ-334: `node scripts/test-full.mjs` is the full suite by its direct entry point, but only the
+// npm spelling matched, so two direct runs in one project took no slot and ran side by side.
+test('SQ-334: the full suite by its direct entry point classifies as full-suite', () => {
+  const directSpellings = [
+    'node scripts/test-full.mjs',
+    'cd plugins/sidequest && node scripts/test-full.mjs',
+    'node ./scripts/test-full.mjs --verbose',
+    'node plugins/sidequest/scripts/test-full.mjs',
+    'node --import tsx scripts/test-full.mjs',
+    '/usr/local/bin/node scripts/test-full.mjs',
+    `"${process.execPath}" scripts/test-full.mjs`,
+    'node "scripts/test-full.mjs"',
+    'node.exe scripts\\test-full.mjs',
+    'npm run typecheck && node scripts/test-full.mjs',
+    '(node scripts/test-full.mjs)',
+  ];
+  for (const command of directSpellings) assert.equal(captureBudgetClass(command), 'full-suite', command);
+  // The npm spelling still matches, including after a pipe-free separator.
+  assert.equal(captureBudgetClass('npm run lint; npm run test:full'), 'full-suite');
+  for (const command of ['node scripts/test-full.mjsx', 'node scripts/build.mjs', 'cat scripts/test-full.mjs', 'git diff -- scripts/test-full.mjs']) {
+    assert.equal(captureBudgetClass(command), 'command', command);
+  }
+});
+
+test('SQ-334: a ticket-bound direct-entry full-suite capture takes the project slot', { skip: process.platform === 'win32' }, async () => {
+  const project = captureFixtureProject('sq-334-direct-full-suite-', '\n');
+  fs.mkdirSync(path.join(project, 'scripts'));
+  fs.writeFileSync(path.join(project, 'scripts', 'test-full.mjs'), '\n');
+  execFileSync('git', ['add', '--all'], { cwd: project, windowsHide: true });
+  execFileSync('git', ['-c', 'user.name=Sidequest Tests', '-c', 'user.email=sidequest@example.invalid', 'commit', '--quiet', '-m', 'direct entry'], { cwd: project, windowsHide: true });
+  const boardProject = store.ensureProject(project);
+  const command = 'node scripts/test-full.mjs';
+  const ticket = store.createTicket(boardProject.slug, { title: 'direct-entry full suite takes the slot', executorVerifyKind: 'command', executorVerify: command });
+  try {
+    const { capture } = await runCapturedVerification(command, { project, ticket: ticket.ref }, project, fs, {
+      resolveBudget: (candidate: string) => captureBudget(candidate, 8, 0, ''),
+    });
+    assert.equal(capture.status, 'passed', capture.evidence);
+    assert.equal(capture.budget?.budgetClass, 'full-suite');
+    assert.equal(capture.queuePosition, 1, 'the direct-entry full suite must queue for the project slot');
+    assert.equal(fs.existsSync(path.join(captureSlotDirectory(project), 'active')), false, 'the project slot is released after the run');
+    if (capture.logPath) deleteLog(capture);
+  } finally {
+    fs.rmSync(captureSlotDirectory(project), { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+// SQ-334: the slot is keyed per project by design (captureSlotDirectory hashes the registered
+// project path). The refusal called it "per-host", so an orchestrator concluded the machine was
+// serialised and stopped keeping cross-project suites apart.
+test('SQ-334: the slot-wait refusal names the slot per-project and says other projects are not serialised', async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-334-slot-scope-'));
+  const otherProject = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-334-slot-other-'));
+  const lease = await acquireCaptureSlot(project);
+  assert.ok('release' in lease, `fixture must hold the slot: ${JSON.stringify(lease)}`);
+  try {
+    const other = await acquireCaptureSlot(otherProject, 200);
+    assert.ok('release' in other, `a capture in another project is not serialised against this one: ${JSON.stringify(other)}`);
+    await other.release();
+    const waited = await acquireCaptureSlot(project, 200);
+    assert.ok(!('release' in waited) && 'queuePosition' in waited, `the second capture in the same project must time out: ${JSON.stringify(waited)}`);
+    assert.doesNotMatch(waited.reason, /per-host/);
+    assert.match(waited.reason, /waited \d+ms for this project's full-suite slot at queue position 2;/);
+    assert.match(waited.reason, /The slot is per project: it serialises full-suite captures within this project only, and captures in other projects on this host are not serialised against it/);
+  } finally {
+    await lease.release();
+    fs.rmSync(captureSlotDirectory(project), { recursive: true, force: true });
+    fs.rmSync(captureSlotDirectory(otherProject), { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+    fs.rmSync(otherProject, { recursive: true, force: true });
   }
 });
 
@@ -318,9 +392,9 @@ test('SQ-169: a full-suite capture that exceeds its budget is stopped, reported,
     assert.equal(capture.budget?.budgetClass, 'full-suite');
     assert.equal(capture.queuePosition, 1);
     assert.match(capture.reason, /^capture_budget_exceeded: the verify command ran \d+ms and was stopped at its 1500ms capture budget\./);
-    assert.match(capture.reason, /full-suite class \(the npm run test:full suite, serialized per host\)/);
+    assert.match(capture.reason, /full-suite class \(the test:full suite, serialized per project; captures in other projects are not serialized against it\)/);
     assert.match(announced.join('\n'), /^verify-capture: capture budget 1500ms, full-suite class/);
-    assert.equal(fs.existsSync(path.join(captureSlotDirectory(project), 'active')), false, 'the per-host slot is released after a budget timeout');
+    assert.equal(fs.existsSync(path.join(captureSlotDirectory(project), 'active')), false, 'the project slot is released after a budget timeout');
     fs.rmSync(capture.logPath, { force: true });
   } finally {
     fs.rmSync(captureSlotDirectory(project), { recursive: true, force: true });

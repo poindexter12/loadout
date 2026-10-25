@@ -17,6 +17,7 @@ const captureSlotProcessLiveness = Object.freeze({
   }
 });
 const captureSlotTimeoutMilliseconds = 30 * 60 * 1e3;
+const captureSlotScopeNotice = "The slot is per project: it serialises full-suite captures within this project only, and captures in other projects on this host are not serialised against it, so keep cross-project suites apart yourself.";
 const captureSlotStaleMilliseconds = 30 * 60 * 1e3;
 const captureSlotRetryMilliseconds = 50;
 const captureSlotOperationRetryLimit = 20;
@@ -33,8 +34,10 @@ const harnessForegroundMaximumMilliseconds = 6e5;
 const harnessBackgroundDefaultMilliseconds = 18e5;
 const harnessBackgroundMaximumMilliseconds = 72e5;
 const harnessTimeoutMarginMilliseconds = 6e5;
+const npmFullSuitePattern = /(?:^|[\s&;|()])npm\s+run\s+test:full(?:\s|$)/;
+const directFullSuitePattern = /(?:^|[\s&;|()])["']?(?:[^\s"'&;|()]*[\\/])?node(?:\.exe)?["']?\s(?:[^&;|()\n]*\s)?["']?(?:[^\s"'&;|()]*[\\/])?test-full\.mjs["']?(?=[\s&;|()]|$)/;
 function isFullSuiteCommand(command) {
-  return /(?:^|[\s&;()])npm\s+run\s+test:full(?:\s|$)/.test(command);
+  return npmFullSuitePattern.test(command) || directFullSuitePattern.test(command);
 }
 const nodeTestRunnerPattern = /(?:^|[\s&;|()])["']?(?:[^\s"'&;|()]*[\\/])?node(?:\.exe)?["']?\s(?:[^&;|()\n]*\s)?--test(?=[\s&;|()]|$)/;
 const npmTestScriptPattern = /(?:^|[\s&;|()])npm(?:\.cmd)?\s+(?:-[^\s&;|()]*(?:\s+[^-\s&;|()][^\s&;|()]*)?\s+)*(?:t|tst|test|run(?:-script)?\s+test(?::[^\s&;|()]+)?)(?=[\s&;|()]|$)/;
@@ -105,7 +108,7 @@ function fullSuiteCaptureTimeoutMilliseconds(availableParallelism = os.available
   return captureBudget("npm run test:full", availableParallelism, loadAverage, rawOverride).timeoutMilliseconds;
 }
 const captureBudgetClassDescriptions = Object.freeze({
-  "full-suite": "the npm run test:full suite, serialized per host",
+  "full-suite": "the test:full suite, serialized per project; captures in other projects are not serialized against it",
   "test-suite": "a node --test or npm test script run",
   command: "not a recognized test runner, so it gets no capacity phase budget"
 });
@@ -330,7 +333,7 @@ async function acquireCaptureSlot(project, timeoutMilliseconds = captureSlotTime
     }
     if (!waitingAnnounced) {
       const siblingCount = queuePosition - 1;
-      process.stdout.write(`verify-capture: waiting for ${siblingCount} sibling capture${siblingCount === 1 ? "" : "s"} to finish (queue position ${queuePosition}).
+      process.stdout.write(`verify-capture: waiting for ${siblingCount} sibling capture${siblingCount === 1 ? "" : "s"} to finish (queue position ${queuePosition}). ${captureSlotScopeNotice}
 `);
       waitingAnnounced = true;
     }
@@ -340,7 +343,7 @@ async function acquireCaptureSlot(project, timeoutMilliseconds = captureSlotTime
       return Object.freeze({
         waitedForSlotMs,
         queuePosition,
-        reason: `Verification capture waited ${waitedForSlotMs}ms for the per-host full-suite slot at queue position ${queuePosition}; sibling capture contention exceeded the ${timeoutMilliseconds}ms limit.`
+        reason: `Verification capture waited ${waitedForSlotMs}ms for this project's full-suite slot at queue position ${queuePosition}; sibling capture contention exceeded the ${timeoutMilliseconds}ms limit. ${captureSlotScopeNotice}`
       });
     }
     await wait(captureSlotRetryMilliseconds);
@@ -381,7 +384,7 @@ async function runFullSuiteCapture(command, project, cwd, fileSystem = fs, optio
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     return captureSlotCouldNotRun(command, Object.freeze({
-      reason: `Verification capture could not acquire its per-host full-suite slot: ${reason}`,
+      reason: `Verification capture could not acquire this project's full-suite slot: ${reason}`,
       errorCode: captureSlotErrorCode(error)
     }));
   }

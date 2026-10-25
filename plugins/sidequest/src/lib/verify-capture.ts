@@ -26,6 +26,10 @@ const captureSlotProcessLiveness: CaptureSlotProcessLiveness = Object.freeze({
 });
 
 const captureSlotTimeoutMilliseconds = 30 * 60 * 1_000;
+// SQ-334: the slot is keyed per project (captureSlotDirectory hashes the registered project path,
+// by design), so it never serialises captures across projects. Say so wherever the slot surfaces,
+// or an operator reads "slot" as machine-wide and stops managing the cross-project case.
+const captureSlotScopeNotice = 'The slot is per project: it serialises full-suite captures within this project only, and captures in other projects on this host are not serialised against it, so keep cross-project suites apart yourself.';
 const captureSlotStaleMilliseconds = 30 * 60 * 1_000;
 const captureSlotRetryMilliseconds = 50;
 const captureSlotOperationRetryLimit = 20;
@@ -40,7 +44,7 @@ const maximumTestPhaseTimeoutMilliseconds = 2_400_000;
 const minimumEffectiveTestWorkers = 0.5;
 const phaseBudgetOverrideVariable = 'SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS';
 // SQ-169: the override is widen-only, so without a ceiling one huge value let a hung run hold
-// the per-host capture slot (and the executor waiting on it) indefinitely. Two hours is four
+// the project's capture slot (and the executor waiting on it) indefinitely. Two hours is four
 // times the slowest full suite measured on a contended host (SQ-62: 29 minutes) and well above
 // the 3_000_000ms the capacity model itself can reach, so it bounds a wedged run without
 // constraining any real one.
@@ -81,8 +85,17 @@ type CaptureBudget = Readonly<{
 }>;
 type CaptureBudgetResolver = (command: string) => CaptureBudget;
 
+// The full suite by either spelling: the npm script (`npm run test:full`) or its direct entry
+// point (`node scripts/test-full.mjs`). SQ-334: only the npm spelling matched, so two direct
+// `node scripts/test-full.mjs` captures in one project took no slot and ran side by side. The
+// direct form is matched with the same care as nodeTestRunnerPattern below: a `node` executable
+// (bare, path-qualified, quoted, or .exe), any flags before the script, and a script path that
+// may be relative, path-qualified or quoted (`node --import tsx plugins/sidequest/scripts/test-full.mjs`).
+const npmFullSuitePattern = /(?:^|[\s&;|()])npm\s+run\s+test:full(?:\s|$)/;
+const directFullSuitePattern = /(?:^|[\s&;|()])["']?(?:[^\s"'&;|()]*[\\/])?node(?:\.exe)?["']?\s(?:[^&;|()\n]*\s)?["']?(?:[^\s"'&;|()]*[\\/])?test-full\.mjs["']?(?=[\s&;|()]|$)/;
+
 function isFullSuiteCommand(command: string): boolean {
-  return /(?:^|[\s&;()])npm\s+run\s+test:full(?:\s|$)/.test(command);
+  return npmFullSuitePattern.test(command) || directFullSuitePattern.test(command);
 }
 
 // The classifier errs toward the larger budget on purpose: a false positive (say, `echo node
@@ -185,7 +198,7 @@ function fullSuiteCaptureTimeoutMilliseconds(availableParallelism = os.available
 }
 
 const captureBudgetClassDescriptions: Readonly<Record<CaptureBudgetClass, string>> = Object.freeze({
-  'full-suite': 'the npm run test:full suite, serialized per host',
+  'full-suite': 'the test:full suite, serialized per project; captures in other projects are not serialized against it',
   'test-suite': 'a node --test or npm test script run',
   command: 'not a recognized test runner, so it gets no capacity phase budget',
 });
@@ -503,7 +516,7 @@ async function acquireCaptureSlot(project: string, timeoutMilliseconds = capture
     }
     if (!waitingAnnounced) {
       const siblingCount = queuePosition - 1;
-      process.stdout.write(`verify-capture: waiting for ${siblingCount} sibling capture${siblingCount === 1 ? '' : 's'} to finish (queue position ${queuePosition}).\n`);
+      process.stdout.write(`verify-capture: waiting for ${siblingCount} sibling capture${siblingCount === 1 ? '' : 's'} to finish (queue position ${queuePosition}). ${captureSlotScopeNotice}\n`);
       waitingAnnounced = true;
     }
     const waitedForSlotMs = Date.now() - startedAt;
@@ -512,7 +525,7 @@ async function acquireCaptureSlot(project: string, timeoutMilliseconds = capture
       return Object.freeze({
         waitedForSlotMs,
         queuePosition,
-        reason: `Verification capture waited ${waitedForSlotMs}ms for the per-host full-suite slot at queue position ${queuePosition}; sibling capture contention exceeded the ${timeoutMilliseconds}ms limit.`,
+        reason: `Verification capture waited ${waitedForSlotMs}ms for this project's full-suite slot at queue position ${queuePosition}; sibling capture contention exceeded the ${timeoutMilliseconds}ms limit. ${captureSlotScopeNotice}`,
       });
     }
     await wait(captureSlotRetryMilliseconds);
@@ -556,7 +569,7 @@ async function runFullSuiteCapture(command: string, project: string, cwd: string
   } catch (error: unknown) {
     const reason = error instanceof Error ? error.message : String(error);
     return captureSlotCouldNotRun(command, Object.freeze({
-      reason: `Verification capture could not acquire its per-host full-suite slot: ${reason}`,
+      reason: `Verification capture could not acquire this project's full-suite slot: ${reason}`,
       errorCode: captureSlotErrorCode(error),
     }));
   }
@@ -786,7 +799,8 @@ async function runCapturedVerification(command: string, target: CaptureTarget | 
     options.beforeRun?.();
     if (target && !preflight) started.before = treeSnapshot(captureCwd, true);
   };
-  // Only a ticket-bound full-suite capture takes the per-host slot; every capture runs under the
+  // Only a ticket-bound full-suite capture takes the project's slot (keyed per project by
+  // captureSlotDirectory, never per host: captures in other projects run beside it); every capture runs under the
   // budget model. SQ-74 ruled that an ad-hoc full-suite run (no --ticket, or `npm run test:full`
   // straight from a shell) does not contend for the slot: the slot serialises recorded captures,
   // a slot held by test-full itself would deadlock the capture that spawns it, and load from
