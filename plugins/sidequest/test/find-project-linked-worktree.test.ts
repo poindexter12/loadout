@@ -32,8 +32,8 @@ function repoWithOutsideWorktree() {
   const parent = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sq-find-project-fx-')));
   const repo = path.join(parent, 'checkout', 'repo');
   fs.mkdirSync(repo, { recursive: true });
-  git(repo, ['init', '-q']);
-  git(repo, ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'init']);
+  git(repo, ['init', '-q', '-b', 'main']);
+  git(repo, ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'seed']);
   const worktree = path.join(parent, 'elsewhere', 'worktrees', 'primary-1');
   git(repo, ['worktree', 'add', '-q', '--detach', worktree]);
   return { repo, worktree };

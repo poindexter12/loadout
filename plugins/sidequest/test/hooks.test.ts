@@ -4134,14 +4134,16 @@ test('worktree-create binds a linked checkout to its registered main board', () 
   const name = `agent-linked-${sqSeq}`;
   const target = worktrees.namedWorktreePath(linkedCheckout, name);
   try {
-    assert.equal(store.findProject(linkedCheckout).ok, false);
+    // SQ-237: findProject folds the linked checkout to its main board instead of reporting not_found.
+    assert.equal(store.findProject(linkedCheckout).slug, project);
     const output = execFileSync(process.execPath, [WORKTREE_CREATE], {
       input: JSON.stringify({ hook_event_name: 'WorktreeCreate', session_id: sessionId, cwd: linkedCheckout, name }),
       encoding: 'utf8',
       env: process.env,
     }).trim();
     assert.equal(output, gitFixture(['rev-parse', '--show-toplevel'], target), 'the hook must return Git’s host-facing path spelling');
-    assert.equal(store.findProject(linkedCheckout).ok, false, 'the linked checkout must not mint a second board');
+    assert.equal(store.listProjects({ all: true }).some((entry: any) => entry.path === linkedCheckout), false, 'the linked checkout must not mint a second board');
+    assert.equal(store.findProject(linkedCheckout).slug, project, 'the linked checkout resolves to its main board');
     const dispatch = store.getTicket(project, ticket.ref).dispatch;
     assert.equal(store.findProject(repository).slug, project);
     assert.equal(worktrees.canonicalPath(dispatch.worktree), worktrees.canonicalPath(target));
