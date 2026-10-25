@@ -2560,25 +2560,39 @@ function bindDispatchWorktreeCreation(slug?: any, sessionId?: any, worktree?: an
 // session instead of assuming the cwd board. `excludeSlug` is the board the hook
 // already tried. Each match reports the registered repository the checkout must
 // be created from.
-function dispatchWorktreeCreationBoards(sessionId?: any, excludeSlug?: any) {
+//
+// Only a board that can actually take THIS creation counts (SQ-308): one holding
+// an unbound launched dispatch, or one whose dispatch is already bound to the very
+// checkout this name resolves to there (a re-entered creation). A dispatch already
+// bound to a different checkout belongs to an earlier spawn, so counting it made
+// one session's live executors on board A refuse every new spawn on board B as
+// ambiguous_binding. `worktreeFor` maps a board's repository to the checkout path
+// this creation would take in it; without it no bound dispatch can be matched.
+function dispatchWorktreeCreationBoards(sessionId?: any, excludeSlug?: any, worktreeFor?: any) {
   const normalizedSessionId = String(sessionId || '').trim();
   if (!normalizedSessionId) return [];
   const excluded = String(excludeSlug || '').trim();
-  const boards: any[] = [];
+  const resumed: any[] = [];
+  const pending: any[] = [];
   for (const project of listProjects({ all: true })) {
     if (!project?.slug || project.slug === excluded) continue;
     const meta = readMeta(project.slug);
     if (!meta?.path) continue;
-    const live = listTickets(project.slug).some((candidate?: any) => {
+    const repository = canonicalPath(meta.path);
+    const target = typeof worktreeFor === 'function' ? canonicalPath(worktreeFor(repository)) : null;
+    let unbound = false;
+    let reentered = false;
+    for (const candidate of listTickets(project.slug)) {
       const state = dispatchState(candidate);
-      if (dispatchCreationCandidate(state, normalizedSessionId)) return true;
-      return Boolean(state && state.sessionId === normalizedSessionId && state.sharedTree === false
+      if (dispatchCreationCandidate(state, normalizedSessionId)) unbound = true;
+      else if (target && state && state.sessionId === normalizedSessionId && state.sharedTree === false
         && state.outcome === 'launched' && !state.terminalAt && state.worktreeBindingSource === 'worktree-create'
-        && state.worktree);
-    });
-    if (live) boards.push({ slug: project.slug, repository: canonicalPath(meta.path) });
+        && state.worktree && canonicalPath(state.worktree) === target) reentered = true;
+    }
+    if (reentered) resumed.push({ slug: project.slug, repository });
+    else if (unbound) pending.push({ slug: project.slug, repository });
   }
-  return boards;
+  return resumed.length ? resumed : pending;
 }
 
 function completeDispatchWorktreeCreation(slug?: any, sessionId?: any, worktree?: any) {

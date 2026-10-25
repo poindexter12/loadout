@@ -2413,3 +2413,57 @@ test('SQ-258: an orchestrator-granted foreign repository worktree carries a writ
     execFileSync('git', ['worktree', 'remove', '--force', linked], { cwd: PROJECT, windowsHide: true });
   }
 });
+
+// SQ-308. One session ran isolated executors on two boards at once. Their dispatches were already bound to
+// their own checkouts, yet the hook counted every board holding any live bound dispatch as a candidate for
+// the NEXT creation, so a third spawn on either board was refused ambiguous_binding until the first two
+// went idle. A dispatch bound to another checkout cannot take this creation; only the board holding the
+// unbound launch can.
+test('SQ-308: one session with live worktree dispatches on two boards can spawn a third on either board', () => {
+  const { spawnSync } = require('node:child_process');
+  const repoA = initRepo('sq308-board-a-');
+  const repoB = initRepo('sq308-board-b-');
+  const cwdRepo = initRepo('sq308-session-cwd-');
+  const boardA = store.ensureProject(repoA, 'sq308 board a').slug;
+  const boardB = store.ensureProject(repoB, 'sq308 board b').slug;
+  store.ensureProject(cwdRepo, 'sq308 session cwd');
+  const sessionId = 'sq308-two-board-session';
+  const launch = (board: string, label: string) => {
+    const ticket = store.createTicket(board, { title: `sq308 ${label}`, category: 'codebase-exploration', description: 'two-board fixture', files: ['README.md'] });
+    const prepared = store.prepareDispatch(board, ticket.ref, { sharedTree: false, sessionId });
+    assert.equal(store.recordDispatchLaunch(board, ticket.ref, { token: prepared.token, executor: prepared.ticket.dispatchExecutor, sessionId, agentName: label }).ok, true);
+    return ticket.ref;
+  };
+  // The two executors already running: each bound to its own checkout on its own board.
+  launch(boardA, 'sq308-live-a');
+  assert.equal(store.bindDispatchWorktreeCreation(boardA, sessionId, worktrees.namedWorktreePath(repoA, 'agent-sq308livea')).ok, true);
+  launch(boardB, 'sq308-live-b');
+  assert.equal(store.bindDispatchWorktreeCreation(boardB, sessionId, worktrees.namedWorktreePath(repoB, 'agent-sq308liveb')).ok, true);
+  const created: { repo: string; target: string; name: string }[] = [];
+  const spawn = (board: string, repo: string, other: string, name: string) => {
+    const ref = launch(board, name);
+    const target = worktrees.namedWorktreePath(repo, name);
+    created.push({ repo, target, name });
+    const result = spawnSync(process.execPath, [path.join(HOOKS, 'worktree-create.js')], {
+      input: JSON.stringify({ hook_event_name: 'WorktreeCreate', name, session_id: sessionId, cwd: cwdRepo }),
+      encoding: 'utf8',
+      env: { ...process.env, SIDEQUEST_HOME },
+      windowsHide: true,
+    });
+    assert.equal(result.status, 0, `the spawn on ${board} must not be refused: ${result.stderr}`);
+    assert.equal(worktrees.canonicalPath(result.stdout.trim()), worktrees.canonicalPath(target), 'the checkout lands in the dispatch board repository');
+    assert.equal(fs.existsSync(worktrees.namedWorktreePath(other, name)), false, 'the other board repository must not receive the checkout');
+    const dispatch = store.getTicket(board, ref).dispatch;
+    assert.equal(worktrees.canonicalPath(dispatch.worktree), worktrees.canonicalPath(target));
+    assert.equal(dispatch.worktreeBindingSource, 'worktree-create');
+  };
+  try {
+    spawn(boardB, repoB, repoA, 'agent-sq308thirdb');
+    spawn(boardA, repoA, repoB, 'agent-sq308thirda');
+  } finally {
+    for (const entry of created) {
+      if (fs.existsSync(entry.target)) execFileSync('git', ['worktree', 'remove', '--force', entry.target], { cwd: entry.repo, windowsHide: true });
+      try { execFileSync('git', ['branch', '-D', `worktree-${entry.name}`], { cwd: entry.repo, windowsHide: true, stdio: 'ignore' }); } catch (_) {}
+    }
+  }
+});

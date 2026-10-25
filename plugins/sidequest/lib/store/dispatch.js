@@ -2030,23 +2030,29 @@ function createDispatch(dependencies) {
     }
     return { ok: false, reason: "dispatch_binding_unavailable" };
   }
-  function dispatchWorktreeCreationBoards(sessionId, excludeSlug) {
+  function dispatchWorktreeCreationBoards(sessionId, excludeSlug, worktreeFor) {
     const normalizedSessionId = String(sessionId || "").trim();
     if (!normalizedSessionId) return [];
     const excluded = String(excludeSlug || "").trim();
-    const boards = [];
+    const resumed = [];
+    const pending = [];
     for (const project of listProjects({ all: true })) {
       if (!project?.slug || project.slug === excluded) continue;
       const meta = readMeta(project.slug);
       if (!meta?.path) continue;
-      const live = listTickets(project.slug).some((candidate) => {
+      const repository = canonicalPath(meta.path);
+      const target = typeof worktreeFor === "function" ? canonicalPath(worktreeFor(repository)) : null;
+      let unbound = false;
+      let reentered = false;
+      for (const candidate of listTickets(project.slug)) {
         const state = dispatchState(candidate);
-        if (dispatchCreationCandidate(state, normalizedSessionId)) return true;
-        return Boolean(state && state.sessionId === normalizedSessionId && state.sharedTree === false && state.outcome === "launched" && !state.terminalAt && state.worktreeBindingSource === "worktree-create" && state.worktree);
-      });
-      if (live) boards.push({ slug: project.slug, repository: canonicalPath(meta.path) });
+        if (dispatchCreationCandidate(state, normalizedSessionId)) unbound = true;
+        else if (target && state && state.sessionId === normalizedSessionId && state.sharedTree === false && state.outcome === "launched" && !state.terminalAt && state.worktreeBindingSource === "worktree-create" && state.worktree && canonicalPath(state.worktree) === target) reentered = true;
+      }
+      if (reentered) resumed.push({ slug: project.slug, repository });
+      else if (unbound) pending.push({ slug: project.slug, repository });
     }
-    return boards;
+    return resumed.length ? resumed : pending;
   }
   function completeDispatchWorktreeCreation(slug, sessionId, worktree) {
     const normalizedSessionId = String(sessionId || "").trim();
