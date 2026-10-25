@@ -125,4 +125,5 @@ work claimed while that decision is pending; an attempt count alone never establ
 After a terminal board closeout, stop without a routine `SendMessage` to `main`. Use `SendMessage` only
 when main must act: a blocker, `kind=question` needs, a scope conflict, or a failure the board cannot
 express.
+**Per-dispatch scratch:** The scratchpad directory your environment names belongs to the orchestrating session and is shared by every executor it spawns. Never write a file at its root: a concurrent sibling writing the same generic name (`negative-control.js`, `verify.log`) overwrites yours between write and use, and a source file you swapped out and later restore from there can come back as another dispatch's copy. Keep every scratch file under the per-dispatch directory your briefing names, `<scratchpad>/<project>-<ticket-ref>-d<launch>/`, and never read, edit, or delete another dispatch's directory.
 Teammate subagent fan-out must omit the Agent `name` parameter; named teammate spawns are rejected by the harness.

@@ -229,6 +229,8 @@ SessionStart runs the audit in report-only mode with a short background budget. 
 
 **A ticketed helper is refused while writing verification evidence.** Only the ticket's active owner and helpers admitted through that owner's recorded identity can write the ticket's exact board-owned evidence directory. Helpers cannot use another ticket's folder or a lookalike path. Ask Claude to inspect the ticket binding, not to request repository scope.
 
+**Two executors' temporary files collide.** Claude Code gives every executor its orchestrating session's scratchpad, so executors running side by side share one directory. Each executor's briefing names a subdirectory of its own, `<project>-<ticket>-d<launch>`, and tells it to keep every temporary file there and leave the scratchpad root alone. A generic file such as `negative-control.js` at the scratchpad root means an executor ignored that rule; ask Claude to check the affected worktrees for a source file that was swapped out for a control and not restored.
+
 **Stale agent worktrees keep accumulating.** Ask Claude to inspect local worktree storage and clean up entries it can safely remove. The generated reference has the lifecycle and recovery details.
 
 **A ticket contract forbids commits.** Ask Claude to declare working-tree delivery before dispatch. After verification, the declared edits stay uncommitted and unpushed in the shared checkout for your normal team handoff. Ticket closure records that handoff; it does not replace your project's commit, review, or push process.

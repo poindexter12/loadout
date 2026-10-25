@@ -133,9 +133,24 @@ function renderExecAgent({ name, effort, modelId, marker, extraNote, ticketBrief
 ${skills.map((skill) => `  - ${skill}`).join("\n")}
 ` : "";
   return template.split("{{NAME}}").join(String(name)).split("{{EFFORT}}").join(String(effort)).split("{{MODEL_FRONTMATTER}}").join(modelId ? `
-model: ${modelId}` : "").split("{{CHECKPOINT_TOOL_ROUNDS}}").join(String(EXECUTOR_CHECKPOINT_TOOL_ROUNDS)).split("permissionMode: bypassPermissions").join(`${toolsLine}${disallowedToolsLine}${skillsLine}permissionMode: bypassPermissions`).split("{{MARKER}}").join(marker || "").split("{{EXTRA_NOTE}}").join(extraNote || "").split("{{TICKET_BRIEF}}").join(`Teammate subagent fan-out must omit the Agent \`name\` parameter; named teammate spawns are rejected by the harness.${ticketBrief2 ? `
+model: ${modelId}` : "").split("{{CHECKPOINT_TOOL_ROUNDS}}").join(String(EXECUTOR_CHECKPOINT_TOOL_ROUNDS)).split("permissionMode: bypassPermissions").join(`${toolsLine}${disallowedToolsLine}${skillsLine}permissionMode: bypassPermissions`).split("{{MARKER}}").join(marker || "").split("{{EXTRA_NOTE}}").join(extraNote || "").split("{{TICKET_BRIEF}}").join(`${PER_DISPATCH_SCRATCH_RULE}
+Teammate subagent fan-out must omit the Agent \`name\` parameter; named teammate spawns are rejected by the harness.${ticketBrief2 ? `
 
 ${ticketBrief2}` : ""}`);
+}
+const PER_DISPATCH_SCRATCH_RULE = "**Per-dispatch scratch:** The scratchpad directory your environment names belongs to the orchestrating session and is shared by every executor it spawns. Never write a file at its root: a concurrent sibling writing the same generic name (`negative-control.js`, `verify.log`) overwrites yours between write and use, and a source file you swapped out and later restore from there can come back as another dispatch's copy. Keep every scratch file under the per-dispatch directory your briefing names, `<scratchpad>/<project>-<ticket-ref>-d<launch>/`, and never read, edit, or delete another dispatch's directory.";
+function dispatchScratchDirectoryName(ticket, slug) {
+  const ref = String(ticket?.ref || "").trim();
+  if (!ref) return null;
+  const round = Number(ticket?.dispatch?.launchSeq);
+  const launch = Number.isInteger(round) && round > 0 ? round : 1;
+  return [String(slug || "").trim(), ref, `d${launch}`].filter(Boolean).join("-").replace(/[^A-Za-z0-9._-]+/g, "-");
+}
+function ticketScratchSpace(ticket, slug) {
+  if (!ticket?.dispatch) return null;
+  const name = dispatchScratchDirectoryName(ticket, slug);
+  if (!name) return null;
+  return `Per-dispatch scratch directory: \`<scratchpad>/${name}/\`, where \`<scratchpad>\` is the Scratchpad directory your environment names. That scratchpad is shared by every executor the orchestrating session spawns, so create this directory before first use and keep every temporary file in it: scripts, logs, and any source file you swap out for a control and must restore. Never write at the scratchpad root, and never read, edit, or delete another dispatch's directory.`;
 }
 function dispatchNote() {
   return `
@@ -625,7 +640,7 @@ Git dir: ${gitDir}`;
 }
 function ticketReadOnlyScratchSpace(ticket) {
   if (ticket?.dispatch?.readonly !== true) return null;
-  return "Read-only dispatch: keep temporary files in the session scratchpad, outside every repository worktree. The scratchpad is not a durable ticket artifact. With no Write tool, write scratch and evidence files through Bash: a heredoc or printf redirected into the scratchpad or the board verification directory is allowed; only a heredoc that carries a git invocation is refused.";
+  return "Read-only dispatch: keep temporary files in the session scratchpad, outside every repository worktree, inside the per-dispatch scratch directory named below. The scratchpad is not a durable ticket artifact. With no Write tool, write scratch and evidence files through Bash: a heredoc or printf redirected into the scratchpad or the board verification directory is allowed; only a heredoc that carries a git invocation is refused.";
 }
 function ticketIsolationContract(ticket, projectPath) {
   if (!ticket || !ticket.dispatch || ticket.dispatch.sharedTree !== false) return null;
@@ -763,7 +778,7 @@ function verificationGateBody(ticket, project) {
     ...highStakes.length ? [highStakes.join("\n")] : []
   ].filter(Boolean).join("\n\n");
 }
-function executorSafetyBody(ticket, nonce, tokenFile, project, executor, closeout, worktreeIdentity, readOnlyScratchSpace, worktreeSync) {
+function executorSafetyBody(ticket, nonce, tokenFile, project, executor, closeout, worktreeIdentity, readOnlyScratchSpace, worktreeSync, scratchSpace) {
   const claimCall = [
     "mcp__plugin_sidequest_board__claim({",
     `  ref: ${JSON.stringify(ticket.ref)},`,
@@ -781,6 +796,7 @@ function executorSafetyBody(ticket, nonce, tokenFile, project, executor, closeou
     ["```javascript", claimCall, "```"].join("\n"),
     ...worktreeIdentity ? [worktreeIdentity] : [],
     ...readOnlyScratchSpace ? [readOnlyScratchSpace] : [],
+    ...scratchSpace ? [scratchSpace] : [],
     ...worktreeSync ? [worktreeSync] : [],
     ...ticketIsolationContract(ticket, project) || [],
     "Execution survival: Budget tool calls and run the declared verify command early, rather than only at the end. If the budget nears exhaustion after partly completing the contract, commit and submit the verified portion with evidence and plainly name what remains: a partial submission with proof beats a dead run. Never leave verified work uncommitted. Board MCP is the executor lifecycle authority. If its transport is unavailable, do not use the Sidequest CLI or raw Agent as a fallback: reload or reconnect Sidequest, then re-dispatch.",
@@ -943,6 +959,7 @@ function ticketBrief(ticket, nonce, marker, slug, projectPath, readOnlyRender) {
   const worktreeSync = ticketWorktreeSync(ticket, project);
   const worktreeIdentity = ticketWorktreeIdentity(ticket, project);
   const readOnlyScratchSpace = ticketReadOnlyScratchSpace(ticket);
+  const scratchSpace = ticketScratchSpace(ticket, slug);
   const uncertainty = dispatchUncertaintyPacket(ticket, slug);
   const planDocument = planDocumentPacket(ticket, slug);
   const experimentLog = experimentLogPacket(ticket, slug);
@@ -965,7 +982,7 @@ This dispatch deliberately runs in the shared checkout. Write only within the de
     revision: Number(ticket?.dispatch?.launchSeq) || 1,
     items: [
       { id: "verification-gate", kind: "safety", priority: 700, order: 0, body: verificationGateBody(ticket, project) },
-      { id: "safety", kind: "safety", priority: 600, order: 1, body: executorSafetyBody(ticket, nonce, ticket?.dispatch?.tokenFile, project, executor, closeout, worktreeIdentity, readOnlyScratchSpace, worktreeSync) + artifactSafety },
+      { id: "safety", kind: "safety", priority: 600, order: 1, body: executorSafetyBody(ticket, nonce, ticket?.dispatch?.tokenFile, project, executor, closeout, worktreeIdentity, readOnlyScratchSpace, worktreeSync, scratchSpace) + artifactSafety },
       { id: "execution-contract", kind: "contract", priority: 500, order: 2, body: storyContractProjectionBody(snapshot) },
       ...storyLog ? [{ id: "story-decision-log", kind: "evidence", priority: 475, order: 3, body: storyDecisionLogProjectionBody(storyLog) }] : [],
       ...rejectionHistory ? [{ id: "rejection-history", kind: "evidence", priority: 450, order: 4, body: rejectionHistory }] : [],
