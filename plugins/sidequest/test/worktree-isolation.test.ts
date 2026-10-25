@@ -2344,3 +2344,72 @@ test('SQ-255: an attempt whose WorktreeCreate hook created nothing is dispatchab
   assert.equal(again.ticket.dispatch.outcome, 'prepared');
   assert.ok(!again.ticket.dispatch.worktree, 'the fresh attempt carries no stale worktree binding');
 });
+
+// SQ-258. An executor whose user approved work on a branch of ANOTHER repository checked that branch out
+// as its own worktree, and every Write/Edit there was refused as "no write lease for this linked worktree":
+// the lease only knows the dispatch repository, and declared files cannot name a path outside it. The only
+// way through was copying files in with Bash, which the guard never sees. The orchestrator now grants the
+// foreign worktree on the ticket (externalWorktrees), and the guard admits writes under exactly that root,
+// for exactly as long as the claim is held.
+test('SQ-258: an orchestrator-granted foreign repository worktree carries a write lease while the claim is held', () => {
+  const agentId = 'a258external';
+  const { ticket, sessionId, executor } = dispatched(agentId);
+  const linked = ticket.dispatch.worktree;
+  execFileSync('git', ['worktree', 'add', '--detach', linked], { cwd: PROJECT, windowsHide: true });
+  completeCheckoutCreation(sessionId, linked);
+  assert.equal(store.bindDispatchAgent(sessionId, executor, agentId, agentId, linked).ok, true);
+  const foreignRepo = initRepo('sq-isolation-foreign-repo-');
+  const foreignWorktree = path.join(fs.realpathSync(os.tmpdir()), `sq-isolation-kev-stack-${process.pid}-${Date.now()}`);
+  execFileSync('git', ['worktree', 'add', '--quiet', '-b', 'feat/kev-stack', foreignWorktree], { cwd: foreignRepo, windowsHide: true });
+  const worker = `${agentId}-worker`;
+  const foreignWrite = () => runHook(GUARD_ISOLATION, writePayload(agentId, executor, sessionId, path.join(foreignWorktree, 'stack', 'main.tf'), linked));
+  try {
+    assert.equal(store.claimTicket(slug, ticket.ref, worker, {
+      token: store.getTicket(slug, ticket.ref).dispatchNonce,
+      executor,
+    }).ok, true);
+    assert.equal(runHook(GUARD_ISOLATION, writePayload(agentId, executor, sessionId, path.join(linked, 'README.md'), linked)), null);
+
+    const ungranted = foreignWrite();
+    assert.equal(ungranted.hookSpecificOutput.permissionDecision, 'deny', 'an ungranted foreign worktree stays refused');
+    assert.match(ungranted.hookSpecificOutput.permissionDecisionReason, /externalWorktrees/, 'the refusal names the grant that would admit it');
+
+    assert.throws(
+      () => store.updateTicket(slug, ticket.ref, { externalWorktrees: [foreignWorktree], by: worker }, undefined, { allowLiveClaimCloseoutUpdate: true }),
+      /externalWorktrees/,
+      'the claim holder cannot grant itself a foreign write lease',
+    );
+    assert.throws(
+      () => store.updateTicket(slug, ticket.ref, { externalWorktrees: ['relative/kev-stack'], by: 'orchestrator' }, undefined, { allowLiveClaimCloseoutUpdate: true }),
+      /absolute/,
+    );
+    assert.throws(
+      () => store.updateTicket(slug, ticket.ref, { externalWorktrees: [path.join(PROJECT, 'nested')], by: 'orchestrator' }, undefined, { allowLiveClaimCloseoutUpdate: true }),
+      /inside the project/,
+      'a grant can never reopen the dispatch repository itself',
+    );
+
+    const granted = store.updateTicket(slug, ticket.ref, { externalWorktrees: [foreignWorktree], by: 'orchestrator' }, undefined, { allowLiveClaimCloseoutUpdate: true });
+    assert.deepEqual(granted.externalWorktrees, [foreignWorktree]);
+    assert.equal(foreignWrite(), null, 'the granted foreign worktree admits Write/Edit');
+    assert.equal(
+      runHook(GUARD_ISOLATION, writePayload(agentId, executor, sessionId, path.join(foreignRepo, 'README.md'), linked))
+        .hookSpecificOutput.permissionDecision,
+      'deny',
+      'the grant covers its root only, not the foreign repository main checkout',
+    );
+    assert.equal(
+      runHook(GUARD_ISOLATION, writePayload(agentId, executor, sessionId, path.join(PROJECT, 'README.md'), linked))
+        .hookSpecificOutput.permissionDecision,
+      'deny',
+      'the shared checkout stays refused',
+    );
+
+    assert.equal(store.releaseTicket(slug, ticket.ref, worker, { status: 'todo' }).ok, true);
+    assert.equal(foreignWrite().hookSpecificOutput.permissionDecision, 'deny', 'the grant ends with the claim');
+  } finally {
+    store.releaseTicket(slug, ticket.ref, worker, { status: 'todo', source: 'test', force: true });
+    execFileSync('git', ['worktree', 'remove', '--force', foreignWorktree], { cwd: foreignRepo, windowsHide: true });
+    execFileSync('git', ['worktree', 'remove', '--force', linked], { cwd: PROJECT, windowsHide: true });
+  }
+});

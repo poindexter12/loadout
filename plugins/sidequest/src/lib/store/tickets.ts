@@ -3,6 +3,7 @@
 const { refPrefixOf } = require('./projects.js');
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationRef } = require('../kernel/review-binding');
 const { classifyVerificationKind, verificationRequirement } = require('../kernel/verification.js');
+const { normalizeExternalWorktrees } = require('../kernel/worktree');
 
 // `verifyCommandErrors` returns no error for an empty command, and
 // `classifyVerificationKind` keeps an explicitly declared `command` kind, so a
@@ -270,6 +271,7 @@ function createTicket(slug?: any, fields?: any, reviewTarget?: any) {
     readonlyOverride: requestedReadonlyOverride(fields),
     workingTreeDelivery: fields.workingTreeDelivery === true,
     externalDeliverable: fields.externalDeliverable === true,
+    externalWorktrees: normalizeExternalWorktrees(fields.externalWorktrees, readMeta(slug)?.path || null),
     executorAnchors: executorText(fields.executorAnchors, EXECUTOR_ANCHORS_MAX, 'executor anchors'),
     executorVerifyKind,
     executorAttestationArtifact: executorText(fields.executorAttestationArtifact, EXECUTOR_VERIFY_MAX, 'executor attestation artifact'),
@@ -1110,6 +1112,7 @@ function activeClaimCloseoutUpdateRefusal(ticket?: any, patch?: any, options: Up
     ...((patch.readonly !== undefined || patch.readonlyOverride !== undefined) && requestedReadonlyOverride(patch) !== ticket.readonlyOverride ? ['readonly'] : []),
     ...(patch.workingTreeDelivery !== undefined && (patch.workingTreeDelivery === true) !== (ticket.workingTreeDelivery === true) ? ['workingTreeDelivery'] : []),
     ...(patch.externalDeliverable !== undefined && (patch.externalDeliverable === true) !== (ticket.externalDeliverable === true) ? ['externalDeliverable'] : []),
+    ...(patch.externalWorktrees !== undefined && !sameFiles(ticket.externalWorktrees, patch.externalWorktrees) ? ['externalWorktrees'] : []),
     ...(patch.executorVerify !== undefined && patch.executorVerify !== ticket.executorVerify ? ['verify'] : []),
     ...(patch.executorVerifyKind !== undefined && patch.executorVerifyKind !== ticket.executorVerifyKind ? ['verifyKind'] : []),
     ...(patch.executorAttestationArtifact !== undefined && patch.executorAttestationArtifact !== ticket.executorAttestationArtifact ? ['attestationArtifact'] : []),
@@ -1276,6 +1279,7 @@ function updateTicket(slug?: any, idOrRef?: any, patch?: any, reviewTarget?: any
     if (patch.readonly !== undefined || patch.readonlyOverride !== undefined) t.readonlyOverride = requestedReadonlyOverride(patch);
     if (patch.workingTreeDelivery !== undefined) t.workingTreeDelivery = patch.workingTreeDelivery === true;
     if (patch.externalDeliverable !== undefined) t.externalDeliverable = patch.externalDeliverable === true;
+    if (patch.externalWorktrees !== undefined) t.externalWorktrees = normalizeExternalWorktrees(patch.externalWorktrees, readMeta(slug)?.path || null);
     if (patch.category !== undefined || patch.readonly !== undefined || patch.readonlyOverride !== undefined) {
       t.files = boundedFiles(t.files, {
         category: t.category,

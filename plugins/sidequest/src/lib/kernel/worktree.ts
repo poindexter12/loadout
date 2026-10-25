@@ -392,6 +392,77 @@ export function legacyWorktreeCleanupDecision(facts: LegacyWorktreeCleanupFacts)
   return allowed('the registered legacy worktree is clean, settled, and old enough.');
 }
 
+// SQ-258. A ticket's declared files are repository-relative by construction, so they can never name a
+// checkout of ANOTHER repository, and the worktree lease above only knows the dispatch repository. When a
+// user approves work on a branch elsewhere, the orchestrator grants that checkout on the ticket as an
+// external worktree root. These two functions are the whole contract: what a grant may name, and when a
+// write under one is admitted. Everything else stays with the ordinary lease.
+export const EXTERNAL_WORKTREES_MAX = 8;
+
+function pathWithin(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+// A grant must be absolute, and must not sit inside or above the dispatch repository: either would let a
+// grant reopen the shared checkout the isolation lease exists to protect.
+export function normalizeExternalWorktrees(value: unknown, repository: string | null): string[] {
+  if (value == null) return [];
+  const entries = Array.isArray(value) ? value : [value];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const canonicalRepository = repository ? canonicalPath(repository) : null;
+  for (const entry of entries) {
+    const raw = String(entry ?? '').trim();
+    if (!raw) continue;
+    if (!path.isAbsolute(raw)) {
+      throw new Error(`externalWorktrees: "${raw}" must be an absolute path to the approved foreign checkout.`);
+    }
+    const resolved = path.resolve(raw);
+    const canonical = canonicalPath(resolved);
+    if (canonicalRepository && (pathWithin(canonicalRepository, canonical) || pathWithin(canonical, canonicalRepository))) {
+      throw new Error(`externalWorktrees: "${raw}" is inside the project repository or contains it; declare repository paths in files instead.`);
+    }
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    out.push(resolved);
+  }
+  if (out.length > EXTERNAL_WORKTREES_MAX) {
+    throw new Error(`externalWorktrees: at most ${EXTERNAL_WORKTREES_MAX} roots may be granted to one ticket.`);
+  }
+  return out;
+}
+
+export type ExternalWorktreeWriteFacts = Readonly<{
+  roots: readonly string[];
+  repository: string | null;
+  // The target's own checkout facts, when it sits in one. A target in the dispatch repository's Git
+  // directory is never external, whatever a grant says.
+  targetCommonGitDirectory: string | null;
+  claimHeld: boolean;
+  identityBound: boolean;
+  terminal: boolean;
+}>;
+
+export function externalWorktreeWriteDecision(facts: ExternalWorktreeWriteFacts, target: string): LeaseDecision {
+  if (!facts.roots.length) return denied('no external worktree is granted to this ticket.');
+  if (facts.terminal) return denied('the dispatch is terminal, so its external worktree grant has ended.');
+  if (!facts.identityBound) return denied('an external worktree write requires a bound runtime identity.');
+  if (!facts.claimHeld) return denied('an external worktree grant applies only while the claim is held.');
+  const canonicalTarget = canonicalPath(target);
+  if (facts.repository) {
+    const canonicalRepository = canonicalPath(facts.repository);
+    if (pathWithin(canonicalRepository, canonicalTarget)) return denied('the target is inside the dispatch repository, which no external grant covers.');
+    if (facts.targetCommonGitDirectory
+      && canonicalPath(facts.targetCommonGitDirectory) === canonicalPath(path.join(canonicalRepository, '.git'))) {
+      return denied('the target is a checkout of the dispatch repository, which no external grant covers.');
+    }
+  }
+  return facts.roots.some((root) => pathWithin(canonicalPath(root), canonicalTarget))
+    ? allowed('target belongs to an external worktree granted to this ticket.')
+    : denied('target is outside every external worktree granted to this ticket.');
+}
+
 export function isCanonicalRegisteredWorktree(lease: WorktreeLease, registeredWorktrees: readonly string[]): boolean {
   return Boolean(lease.canonicalWorktree) && registeredWorktrees.some((registered) => sameCanonicalPath(registered, lease.canonicalWorktree!));
 }

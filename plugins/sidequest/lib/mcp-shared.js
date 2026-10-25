@@ -137,6 +137,7 @@ function provenNoOpCloseout(slug, ticket) {
 }
 const PROJECT_PROP = { type: "string", description: "Board (current project)." };
 const FILES_PROP = { type: "array", items: { type: "string" }, description: "Declared file scope: paths, directory prefixes covering descendants, or globs matched consistently by hook and commit enforcement." };
+const EXTERNAL_WORKTREES_PROP = { type: "array", items: { type: "string" }, description: "Orchestrator-granted absolute roots of approved checkouts in OTHER repositories (for example a user-approved branch worktree). The claimed executor may Write/Edit under them while its claim is held; they are never committed by the board, never inside this project, and an executor cannot grant them to itself. Empty clears." };
 const LABELS_PROP = { type: "array", items: { type: "string" } };
 const CONTRACT_PROP = (verb) => ({ type: "array", items: { type: "string" }, description: `Named contracts or interfaces this ticket ${verb}.` });
 const MODEL_FILTER_PROP = { type: "string", description: "Filter by resolved model slug." };
@@ -973,6 +974,7 @@ module.exports = {
   provenNoOpCloseout,
   PROJECT_PROP,
   FILES_PROP,
+  EXTERNAL_WORKTREES_PROP,
   LABELS_PROP,
   CONTRACT_PROP,
   MODEL_FILTER_PROP,

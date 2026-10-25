@@ -276,6 +276,12 @@
             "type": "string"
           }
         },
+        "externalWorktrees": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "produces": {
           "type": "array",
           "items": {
@@ -448,6 +454,12 @@
           }
         },
         "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "externalWorktrees": {
           "type": "array",
           "items": {
             "type": "string"
