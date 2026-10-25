@@ -190,6 +190,8 @@ test('read-only briefings keep scratch outside every repository worktree', () =>
       dispatch: { readonly: true, sharedTree },
     }, 'readonly-scratch-token');
     assert.match(briefing, /Read-only dispatch: keep temporary files in the session scratchpad, outside every repository worktree/);
+    // SQ-227: a readonly executor has no Write tool, so the briefing names the supported Bash write path.
+    assert.match(briefing, /With no Write tool, write scratch and evidence files through Bash: a heredoc or printf redirected into the scratchpad or the board verification directory is allowed/);
     assert.doesNotMatch(briefing, /keep temporary files in your own worktree/);
   }
 });
@@ -1160,7 +1162,8 @@ test('briefings surface resolved worktree identities for linked and shared dispa
   assert.ok(linked.includes(`Path: ${linkedWorktree}`));
   assert.ok(linked.includes(`Git dir: ${linkedGitDirectory}`));
   assert.ok(!linked.includes(path.join(root, '.git', 'worktrees', 'agent-briefing-worker')));
-  assert.match(linked, /harness refuses heredocs in isolated worktrees; Write scripts to your scratchpad and run them by path/);
+  assert.match(linked, /A heredoc that carries a git invocation is refused in an isolated worktree; run git as plain, separate commands, or Write the script to your scratchpad and run it by path\. A heredoc with no git invocation is allowed\./);
+  assert.doesNotMatch(linked, /harness refuses heredocs in isolated worktrees/);
   assert.doesNotMatch(linked, /Working directory binding:/);
 
   const shared = agentsync.renderTicketBriefing(Object.assign({}, base, {

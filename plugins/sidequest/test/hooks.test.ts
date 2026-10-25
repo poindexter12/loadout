@@ -2674,18 +2674,50 @@ test('fail-closed guard: guard-home-delete, guard-process-signal and read-only g
   }
 });
 
-test('heredoc guard: denies a heredoc in a dispatched isolated worktree', () => {
-  const ticket = addStopTicket('heredoc isolation guard');
+function claimHeredocWorker(label: string): Record<string, unknown> {
+  const ticket = addStopTicket(label);
   const sessionId = `heredoc-isolated-${++sqSeq}`;
-  const acting = claimStopTicket(ticket, sessionId, 'heredoc-worker');
-  const out = runHookOutput(GUARD_HEREDOC_ISOLATED, {
-    ...acting,
-    tool_name: 'Bash',
-    tool_input: { command: "node - <<'JS'\nconsole.log('probe');\nJS" },
-  });
-  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
-  assert.match(out.hookSpecificOutput.permissionDecisionReason, /harness refuses heredocs in isolated worktrees/);
-  assert.match(out.hookSpecificOutput.permissionDecisionReason, /Write the script to your scratchpad and run it by path/);
+  return claimStopTicket(ticket, sessionId, `heredoc-worker-${sqSeq}`);
+}
+
+test('heredoc guard: denies a heredoc that carries a git invocation in a dispatched isolated worktree', () => {
+  const acting = claimHeredocWorker('heredoc isolation guard');
+  const commands = [
+    "git commit -F - <<'EOF'\nsubject line\nEOF",
+    "cd sub && git tag -a v1 -F - <<'EOF'\nnotes\nEOF",
+    "bash <<'SH'\ncd /tmp/elsewhere\ngit push origin main\nSH",
+    "sh -s <<'SH'\nset -e\n  git reset --hard\nSH",
+  ];
+  for (const command of commands) {
+    const out = runHookOutput(GUARD_HEREDOC_ISOLATED, { ...acting, tool_name: 'Bash', tool_input: { command } });
+    assert.equal(out?.hookSpecificOutput?.permissionDecision, 'deny', command);
+    assert.match(out.hookSpecificOutput.permissionDecisionReason, /heredoc that carries a git invocation/, command);
+    assert.match(out.hookSpecificOutput.permissionDecisionReason, /Write the script to your scratchpad and run it by path/, command);
+  }
+});
+
+// SQ-227: the guard refused EVERY heredoc in an isolated worktree, so a readonly executor (no Write tool) could
+// not write evidence or scratch files at all, and the session scratchpad path of any repo under
+// ~/Code/github.com/ encodes "github" into it. Only a heredoc that carries a git invocation may be refused.
+test('heredoc guard: allows a non-git heredoc in a dispatched isolated worktree (SQ-227)', () => {
+  const acting = claimHeredocWorker('heredoc non-git allowance');
+  const scratch = '/private/tmp/claude-503/-Users-joese-Code-github-com-poindexter12-muximus/0b1c/scratchpad';
+  const commands = [
+    `cat <<'EOF' > ${scratch}/x\nevidence line\nEOF`,
+    `cat > "${scratch}/notes.md" <<EOF\nRun git push later, after review.\nThe github.com remote is fine.\nEOF`,
+    "node - <<'JS'\nconsole.log('probe');\nJS",
+    `ls ${scratch} && cat <<-'EOF' >> ${scratch}/log\n\tline\n\tEOF`,
+    `printf '%s\\n' "$(cat <<'EOF'\nprobe output\nEOF\n)" > /Users/me/.claude/sidequest/projects/p/verification/SQ-1/out.txt`,
+    "/Users/me/.local/share/mise/installs/aqua-github-copilot-cli/1.0/bin/copilot --help <<'EOF'\nq\nEOF",
+    "echo 'git push' && cat <<'EOF' > /tmp/x\nbody\nEOF",
+  ];
+  for (const command of commands) {
+    assert.strictEqual(
+      runHookOutput(GUARD_HEREDOC_ISOLATED, { ...acting, tool_name: 'Bash', tool_input: { command } }),
+      null,
+      command,
+    );
+  }
 });
 
 test('heredoc guard: stays silent for non-isolated and non-heredoc Bash commands', () => {

@@ -625,7 +625,7 @@ Git dir: ${gitDir}`;
 }
 function ticketReadOnlyScratchSpace(ticket) {
   if (ticket?.dispatch?.readonly !== true) return null;
-  return "Read-only dispatch: keep temporary files in the session scratchpad, outside every repository worktree. The scratchpad is not a durable ticket artifact.";
+  return "Read-only dispatch: keep temporary files in the session scratchpad, outside every repository worktree. The scratchpad is not a durable ticket artifact. With no Write tool, write scratch and evidence files through Bash: a heredoc or printf redirected into the scratchpad or the board verification directory is allowed; only a heredoc that carries a git invocation is refused.";
 }
 function ticketIsolationContract(ticket, projectPath) {
   if (!ticket || !ticket.dispatch || ticket.dispatch.sharedTree !== false) return null;
@@ -635,7 +635,7 @@ function ticketIsolationContract(ticket, projectPath) {
   const expected = continuationWorktree || String(dispatch.worktree || "").trim() || "(immutable worktree binding unavailable; writes will be refused)";
   return [[
     "Worktree isolation contract: this dispatch runs in its own linked worktree, never in the shared checkout.",
-    "The harness refuses heredocs in isolated worktrees; Write scripts to your scratchpad and run them by path.",
+    "A heredoc that carries a git invocation is refused in an isolated worktree; run git as plain, separate commands, or Write the script to your scratchpad and run it by path. A heredoc with no git invocation is allowed.",
     `Expected worktree root: ${expected}`,
     "Confirm it before your first write, and again after any resume from a coordinator message: `git rev-parse --git-dir` must differ from `git rev-parse --git-common-dir`.",
     `If they match you are in the shared checkout ${root}. Stop. Write nothing, tell the orchestrator this ticket lost its worktree and needs re-dispatch, and name any work you already have staged there so it can be committed out of the shared tree rather than lost.`
