@@ -2629,26 +2629,32 @@ test('fail-closed guard: guard-shared-tree-commit denies an executor raw commit 
 
 test('guard-destructive-git spawns no git for a command that cannot destroy work or publish (SQ-370)', async () => {
   // Every Bash call runs this guard under the harness's 10s hook timeout, and a guard killed there decides nothing.
-  // A slow git must therefore never be on the path of a plain command: the fake git records each invocation.
-  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-370-slow-git-'));
+  // A slow git must therefore never be on the path of a plain command. Assert that property directly, not through
+  // wall-clock time (SQ-381): on a loaded machine the hook's own process startup exceeds any tight bound. The guard
+  // reaches git only through synchronous, PATH-resolved execFileSync('git'), so a fake git first on PATH records
+  // every invocation before the guard can exit.
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-370-fake-git-'));
   const marker = path.join(bin, 'git-invoked');
   const fakeGit = path.join(bin, 'git');
-  fs.writeFileSync(fakeGit, `#!/bin/sh\necho "$*" >> "${marker}"\nsleep 3\nexit 1\n`, { mode: 0o755 });
+  fs.writeFileSync(fakeGit, `#!/bin/sh\necho "$*" >> "${marker}"\nexit 1\n`, { mode: 0o755 });
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-370-plain-cwd-'));
+  const runGuard = (command: string) => runHookProcessForBudget(
+    path.join(HOOKS, 'guard-destructive-git.js'),
+    { hook_event_name: 'PreToolUse', session_id: `sq-370-${crypto.randomUUID()}`, tool_name: 'Bash', tool_input: { command }, cwd },
+    { PATH: `${bin}${path.delimiter}${process.env.PATH || ''}` },
+  );
+  const invocations = () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8') : '');
   for (const command of ['ls', 'git log --oneline -1', 'git status --short']) {
-    const started = Date.now();
-    const result = await runHookProcessForBudget(
-      path.join(HOOKS, 'guard-destructive-git.js'),
-      { hook_event_name: 'PreToolUse', session_id: `sq-370-${crypto.randomUUID()}`, tool_name: 'Bash', tool_input: { command }, cwd },
-      { PATH: `${bin}${path.delimiter}${process.env.PATH || ''}` },
-    );
-    const elapsedMs = Date.now() - started;
+    const result = await runGuard(command);
     assert.equal(result.status, 0, `${command}: ${result.stderr}`);
     assert.equal(result.stdout.trim(), '', `${command} must be allowed silently: ${result.stdout}`);
-    const invoked = fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8') : '';
-    assert.equal(invoked, '', `${command} must not spawn git, but the guard ran: ${invoked}`);
-    assert.ok(elapsedMs < 1000, `${command} took ${elapsedMs}ms; the guard must answer a non-git-write command without waiting on git`);
+    assert.equal(invocations(), '', `${command} must not spawn git, but the guard ran: ${invocations()}`);
   }
+  // Positive control: a command that could destroy work does make the guard resolve its repository through git, and
+  // the fake git records it. Without this the empty marker above could pass because the shim was never reachable.
+  const destructiveResult = await runGuard('git reset --hard');
+  assert.equal(destructiveResult.status, 0, `git reset --hard: ${destructiveResult.stderr}`);
+  assert.match(invocations(), /rev-parse --show-toplevel/, 'the fake git must intercept the guard\'s git spawns');
 });
 
 test('fail-closed guard: guard-home-delete, guard-process-signal and read-only git stay unrefused while the board lock is held', async () => {
