@@ -15,6 +15,17 @@ const store = require('../lib/store.js');
 const db = require('../lib/db.js');
 const { moveBoards } = require('../lib/board-move.js');
 const BIN = path.join(__dirname, '..', 'bin', 'sidequest.js');
+const { execFileSync } = require('child_process');
+const commitScope = require('../lib/commit-scope.js');
+
+// Same route override the integrate fixtures use, set before any move so the copied profile
+// carries it into the destination.
+const exploration = store.getCategory('codebase-exploration');
+store.setCategory(Object.assign({}, exploration, { route: { model: 'sonnet', effort: 'medium' }, fallback: null }));
+
+function git(args: string[], cwd: string) {
+  return execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true }).trim();
+}
 
 const MOVED_PATH = path.join(os.tmpdir(), 'sq-board-move-test', 'moved');
 const STAYS_PATH = path.join(os.tmpdir(), 'sq-board-move-test', 'stays');
@@ -23,6 +34,7 @@ const BLOCKED_PATH = path.join(os.tmpdir(), 'sq-board-move-test', 'blocked');
 function runCli(home: string, args: string[], cwd: string) {
   const res = spawnSync(process.execPath, [BIN, ...args], {
     encoding: 'utf8',
+    cwd: fs.existsSync(cwd) ? cwd : undefined,
     env: Object.assign({}, process.env, { SIDEQUEST_HOME: home, CLAUDE_PROJECT_DIR: cwd }),
   });
   return { status: res.status, stdout: res.stdout || '', stderr: res.stderr || '' };
@@ -133,8 +145,51 @@ test('move carries tickets, comments, files and state; source no longer lists it
   }
 });
 
+test('a submission parked in the source integrates from the destination home after the move', async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-board-move-repo-'));
+  git(['init', '-b', 'main'], repo);
+  git(['config', 'user.name', 'Sidequest Test'], repo);
+  git(['config', 'user.email', 'sidequest-test@example.invalid'], repo);
+  fs.writeFileSync(path.join(repo, 'README.md'), 'move fixture\n');
+  fs.writeFileSync(path.join(repo, '.gitignore'), '.claude/*\n');
+  git(['add', '.'], repo);
+  git(['commit', '-m', 'base'], repo);
+  const executor = path.join(repo, '.claude', 'worktrees', 'agent-move1');
+  git(['worktree', 'add', '-b', 'worktree-agent-move1', executor, 'main'], repo);
+  fs.writeFileSync(path.join(executor, 'feature.txt'), 'executor work\n');
+  git(['add', 'feature.txt'], executor);
+  git(['commit', '-m', 'feature'], executor);
+  const candidate = git(['rev-parse', 'HEAD'], executor);
+
+  const { slug } = store.ensureProject(repo, 'Integrate Board');
+  const ticket = store.createTicket(slug, {
+    title: 'parked submission',
+    category: 'codebase-exploration',
+    description: 'A submission parked before the move, integrated after it.',
+    files: ['feature.txt'],
+  });
+  const gitRef = `refs/sidequest/${ticket.ref}`;
+  git(['update-ref', gitRef, candidate], executor);
+  const target = store.integrationTarget(slug);
+  const range = commitScope.submissionRange(executor, { commit: candidate, gitRef, upstream: target.upstream, integrationBranch: target.branch });
+  assert.strictEqual(range.ok, true, JSON.stringify(range));
+  assert.strictEqual(store.claimTicket(slug, ticket.ref, 'move-worker', { direct: true, reason: 'The move fixture requires a local direct claim.' }).ok, true);
+  assert.strictEqual(store.submitTicket(slug, ticket.ref, 'move-worker', { commit: candidate, gitRef, range, worktree: executor }).ok, true);
+
+  const res = await moveBoards({ sourceHome: SOURCE, destHome: DEST, boards: [repo] });
+  assert.strictEqual(res.ok, true, res.refused);
+  assert.deepStrictEqual(res.boards[0].gitRefs, [gitRef], 'the refs/sidequest pointer is reported and stays valid');
+
+  const result = runCli(DEST, ['integrate', ticket.ref, '--by', 'orchestrator', '--json'], repo);
+  assert.strictEqual(result.status, 0, result.stderr + result.stdout);
+  assert.strictEqual(JSON.parse(result.stdout).ok, true);
+  assert.strictEqual(git(['show', 'main:feature.txt'], repo), 'executor work');
+  const pulse = JSON.parse(runCli(DEST, ['pulse', ticket.ref, '--json'], repo).stdout);
+  assert.strictEqual(JSON.stringify(pulse).includes('"done"'), true, 'integrated ticket is done in the destination');
+});
+
 test('new tickets on the moved board continue the ref sequence without collisions', () => {
-  const res = runCli(DEST, ['add', '-t', 'after the move', '--json'], MOVED_PATH);
+  const res = runCli(DEST, ['add', '-t', 'after the move', '--unclassified', '--json'], MOVED_PATH);
   assert.strictEqual(res.status, 0, res.stderr);
   const ref = JSON.parse(res.stdout).ref;
   assert.ok(![open.ref, released.ref, submitted.ref, finished.ref].includes(ref), `${ref} does not reuse a moved ref`);

@@ -207,6 +207,38 @@ Mirroring obeys the same `--apply` rule as everything else. `sidequest audit` pl
 
 SessionStart runs the audit in report-only mode with a short background budget. When it finds something, the session context contains one summary line such as `sidequest audit: 2 untracked issues. Run sidequest audit for detail.` It stays quiet when every count is zero and never blocks startup. A release cut with `--push` runs `sidequest audit --apply` after publishing its tag; `--dry-run` runs the report mode only. Audit failures are warnings and never roll back a release cut.
 
+## Split boards by account
+
+Every board lives in the database of one Sidequest home. When `SIDEQUEST_HOME` is unset, the home follows `CLAUDE_CONFIG_DIR`: a session started with `CLAUDE_CONFIG_DIR=~/.work/claude` uses `~/.work/claude/sidequest`, and a session started with `~/.personal/claude` uses `~/.personal/claude/sidequest`. Boards created while every session shared one home stay in that home until you move them.
+
+`sidequest move-board` moves whole boards from one home to another:
+
+```bash
+# See exactly what would move. Nothing is written, and the destination is not created.
+sidequest move-board my-repo other-repo --from-home ~/.work/claude/sidequest --to-home ~/.personal/claude/sidequest --dry-run
+
+# Move them.
+sidequest move-board my-repo other-repo --from-home ~/.work/claude/sidequest --to-home ~/.personal/claude/sidequest
+```
+
+A board can be named by its slug, its display name, or its repository path. `--from-home` defaults to the current home. Add `--json` for the full plan.
+
+What moves: the board's tickets with their comments, claim history, submissions and dispatch records, its stories, links, categories, board config and notifications, and everything under `projects/<slug>/` (assets, plans, verification logs). Dispatch token files the tickets name move too, and paths inside the board that pointed at those files are rewritten to the destination. Routing profiles the board uses are copied when the destination lacks them and stay in the source for the boards still there. Ticket ids and refs do not change, so `refs/sidequest/<ref>` pointers in the repository stay valid and new tickets continue the ref sequence.
+
+What stays: existing worktrees. They are registered with Git at their current paths and keep working where they are, so a submission parked before the move integrates from the destination home. New dispatches create worktrees under the destination home. Remove the old ones with `git worktree remove` once their work is integrated.
+
+The move refuses, and names the cause, while any board it moves has a claimed ticket, a launched or bound dispatch, or a held publish lock. It also refuses when the destination already holds a board with the same slug that has tickets the source does not, or a different routing profile with the same name. A destination copy that is empty or left by an interrupted move is replaced. The destination database is created when absent. The source rows are deleted only after the destination copy commits and its per-table row counts match, so a crash at any point leaves the board in at least one home, and running the same move again finishes it.
+
+### Remove a global SIDEQUEST_HOME pin afterwards
+
+A shell profile that exports `SIDEQUEST_HOME` pins every account to one home and overrides the per-account default. Once each board sits in the home for its account:
+
+1. Move the boards that belong to the other account, as above.
+2. Delete the `export SIDEQUEST_HOME=...` line from your shell profile, or any `env` block that sets it.
+3. Start a new shell and a new Claude Code session for each account. Run `sidequest projects` in each and check it lists only that account's boards.
+
+Keep the old home until the second account has used its boards for a while. Its database still holds every board you did not move.
+
 ## If something stops working
 
 **The board does not open.** Reload Claude Code after installing Sidequest, then ask Claude to open the board again. If the browser still does not open, ask Claude to start the Sidequest dashboard and report its local URL.
