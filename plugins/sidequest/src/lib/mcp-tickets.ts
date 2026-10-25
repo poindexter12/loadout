@@ -26,6 +26,7 @@ const {
   provenNoOpCloseout,
   PROJECT_PROP,
   FILES_PROP,
+  EXTERNAL_WORKTREES_PROP,
   LABELS_PROP,
   CONTRACT_PROP,
   MODEL_FILTER_PROP,
@@ -172,6 +173,7 @@ const tools: ToolDefinition[] = [
         highStakes: { type: 'boolean' },
         labels: LABELS_PROP,
         files: FILES_PROP,
+        externalWorktrees: EXTERNAL_WORKTREES_PROP,
         produces: CONTRACT_PROP('produces'),
         changes: CONTRACT_PROP('changes'),
         consumes: CONTRACT_PROP('consumes'),
@@ -235,6 +237,7 @@ const tools: ToolDefinition[] = [
         highStakes: args.highStakes,
         labels: args.labels,
         files: args.files,
+        externalWorktrees: args.externalWorktrees,
         contracts: { produces: args.produces, changes: args.changes, consumes: args.consumes },
         contractWaiver: args.contractWaiver,
         readonly: args.readonly,
@@ -276,6 +279,7 @@ const tools: ToolDefinition[] = [
         highStakes: { type: 'boolean' },
         labels: LABELS_PROP,
         files: FILES_PROP,
+        externalWorktrees: EXTERNAL_WORKTREES_PROP,
         by: { type: 'string', description: 'Human-readable update label. It cannot authorize closeout fields on a live claim.' },
         produces: CONTRACT_PROP('produces'),
         changes: CONTRACT_PROP('changes'),
@@ -356,6 +360,7 @@ const tools: ToolDefinition[] = [
       if (args.readonly !== undefined) patch.readonly = args.readonly;
       if (args.workingTreeDelivery !== undefined) patch.workingTreeDelivery = args.workingTreeDelivery;
       if (args.externalDeliverable !== undefined) patch.externalDeliverable = args.externalDeliverable;
+      if (args.externalWorktrees !== undefined) patch.externalWorktrees = args.externalWorktrees;
       if (args.anchors !== undefined) patch.executorAnchors = args.anchors;
       if (args.verify !== undefined) patch.executorVerify = args.verify;
       if (args.verifyKind !== undefined) patch.executorVerifyKind = args.verifyKind;

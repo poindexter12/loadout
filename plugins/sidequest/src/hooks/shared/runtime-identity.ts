@@ -25,6 +25,8 @@ export interface IsolationExpectation {
   phase: DispatchPhase;
   sharedTree: boolean;
   terminal: boolean;
+  // SQ-258: orchestrator-granted roots of approved checkouts in other repositories.
+  externalWorktrees?: readonly string[];
 }
 
 export interface CheckoutLocation {

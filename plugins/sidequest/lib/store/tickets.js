@@ -2,6 +2,7 @@
 const { refPrefixOf } = require("./projects.js");
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationRef } = require("../kernel/review-binding");
 const { classifyVerificationKind, verificationRequirement } = require("../kernel/verification.js");
+const { normalizeExternalWorktrees } = require("../kernel/worktree");
 function emptyVerifyCommandRefusal(kind, verify, fields) {
   if (String(kind ?? "").trim().toLowerCase() !== "command") return null;
   if (String(verify ?? "").trim()) return null;
@@ -259,6 +260,7 @@ function createTickets(dependencies) {
       readonlyOverride: requestedReadonlyOverride(fields),
       workingTreeDelivery: fields.workingTreeDelivery === true,
       externalDeliverable: fields.externalDeliverable === true,
+      externalWorktrees: normalizeExternalWorktrees(fields.externalWorktrees, readMeta(slug)?.path || null),
       executorAnchors: executorText(fields.executorAnchors, EXECUTOR_ANCHORS_MAX, "executor anchors"),
       executorVerifyKind,
       executorAttestationArtifact: executorText(fields.executorAttestationArtifact, EXECUTOR_VERIFY_MAX, "executor attestation artifact"),
@@ -962,6 +964,7 @@ function createTickets(dependencies) {
       ...(patch.readonly !== void 0 || patch.readonlyOverride !== void 0) && requestedReadonlyOverride(patch) !== ticket.readonlyOverride ? ["readonly"] : [],
       ...patch.workingTreeDelivery !== void 0 && patch.workingTreeDelivery === true !== (ticket.workingTreeDelivery === true) ? ["workingTreeDelivery"] : [],
       ...patch.externalDeliverable !== void 0 && patch.externalDeliverable === true !== (ticket.externalDeliverable === true) ? ["externalDeliverable"] : [],
+      ...patch.externalWorktrees !== void 0 && !sameFiles(ticket.externalWorktrees, patch.externalWorktrees) ? ["externalWorktrees"] : [],
       ...patch.executorVerify !== void 0 && patch.executorVerify !== ticket.executorVerify ? ["verify"] : [],
       ...patch.executorVerifyKind !== void 0 && patch.executorVerifyKind !== ticket.executorVerifyKind ? ["verifyKind"] : [],
       ...patch.executorAttestationArtifact !== void 0 && patch.executorAttestationArtifact !== ticket.executorAttestationArtifact ? ["attestationArtifact"] : []
@@ -1100,6 +1103,7 @@ function createTickets(dependencies) {
       if (patch.readonly !== void 0 || patch.readonlyOverride !== void 0) t.readonlyOverride = requestedReadonlyOverride(patch);
       if (patch.workingTreeDelivery !== void 0) t.workingTreeDelivery = patch.workingTreeDelivery === true;
       if (patch.externalDeliverable !== void 0) t.externalDeliverable = patch.externalDeliverable === true;
+      if (patch.externalWorktrees !== void 0) t.externalWorktrees = normalizeExternalWorktrees(patch.externalWorktrees, readMeta(slug)?.path || null);
       if (patch.category !== void 0 || patch.readonly !== void 0 || patch.readonlyOverride !== void 0) {
         t.files = boundedFiles(t.files, {
           category: t.category,

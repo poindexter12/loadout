@@ -537,6 +537,32 @@ function linkedWorktreeLeaseRefusal(found, target, actualRoot, reason) {
     "Use the worktree assigned to this executor. If it no longer exists, stop and ask the orchestrator to redispatch the ticket."
   );
 }
+function foreignRepositoryCheckout(found, checkoutRoot) {
+  if (!found.projectPath) return null;
+  const facts = observedGitFacts(checkoutRoot);
+  if (!facts) return null;
+  return samePath(facts.commonGitDirectory, import_node_path6.default.join(found.projectPath, ".git")) ? null : facts.commonGitDirectory;
+}
+function externalWorktreeWriteAllowed(found, checkoutRoot, target) {
+  if (!found.externalWorktrees?.length) return false;
+  const commonGitDirectory = foreignRepositoryCheckout(found, checkoutRoot);
+  if (!commonGitDirectory) return false;
+  return leaseKernel.externalWorktreeWriteDecision({
+    roots: found.externalWorktrees,
+    repository: found.projectPath,
+    targetCommonGitDirectory: commonGitDirectory,
+    claimHeld: Boolean(found.claimHeld),
+    identityBound: Boolean(found.identityBound),
+    terminal: Boolean(found.terminal)
+  }, target).allowed;
+}
+function foreignWorktreeRefusal(found, target, actualRoot, reason) {
+  return boundedRefusal(
+    `${found.ref} has no write lease for this linked worktree of another repository.`,
+    [["foreign worktree", actualRoot], ["writing to", target], ["lease decision", reason]],
+    `If the user approved this checkout, ask the orchestrator to grant its root: update({ ref: "${found.ref}", externalWorktrees: ["<root>"] }). Do not copy files in through Bash.`
+  );
+}
 function main() {
   const input = readStdin();
   if (!input || !WRITE_TOOLS.has(stringField(input, "tool_name"))) return;
@@ -572,9 +598,13 @@ function main() {
     return;
   }
   try {
+    if (externalWorktreeWriteAllowed(found, repo.root, target)) return;
+  } catch (_) {
+  }
+  try {
     const decision = leaseKernel.worktreeWriteDecision(observedWorktreeLease(found, repo.root, agentId, sessionId), target);
     if (!decision.allowed) {
-      const message = !found.sharedTree && repo.linked ? linkedWorktreeLeaseRefusal(found, target, repo.root, decision.reason) : !found.sharedTree ? refusal(found, target, repo.root, stringField(input, "cwd")) : leaseRefusal(found, target, decision.reason);
+      const message = foreignRepositoryCheckout(found, repo.root) ? foreignWorktreeRefusal(found, target, repo.root, decision.reason) : !found.sharedTree && repo.linked ? linkedWorktreeLeaseRefusal(found, target, repo.root, decision.reason) : !found.sharedTree ? refusal(found, target, repo.root, stringField(input, "cwd")) : leaseRefusal(found, target, decision.reason);
       writeDeny("PreToolUse", message);
     }
   } catch (_) {

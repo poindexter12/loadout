@@ -28,6 +28,7 @@ failClosedOnBoardBusy();
 const leaseKernel = require(runtimeModule('kernel/worktree')) as {
   createWorktreeLease: (facts: unknown) => unknown;
   worktreeWriteDecision: (lease: unknown, target: string) => { allowed: boolean; reason: string };
+  externalWorktreeWriteDecision: (facts: unknown, target: string) => { allowed: boolean; reason: string };
 };
 
 const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
@@ -233,6 +234,39 @@ function linkedWorktreeLeaseRefusal(found: IsolationExpectation, target: string,
   );
 }
 
+// SQ-258: a checkout whose common Git directory is not the dispatch repository's belongs to another
+// repository entirely. No repository-relative lease can ever cover it; only an orchestrator grant can.
+function foreignRepositoryCheckout(found: IsolationExpectation, checkoutRoot: string): string | null {
+  if (!found.projectPath) return null;
+  const facts = observedGitFacts(checkoutRoot);
+  if (!facts) return null;
+  return samePath(facts.commonGitDirectory, path.join(found.projectPath, '.git')) ? null : facts.commonGitDirectory;
+}
+
+function externalWorktreeWriteAllowed(found: IsolationExpectation, checkoutRoot: string, target: string): boolean {
+  if (!found.externalWorktrees?.length) return false;
+  // Fail closed: without the checkout's own Git facts the guard cannot prove the target is not another
+  // checkout of the dispatch repository, which no grant may reopen.
+  const commonGitDirectory = foreignRepositoryCheckout(found, checkoutRoot);
+  if (!commonGitDirectory) return false;
+  return leaseKernel.externalWorktreeWriteDecision({
+    roots: found.externalWorktrees,
+    repository: found.projectPath,
+    targetCommonGitDirectory: commonGitDirectory,
+    claimHeld: Boolean(found.claimHeld),
+    identityBound: Boolean(found.identityBound),
+    terminal: Boolean(found.terminal),
+  }, target).allowed;
+}
+
+function foreignWorktreeRefusal(found: IsolationExpectation, target: string, actualRoot: string, reason: string): string {
+  return boundedRefusal(
+    `${found.ref} has no write lease for this linked worktree of another repository.`,
+    [['foreign worktree', actualRoot], ['writing to', target], ['lease decision', reason]],
+    `If the user approved this checkout, ask the orchestrator to grant its root: update({ ref: "${found.ref}", externalWorktrees: ["<root>"] }). Do not copy files in through Bash.`,
+  );
+}
+
 function main(): void {
   const input = readStdin();
   if (!input || !WRITE_TOOLS.has(stringField(input, 'tool_name'))) return;
@@ -272,9 +306,16 @@ function main(): void {
     return;
   }
   try {
+    if (externalWorktreeWriteAllowed(found, repo.root, target)) return;
+  } catch (_) {
+    // An unreadable grant never admits a write; the ordinary lease below decides.
+  }
+  try {
     const decision = leaseKernel.worktreeWriteDecision(observedWorktreeLease(found, repo.root, agentId, sessionId), target);
     if (!decision.allowed) {
-      const message = !found.sharedTree && repo.linked
+      const message = foreignRepositoryCheckout(found, repo.root)
+        ? foreignWorktreeRefusal(found, target, repo.root, decision.reason)
+        : !found.sharedTree && repo.linked
         ? linkedWorktreeLeaseRefusal(found, target, repo.root, decision.reason)
         : !found.sharedTree
           ? refusal(found, target, repo.root, stringField(input, 'cwd'))

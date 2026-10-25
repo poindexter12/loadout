@@ -2800,6 +2800,7 @@ function dispatchIsolationExpectation(identity?: any) {
         sanctionedRevisions: sanctionedRevisionsForLiveClaim(ticket, state),
         claimHeld: Boolean(ticket.claim && ticket.claim.by),
         phase: state.terminalAt ? 'terminal' : state.outcome === 'claimed' ? 'claimed' : 'bound',
+        externalWorktrees: Array.isArray(ticket.externalWorktrees) ? ticket.externalWorktrees.map(String) : [],
       };
       if (agentId && candidate.agentId === agentId) byAgent.push(candidate);
       else if (!terminalWithoutClaim && sessionId && executor && state.sessionId === sessionId && state.executor === executor
@@ -2832,6 +2833,7 @@ function dispatchIsolationExpectation(identity?: any) {
     expectedCheckoutInstance: expectation.worktreeCheckoutInstance,
     expectedRevision: expectation.worktreeObservedRevision,
     worktreeBindingSource: expectation.worktreeBindingSource,
+    externalWorktrees: expectation.externalWorktrees,
   };
 }
 

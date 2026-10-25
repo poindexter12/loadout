@@ -25,6 +25,7 @@ const {
   provenNoOpCloseout,
   PROJECT_PROP,
   FILES_PROP,
+  EXTERNAL_WORKTREES_PROP,
   LABELS_PROP,
   CONTRACT_PROP,
   MODEL_FILTER_PROP,
@@ -149,6 +150,7 @@ const tools = [
         highStakes: { type: "boolean" },
         labels: LABELS_PROP,
         files: FILES_PROP,
+        externalWorktrees: EXTERNAL_WORKTREES_PROP,
         produces: CONTRACT_PROP("produces"),
         changes: CONTRACT_PROP("changes"),
         consumes: CONTRACT_PROP("consumes"),
@@ -208,6 +210,7 @@ const tools = [
         highStakes: args.highStakes,
         labels: args.labels,
         files: args.files,
+        externalWorktrees: args.externalWorktrees,
         contracts: { produces: args.produces, changes: args.changes, consumes: args.consumes },
         contractWaiver: args.contractWaiver,
         readonly: args.readonly,
@@ -249,6 +252,7 @@ const tools = [
         highStakes: { type: "boolean" },
         labels: LABELS_PROP,
         files: FILES_PROP,
+        externalWorktrees: EXTERNAL_WORKTREES_PROP,
         by: { type: "string", description: "Human-readable update label. It cannot authorize closeout fields on a live claim." },
         produces: CONTRACT_PROP("produces"),
         changes: CONTRACT_PROP("changes"),
@@ -325,6 +329,7 @@ const tools = [
       if (args.readonly !== void 0) patch.readonly = args.readonly;
       if (args.workingTreeDelivery !== void 0) patch.workingTreeDelivery = args.workingTreeDelivery;
       if (args.externalDeliverable !== void 0) patch.externalDeliverable = args.externalDeliverable;
+      if (args.externalWorktrees !== void 0) patch.externalWorktrees = args.externalWorktrees;
       if (args.anchors !== void 0) patch.executorAnchors = args.anchors;
       if (args.verify !== void 0) patch.executorVerify = args.verify;
       if (args.verifyKind !== void 0) patch.executorVerifyKind = args.verifyKind;
