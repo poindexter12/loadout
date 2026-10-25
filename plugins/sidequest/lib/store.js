@@ -1874,6 +1874,33 @@ function getTicket(slug, idOrRef) {
   );
   return row ? parseTicketData(String(slug || ""), row.data) : null;
 }
+function liveClaimsForRef(ref) {
+  const wanted = String(ref == null ? "" : ref).trim();
+  if (!wanted) return [];
+  const rows = db.selectRows(
+    database(),
+    "SELECT project, data FROM tickets WHERE upper(ref) = upper(?) AND archived = 0 AND claim_by IS NOT NULL AND claim_by <> ''",
+    [wanted]
+  );
+  const claims = [];
+  for (const row of rows) {
+    const slug = String(row.project || "");
+    let ticket;
+    try {
+      ticket = parseTicketData(slug, row.data);
+    } catch (_) {
+      continue;
+    }
+    if (!ticket || !ticket.claim || !ticket.claim.by) continue;
+    claims.push({
+      slug,
+      ref: ticket.ref,
+      by: String(ticket.claim.by),
+      sessionId: String(dispatchState(ticket)?.sessionId || "").trim() || null
+    });
+  }
+  return claims;
+}
 function coerceStatus(s, fallback) {
   s = String(s || "").toLowerCase();
   return VALID_STATUS.includes(s) ? s : fallback;
@@ -3666,6 +3693,7 @@ module.exports = {
   recordWorktreeGcCandidateCursor,
   listAllProjectTickets,
   getTicket,
+  liveClaimsForRef,
   addExternalLink,
   removeExternalLink,
   listExternalLinks,

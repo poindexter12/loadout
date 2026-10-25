@@ -2002,6 +2002,34 @@ function getTicket(slug?: any, idOrRef?: any) {
   return row ? parseTicketData(String(slug || ''), row.data) : null;
 }
 
+// Every board where `ref` names a live-claimed, unarchived ticket, across all
+// projects. A board call that omits `project` uses this to follow the caller's
+// claim onto the board it was made on instead of silently resolving to the
+// session cwd's board, where the same ref can name an unrelated ticket (SQ-284).
+function liveClaimsForRef(ref?: any) {
+  const wanted = String(ref == null ? '' : ref).trim();
+  if (!wanted) return [];
+  const rows = db.selectRows(
+    database(),
+    "SELECT project, data FROM tickets WHERE upper(ref) = upper(?) AND archived = 0 AND claim_by IS NOT NULL AND claim_by <> ''",
+    [wanted],
+  );
+  const claims: any[] = [];
+  for (const row of rows) {
+    const slug = String(row.project || '');
+    let ticket: any;
+    try { ticket = parseTicketData(slug, row.data); } catch (_: any) { continue; }
+    if (!ticket || !ticket.claim || !ticket.claim.by) continue;
+    claims.push({
+      slug,
+      ref: ticket.ref,
+      by: String(ticket.claim.by),
+      sessionId: String(dispatchState(ticket)?.sessionId || '').trim() || null,
+    });
+  }
+  return claims;
+}
+
 function coerceStatus(s?: any, fallback?: any) {
   s = String(s || '').toLowerCase();
   return VALID_STATUS.includes(s) ? s : fallback;
@@ -4125,6 +4153,7 @@ module.exports = {
   recordWorktreeGcCandidateCursor,
   listAllProjectTickets,
   getTicket,
+  liveClaimsForRef,
   addExternalLink,
   removeExternalLink,
   listExternalLinks,
