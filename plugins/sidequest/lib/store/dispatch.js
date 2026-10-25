@@ -64,7 +64,7 @@ function requirementsMatch(left, right) {
   return JSON.stringify(left || null) === JSON.stringify(right || null);
 }
 function createDispatch(dependencies) {
-  const { ARTIFACT_BASELINE_MAX_PATHS, SHARED_TREE_ARTIFACT_MARKER, assertDispatchTransport, assertSidequestInstall, checkSidequestInstall, prepareAttempt, transitionAttempt, attemptDiagnostic, ensurePythonIoEncoding, localAheadOfUpstreamWarning, availableRoute, boardConfig, claimIdleMs, claimReclaimable, claimVerification, classifyDispatchFailure, terminalAgentFailure, commitScope, crypto, database, db, dispatchReadOnly, dispatchBaselineForProject, dispatchVerifyCommandError, dispatchRouteRefusal, dispatchRouteState, effectiveScope, execFileSync, execProjection, fs, getCategory, getStory, homeRoot, integrationTarget, integrationTargetCommit, legacyCategoryForComplexity, listProjects, listTickets, nonRepoExternalOutput, normalizeArtifactRoots, normalizeFiles, normalizeRoute, normalizeWorktreeIsolation, path, hasOriginRemote, pendingSubmission, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, reclaimUnclaimedDispatchWorktree, preparedDispatchTtlMs, putTicket, readMeta, releaseTerminalClaim, resolveCategoryFallback, resolveCategoryRoute, resolveTicketRoute, resolveExec, stableExecutorName, staleWorktreeCwdWarning, storyExecutionContract, ticketCategory, ticketStorageRow, withTicketLock, normalizeCategoryId, projectRoutingEnabled, routingDisabledMessage, getTicket, dispatchLaunchName, nextDispatchLaunchSeq, spawnDescription, claudeQuotaFailure, canonicalPath, checkoutInstanceIdentity, checkoutLayout, createWorktreeLease, worktreeResumeDecision, isCanonicalRegisteredWorktree } = dependencies;
+  const { ARTIFACT_BASELINE_MAX_PATHS, SHARED_TREE_ARTIFACT_MARKER, assertDispatchTransport, assertSidequestInstall, checkSidequestInstall, prepareAttempt, transitionAttempt, attemptDiagnostic, ensurePythonIoEncoding, localAheadOfUpstreamWarning, availableRoute, boardConfig, claimIdleMs, claimReclaimable, claimVerification, classifyDispatchFailure, terminalAgentFailure, commitScope, crypto, database, db, dispatchReadOnly, dispatchBaselineForProject, dispatchVerifyCommandError, dispatchRouteRefusal, dispatchRouteState, effectiveScope, execFileSync, execProjection, fs, getCategory, getStory, homeRoot, integrationTarget, integrationTargetCommit, legacyCategoryForComplexity, listProjects, listTickets, nonRepoExternalOutput, normalizeArtifactRoots, normalizeFiles, normalizeRoute, normalizeWorktreeIsolation, path, hasOriginRemote, pendingSubmission, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, reclaimUnclaimedDispatchWorktree, preparedDispatchTtlMs, putTicket, readMeta, releaseTerminalClaim, resolveCategoryFallback, resolveCategoryRoute, resolveTicketRoute, resolveExec, stableExecutorName, staleWorktreeCwdWarning, storyExecutionContract, ticketCategory, ticketStorageRow, transaction, withTicketFileLock, withTicketLock, withTicketLocks, normalizeCategoryId, projectRoutingEnabled, routingDisabledMessage, getTicket, dispatchLaunchName, nextDispatchLaunchSeq, spawnDescription, claudeQuotaFailure, canonicalPath, checkoutInstanceIdentity, checkoutLayout, createWorktreeLease, worktreeResumeDecision, isCanonicalRegisteredWorktree } = dependencies;
   function syncLiveDispatchVerification(slug, ticket, amendment) {
     const state = dispatchState(ticket);
     if (!state || state.terminalAt) return null;
@@ -1648,37 +1648,50 @@ function createDispatch(dependencies) {
         }
       };
     };
-    for (let attempt = 1; ; attempt += 1) {
-      const planKeys = dispatchPlanKeys(slug, getTicket(slug, found.id) || found);
-      const boardStamp = dispatchPlanBoardStamp(planKeys);
-      const repositoryStamp = dispatchRepositoryStamp(projectPath);
-      let staleReason = null;
-      stagedToken = null;
-      const committed = withPrecomputedProjectSnapshot(slug, projectPath, () => {
-        const planned = planDispatch();
-        try {
-          return withTicketLock(slug, found.id, () => {
-            const boardNow = dispatchPlanBoardStamp(planKeys);
-            if (boardNow !== boardStamp) {
-              staleReason = "the board rows it read were rewritten";
-              return STALE_DISPATCH_PLAN;
-            }
-            const repositoryNow = dispatchRepositoryStamp(projectPath);
-            if (repositoryNow !== repositoryStamp) {
-              staleReason = `the repository moved (${stampDifference(repositoryStamp, repositoryNow)})`;
-              return STALE_DISPATCH_PLAN;
-            }
-            return planned.commit();
-          });
-        } finally {
-          stagedToken?.discard();
+    const prepared = withTicketFileLock(slug, found.id, () => {
+      for (let attempt = 1; ; attempt += 1) {
+        const planKeys = dispatchPlanKeys(slug, getTicket(slug, found.id) || found);
+        const boardStamp = dispatchPlanBoardStamp(planKeys);
+        const repositoryStamp = dispatchRepositoryStamp(projectPath);
+        let staleReason = null;
+        stagedToken = null;
+        const committed = withPrecomputedProjectSnapshot(slug, projectPath, () => {
+          dispatchPlanObserver?.({ phase: "plan", slug, id: found.id, ref: found.ref, attempt });
+          const planned = planDispatch();
+          try {
+            return transaction(() => {
+              const boardNow = dispatchPlanBoardStamp(planKeys);
+              if (boardNow !== boardStamp) {
+                staleReason = "the board rows it read were rewritten";
+                return STALE_DISPATCH_PLAN;
+              }
+              const repositoryNow = dispatchRepositoryStamp(projectPath);
+              if (repositoryNow !== repositoryStamp) {
+                staleReason = `the repository moved (${stampDifference(repositoryStamp, repositoryNow)})`;
+                return STALE_DISPATCH_PLAN;
+              }
+              return planned.commit();
+            });
+          } finally {
+            stagedToken?.discard();
+          }
+        });
+        if (committed !== STALE_DISPATCH_PLAN) {
+          dispatchPlanObserver?.({ phase: "stored", slug, id: found.id, ref: found.ref, attempt });
+          return committed;
         }
-      });
-      if (committed !== STALE_DISPATCH_PLAN) return committed;
-      if (attempt >= DISPATCH_PLAN_MAX_ATTEMPTS) {
-        throw new Error(`prepare dispatch: ${found.ref} was planned ${DISPATCH_PLAN_MAX_ATTEMPTS} times and each plan went stale before it could be stored, the last because ${staleReason}. Nothing was written. Let the concurrent work settle, then dispatch again.`);
+        if (attempt >= DISPATCH_PLAN_MAX_ATTEMPTS) {
+          throw new Error(`prepare dispatch: ${found.ref} was planned ${DISPATCH_PLAN_MAX_ATTEMPTS} times and each plan went stale before it could be stored, the last because ${staleReason}. Nothing was written. Let the concurrent work settle, then dispatch again.`);
+        }
       }
-    }
+    });
+    return prepared;
+  }
+  let dispatchPlanObserver = null;
+  function setDispatchPlanObserver(observer) {
+    const previous = dispatchPlanObserver;
+    dispatchPlanObserver = typeof observer === "function" ? observer : null;
+    return previous;
   }
   function readDispatchBriefing(slug, idOrRef, token, tokenFile) {
     const ticket = getTicket(slug, idOrRef);
@@ -2445,7 +2458,7 @@ function createDispatch(dependencies) {
     const [firstId, secondId] = [target.id, holder.id].sort();
     const factsFor = /* @__PURE__ */ new Map([[target.id, reportedFacts], [holder.id, heldFacts]]);
     const refFor = /* @__PURE__ */ new Map([[target.id, holder.ref], [holder.id, target.ref]]);
-    return withTicketLock(slug, firstId, () => withTicketLock(slug, secondId, () => {
+    return withTicketLocks(slug, [firstId, secondId], () => {
       const now = (/* @__PURE__ */ new Date()).toISOString();
       for (const id of [firstId, secondId]) {
         const ticket = getTicket(slug, id);
@@ -2458,7 +2471,7 @@ function createDispatch(dependencies) {
         putTicket(slug, ticket);
       }
       return { ok: true, exchangedWith: holder.ref };
-    }));
+    });
   }
   function provenLeaseOccupancy(state, worktree) {
     const candidate = String(worktree || "").trim();
@@ -2504,7 +2517,7 @@ function createDispatch(dependencies) {
     const [firstId, secondId] = [target.id, holder.id].sort();
     const factsFor = /* @__PURE__ */ new Map([[target.id, reportedFacts], [holder.id, heldFacts]]);
     const refFor = /* @__PURE__ */ new Map([[target.id, holder.ref], [holder.id, target.ref]]);
-    const exchanged = withTicketLock(slug, firstId, () => withTicketLock(slug, secondId, () => {
+    const exchanged = withTicketLocks(slug, [firstId, secondId], () => {
       const now = (/* @__PURE__ */ new Date()).toISOString();
       for (const id of [firstId, secondId]) {
         const ticket = getTicket(slug, id);
@@ -2518,7 +2531,7 @@ function createDispatch(dependencies) {
         putTicket(slug, ticket);
       }
       return { ok: true, exchanged: true, holder: holder.ref };
-    }));
+    });
     return exchanged || { ok: false, reason: "exchange_lost_race", holder: holder.ref };
   }
   function claimWorktreeReconciliation(slug, ticketId, opts) {
@@ -2836,6 +2849,7 @@ function createDispatch(dependencies) {
     expiredPreparedDispatch,
     worktreeIsolationWarning,
     prepareDispatch,
+    setDispatchPlanObserver,
     syncLiveDispatchVerification,
     readDispatchBriefing,
     recoverLiveClaimDispatch,

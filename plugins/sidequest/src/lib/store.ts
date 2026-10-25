@@ -528,6 +528,7 @@ const {
   markDispatchStopped,
   reconcileLaunchedDispatches,
   ticketEvidenceDirectory,
+  setDispatchPlanObserver,
 } = (dispatch = createDispatch({
   ARTIFACT_BASELINE_MAX_PATHS,
   normalizeCategoryId: (...args: any[]) => normalizeCategoryId(...args),
@@ -606,7 +607,10 @@ const {
   storyExecutionContract: (...args: any[]) => storyExecutionContract(...args),
   ticketCategory: (...args: any[]) => ticketCategory(...args),
   ticketStorageRow,
+  transaction: (...args: any[]) => transaction(...args),
+  withTicketFileLock: (...args: any[]) => withTicketFileLock(...args),
   withTicketLock: (...args: any[]) => withTicketLock(...args),
+  withTicketLocks: (...args: any[]) => withTicketLocks(...args),
 }));
 
 function descriptionField(...candidates: any[]) {
@@ -685,12 +689,20 @@ const {
   releaseLock,
   testClaimLockDelayMs,
   ticketLockPath,
+  withTicketFileLock,
   withTicketLock,
+  withTicketLocks,
 } = createLocks({
   fs,
   path,
   ticketsDir,
   transaction,
+  // Reads the open-transaction depth without opening the database: opening it runs seed repair,
+  // which takes ticket locks of its own, so asking "is a transaction open" must never cause one.
+  inTransaction: () => {
+    const handle = dbByHome.get(homeRoot());
+    return Boolean(handle && transactionDepth.get(handle));
+  },
 });
 
 const { copyAsset, saveAssetData, assetPath } = createAssets({ assetsDir, ensureDir });
@@ -4261,4 +4273,11 @@ module.exports = {
   markLongRunFlagged,
   reconcileSession,
   sessionClaims,
+  // Lock primitives (SQ-273), exported so the lock-order contract in store/locks.ts is testable.
+  setDispatchPlanObserver,
+  ticketLockPath,
+  transaction,
+  withTicketFileLock,
+  withTicketLock,
+  withTicketLocks,
 };

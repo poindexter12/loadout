@@ -1,6 +1,6 @@
 "use strict";
 function createLocks(dependencies) {
-  const { fs, path, ticketsDir, transaction } = dependencies;
+  const { fs, path, ticketsDir, transaction, inTransaction } = dependencies;
   function ticketLockPath(slug, id) {
     return path.join(ticketsDir(slug), "." + path.basename(String(id)) + ".lock");
   }
@@ -111,24 +111,63 @@ function createLocks(dependencies) {
     }
     return { ok: false, reason: "lock_owner_lost" };
   }
-  function withTicketLock(slug, id, fn) {
-    const lock = ticketLockPath(slug, id);
-    const ownerToken = acquireLock(lock);
-    if (!ownerToken) return { ok: false, reason: "busy" };
-    try {
-      return transaction(fn);
-    } finally {
-      releaseLock(lock, ownerToken);
+  function lockOrderViolation(slug, id) {
+    const error = new Error(`ticket lock order violation: the file lock for ${String(slug)}/${String(id)} was requested while a board transaction is open. Take ticket file locks before entering the transaction (withTicketLocks for several), never inside it.`);
+    error.code = "SIDEQUEST_LOCK_ORDER";
+    return error;
+  }
+  function transactionIsOpen() {
+    return typeof inTransaction === "function" && inTransaction() === true;
+  }
+  function acquireTicketLocks(slug, ids) {
+    const ordered = [...new Set((Array.isArray(ids) ? ids : [ids]).map((id) => String(id)))].sort();
+    if (transactionIsOpen()) throw lockOrderViolation(slug, ordered.join(","));
+    const held = [];
+    for (const id of ordered) {
+      const lockPath = ticketLockPath(slug, id);
+      const token = acquireLock(lockPath);
+      if (!token) {
+        releaseTicketLocks(held);
+        return null;
+      }
+      held.push({ path: lockPath, token });
     }
+    return held;
+  }
+  function releaseTicketLocks(held) {
+    if (!Array.isArray(held)) return;
+    for (let index = held.length - 1; index >= 0; index -= 1) releaseLock(held[index].path, held[index].token);
+  }
+  function withTicketFileLocks(slug, ids, fn) {
+    const held = acquireTicketLocks(slug, ids);
+    if (!held) return { ok: false, reason: "busy" };
+    try {
+      return fn();
+    } finally {
+      releaseTicketLocks(held);
+    }
+  }
+  function withTicketFileLock(slug, id, fn) {
+    return withTicketFileLocks(slug, [id], fn);
+  }
+  function withTicketLocks(slug, ids, fn) {
+    return withTicketFileLocks(slug, ids, () => transaction(fn));
+  }
+  function withTicketLock(slug, id, fn) {
+    return withTicketFileLocks(slug, [id], () => transaction(fn));
   }
   return {
     acquireLock,
+    acquireTicketLocks,
     busyWait,
     refreshLock,
     releaseLock,
+    releaseTicketLocks,
     testClaimLockDelayMs,
     ticketLockPath,
-    withTicketLock
+    withTicketFileLock,
+    withTicketLock,
+    withTicketLocks
   };
 }
 module.exports = { createLocks };

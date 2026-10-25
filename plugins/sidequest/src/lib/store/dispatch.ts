@@ -119,7 +119,7 @@ function requirementsMatch(left: any, right: any) {
 }
 
 function createDispatch(dependencies: any) {
-  const { ARTIFACT_BASELINE_MAX_PATHS, SHARED_TREE_ARTIFACT_MARKER, assertDispatchTransport, assertSidequestInstall, checkSidequestInstall, prepareAttempt, transitionAttempt, attemptDiagnostic, ensurePythonIoEncoding, localAheadOfUpstreamWarning, availableRoute, boardConfig, claimIdleMs, claimReclaimable, claimVerification, classifyDispatchFailure, terminalAgentFailure, commitScope, crypto, database, db, dispatchReadOnly, dispatchBaselineForProject, dispatchVerifyCommandError, dispatchRouteRefusal, dispatchRouteState, effectiveScope, execFileSync, execProjection, fs, getCategory, getStory, homeRoot, integrationTarget, integrationTargetCommit, legacyCategoryForComplexity, listProjects, listTickets, nonRepoExternalOutput, normalizeArtifactRoots, normalizeFiles, normalizeRoute, normalizeWorktreeIsolation, path, hasOriginRemote, pendingSubmission, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, reclaimUnclaimedDispatchWorktree, preparedDispatchTtlMs, putTicket, readMeta, releaseTerminalClaim, resolveCategoryFallback, resolveCategoryRoute, resolveTicketRoute, resolveExec, stableExecutorName, staleWorktreeCwdWarning, storyExecutionContract, ticketCategory, ticketStorageRow, withTicketLock, normalizeCategoryId, projectRoutingEnabled, routingDisabledMessage, getTicket, dispatchLaunchName, nextDispatchLaunchSeq, spawnDescription, claudeQuotaFailure, canonicalPath, checkoutInstanceIdentity, checkoutLayout, createWorktreeLease, worktreeResumeDecision, isCanonicalRegisteredWorktree } = dependencies;
+  const { ARTIFACT_BASELINE_MAX_PATHS, SHARED_TREE_ARTIFACT_MARKER, assertDispatchTransport, assertSidequestInstall, checkSidequestInstall, prepareAttempt, transitionAttempt, attemptDiagnostic, ensurePythonIoEncoding, localAheadOfUpstreamWarning, availableRoute, boardConfig, claimIdleMs, claimReclaimable, claimVerification, classifyDispatchFailure, terminalAgentFailure, commitScope, crypto, database, db, dispatchReadOnly, dispatchBaselineForProject, dispatchVerifyCommandError, dispatchRouteRefusal, dispatchRouteState, effectiveScope, execFileSync, execProjection, fs, getCategory, getStory, homeRoot, integrationTarget, integrationTargetCommit, legacyCategoryForComplexity, listProjects, listTickets, nonRepoExternalOutput, normalizeArtifactRoots, normalizeFiles, normalizeRoute, normalizeWorktreeIsolation, path, hasOriginRemote, pendingSubmission, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, reclaimUnclaimedDispatchWorktree, preparedDispatchTtlMs, putTicket, readMeta, releaseTerminalClaim, resolveCategoryFallback, resolveCategoryRoute, resolveTicketRoute, resolveExec, stableExecutorName, staleWorktreeCwdWarning, storyExecutionContract, ticketCategory, ticketStorageRow, transaction, withTicketFileLock, withTicketLock, withTicketLocks, normalizeCategoryId, projectRoutingEnabled, routingDisabledMessage, getTicket, dispatchLaunchName, nextDispatchLaunchSeq, spawnDescription, claudeQuotaFailure, canonicalPath, checkoutInstanceIdentity, checkoutLayout, createWorktreeLease, worktreeResumeDecision, isCanonicalRegisteredWorktree } = dependencies;
 
   function syncLiveDispatchVerification(slug?: any, ticket?: any, amendment?: any) {
     const state = dispatchState(ticket);
@@ -2105,42 +2105,73 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
       },
     };
   };
-  for (let attempt = 1; ; attempt += 1) {
-    // Sampled before the plan reads anything, so a change anywhere between the plan's first read
-    // and the store is caught, not only one that lands after the expensive work finished. Both the
-    // keys and the stamps are taken again per attempt, so a replan addresses current rows.
-    const planKeys = dispatchPlanKeys(slug, getTicket(slug, found.id) || found);
-    const boardStamp = dispatchPlanBoardStamp(planKeys);
-    const repositoryStamp = dispatchRepositoryStamp(projectPath);
-    let staleReason: string | null = null;
-    stagedToken = null;
-    const committed = withPrecomputedProjectSnapshot(slug, projectPath, () => {
-      const planned = planDispatch();
-      // Unconditional, and safe after a publish because the rename already moved the file away.
-      // It also covers the lock itself refusing, where the commit never runs at all.
-      try {
-        return withTicketLock(slug, found.id, () => {
-          const boardNow = dispatchPlanBoardStamp(planKeys);
-          if (boardNow !== boardStamp) {
-            staleReason = 'the board rows it read were rewritten';
-            return STALE_DISPATCH_PLAN;
-          }
-          const repositoryNow = dispatchRepositoryStamp(projectPath);
-          if (repositoryNow !== repositoryStamp) {
-            staleReason = `the repository moved (${stampDifference(repositoryStamp, repositoryNow)})`;
-            return STALE_DISPATCH_PLAN;
-          }
-          return planned.commit();
-        });
-      } finally {
-        stagedToken?.discard();
+  // SQ-273: the ticket's FILE lock is held across the whole plan-then-commit sequence, and the
+  // machine-global transaction is entered only for the short recheck-and-store inside it. That is
+  // the lock order every ticket writer follows (file lock first, transaction second; see
+  // store/locks.ts). It restores the same-ticket serialisation SQ-268 had to give up while the two
+  // locks were welded together: a second prepare of this ticket now waits here instead of planning
+  // in parallel and running the worktree reclaim a second time, then plans against whatever the
+  // first one stored. The board and repository stamps stay exactly as strict as before. The file
+  // lock only excludes this ticket's other prepares; it does nothing about other writers to the
+  // rows the plan read, other tickets' rows, or the repository moving underneath, and the stamps
+  // are what catch those.
+  //
+  // Nothing in the plan may take a ticket file lock: a second acquisition of this one would wait out
+  // the full lock timeout against itself. The plan reads the board and Git and writes nothing.
+  const prepared = withTicketFileLock(slug, found.id, () => {
+    for (let attempt = 1; ; attempt += 1) {
+      // Sampled before the plan reads anything, so a change anywhere between the plan's first read
+      // and the store is caught, not only one that lands after the expensive work finished. Both the
+      // keys and the stamps are taken again per attempt, so a replan addresses current rows.
+      const planKeys = dispatchPlanKeys(slug, getTicket(slug, found.id) || found);
+      const boardStamp = dispatchPlanBoardStamp(planKeys);
+      const repositoryStamp = dispatchRepositoryStamp(projectPath);
+      let staleReason: string | null = null;
+      stagedToken = null;
+      const committed = withPrecomputedProjectSnapshot(slug, projectPath, () => {
+        dispatchPlanObserver?.({ phase: 'plan', slug, id: found.id, ref: found.ref, attempt });
+        const planned = planDispatch();
+        // Unconditional, and safe after a publish because the rename already moved the file away.
+        // It also covers the commit refusing or throwing, where nothing was published.
+        try {
+          return transaction(() => {
+            const boardNow = dispatchPlanBoardStamp(planKeys);
+            if (boardNow !== boardStamp) {
+              staleReason = 'the board rows it read were rewritten';
+              return STALE_DISPATCH_PLAN;
+            }
+            const repositoryNow = dispatchRepositoryStamp(projectPath);
+            if (repositoryNow !== repositoryStamp) {
+              staleReason = `the repository moved (${stampDifference(repositoryStamp, repositoryNow)})`;
+              return STALE_DISPATCH_PLAN;
+            }
+            return planned.commit();
+          });
+        } finally {
+          stagedToken?.discard();
+        }
+      });
+      if (committed !== STALE_DISPATCH_PLAN) {
+        dispatchPlanObserver?.({ phase: 'stored', slug, id: found.id, ref: found.ref, attempt });
+        return committed;
       }
-    });
-    if (committed !== STALE_DISPATCH_PLAN) return committed;
-    if (attempt >= DISPATCH_PLAN_MAX_ATTEMPTS) {
-      throw new Error(`prepare dispatch: ${found.ref} was planned ${DISPATCH_PLAN_MAX_ATTEMPTS} times and each plan went stale before it could be stored, the last because ${staleReason}. Nothing was written. Let the concurrent work settle, then dispatch again.`);
+      if (attempt >= DISPATCH_PLAN_MAX_ATTEMPTS) {
+        throw new Error(`prepare dispatch: ${found.ref} was planned ${DISPATCH_PLAN_MAX_ATTEMPTS} times and each plan went stale before it could be stored, the last because ${staleReason}. Nothing was written. Let the concurrent work settle, then dispatch again.`);
+      }
     }
-  }
+  });
+  return prepared;
+}
+
+// Test seam, not configuration: called with phase 'plan' at the start of every dispatch plan and
+// with phase 'stored' once the plan is stored, both inside the ticket file lock. A test uses it to
+// count plans, and to hold one plan open while a second prepare of the same ticket races it from
+// another process, which is how "two concurrent prepares produce exactly one plan" is proven.
+let dispatchPlanObserver: ((event: any) => void) | null = null;
+function setDispatchPlanObserver(observer?: any) {
+  const previous = dispatchPlanObserver;
+  dispatchPlanObserver = typeof observer === 'function' ? observer : null;
+  return previous;
 }
 
 function readDispatchBriefing(slug?: any, idOrRef?: any, token?: any, tokenFile?: any) {
@@ -3059,7 +3090,9 @@ function exchangeCrossedCreationBinding(slug?: any, ticketId?: any, sessionId?: 
   const [firstId, secondId] = [target.id, holder.id].sort();
   const factsFor = new Map([[target.id, reportedFacts], [holder.id, heldFacts]]);
   const refFor = new Map([[target.id, holder.ref], [holder.id, target.ref]]);
-  return withTicketLock(slug, firstId, () => withTicketLock(slug, secondId, () => {
+  // Both file locks before the one transaction, in sorted order (SQ-273 lock ordering): nesting
+  // withTicketLock took the second file lock inside the first lock's open transaction.
+  return withTicketLocks(slug, [firstId, secondId], () => {
     const now = new Date().toISOString();
     for (const id of [firstId, secondId]) {
       const ticket = getTicket(slug, id);
@@ -3072,7 +3105,7 @@ function exchangeCrossedCreationBinding(slug?: any, ticketId?: any, sessionId?: 
       putTicket(slug, ticket);
     }
     return { ok: true, exchangedWith: holder.ref };
-  }));
+  });
 }
 
 // SQ-324. Creation attribution is a guess (see the comment above), and until something corrects it the
@@ -3147,7 +3180,9 @@ function exchangeClaimedCreationBinding(slug?: any, ticketId?: any, opts?: any) 
   const [firstId, secondId] = [target.id, holder.id].sort();
   const factsFor = new Map([[target.id, reportedFacts], [holder.id, heldFacts]]);
   const refFor = new Map([[target.id, holder.ref], [holder.id, target.ref]]);
-  const exchanged = withTicketLock(slug, firstId, () => withTicketLock(slug, secondId, () => {
+  // Both file locks before the one transaction, in sorted order (SQ-273 lock ordering): nesting
+  // withTicketLock took the second file lock inside the first lock's open transaction.
+  const exchanged = withTicketLocks(slug, [firstId, secondId], () => {
     const now = new Date().toISOString();
     for (const id of [firstId, secondId]) {
       const ticket = getTicket(slug, id);
@@ -3161,7 +3196,7 @@ function exchangeClaimedCreationBinding(slug?: any, ticketId?: any, opts?: any) 
       putTicket(slug, ticket);
     }
     return { ok: true, exchanged: true, holder: holder.ref };
-  }));
+  });
   return exchanged || { ok: false, reason: 'exchange_lost_race', holder: holder.ref };
 }
 
@@ -3525,6 +3560,7 @@ function reconcileLaunchedDispatches(sessionId?: any, opts?: any) {
     expiredPreparedDispatch,
     worktreeIsolationWarning,
     prepareDispatch,
+    setDispatchPlanObserver,
     syncLiveDispatchVerification,
     readDispatchBriefing,
     recoverLiveClaimDispatch,
