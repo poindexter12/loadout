@@ -304,7 +304,7 @@ const tools = [
   },
   {
     name: "dispatch",
-    description: "Prepare a token-gated dispatch. It returns a stable executor spawn spec and token. Each returned subagent_type is bundled in Sidequest and discoverable when the plugin loads, before SessionStart maintenance. Shared-tree dispatch requires the spawning runtime to already be rooted in the declared checkout. Executors with a live claim cannot dispatch child tickets, but the live claim holder can recover a missing isolated-worktree binding by supplying recoveryEvidence, claimHolder, and worktree; the board verifies the stored executor.",
+    description: "Prepare a token-gated dispatch. It returns a stable executor spawn spec and token. Each returned subagent_type is bundled in Sidequest and discoverable when the plugin loads, before SessionStart maintenance. Shared-tree dispatch requires the spawning runtime to already be rooted in the declared checkout. Executors with a live claim cannot dispatch child tickets, but the live claim holder can recover a missing isolated-worktree binding by supplying recoveryEvidence, claimHolder, and worktree; the board verifies the stored executor. Dispatch by priority (urgent, high, normal, low): when unblocked, undispatched ready work outranks the ticket, the result names it in higherPriorityReady and a warning.",
     inputSchema: {
       type: "object",
       properties: {
@@ -313,6 +313,7 @@ const tools = [
         sharedTree: { type: "boolean", description: "Use the declared shared checkout only when the spawning runtime is already rooted there: the spawn carries no isolation and no cwd, so the executor inherits this session's cwd. Refused when this session is rooted in a linked worktree or in another repository; dispatch another project's ticket without sharedTree instead. Executors with a live claim cannot use this to dispatch child work." },
         allowRepeatFailure: { type: "boolean" },
         allowUnscoped: { type: "boolean", description: "Explicitly allow a write ticket with no declared file scope." },
+        priorityOverride: { type: "string", description: "Why this goes ahead of higher-priority ready work (user named it, or that work is blocked in practice). Recorded; silences the priority notice." },
         integrationBranch: { type: "string" },
         recoveryEvidence: { type: "string", description: "Observed failure evidence. With claimHolder, executor, and worktree, recover that live isolated claim without releasing it." },
         recoveryTaskId: { type: "string", description: "The failed task id from a host task-failure notification. When it matches the bound runtime of the unclaimed attempt being retired, recoveryEvidence applies at once instead of waiting out the claim-idle backstop." },
@@ -342,6 +343,7 @@ const tools = [
         ...Object.hasOwn(args, "sharedTree") ? { sharedTree: args.sharedTree === true } : {},
         allowRepeatFailure: args.allowRepeatFailure === true,
         allowUnscoped: args.allowUnscoped === true,
+        ...typeof args.priorityOverride === "string" ? { priorityOverride: args.priorityOverride } : {},
         integrationBranch: args.integrationBranch,
         recoveryEvidence: args.recoveryEvidence,
         recoveryTaskId: args.recoveryTaskId,
@@ -359,11 +361,13 @@ const tools = [
       const dispatchState = prepared.ticket.dispatch || {};
       const description = dispatchState.description || agentsync.spawnDescription(prepared.ticket, resolved);
       const spawn = agentsync.agentSpawn(dispatchState.launchName, isolation, resolved && resolved.model, agent, prompt, description);
+      const higherPriorityReady = store.dispatchHigherPriorityReady(prepared.ticket, slug);
       const compact = {
         ref: prepared.ticket.ref,
         effort: prepared.ticket.effort,
         runsLabel: prepared.ticket.exec && prepared.ticket.exec.runsLabel,
         ...prepared.ticket.dispatch?.fallbackReason ? { fallbackReason: prepared.ticket.dispatch.fallbackReason } : {},
+        ...higherPriorityReady.length ? { higherPriorityReady } : {},
         spawn
       };
       const warnings = store.presentWarnings(prepared.ticket, store.dispatchWarnings(prepared.ticket, slug), sessionId);
@@ -380,6 +384,7 @@ const tools = [
         token: prepared.token,
         recovery: prepared.recovery || null,
         ...dispatchState.fallbackReason ? { fallbackReason: dispatchState.fallbackReason } : {},
+        ...higherPriorityReady.length ? { higherPriorityReady } : {},
         warnings,
         spawn,
         guidance: prepared.recovery?.kind === "live_claim_resume" ? `Live claim recovered for ${prepared.ticket.ref}. Pass spawn unchanged; it carries a fresh token for the rebound linked worktree.` : prepared.recovery ? `Claude quota fallback prepared from ${prepared.recovery.failedModel} to ${prepared.recovery.model}·${prepared.recovery.effort}. Pass spawn unchanged; category policy is unchanged.` : `Instant: pass spawn unchanged to Agent; it claims ${prepared.ticket.ref} with executor ${agent} and the token.`,

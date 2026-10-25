@@ -366,9 +366,14 @@ function dispatchUncertaintyWarnings(...args) {
 }
 function dispatchWarnings(ticket, slug) {
   const project = !slug && process.env.CLAUDE_PROJECT_DIR ? findProject(process.env.CLAUDE_PROJECT_DIR) : null;
-  const warnings = warningsLayer.dispatchWarnings(ticket, slug || (project?.ok ? project.slug : null));
+  const board = slug || (project?.ok ? project.slug : null);
+  const warnings = warningsLayer.dispatchWarnings(ticket, board);
+  const priority = board && ticket?.ref ? priorityBypassNotice(ticket, readyTickets(board)) : null;
   const pinned = pinnedVerifierNotice(ticket);
-  return pinned ? [...warnings, pinned] : warnings;
+  return [...priority ? [priority] : [], ...warnings, ...pinned ? [pinned] : []];
+}
+function dispatchHigherPriorityReady(ticket, slug) {
+  return slug && ticket?.ref ? dispatchPriorityBypass(ticket, readyTickets(slug)) : [];
 }
 function dispatchDeclaredFiles(...args) {
   return warningsLayer.dispatchDeclaredFiles(...args);
@@ -591,6 +596,8 @@ const {
   worktreeIsolationWarning,
   prepareDispatch,
   syncLiveDispatchVerification,
+  dispatchPriorityBypass,
+  priorityBypassNotice,
   retirePreparedCompatibilityStaleAttempt,
   preparedCompatibilityHasProvenMismatch,
   supersedeUnboundAttempt,
@@ -3563,6 +3570,7 @@ module.exports = {
   dispatchDeclaredFiles,
   dispatchWorkspace,
   dispatchWarnings,
+  dispatchHigherPriorityReady,
   staleWorktreeCwdWarning,
   dispatchUncertaintyWarnings,
   ticketReferenceWarnings,

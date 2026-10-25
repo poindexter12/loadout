@@ -1745,7 +1745,9 @@ function requestedReadonlyOverride(fields?: any) {
 
 function warningPriority(warning?: any) {
   const text = String(warning || '');
-  if (/verify command|no file scope|outside the repo worktree|worktree visibility/i.test(text)) return 3;
+  // SQ-348: a dispatch that skips higher-priority ready work ranks with the defect warnings, so a
+  // crowded result never drops the one notice that says this ticket should not have gone first.
+  if (/^dispatch priority:|verify command|no file scope|outside the repo worktree|worktree visibility/i.test(text)) return 3;
   if (/build output|consumer|anchor|declared file scope|executor context/i.test(text)) return 2;
   return 1;
 }

@@ -1324,7 +1324,7 @@ test('tools/list preserves MCP contracts within the payload budget', async (cont
   const add = tools.find((tool: any) => tool.name === 'add');
   assert.match(add.inputSchema.properties.complexity.description, /why required/);
   assert.equal(tools.find((tool: any) => tool.name === 'changes').description, 'Poll ticket changes.');
-  assert.equal(tools.find((tool: any) => tool.name === 'ready').description, 'List ready ticket refs.');
+  assert.equal(tools.find((tool: any) => tool.name === 'ready').description, 'List ready ticket refs, by priority.');
   assert.deepEqual(Object.keys(comments.inputSchema.properties).sort(), ['cursor', 'full', 'limit', 'project', 'ref', 'since']);
   assert.equal(comments.inputSchema.properties.full.type, 'boolean');
   assert.equal(Object.hasOwn(tools.find((tool: any) => tool.name === 'unarchive').inputSchema.properties, 'full'), false);
@@ -4109,7 +4109,7 @@ test('MCP board archive tools match the CLI archive-board lifecycle', async () =
 test('dispatch returns a stable executor, one spawn prompt, and a token', async () => {
   const d = mcp.toolDescriptors().find((t: any) => t.name === 'dispatch');
   assert.ok(d);
-  assert.deepStrictEqual(Object.keys(d.inputSchema.properties).sort(), ['allowRepeatFailure', 'allowUnscoped', 'claimHolder', 'full', 'integrationBranch', 'project', 'recoveryEvidence', 'recoveryTaskId', 'ref', 'sharedTree', 'worktree']);
+  assert.deepStrictEqual(Object.keys(d.inputSchema.properties).sort(), ['allowRepeatFailure', 'allowUnscoped', 'claimHolder', 'full', 'integrationBranch', 'priorityOverride', 'project', 'recoveryEvidence', 'recoveryTaskId', 'ref', 'sharedTree', 'worktree']);
   assert.deepStrictEqual(d.inputSchema.required, ['ref']);
 
   seedCatalog([{ slug: 'codex-gpt-5-6-terra', id: 'claude-gpt-5.6-terra', label: 'Terra' }]);
@@ -5372,7 +5372,8 @@ test('MCP board reads omit taxonomy and default ready rows stay summary-sized', 
   assert.equal(typeof list.claimIdleMs, 'number');
   assert.equal(ready.claimIdleMs, undefined);
   assert.equal(list.tickets.find((ticket: any) => ticket.ref === added.ref).categoryId, 'coding.easy');
-  assert.deepEqual(ready.tickets.find((ticket: any) => ticket.ref === added.ref), { ref: added.ref, title: 'trimmed taxonomy response' });
+  // SQ-348: priority rides each default row so the bands are visible before a dispatch is chosen.
+  assert.deepEqual(ready.tickets.find((ticket: any) => ticket.ref === added.ref), { ref: added.ref, title: 'trimmed taxonomy response', priority: 'normal' });
   assert.equal(ready.count, ready.tickets.length);
 });
 

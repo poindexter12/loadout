@@ -286,13 +286,22 @@ function staleWorktreeCwdWarning(...args: any[]) { return warningsLayer.staleWor
 function dispatchUncertaintyWarnings(...args: any[]) { return warningsLayer.dispatchUncertaintyWarnings(...args); }
 function dispatchWarnings(ticket?: any, slug?: any) {
   const project = !slug && process.env.CLAUDE_PROJECT_DIR ? findProject(process.env.CLAUDE_PROJECT_DIR) : null;
-  const warnings = warningsLayer.dispatchWarnings(ticket, slug || (project?.ok ? project.slug : null));
+  const board = slug || (project?.ok ? project.slug : null);
+  const warnings = warningsLayer.dispatchWarnings(ticket, board);
+  // SQ-348: unblocked ready work at a strictly higher priority, named first so the orchestrator
+  // reads it before anything else in the result; warningPriority ranks it with the defect warnings.
+  const priority = board && ticket?.ref ? priorityBypassNotice(ticket, readyTickets(board)) : null;
   // SQ-362: this is the only warnings array BOTH the MCP dispatch handler and the CLI present, so
   // it is where the pinned verify command becomes visible at dispatch time. Appended last and
   // worded without the phrase "verify command" so it ranks below the real defect warnings and is
   // the first thing dropped if a dispatch is already over the presented-warning budget.
   const pinned = pinnedVerifierNotice(ticket);
-  return pinned ? [...warnings, pinned] : warnings;
+  return [...(priority ? [priority] : []), ...warnings, ...(pinned ? [pinned] : [])];
+}
+// SQ-348: the structured twin of the priority notice, for the dispatch result's higherPriorityReady
+// field. It is not subject to the per-session warning dedupe, so a repeat dispatch still carries it.
+function dispatchHigherPriorityReady(ticket?: any, slug?: any) {
+  return slug && ticket?.ref ? dispatchPriorityBypass(ticket, readyTickets(slug)) : [];
 }
 function dispatchDeclaredFiles(...args: any[]) { return warningsLayer.dispatchDeclaredFiles(...args); }
 function externalDeclaredFiles(...args: any[]) { return warningsLayer.externalDeclaredFiles(...args); }
@@ -492,6 +501,8 @@ const {
   worktreeIsolationWarning,
   prepareDispatch,
   syncLiveDispatchVerification,
+  dispatchPriorityBypass,
+  priorityBypassNotice,
   retirePreparedCompatibilityStaleAttempt,
   preparedCompatibilityHasProvenMismatch,
   supersedeUnboundAttempt,
@@ -4023,6 +4034,7 @@ module.exports = {
   dispatchDeclaredFiles,
   dispatchWorkspace,
   dispatchWarnings,
+  dispatchHigherPriorityReady,
   staleWorktreeCwdWarning,
   dispatchUncertaintyWarnings,
   ticketReferenceWarnings,

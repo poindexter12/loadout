@@ -906,6 +906,31 @@ function createDispatch(dependencies) {
     const preparedAt = Date.parse(state.preparedAt);
     return Number.isFinite(preparedAt) && now - preparedAt > preparedDispatchTtlMs();
   }
+  const DISPATCH_PRIORITY_RANK = { urgent: 0, high: 1, normal: 2, low: 3 };
+  function dispatchPriorityRank(priority) {
+    const key = String(priority || "").toLowerCase();
+    return Object.prototype.hasOwnProperty.call(DISPATCH_PRIORITY_RANK, key) ? DISPATCH_PRIORITY_RANK[key] ?? 9 : 9;
+  }
+  function dispatchInFlight(state, now = Date.now()) {
+    return Boolean(state && state.outcome && !state.terminalAt && !expiredPreparedDispatch(state, now));
+  }
+  function higherPriorityReadyWork(ticket, readySet, now = Date.now()) {
+    if (!ticket) return [];
+    const rank = dispatchPriorityRank(ticket.priority);
+    return (Array.isArray(readySet) ? readySet : []).filter((candidate) => candidate && candidate.id !== ticket.id && candidate.ref !== ticket.ref).filter((candidate) => dispatchPriorityRank(candidate.priority) < rank).filter((candidate) => candidate.status !== "awaiting-oracle").filter((candidate) => !dispatchInFlight(dispatchState(candidate), now)).sort((left, right) => dispatchPriorityRank(left.priority) - dispatchPriorityRank(right.priority) || String(left.createdAt).localeCompare(String(right.createdAt))).map((candidate) => ({ ref: candidate.ref, priority: candidate.priority }));
+  }
+  function dispatchPriorityBypass(ticket, readySet, now = Date.now()) {
+    if (dispatchState(ticket)?.priorityOverride) return [];
+    return higherPriorityReadyWork(ticket, readySet, now);
+  }
+  const PRIORITY_NOTICE_REF_LIMIT = 8;
+  function priorityBypassNotice(ticket, readySet, now = Date.now()) {
+    const waiting = dispatchPriorityBypass(ticket, readySet, now);
+    if (!waiting.length) return null;
+    const listed = waiting.slice(0, PRIORITY_NOTICE_REF_LIMIT).map((item) => `${item.ref} (${item.priority})`).join(", ");
+    const more = waiting.length > PRIORITY_NOTICE_REF_LIMIT ? `, and ${waiting.length - PRIORITY_NOTICE_REF_LIMIT} more` : "";
+    return `dispatch priority: ${String(ticket?.ref || "this ticket")} is ${String(ticket?.priority || "unprioritized")} priority, but unblocked ready work at a higher priority is waiting undispatched: ${listed}${more}. The board hands work out urgent, then high, then normal, then low; dispatch those first. When this ticket is the right call anyway (the user named it, or a listed ticket is blocked in practice), pass priorityOverride with that reason on the dispatch so the board records it.`;
+  }
   function recentNoCommitAttemptSelection(state) {
     const attempts = Array.isArray(state?.attempts) ? state.attempts : [];
     const recent = [];
@@ -1366,6 +1391,7 @@ function createDispatch(dependencies) {
     }
     const verifyError = dispatchVerifyCommandError(found, projectPath);
     if (verifyError) throw new Error(verifyError);
+    const priorityOverride = String(opts.priorityOverride ?? "").trim();
     const installCheck = projectPath ? assertSidequestInstall(projectPath) : null;
     const preparedPluginInstall = installCheck?.installPath || null;
     const preparedPluginIdentity = installCheck?.identity || null;
@@ -1599,6 +1625,7 @@ function createDispatch(dependencies) {
             ...worktreeWarning ? { worktreeWarning } : {},
             ...pythonIoEncoding.written ? { pythonIoEncoding } : {},
             ...opts.dispatchSkew ? { dispatchSkew: opts.dispatchSkew } : {},
+            ...priorityOverride ? { priorityOverride: { reason: priorityOverride, at: now } } : {},
             declaredFiles,
             ...!sharedTree && releasedContinuation?.continuation ? {
               continuation: releasedContinuation.continuation,
@@ -1962,6 +1989,7 @@ function createDispatch(dependencies) {
         route: dispatchRouteState(fallback.model, fallback.effort, fallback.exec),
         storyContract: state.storyContract || storyExecutionContract(t.storyId ? getStory(slug, t.storyId) : null),
         ...state.storyContractDrift ? { storyContractDrift: state.storyContractDrift } : {},
+        ...state.priorityOverride ? { priorityOverride: state.priorityOverride } : {},
         preparedAt: now,
         launchedAt: null,
         boundAt: null,
@@ -2892,6 +2920,10 @@ function createDispatch(dependencies) {
     prepareDispatch,
     setDispatchPlanObserver,
     syncLiveDispatchVerification,
+    // SQ-348: store.dispatchWarnings and the dispatch result read these with the board's ready list.
+    higherPriorityReadyWork,
+    dispatchPriorityBypass,
+    priorityBypassNotice,
     readDispatchBriefing,
     recoverLiveClaimDispatch,
     recordDispatchLaunch,

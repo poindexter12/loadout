@@ -81,7 +81,7 @@ function boardRefSurface(projectPath) {
   }
 }
 function readySummary(payload) {
-  const tickets = payload.tickets.map((ticket) => ({ ref: ticket.ref, title: ticket.title }));
+  const tickets = payload.tickets.map((ticket) => ({ ref: ticket.ref, title: ticket.title, priority: ticket.priority }));
   return {
     count: tickets.length,
     tickets,
@@ -328,7 +328,7 @@ const tools = [
   },
   {
     name: "ready",
-    description: "Ready tickets in safe waves. Default: count plus ref/title rows; full:true returns ticket records.",
+    description: "Ready tickets in safe waves, rows in priority order. Default: count plus ref/title/priority rows; full:true returns ticket records. Waves group by file overlap, not priority: dispatch the highest band first.",
     inputSchema: {
       type: "object",
       properties: {

@@ -215,7 +215,7 @@
   },
   {
     "name": "ready",
-    "description": "List ready ticket refs.",
+    "description": "List ready ticket refs, by priority.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1520,7 +1520,7 @@
   },
   {
     "name": "dispatch",
-    "description": "Dispatch; token and spawn spec.",
+    "description": "Dispatch; token and spawn spec. Flags skipped higher-priority ready work.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1539,6 +1539,9 @@
         },
         "allowUnscoped": {
           "type": "boolean"
+        },
+        "priorityOverride": {
+          "type": "string"
         },
         "integrationBranch": {
           "type": "string"
