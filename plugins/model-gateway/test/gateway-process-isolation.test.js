@@ -853,6 +853,32 @@ test('sync gateway fixture cleanup removes helper-owned homes and preserves supp
   assert.equal(fs.existsSync(suppliedHome), true);
 });
 
+// SQ-371: fixture processes run real netstat/lsof/ps owner probes, measured at
+// 9-16s each under host load, against a 2000ms production default. Without a
+// fixture budget ensure/stop/restart refused with "could not confirm the owner"
+// before the behavior under test ran. The budget must reach the child, must not
+// be inheritable from the outer shell, and must stay lowerable per test.
+test('gateway fixture processes get an owner-probe budget that survives host load', (t) => {
+  const previous = process.env.CODEX_GATEWAY_PROBE_TIMEOUT_MS;
+  process.env.CODEX_GATEWAY_PROBE_TIMEOUT_MS = '1';
+  t.after(() => {
+    if (previous === undefined) delete process.env.CODEX_GATEWAY_PROBE_TIMEOUT_MS;
+    else process.env.CODEX_GATEWAY_PROBE_TIMEOUT_MS = previous;
+  });
+  const printBudget = ['-e', 'process.stdout.write(String(process.env.CODEX_GATEWAY_PROBE_TIMEOUT_MS))'];
+
+  const fixture = spawnGatewayProcessSync(process.execPath, printBudget, { encoding: 'utf8' });
+  assert.equal(fixture.status, 0, fixture.stderr);
+  assert.ok(Number(fixture.stdout) >= 30000, `fixture owner-probe budget ${fixture.stdout} is below the 9-16s probes measured under load`);
+
+  const lowered = spawnGatewayProcessSync(process.execPath, printBudget, {
+    encoding: 'utf8',
+    isolatedOverrides: { CODEX_GATEWAY_PROBE_TIMEOUT_MS: '100' },
+  });
+  assert.equal(lowered.status, 0, lowered.stderr);
+  assert.equal(lowered.stdout, '100', 'a timeout-refusal test can still lower the budget');
+});
+
 test('isolated ensure preserves a foreign serve-shim process and cleans its own supervisor', async (t) => {
   const home = trackFixtureHome(fs.mkdtempSync(path.join(os.tmpdir(), 'model-gateway-ensure-isolation-')));
   const foreignScript = path.join(home, 'foreign-install', 'model-gateway', 'bin', 'model-gateway.js');
