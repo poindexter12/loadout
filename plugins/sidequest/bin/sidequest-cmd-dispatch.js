@@ -50,7 +50,7 @@ async function cmdDispatch(opts, positional) {
   const agent = canonicalPreparedDispatchExecutor(prepared.ticket);
   const dispatchState = prepared.ticket.dispatch || {};
   const spawn2 = agentsync.agentSpawn(dispatchState.launchName, isolation, resolved && resolved.model, agent, prompt, dispatchState.description);
-  const warnings = store.dispatchWarnings(prepared.ticket);
+  const warnings = store.dispatchWarnings(prepared.ticket, slug);
   if (unverifiedTransport) {
     warnings.push("dispatch warning: --unverified-transport was used — this does NOT prove any session will have the Sidequest board MCP connected; a fresh native Agent could still receive zero board tools.");
   }

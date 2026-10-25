@@ -1623,17 +1623,28 @@ test('MCP defaults cap category, dispatch, and pulse result payloads', async () 
 
   const ticket = await callTool('add', { project, title: 'payload dispatch', description: DISPATCH_DESCRIPTION, category: 'payload-0' });
   const dispatched = await callToolRaw('dispatch', { allowUnscoped: true, project, ref: ticket.ref });
-  assert.ok(payloadBytes(dispatched.content[0].text) <= 1220, `dispatch is ${payloadBytes(dispatched.content[0].text)} bytes`);
   const dispatchPayload = JSON.parse(dispatched.content[0].text);
-  assert.deepStrictEqual(Object.keys(dispatchPayload).sort(), ['effort', 'ref', 'runsLabel', 'spawn']);
+  // SQ-320: this plain dispatch carries warnings (an unscoped write ticket), which the old
+  // ceiling dropped without a marker. The 1220-byte cap now bounds the payload apart
+  // from its warnings, which always ride.
+  const { warnings: plainWarnings, ...plainBase } = dispatchPayload;
+  assert.ok(Array.isArray(plainWarnings) && plainWarnings.length > 0, 'the plain dispatch keeps its warnings');
+  assert.ok(payloadBytes(JSON.stringify(plainBase, null, 2)) <= 1220, `dispatch without warnings is ${payloadBytes(JSON.stringify(plainBase, null, 2))} bytes`);
+  assert.deepStrictEqual(Object.keys(plainBase).sort(), ['effort', 'ref', 'runsLabel', 'spawn']);
   assert.equal(dispatchPayload.token, undefined);
   assert.equal(dispatchPayload.agent, undefined);
   assert.equal(dispatchPayload.guidance, undefined);
 
   const warningTicket = await callTool('add', { project, title: 'payload warning', description: DISPATCH_DESCRIPTION, category: 'debugging', files: ['fixture.ts'] });
+  // SQ-320: warnings are exempt from the spawn budget. Before, a warning that pushed the
+  // compact result past 1200 bytes was dropped with no marker, so the payload carrying it
+  // is now allowed to exceed the cap, and the cap still bounds everything else.
   const warningDispatch = await callToolRaw('dispatch', { allowUnscoped: true, project, ref: warningTicket.ref });
-  assert.ok(payloadBytes(warningDispatch.content[0].text) <= 1220, `warning dispatch is ${payloadBytes(warningDispatch.content[0].text)} bytes`);
-  assert.equal(JSON.parse(warningDispatch.content[0].text).warnings, undefined);
+  const warningPayload = JSON.parse(warningDispatch.content[0].text);
+  assert.match(warningPayload.warnings.join('\n'), /has no verify command/);
+  assert.equal(warningPayload.warningsOmitted, undefined);
+  const { warnings: _carried, ...warningBase } = warningPayload;
+  assert.ok(payloadBytes(JSON.stringify(warningBase, null, 2)) <= 1220, `warning dispatch without warnings is ${payloadBytes(JSON.stringify(warningBase, null, 2))} bytes`);
 
   const pulse = await callToolRaw('pulse', { project, ref: ticket.ref });
   assert.ok(payloadBytes(pulse.content[0].text) <= 1200, `pulse is ${payloadBytes(pulse.content[0].text)} bytes`);
@@ -6125,6 +6136,66 @@ test('a freshly registered Codex pin lands in the Claude agent directory and is 
     if (previous.agentsDir === undefined) delete process.env.SIDEQUEST_AGENTS_DIR;
     else process.env.SIDEQUEST_AGENTS_DIR = previous.agentsDir;
   }
+});
+
+// SQ-320: the compact dispatch result attached warnings only if the whole result still fit
+// 1200 bytes, and otherwise returned it without them and without any marker. A normal
+// dispatch sits near that line, so Dispatch update notices (SQ-316's Codex pin reload,
+// PYTHONIOENCODING) never reached the orchestrator. The CLI dispatched without the board
+// slug, so every board-aware warning was absent from its JSON too.
+test('dispatch warnings reach the compact MCP result past the old 1200-byte ceiling and the CLI JSON', async () => {
+  const referenced = await callTool('add', { title: 'warning channel referenced', description: DISPATCH_DESCRIPTION, category: 'debugging' });
+  const mcpTarget = await callTool('add', {
+    title: 'warning channel mcp',
+    description: `${DISPATCH_DESCRIPTION} Builds on ${referenced.ref}.`,
+    category: 'debugging',
+  });
+  const cliTarget = await callTool('add', {
+    title: 'warning channel cli',
+    description: `${DISPATCH_DESCRIPTION} Builds on ${referenced.ref}.`,
+    category: 'debugging',
+    // Declared so the no-scope warning does not crowd the stale-reference one past
+    // presentWarnings' three-warning cap.
+    files: ['sq320-cli-fixture.ts'],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  claimDispatchedTicket(referenced.project, referenced, 'warning-channel-holder');
+  const stale = new RegExp(`${referenced.ref} changed state \\(todo -> doing\\)`);
+
+  const dispatched = await callToolRaw('dispatch', { allowUnscoped: true, ref: mcpTarget.ref });
+  assert.ok(!dispatched.isError, dispatched.content[0].text);
+  const compact = JSON.parse(dispatched.content[0].text);
+  assert.ok(payloadBytes(dispatched.content[0].text) > 1200, `the fixture must exceed the old ceiling; it is ${payloadBytes(dispatched.content[0].text)} bytes`);
+  assert.ok(compact.spawn && compact.spawn.prompt, 'the compact spawn still rides');
+  assert.match(compact.warnings.join('\n'), stale);
+  assert.match(compact.warnings.join('\n'), /has no verify command/);
+  assert.equal(compact.warningsOmitted, undefined);
+  assert.equal(compact.token, undefined, 'warnings do not pull the full payload into the compact form');
+
+  const cli = runCli(['dispatch', cliTarget.ref, '--unverified-transport', '--allow-unscoped']);
+  assert.match(cli.warnings.join('\n'), stale, `CLI warnings: ${JSON.stringify(cli.warnings)}`);
+});
+
+test('a dispatch warning cut by the hard ceiling leaves a count and a retrieval handle, never silence', async () => {
+  const { compactDispatchWarnings } = require('../lib/mcp-shared.js');
+  const compact = { ref: 'SQ-1', effort: 'high', spawn: { prompt: 'x'.repeat(200) } };
+  const warnings = ['Dispatch update: first notice '.padEnd(1500, '.'), 'Dispatch update: second notice '.padEnd(1500, '.')];
+  assert.deepEqual(compactDispatchWarnings('demo', compact, []), compact);
+  assert.deepEqual(compactDispatchWarnings('demo', compact, warnings).warnings, warnings, 'under the hard ceiling every warning rides whole');
+
+  const wholeBytes = Buffer.byteLength(JSON.stringify(Object.assign({}, compact, { warnings }), null, 2));
+  const cut = compactDispatchWarnings('demo', compact, warnings, wholeBytes - 1);
+  assert.ok(Buffer.byteLength(JSON.stringify(cut, null, 2)) <= wholeBytes - 1, 'the marked result honors the ceiling it was given');
+  assert.deepEqual(cut.warnings, [warnings[0]]);
+  assert.equal(cut.warningsOmitted, 1);
+  assert.equal(cut.warningsRetrieval.tool, 'context_page');
+  const page = await callTool('context_page', { ...cut.warningsRetrieval.arguments, limit: 4096 });
+  for (const warning of warnings) assert.ok(JSON.stringify(page).includes(warning.slice(0, 40)), `retrieval returns ${warning.slice(0, 40)}`);
+
+  const none = compactDispatchWarnings('demo', compact, warnings, Buffer.byteLength(JSON.stringify(compact, null, 2)) + 10);
+  assert.deepEqual(none.warnings, []);
+  assert.equal(none.warningsOmitted, 2);
+  assert.ok(none.warningsRetrieval);
 });
 
 // SQ-355: integrate held its client silent for the sum of two pinned verify runs,
