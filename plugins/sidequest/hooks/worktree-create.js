@@ -193,7 +193,7 @@ function bindCreation(cwdRepository, sessionId, name, namedWorktreePath) {
   if (binding.ok || binding.reason !== "project_unavailable" && binding.reason !== "dispatch_binding_unavailable") {
     return binding;
   }
-  const boards = store.dispatchWorktreeCreationBoards(sessionId, cwdSlug);
+  const boards = store.dispatchWorktreeCreationBoards(sessionId, cwdSlug, (repository) => namedWorktreePath(repository, name));
   if (boards.length > 1) {
     return { ok: false, reason: `ambiguous_binding (session ${sessionId} has live worktree dispatches on ${boards.map((board2) => board2.slug).join(", ")})` };
   }
