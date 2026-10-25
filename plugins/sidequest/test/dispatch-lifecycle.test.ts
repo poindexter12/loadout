@@ -177,6 +177,51 @@ test('shared-tree admission requires the project checkout while artifacts remain
   }
 });
 
+// SQ-309: an orchestrator rooted in repo A dispatched a sharedTree ticket on repo B's board. The spawn
+// carried no isolation and no cwd, so the executor inherited repo A and failed its worktree preflight
+// ("Runtime worktree does not match dispatch target"). Dispatch must refuse up front instead.
+test('shared-tree dispatch from a session rooted in another repository is refused up front (SQ-309)', () => {
+  const foreignRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-shared-tree-foreign-'));
+  execFileSync('git', ['init', '-q'], { cwd: foreignRepo });
+  const foreignSubdir = path.join(foreignRepo, 'nested');
+  fs.mkdirSync(foreignSubdir);
+  try {
+    const ticket = createFixture('shared-tree foreign runtime rejection');
+    assert.throws(
+      () => store.prepareDispatch(slug, ticket.ref, { sharedTree: true, runtimeCwd: foreignSubdir }),
+      (error: any) => {
+        assert.match(error.message, /sharedTree:true requires the spawning runtime to be rooted in the declared project checkout/);
+        assert.ok(error.message.includes(fs.realpathSync.native(foreignRepo)), `refusal names the foreign root: ${error.message}`);
+        assert.match(error.message, /Dispatch it without sharedTree/);
+        return true;
+      },
+    );
+    assert.equal(store.getTicket(slug, ticket.ref).dispatchNonce, null, 'a refused dispatch mints no token');
+
+    // A subdirectory of the project checkout is still the project checkout.
+    const projectSubdir = path.join(PROJECT, 'sq309-subdir');
+    fs.mkdirSync(projectSubdir, { recursive: true });
+    const admitted = store.prepareDispatch(slug, ticket.ref, { sharedTree: true, runtimeCwd: projectSubdir });
+    assert.equal(admitted.ok, true);
+    assert.equal(admitted.ticket.dispatch.sharedTree, true);
+    assert.equal(store.releaseTicket(slug, ticket.ref, 'sq309-cleanup', { force: true, status: 'todo', source: 'test' }).ok, true);
+    fs.rmSync(projectSubdir, { recursive: true, force: true });
+  } finally {
+    fs.rmSync(foreignRepo, { recursive: true, force: true });
+  }
+});
+
+test('recovery evidence on a ticket with nothing in flight says to dispatch plainly (SQ-309)', () => {
+  const ticket = createFixture('recovery evidence with nothing in flight');
+  assert.throws(
+    () => store.prepareDispatch(slug, ticket.ref, { recoveryEvidence: 'executor released: runtime worktree mismatch' }),
+    /not an active attempt\. .*No recovery is needed: nothing is in flight on .*dispatch it again without recoveryEvidence/,
+  );
+  const plain = store.prepareDispatch(slug, ticket.ref, { runtimeCwd: PROJECT });
+  assert.equal(plain.ok, true);
+  assert.equal(store.releaseTicket(slug, ticket.ref, 'sq309-recovery-cleanup', { force: true, status: 'todo', source: 'test' }).ok, true);
+});
+
 function windowsShortPathAlias(directory = '') {
   if (process.platform !== 'win32') return null;
   const result = spawnSync('cmd.exe', ['/d', '/s', '/c', `for %I in ("${directory}") do @echo %~sI`], {
