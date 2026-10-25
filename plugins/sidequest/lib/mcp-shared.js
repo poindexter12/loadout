@@ -57,6 +57,25 @@ function resolveProject(projectArg) {
   }
   return store.ensureProject(store.sessionProjectRoot());
 }
+function claimedProjectForRef(args) {
+  if (!args || typeof args !== "object") return null;
+  if (String(args.project == null ? "" : args.project).trim()) return null;
+  const ref = String(args.ref == null ? "" : args.ref).trim();
+  if (!ref) return null;
+  const claims = store.liveClaimsForRef(ref);
+  if (!claims.length) return null;
+  const by = String(args.by == null ? "" : args.by).trim();
+  const session = runtimeSessionId();
+  const mine = by ? claims.filter((claim) => claim.by === by) : session ? claims.filter((claim) => claim.sessionId === session) : [];
+  if (!mine.length) return null;
+  const cwd = store.findProject(store.sessionProjectRoot());
+  const cwdSlug = cwd && cwd.ok ? cwd.slug : null;
+  const boards = Array.from(new Set(mine.map((claim) => String(claim.slug))));
+  if (boards.length === 1 && boards[0] === cwdSlug) return null;
+  if (boards.length === 1 && (by || !cwdSlug || !store.getTicket(cwdSlug, ref))) return boards[0];
+  const named = boards.concat(cwdSlug && !boards.includes(cwdSlug) ? [cwdSlug] : []);
+  throw new Error(`${ref} is ambiguous across boards (${named.join(", ")}): your claim is on ${boards.join(", ")} but this session's board is ${cwdSlug || "unregistered"}. Pass \`project\` to name the board.`);
+}
 function runtimeSessionId() {
   const v = process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || "";
   return String(v).trim() || null;
@@ -962,6 +981,7 @@ module.exports = {
   assertSidequestInstall,
   assertDispatchTransport,
   resolveProject,
+  claimedProjectForRef,
   runtimeSessionId,
   sessionOf,
   controlPlaneIdentity,

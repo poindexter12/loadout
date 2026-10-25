@@ -1,7 +1,7 @@
 "use strict";
 const path = require("path");
 const store = require("./store");
-const { compactSchema, conciseDescription, resolveProject, TOOL_DESCRIPTION_OVERRIDES, boundedReadPayload } = require("./mcp-shared");
+const { compactSchema, conciseDescription, resolveProject, claimedProjectForRef, TOOL_DESCRIPTION_OVERRIDES, boundedReadPayload } = require("./mcp-shared");
 const { sidequestMutationFreshness } = require("./plugin-freshness");
 const { tools: readTools } = require("./mcp-read");
 const { tools: ticketTools } = require("./mcp-tickets");
@@ -194,6 +194,10 @@ function assertMutationFreshness(projectArg) {
 }
 async function runTool(tool, rawArgs, context) {
   const { args, aliases } = validateToolArguments(tool, rawArgs);
+  if (tool.name !== "claim" && tool.inputSchema?.properties?.project) {
+    const claimedProject = claimedProjectForRef(args);
+    if (claimedProject) args.project = claimedProject;
+  }
   if (!toolMutates(tool.name, args)) {
     const output = await tool.handler(args, context);
     return acknowledgeAliases(tool.name === "context_page" ? output : boundedReadPayload(tool.name, output), aliases);

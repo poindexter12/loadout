@@ -6346,4 +6346,46 @@ test('integration delivery reports the verification phase it enters and leaves (
   assert.equal(typeof phases[1].durationMs, 'number');
 });
 
+test('SQ-284: board calls that omit project follow the caller claim to its board, not the cwd board', async () => {
+  const cwdRoot = committedRepo('sq-mcp-284-cwd-');
+  const otherRoot = committedRepo('sq-mcp-284-other-');
+  const cwdBoard = store.ensureProject(cwdRoot).slug;
+  const otherBoard = store.ensureProject(otherRoot).slug;
+  const previousProjectDirectory = process.env.CLAUDE_PROJECT_DIR;
+  process.env.CLAUDE_PROJECT_DIR = cwdRoot;
+  try {
+    const cwdTicket = store.createTicket(cwdBoard, { title: 'Unrelated cwd ticket', source: 'test' });
+    const claimed = store.createTicket(otherBoard, { title: 'Ticket claimed on another board', source: 'test' });
+    assert.equal(cwdTicket.ref, claimed.ref, 'both boards hold the same ref');
+    assert.equal(store.claimTicket(otherBoard, claimed.ref, 'sq-284-exec', { direct: true }).ok, true);
+
+    await callTool('comment', { ref: claimed.ref, by: 'sq-284-exec', body: 'progress from the executor' });
+
+    const onClaimedBoard = await callTool('comments', { project: otherBoard, ref: claimed.ref });
+    assert.ok(
+      onClaimedBoard.comments.some((comment: any) => String(comment.body || '').includes('progress from the executor')),
+      'the comment lands on the board holding the claim',
+    );
+    const onCwdBoard = await callTool('comments', { project: cwdBoard, ref: cwdTicket.ref });
+    assert.ok(
+      !onCwdBoard.comments.some((comment: any) => String(comment.body || '').includes('progress from the executor')),
+      'the unrelated cwd ticket of the same ref is untouched',
+    );
+
+    // Without a claim match the cwd default still holds.
+    await callTool('comment', { ref: cwdTicket.ref, by: 'someone-else', body: 'orchestrator note' });
+    const cwdAfter = await callTool('comments', { project: cwdBoard, ref: cwdTicket.ref });
+    assert.ok(cwdAfter.comments.some((comment: any) => String(comment.body || '').includes('orchestrator note')));
+
+    // The same caller holding the ref on both boards is ambiguous: refuse rather than guess.
+    assert.equal(store.claimTicket(cwdBoard, cwdTicket.ref, 'sq-284-exec', { direct: true }).ok, true);
+    const ambiguous = await callToolRaw('comment', { ref: claimed.ref, by: 'sq-284-exec', body: 'which board?' });
+    assert.equal(ambiguous.isError, true);
+    assert.match(ambiguous.content[0].text, /ambiguous across boards/);
+  } finally {
+    if (previousProjectDirectory === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = previousProjectDirectory;
+  }
+});
+
 export {};

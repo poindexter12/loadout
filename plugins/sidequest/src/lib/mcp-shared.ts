@@ -73,6 +73,37 @@ function resolveProject(projectArg?: any) {
   return store.ensureProject(store.sessionProjectRoot());
 }
 
+// A call that names a ticket `ref` but no `project` defaults to the session
+// cwd's board. That is wrong for an executor whose claim lives on another
+// board: the same ref there can name an unrelated ticket, and the call lands on
+// it silently (SQ-284). When the caller holds a live claim on that ref (matched
+// by `by`, or by the dispatch session when `by` is omitted), return the board
+// that claim is on. Return null to keep the cwd default; throw when the ref is
+// ambiguous across boards and only `project` can say which one is meant.
+function claimedProjectForRef(args?: any) {
+  if (!args || typeof args !== 'object') return null;
+  if (String(args.project == null ? '' : args.project).trim()) return null;
+  const ref = String(args.ref == null ? '' : args.ref).trim();
+  if (!ref) return null;
+  const claims = store.liveClaimsForRef(ref);
+  if (!claims.length) return null;
+  const by = String(args.by == null ? '' : args.by).trim();
+  const session = runtimeSessionId();
+  const mine = by
+    ? claims.filter((claim: any) => claim.by === by)
+    : (session ? claims.filter((claim: any) => claim.sessionId === session) : []);
+  if (!mine.length) return null;
+  const cwd = store.findProject(store.sessionProjectRoot());
+  const cwdSlug = cwd && cwd.ok ? cwd.slug : null;
+  const boards: string[] = Array.from(new Set(mine.map((claim: any) => String(claim.slug))));
+  if (boards.length === 1 && boards[0] === cwdSlug) return null;
+  // A claim held under the caller's own `by` is decisive. A session-only match
+  // is not when the cwd board has its own ticket under the same ref.
+  if (boards.length === 1 && (by || !cwdSlug || !store.getTicket(cwdSlug, ref))) return boards[0];
+  const named = boards.concat(cwdSlug && !boards.includes(cwdSlug) ? [cwdSlug] : []);
+  throw new Error(`${ref} is ambiguous across boards (${named.join(', ')}): your claim is on ${boards.join(', ')} but this session's board is ${cwdSlug || 'unregistered'}. Pass \`project\` to name the board.`);
+}
+
 // The MCP server inherits its Claude Code session identity. Tool callers only
 // know labels, which cannot be used by the Agent lifecycle hooks.
 function runtimeSessionId() {
@@ -1060,6 +1091,7 @@ module.exports = {
   assertSidequestInstall,
   assertDispatchTransport,
   resolveProject,
+  claimedProjectForRef,
   runtimeSessionId,
   sessionOf,
   controlPlaneIdentity,
