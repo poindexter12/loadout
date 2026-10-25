@@ -316,6 +316,7 @@ function collectGitSubmissionFacts(options) {
     targetFailure = { code: "integration_target_unavailable", message: `submit: refused ${ticket.ref}; ${boundedSubmissionText(error && error.message || String(error))}. Remedy: Fetch or recreate ${targetName}, then resubmit the preserved candidate.`, retryable: true };
   }
   const dispatchBase = String(ticket.dispatch?.baseCommit || "").trim() || null;
+  const namedBase = String(ticket.dispatch?.baseRef?.commit || "").trim() || null;
   const approvedBoundaries = sharedTreeSubmissionBoundaries(slug, ticket);
   const boundaryCommits = approvedBoundaries.map((boundary) => boundary.commit);
   const calculatedRange = target ? commitScope.submissionRange(root, {
@@ -335,7 +336,7 @@ function collectGitSubmissionFacts(options) {
       ...dispatchBase ? { dispatchBase } : {},
       allowedBases: [...dispatchBase ? [dispatchBase] : [], ...boundaryCommits],
       baseCandidates: boundaryCommits
-    } : ticket.dispatch?.sharedTree !== false && dispatchBase ? { dispatchBase, allowedBases: [dispatchBase] } : { allowedBases: [] }
+    } : namedBase ? { dispatchBase: namedBase, allowedBases: [namedBase] } : ticket.dispatch?.sharedTree !== false && dispatchBase ? { dispatchBase, allowedBases: [dispatchBase] } : { allowedBases: [] }
   }) : null;
   const range = calculatedRange && !calculatedRange.ok ? Object.assign({}, calculatedRange, { approvedBoundaries }) : calculatedRange;
   const scope = ticketCommitScope(slug, ticket);

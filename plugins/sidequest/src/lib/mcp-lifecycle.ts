@@ -422,6 +422,15 @@ function collectGitSubmissionFacts(options: any) {
     targetFailure = { code: 'integration_target_unavailable', message: `submit: refused ${ticket.ref}; ${boundedSubmissionText((error && error.message) || String(error))}. Remedy: Fetch or recreate ${targetName}, then resubmit the preserved candidate.`, retryable: true };
   }
   const dispatchBase = String(ticket.dispatch?.baseCommit || '').trim() || null;
+  // SQ-287. A ticket that names its base (SQ-286: an open pull request's branch, say) was forked
+  // from that commit, and the dispatch recorded what the name resolved to. Without this the
+  // candidate had no route: its default range ran from the integration target and swallowed the
+  // PR's own commits (outside_scope), while `--base <PR head>` refused unrecognized_base because
+  // the PR head is not on the integration target. The recorded commit is the boundary: the
+  // default range starts there and an explicit base naming it is approved, so scope is checked
+  // over base..candidate only. A live re-resolution of the branch name is deliberately not
+  // trusted here; the recorded commit is the one the worktree actually started from.
+  const namedBase = String(ticket.dispatch?.baseRef?.commit || '').trim() || null;
   const approvedBoundaries = sharedTreeSubmissionBoundaries(slug, ticket);
   const boundaryCommits = approvedBoundaries.map((boundary: { ref: string; commit: string }) => boundary.commit);
   const calculatedRange = target
@@ -444,9 +453,11 @@ function collectGitSubmissionFacts(options: any) {
           allowedBases: [...(dispatchBase ? [dispatchBase] : []), ...boundaryCommits],
           baseCandidates: boundaryCommits,
         }
-        : ticket.dispatch?.sharedTree !== false && dispatchBase
-          ? { dispatchBase, allowedBases: [dispatchBase] }
-          : { allowedBases: [] }),
+        : namedBase
+          ? { dispatchBase: namedBase, allowedBases: [namedBase] }
+          : ticket.dispatch?.sharedTree !== false && dispatchBase
+            ? { dispatchBase, allowedBases: [dispatchBase] }
+            : { allowedBases: [] }),
     })
     : null;
   const range = calculatedRange && !calculatedRange.ok
