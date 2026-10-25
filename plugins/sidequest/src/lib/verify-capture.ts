@@ -45,6 +45,17 @@ const phaseBudgetOverrideVariable = 'SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS';
 // the 3_000_000ms the capacity model itself can reach, so it bounds a wedged run without
 // constraining any real one.
 const captureHardMaximumMilliseconds = 2 * 60 * 60 * 1_000;
+// SQ-332: the Claude Code Bash tool's own ceilings, which an attached capture has to live inside.
+// A foreground call stops at 600000ms; a longer call is moved to the background under a 1800000ms
+// default (discarding the caller's foreground timeout), and a background call accepts at most
+// 7200000ms. When the harness kills the wrapper first, nothing is recorded: no pass, no fail, no
+// capture_budget_exceeded. The budget is never shrunk to fit those ceilings (that re-breaks what
+// SQ-169 and SQ-225 fixed); instead the wrapper tells the caller the timeout it must pass, with a
+// margin so the harness kill lands after the wrapper's own deadline and the verdict still records.
+const harnessForegroundMaximumMilliseconds = 600_000;
+const harnessBackgroundDefaultMilliseconds = 1_800_000;
+const harnessBackgroundMaximumMilliseconds = 7_200_000;
+const harnessTimeoutMarginMilliseconds = 600_000;
 
 // SQ-169: every capture runs under one budget model. The run budget is the ordinary setup
 // allowance plus a phase budget chosen by what the command is, derived from the capacity the
@@ -197,6 +208,31 @@ function captureBudgetLever(budget: CaptureBudget): string {
   return `To give it more wall clock, rerun the same wrapper with ${budget.overrideVariable}=<milliseconds> above ${budget.phaseBudgetMilliseconds} in its environment. The override only widens the phase budget, never shortens it or skips a test, and the capture still stops at the ${budget.hardMaximumMilliseconds}ms hard maximum.`;
 }
 
+// SQ-332: the Bash timeout an attached capture needs: the budget plus a margin, never more than
+// the harness accepts. Equal to the harness maximum means the margin did not fit.
+function captureHarnessTimeoutMilliseconds(budget: CaptureBudget): number {
+  return Math.min(harnessBackgroundMaximumMilliseconds, budget.timeoutMilliseconds + harnessTimeoutMarginMilliseconds);
+}
+
+// SQ-332: agent-facing. Announced before the command starts, so a caller about to background the
+// wrapper learns the timeout it must pass while it can still act on it, and a wrapper killed by
+// the harness default leaves this line as the identifiable reason it recorded nothing.
+function captureHarnessGuidance(budget: CaptureBudget, detached = false): string {
+  if (detached) {
+    return `verify-capture: running detached, so no Bash timeout can stop this capture; it records its own verdict within its ${budget.timeoutMilliseconds}ms budget.`;
+  }
+  const required = captureHarnessTimeoutMilliseconds(budget);
+  const marginFits = budget.timeoutMilliseconds + harnessTimeoutMarginMilliseconds <= harnessBackgroundMaximumMilliseconds;
+  const parts = [`verify-capture: Bash timeout: this capture may run up to ${budget.timeoutMilliseconds}ms. The Bash tool stops a foreground call at ${harnessForegroundMaximumMilliseconds}ms and moves a longer one to the background under its ${harnessBackgroundDefaultMilliseconds}ms default, discarding the timeout you set, and a wrapper killed there records no verdict at all.`];
+  if (budget.timeoutMilliseconds >= harnessBackgroundDefaultMilliseconds) {
+    parts.push(`This budget is at or above that ${harnessBackgroundDefaultMilliseconds}ms default, so a backgrounded call without an explicit timeout is killed before this capture can record pass, fail, or capture_budget_exceeded.`);
+  }
+  parts.push(marginFits
+    ? `If you background this call, pass timeout=${required} (the budget plus a ${harnessTimeoutMarginMilliseconds}ms margin, under the ${harnessBackgroundMaximumMilliseconds}ms harness maximum), never the default; or rerun with --detach, which no Bash timeout can stop.`
+    : `This budget leaves less than the ${harnessTimeoutMarginMilliseconds}ms margin under the ${harnessBackgroundMaximumMilliseconds}ms harness maximum, so no Bash timeout reliably outlives it: rerun with --detach, which no Bash timeout can stop.`);
+  return parts.join(' ');
+}
+
 function captureBudgetTimeoutReason(budget: CaptureBudget, elapsedMilliseconds: number, loadAtDeadline: number, processReason: string): string {
   return `capture_budget_exceeded: the verify command ran ${elapsedMilliseconds}ms and was stopped at its ${budget.timeoutMilliseconds}ms capture budget. This is a budget verdict, not a test failure: the command had not finished, so whatever it would have reported is unknown. Budget: ${describeCaptureBudget(budget)}; the load average was ${formatLoad(loadAtDeadline)} at the deadline. ${captureBudgetLever(budget)} ${processReason}`.trim();
 }
@@ -226,6 +262,8 @@ type CaptureRunOptions = Readonly<{
   // SQ-76: called once, immediately before the command spawns (inside the full-suite slot), so
   // the capture can snapshot the tree that actually starts the run rather than the tree it queued from.
   beforeRun?: () => void;
+  // SQ-332: true in the --detach child, whose Bash call no harness timeout can reach.
+  detached?: boolean;
 }>;
 type CaptureTarget =Readonly<{ project: string; ticket: string }>;
 type CaptureRecordResult = Readonly<{
@@ -282,10 +320,11 @@ async function runVerifyCapture(command: string, cwd = process.cwd(), timeoutMil
 // "Verification timed out after 600000ms", which an executor could not tell apart from a hung
 // test and had no way to raise; now it names the elapsed time, the budget and how it was
 // derived, the load, and the one lever that grants more time.
-async function runBudgetedCapture(command: string, cwd: string, budget: CaptureBudget, environment?: NodeJS.ProcessEnv, announce?: (line: string) => void): Promise<VerifyCapture> {
+async function runBudgetedCapture(command: string, cwd: string, budget: CaptureBudget, environment?: NodeJS.ProcessEnv, announce?: (line: string) => void, detached = false): Promise<VerifyCapture> {
   if (announce) {
     announce(`verify-capture: capture budget ${budget.timeoutMilliseconds}ms, ${describeCaptureBudget(budget)}.`);
     if (budget.notice) announce(`verify-capture: ${budget.notice}`);
+    announce(captureHarnessGuidance(budget, detached));
   }
   const startedAt = Date.now();
   const capture = await runVerifyCapture(command, cwd, budget.timeoutMilliseconds, environment);
@@ -534,7 +573,7 @@ async function runFullSuiteCapture(command: string, project: string, cwd: string
     capture = await runBudgetedCapture(command, cwd, budget, {
       ...process.env,
       SIDEQUEST_FULL_SUITE_SIBLING_CAPTURE_COUNT: String(slot.queuePosition - 1),
-    }, options.announce);
+    }, options.announce, options.detached);
   } finally {
     releaseFailure = await slot.release();
   }
@@ -756,7 +795,7 @@ async function runCapturedVerification(command: string, target: CaptureTarget | 
   // covers foreign load whatever its source.
   const capture = preflight || (target && isFullSuiteCommand(command)
     ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem, { ...options, beforeRun })
-    : (beforeRun(), await runBudgetedCapture(command, captureCwd, (options.resolveBudget || captureBudget)(command), undefined, options.announce)));
+    : (beforeRun(), await runBudgetedCapture(command, captureCwd, (options.resolveBudget || captureBudget)(command), undefined, options.announce, options.detached)));
   const before = started.before || (target && !preflight ? treeSnapshot(captureCwd, true) : null);
   const recorded = target ? recordCapture(target, capture, captureCwd, resolution, binding?.ok ? binding.head : undefined, before) : null;
   return Object.freeze({ capture, recorded });
@@ -903,7 +942,7 @@ function report(capture: VerifyCapture, recorded?: CaptureRecordResult | null) {
   }
   if (capture.budget) {
     const budget = capture.budget;
-    process.stdout.write(`capture-budget class=${budget.budgetClass} budgetMs=${budget.timeoutMilliseconds} elapsedMs=${capture.elapsedMilliseconds ?? ''} setupMs=${budget.setupAllowanceMilliseconds} phaseMs=${budget.phaseBudgetMilliseconds} measuredPhaseMs=${budget.measuredPhaseBudgetMilliseconds} hardMaxMs=${budget.hardMaximumMilliseconds} cores=${budget.availableParallelism} load=${formatLoad(budget.loadAverage)} effectiveWorkers=${budget.effectiveTestWorkers.toFixed(2)}\n`);
+    process.stdout.write(`capture-budget class=${budget.budgetClass} budgetMs=${budget.timeoutMilliseconds} elapsedMs=${capture.elapsedMilliseconds ?? ''} setupMs=${budget.setupAllowanceMilliseconds} phaseMs=${budget.phaseBudgetMilliseconds} measuredPhaseMs=${budget.measuredPhaseBudgetMilliseconds} hardMaxMs=${budget.hardMaximumMilliseconds} cores=${budget.availableParallelism} load=${formatLoad(budget.loadAverage)} effectiveWorkers=${budget.effectiveTestWorkers.toFixed(2)} harnessTimeoutMs=${captureHarnessTimeoutMilliseconds(budget)}\n`);
   }
   if (recorded?.ok && recorded.capture) {
     process.stdout.write(`capture=${recorded.capture.id} candidate=${recorded.capture.candidate.source}:${recorded.capture.candidate.value}\n`);
@@ -1086,6 +1125,7 @@ async function main() {
     const target = captureTarget(args);
     const { capture, recorded } = await runCapturedVerification(command, target, process.cwd(), fs, {
       announce: (line) => process.stderr.write(`${line}\n`),
+      detached: Boolean(exitFile),
     });
     report(capture, recorded);
     process.exitCode = capture.exitCode === 0 && (!target || recorded?.ok) ? 0 : 2;
@@ -1096,6 +1136,6 @@ async function main() {
   writeExitFile(exitFile, Number(process.exitCode));
 }
 
-module.exports = { awaitDetachedCapture, detachedChildArguments, DETACHED_STILL_RUNNING_EXIT, runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, acquireCaptureSlot, isFullSuiteCommand, isTestSuiteCommand, captureBudgetClass, captureBudget, captureHardMaximumMilliseconds, runBudgetedCapture, fullSuiteCaptureTimeoutMilliseconds, effectiveTestWorkers, capacityScaledDeadlineMilliseconds, recordCapture, verifiedRevision };
+module.exports = { awaitDetachedCapture, detachedChildArguments, DETACHED_STILL_RUNNING_EXIT, runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, acquireCaptureSlot, isFullSuiteCommand, isTestSuiteCommand, captureBudgetClass, captureBudget, captureHardMaximumMilliseconds, captureHarnessTimeoutMilliseconds, captureHarnessGuidance, runBudgetedCapture, fullSuiteCaptureTimeoutMilliseconds, effectiveTestWorkers, capacityScaledDeadlineMilliseconds, recordCapture, verifiedRevision };
 
 if (require.main === module) void main();

@@ -12,7 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 
-const { runVerifyCapture, runCapturedVerification, recordCapture, shellCommand, captureSlotDirectory, acquireCaptureSlot, fullSuiteCaptureTimeoutMilliseconds, captureBudget, captureBudgetClass, captureHardMaximumMilliseconds, runBudgetedCapture, effectiveTestWorkers, capacityScaledDeadlineMilliseconds } = require('../lib/verify-capture.js');
+const { runVerifyCapture, runCapturedVerification, recordCapture, shellCommand, captureSlotDirectory, acquireCaptureSlot, fullSuiteCaptureTimeoutMilliseconds, captureBudget, captureBudgetClass, captureHardMaximumMilliseconds, captureHarnessTimeoutMilliseconds, captureHarnessGuidance, runBudgetedCapture, effectiveTestWorkers, capacityScaledDeadlineMilliseconds } = require('../lib/verify-capture.js');
 const { waitForCapacity, capacityWaitTimeoutMessage, capacityWaitDeadlineMilliseconds, testWorkerConcurrency } = require('./_capacity-deadline.js');
 const store = require('../lib/store.js');
 const { commandVerificationResult } = require('../lib/kernel/verification.js');
@@ -339,9 +339,60 @@ test('SQ-169: the wrapper announces the budget before the run and reports it aft
   });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stderr, /^verify-capture: capture budget 600000ms, command class \(not a recognized test runner/m);
-  assert.match(result.stdout, /^capture-budget class=command budgetMs=600000 elapsedMs=\d+ setupMs=600000 phaseMs=0 measuredPhaseMs=0 hardMaxMs=7200000 cores=\d+ load=\d+\.\d\d effectiveWorkers=\d+\.\d\d$/m);
+  assert.match(result.stdout, /^capture-budget class=command budgetMs=600000 elapsedMs=\d+ setupMs=600000 phaseMs=0 measuredPhaseMs=0 hardMaxMs=7200000 cores=\d+ load=\d+\.\d\d effectiveWorkers=\d+\.\d\d harnessTimeoutMs=1200000$/m);
+  // SQ-332: the announcement names the Bash timeout a backgrounded caller must pass, before the run starts.
+  assert.match(result.stderr, /^verify-capture: Bash timeout: this capture may run up to 600000ms\. .* If you background this call, pass timeout=1200000 \(the budget plus a 600000ms margin, under the 7200000ms harness maximum\), never the default; or rerun with --detach/m);
+  assert.doesNotMatch(result.stderr, /at or above that 1800000ms default/, 'a budget under the background default does not claim the default kills it');
   const details = /^details=(.*)$/m.exec(result.stdout)?.[1];
   if (details) fs.rmSync(details, { force: true });
+});
+
+test('SQ-332: a budget past the 1800000ms background default names that default and the timeout that outlives it', () => {
+  // The capacity model's own ceiling under heavy load: 600000ms setup + 2400000ms phase.
+  const loaded = captureBudget('npm run test:full', 8, 64, '');
+  assert.equal(loaded.timeoutMilliseconds, 3_000_000);
+  assert.equal(captureHarnessTimeoutMilliseconds(loaded), 3_600_000);
+  const guidance = captureHarnessGuidance(loaded);
+  assert.match(guidance, /^verify-capture: Bash timeout: this capture may run up to 3000000ms\. The Bash tool stops a foreground call at 600000ms and moves a longer one to the background under its 1800000ms default, discarding the timeout you set, and a wrapper killed there records no verdict at all\./);
+  assert.match(guidance, /This budget is at or above that 1800000ms default, so a backgrounded call without an explicit timeout is killed before this capture can record pass, fail, or capture_budget_exceeded\./);
+  assert.match(guidance, /If you background this call, pass timeout=3600000 /);
+
+  // SQ-277's geometry: a 6000000ms phase override gives 6600000ms, which still fits the margin.
+  const widened = captureBudget('npm run test:full', 8, 0, '6000000');
+  assert.equal(widened.timeoutMilliseconds, 6_600_000);
+  assert.match(captureHarnessGuidance(widened), /pass timeout=7200000 /);
+
+  // At the hard maximum no Bash timeout can outlive the capture, so the only route is --detach.
+  const clamped = captureBudget('npm run test:full', 8, 0, '999999999');
+  assert.equal(captureHarnessTimeoutMilliseconds(clamped), 7_200_000);
+  const clampedGuidance = captureHarnessGuidance(clamped);
+  assert.match(clampedGuidance, /leaves less than the 600000ms margin under the 7200000ms harness maximum, so no Bash timeout reliably outlives it: rerun with --detach/);
+  assert.doesNotMatch(clampedGuidance, /pass timeout=/);
+  assert.match(captureHarnessGuidance(clamped, true), /^verify-capture: running detached, so no Bash timeout can stop this capture/);
+});
+
+test('SQ-332: a capture whose budget exceeds the harness default announces why a harness kill would leave no record before it runs', async () => {
+  const announced: string[] = [];
+  const longBudget = (command: string) => Object.freeze({ ...captureBudget(command, 8, 0, ''), timeoutMilliseconds: 2_400_000 });
+  const command = `"${process.execPath}" -e "process.stdout.write('quick')"`;
+  const { capture, recorded } = await runCapturedVerification(command, null, process.cwd(), fs, {
+    resolveBudget: longBudget,
+    announce: (line: string) => announced.push(line),
+  });
+  try {
+    assert.equal(capture.status, 'passed', capture.evidence);
+    assert.equal(recorded, null);
+    assert.equal(capture.budget?.timeoutMilliseconds, 2_400_000);
+    // `assert` is require()d, so it is typed any and assert.ok cannot narrow; fall back to '' explicitly.
+    const harnessLine = announced.find((line) => line.startsWith('verify-capture: Bash timeout:')) ?? '';
+    assert.ok(harnessLine, announced.join('\n'));
+    assert.match(harnessLine, /this capture may run up to 2400000ms/);
+    assert.match(harnessLine, /at or above that 1800000ms default, so a backgrounded call without an explicit timeout is killed before this capture can record/);
+    assert.match(harnessLine, /pass timeout=3000000 /);
+    assert.ok(announced.indexOf(harnessLine) > announced.findIndex((line) => line.startsWith('verify-capture: capture budget 2400000ms')), 'the harness line follows the budget line');
+  } finally {
+    deleteLog(capture);
+  }
 });
 
 test('full-suite capture serializes sibling captures and records the queue wait', async () => {
@@ -1305,6 +1356,9 @@ test('SQ-225: a detached capture still running at the wait bound reports verify=
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /^verify=passed exit=0$/m);
     assert.equal(fs.readFileSync(marker, 'utf8'), 'done');
+    // SQ-332: the detached child says no Bash timeout reaches it, instead of telling the caller to background it.
+    assert.match(result.stdout, /^verify-capture: running detached, so no Bash timeout can stop this capture; it records its own verdict within its 600000ms budget\.$/m);
+    assert.doesNotMatch(result.stdout, /If you background this call/);
   } finally {
     removeDetachedEvidence(resumed, runDirectory);
     fs.rmSync(directory, { recursive: true, force: true });

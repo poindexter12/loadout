@@ -1432,6 +1432,10 @@ test('small-ticket lifecycle retires three optional board round trips', () => {
   // executor resumes it in the foreground rather than inventing an until-loop.
   assert.match(briefing, /verify-capture\.js" --base64 \S+ --project "[^"]+" --ticket "SQ-1619" --detach in the FOREGROUND/);
   assert.match(briefing, /so the 10-minute Bash ceiling cannot kill it/);
+  // SQ-332: the harness background default (30 minutes) is shorter than a capture may run, and a
+  // foreground timeout is discarded when the harness backgrounds the call, so the rule is stated once.
+  assert.match(briefing, /the harness moves an over-limit foreground call to the background under its 1800000 ms default, discarding your timeout, and kills the wrapper there before it records any verdict/);
+  assert.match(briefing, /background it with an explicit timeout of 7200000, strictly greater than the budget the wrapper announces, never the default/);
   assert.match(briefing, /If it prints verify=running \(exit 75\), the capture is still going: do not start another, rerun the --resume command it prints in the FOREGROUND/);
   assert.doesNotMatch(briefing, /bounded foreground until-loops/);
   assert.doesNotMatch(briefing, /only for background verification/);
