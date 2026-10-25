@@ -2882,6 +2882,127 @@ test('preparing a dispatch does not hold the board write lock across its Git and
   assert.equal(store.releaseTicket(slug, ticket.ref, 'lock-hold-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
 });
 
+/**
+ * SQ-273. SQ-268 moved the dispatch plan out of the machine-global transaction, and because the
+ * ticket file lock was welded to that transaction it had to drop same-ticket serialisation too: two
+ * concurrent prepares of one ticket both planned, and the loser's worktree reclaim could run twice.
+ * The ticket file lock is now held across plan-then-commit on its own, so a second prepare waits for
+ * the first to store before it plans at all.
+ *
+ * The race needs two processes, because a prepare is synchronous. The first child parks inside its
+ * plan (the observer seam spins until the release file exists) with the file lock held and the
+ * transaction NOT held; the second child is launched into that window. The window is sized from the
+ * first child's own measured start-to-plan time, the same pre-lock work the second must get through
+ * before it could plan, so a loaded machine widens it instead of turning the test into a guess.
+ * Events are read in append order, which is a total order across both processes.
+ */
+test('two concurrent prepares of the same ticket run exactly one plan until the first is stored', async (t: any) => {
+  const spawnChild = require('node:child_process').spawn;
+  const testStart = Date.now();
+  const ticket = createFixture('concurrent prepares of one ticket serialise on its file lock');
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-dispatch-concurrent-prepare-'));
+  const childScript = path.join(scratch, 'prepare-child.js');
+  const eventsFile = path.join(scratch, 'events.jsonl');
+  const releaseFile = path.join(scratch, 'release');
+  fs.writeFileSync(childScript, [
+    "'use strict';",
+    "const fs = require('node:fs');",
+    'const [storePath, slug, ref, role, eventsFile, releaseFile] = process.argv.slice(2);',
+    'const store = require(storePath);',
+    "const emit = (event) => fs.appendFileSync(eventsFile, JSON.stringify({ role, at: Date.now(), ...event }) + '\\n');",
+    'const pause = new Int32Array(new SharedArrayBuffer(4));',
+    'store.setDispatchPlanObserver((event) => {',
+    '  emit({ phase: event.phase, attempt: event.attempt });',
+    "  if (role === 'first' && event.phase === 'plan' && event.attempt === 1) {",
+    '    const deadline = Date.now() + 25000;',
+    '    while (!fs.existsSync(releaseFile) && Date.now() < deadline) Atomics.wait(pause, 0, 0, 20);',
+    '  }',
+    '});',
+    "emit({ phase: 'started' });",
+    'let outcome;',
+    'try {',
+    '  const result = store.prepareDispatch(slug, ref);',
+    "  outcome = { ok: result && result.ok === true, reason: (result && result.reason) || null, error: null };",
+    '} catch (error) {',
+    "  outcome = { ok: false, reason: null, error: String((error && error.message) || error).slice(0, 400) };",
+    '}',
+    "emit({ phase: 'outcome', ...outcome });",
+  ].join('\n'));
+  const storePath = require.resolve('../lib/store.js');
+  const events = (): any[] => (fs.existsSync(eventsFile)
+    ? fs.readFileSync(eventsFile, 'utf8').split('\n').filter(Boolean).map((line: string) => JSON.parse(line))
+    : []);
+  const launch = (role: string) => {
+    const child = spawnChild(process.execPath, [childScript, storePath, slug, ticket.ref, role, eventsFile, releaseFile], {
+      env: process.env,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      windowsHide: true,
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk: any) => { stderr += String(chunk); });
+    const exited = new Promise<{ role: string; code: number | null; stderr: string; at: number }>((resolve) => {
+      child.on('exit', (code: number | null) => resolve({ role, code, stderr, at: Date.now() }));
+    });
+    return { child, exited };
+  };
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const waitFor = async (predicate: (list: any[]) => boolean, what: string) => {
+    const deadline = Date.now() + 20000;
+    while (!predicate(events())) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}; events so far: ${JSON.stringify(events())}`);
+      await sleep(20);
+    }
+  };
+
+  const first = launch('first');
+  let second: ReturnType<typeof launch> | null = null;
+  let windowMs = 0;
+  let duringWindow: any[] = [];
+  try {
+    await waitFor((list) => list.some((event) => event.role === 'first' && event.phase === 'plan'), 'the first prepare to start planning');
+    const firstStarted = events().find((event) => event.role === 'first' && event.phase === 'started');
+    const firstPlan = events().find((event) => event.role === 'first' && event.phase === 'plan');
+    // Three times what the first prepare needed to reach its plan, floored and capped well inside the
+    // 30s file-lock timeout, so the second prepare's wait can never turn into a busy refusal here.
+    windowMs = Math.min(10000, Math.max(1500, 3 * (firstPlan.at - firstStarted.at)));
+    second = launch('second');
+    await waitFor((list) => list.some((event) => event.role === 'second' && event.phase === 'started'), 'the second prepare to start');
+    await sleep(windowMs);
+    duringWindow = events();
+  } finally {
+    fs.writeFileSync(releaseFile, '');
+  }
+  const exits = await Promise.all([first.exited, ...(second ? [second.exited] : [])]);
+  const all = events();
+  fs.rmSync(scratch, { recursive: true, force: true });
+  // Offsets from the first child's start, so a slow run shows which phase the time went to.
+  const origin = all[0]?.at ?? Date.now();
+  t.diagnostic(`fixture ${origin - testStart}ms; race window ${windowMs}ms; events:${JSON.stringify(all.map(({ role, phase, attempt, ok, error, at }: any) => ({ role, phase, attempt, ok, error, ms: at - origin })))}; exits: ${JSON.stringify(exits.map(({ role, code, at }) => ({ role, code, ms: at - origin })))}`);
+  for (const exit of exits) assert.equal(exit.code, 0, `a prepare child crashed: ${exit.stderr}`);
+
+  const plansDuringWindow = duringWindow.filter((event) => event.phase === 'plan');
+  assert.deepEqual(
+    plansDuringWindow.map((event) => event.role),
+    ['first'],
+    'while the first prepare was planning, a second prepare of the same ticket must wait on the ticket file lock instead of planning alongside it',
+  );
+  const firstStoredAt = all.findIndex((event) => event.role === 'first' && event.phase === 'stored');
+  assert.ok(firstStoredAt >= 0, `the first prepare never stored its plan: ${JSON.stringify(all)}`);
+  const plansBeforeStore = all.slice(0, firstStoredAt).filter((event) => event.phase === 'plan');
+  assert.equal(plansBeforeStore.length, 1, 'exactly one plan may run before the first prepare stores; a second means the race planned twice');
+  assert.deepEqual(
+    all.filter((event) => event.phase === 'plan' && event.attempt > 1),
+    [],
+    'no prepare may go stale and replan: with the file lock held across plan and commit, the same-ticket race the recheck catches cannot happen',
+  );
+  const firstOutcome = all.find((event) => event.role === 'first' && event.phase === 'outcome');
+  assert.equal(firstOutcome?.ok, true, `the first prepare must store a prepared dispatch: ${JSON.stringify(firstOutcome)}`);
+  const secondOutcome = all.find((event) => event.role === 'second' && event.phase === 'outcome');
+  assert.ok(secondOutcome, 'the second prepare never finished');
+  assert.notEqual(secondOutcome.reason, 'busy', 'the second prepare outwaited the file lock, so the window was not inside the lock timeout');
+  assert.equal(store.releaseTicket(slug, ticket.ref, 'concurrent-prepare-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
+});
+
 // SQ-255. `dispatch` refused a row as a live attempt and sent the orchestrator to `--recovery-evidence`,
 // and that route refused the same row as "not an active attempt". Two refusals, no third route. These pin
 // the invariant that makes that unreachable: a live-attempt refusal must name a recovery step the recovery
