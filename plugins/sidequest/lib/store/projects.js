@@ -4,7 +4,7 @@ function refPrefixOf(meta) {
   const raw = String(meta?.refPrefix ?? "").trim().toUpperCase();
   return /^[A-Z][A-Z0-9]*$/.test(raw) ? raw : DEFAULT_REF_PREFIX;
 }
-function createProjects({ acquireLock, assetsDir, claimReclaimable, cloneCached, database, db, defaultAlwaysInScope, defaultProjectName, deleteCachedRow, ensureDir, fs, invalidateStoreCaches, listStories, listTickets, normalizeForHash, path, projectDir, putProject, putStory, putTicket, releaseLock, residentCache, slugify, sourceRevisionAdapterForPath, ticketsDir, transaction }) {
+function createProjects({ acquireLock, assetsDir, claimReclaimable, cloneCached, database, db, defaultAlwaysInScope, defaultProjectName, deleteCachedRow, ensureDir, fs, invalidateStoreCaches, listStories, listTickets, nearestRepoRoot, normalizeForHash, path, projectDir, putProject, putStory, putTicket, releaseLock, residentCache, slugify, sourceRevisionAdapterForPath, ticketsDir, transaction }) {
   function canonicalize(absPath) {
     const resolved = path.resolve(absPath);
     try {
@@ -292,6 +292,19 @@ function createProjects({ acquireLock, assetsDir, claimReclaimable, cloneCached,
     const wantedPath = normalizeForHash(canonicalize(arg));
     const byPath = projects.find((project) => project.meta.path && normalizeForHash(canonicalize(project.meta.path)) === wantedPath);
     if (byPath) return { ok: true, slug: byPath.slug, meta: byPath.meta };
+    if (path.isAbsolute(arg) && typeof nearestRepoRoot === "function") {
+      let folded = "";
+      try {
+        folded = nearestRepoRoot(arg);
+      } catch (_) {
+        folded = "";
+      }
+      const foldedKey = folded ? normalizeForHash(canonicalize(folded)) : "";
+      if (foldedKey && foldedKey !== wantedPath) {
+        const byFold = projects.find((project) => project.meta.path && normalizeForHash(canonicalize(project.meta.path)) === foldedKey);
+        if (byFold) return { ok: true, slug: byFold.slug, meta: byFold.meta };
+      }
+    }
     return { ok: false, reason: "not_found", known: projects.map((project) => project.meta.name || project.slug) };
   }
   function seqOfRef(ref) {

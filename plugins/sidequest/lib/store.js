@@ -3374,6 +3374,7 @@ projectsLayer = createProjects({
   invalidateStoreCaches,
   listStories,
   listTickets,
+  nearestRepoRoot,
   normalizeForHash,
   path,
   projectDir,
