@@ -187,10 +187,8 @@ full suite once while publishing the wave in one transaction → re-plan, spawn 
 executor mini-sessions from the spawn side: **the ticket is the spec** (the cheaper the model,
 the more patch-level the detail); **scope the spawn prompt only with logistics**, the ticket
 contract traveling in full and unnarrowed;
-**Executors keep useful work**: keep claim, checkpoint evidence, and await `SendMessage`
-steering for questions or failed checks. Release only for confirmed death or unsalvageable blockers; **batch small same-model tickets into ONE executor**
-(different models never batch); **parallel fan-out spawns one executor per ticket in a single
-message** when the wave justifies it.
+Executor retention, batching, and parallel fan-out detail:
+`references/orchestration.md`.
 
 **Ready** = unclaimed, unblocked, not done, not archived — `sidequest ready --json
 --brief` lists exactly this set, partitioned into **parallel-safe waves** by declared file scope.
