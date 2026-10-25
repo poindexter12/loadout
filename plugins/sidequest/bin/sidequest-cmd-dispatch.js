@@ -393,4 +393,48 @@ async function cmdMerge(opts, positional) {
   if (!dryRun) console.log(`  removed board "${src.meta.name}".`);
   else console.log("  (dry run — nothing was changed)");
 }
-module.exports = { cmdDispatch, cmdBriefing, cmdTempCleanup, cmdNativeAgent, cmdModels, cmdRoute, cmdBoardConfig, cmdProjects, cmdRouting, cmdArchiveBoard, cmdUnarchiveBoard, cmdMerge };
+async function cmdMoveBoard(opts, positional) {
+  const { moveBoards } = require("../lib/board-move");
+  const { resolveSidequestHome } = require("../lib/claude-home");
+  const boards = positional.map((ref) => String(ref)).filter(Boolean);
+  if (!boards.length) fail("move-board: pass at least one board slug, display name, or registered path, e.g. sidequest move-board loadout --to-home ~/.poindexter/claude/sidequest --dry-run");
+  const toHome = opts["to-home"];
+  if (!toHome || toHome === true) fail("move-board: pass --to-home <dir>, the SIDEQUEST_HOME to move the board(s) into.");
+  const expand = (dir) => dir.startsWith("~/") ? path.join(os.homedir(), dir.slice(2)) : dir;
+  const fromHome = opts["from-home"] && opts["from-home"] !== true ? expand(String(opts["from-home"])) : resolveSidequestHome();
+  let res;
+  try {
+    res = await moveBoards({ sourceHome: fromHome, destHome: expand(String(toHome)), boards, dryRun: !!opts["dry-run"] });
+  } catch (e) {
+    fail(`move-board: ${e && e.message || e}`);
+  }
+  if (opts.json) {
+    process.stdout.write(JSON.stringify(res, null, 2) + "\n");
+    if (!res.ok) process.exitCode = 1;
+    return;
+  }
+  if (!res.ok) {
+    const lines = [`move-board: refused, nothing was moved (${res.sourceHome} → ${res.destHome}).`];
+    for (const plan of res.boards) {
+      for (const blocker of plan.blockers) lines.push(`  ${plan.name}: ${blocker.kind}${blocker.ref ? ` ${blocker.ref}` : ""}: ${blocker.detail}`);
+    }
+    fail(lines.join("\n"));
+  }
+  const verb = res.dryRun ? "would move" : "moved";
+  console.log(`✓ ${verb} ${res.boards.length} board(s) ${res.sourceHome} → ${res.destHome}`);
+  for (const plan of res.boards) {
+    const statuses = Object.entries(plan.tickets.byStatus).filter(([, n]) => n).map(([s, n]) => `${s} ${n}`).join(", ");
+    console.log(`  ${plan.name} (${plan.slug})${plan.destination === "replace" ? " [replaces the destination copy]" : ""}`);
+    console.log(`    tickets ${plan.tickets.total}${statuses ? ` (${statuses}${plan.tickets.archived ? `, archived ${plan.tickets.archived}` : ""})` : ""}`);
+    console.log(`    rows ${Object.entries(plan.rows).map(([t, n]) => `${t}=${n}`).join(" ")}${plan.verified ? " (verified in destination)" : ""}`);
+    console.log(`    notifications ${plan.notifications}; routing profiles copied [${plan.shared.routingProfiles.copy.join(", ") || "none"}], kept [${plan.shared.routingProfiles.kept.join(", ") || "none"}]`);
+    console.log(`    files ${plan.files.count} (${plan.files.bytes} bytes) ${plan.files.from} → ${plan.files.to}`);
+    if (plan.dispatchTokens.length) console.log(`    dispatch tokens ${plan.dispatchTokens.length}`);
+    if (plan.rewrittenPaths) console.log(`    home paths rewritten in documents ${plan.rewrittenPaths}`);
+    if (plan.gitRefs.length) console.log(`    refs/sidequest pointers unchanged ${plan.gitRefs.length} (ticket refs keep their names)`);
+    if (plan.worktrees.exists) console.log(`    worktrees: ${plan.worktrees.rule}`);
+  }
+  if (res.dryRun) console.log("  (dry run — nothing was changed)");
+  else console.log(`  Sessions now reach these boards only with SIDEQUEST_HOME=${res.destHome} (or the CLAUDE_CONFIG_DIR that resolves to it).`);
+}
+module.exports = { cmdDispatch, cmdBriefing, cmdTempCleanup, cmdNativeAgent, cmdModels, cmdRoute, cmdBoardConfig, cmdProjects, cmdRouting, cmdArchiveBoard, cmdUnarchiveBoard, cmdMerge, cmdMoveBoard };

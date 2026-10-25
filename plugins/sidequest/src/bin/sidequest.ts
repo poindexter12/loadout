@@ -9,7 +9,7 @@ const { cmdAdd, cmdList, cmdPulse, cmdChanges, cmdUpdate, cmdRm } = require('./s
 const { cmdProfile, cmdCategory, cmdGlobalFallback } = require('./sidequest-cmd-configuration');
 const { cmdClaim, cmdCheckpoint, cmdVerdict, cmdRelease, cmdDone, cmdGroomClose, cmdScopeRequest, cmdCommit, cmdRework, cmdSubmit, cmdAssembleWave, cmdIntegrate, cmdPublish } = require('./sidequest-cmd-execution');
 const { cmdSweepClaims, cmdWorktrees, cmdRecoverShared, cmdNext, cmdWork, cmdReconcile, cmdAssign, cmdRemind, cmdUnremind, cmdComment, cmdComments, cmdLink, cmdUnlink, cmdReady, cmdArchive, cmdUnarchive } = require('./sidequest-cmd-collaboration');
-const { cmdDispatch, cmdBriefing, cmdTempCleanup, cmdNativeAgent, cmdModels, cmdRoute, cmdBoardConfig, cmdProjects, cmdRouting, cmdArchiveBoard, cmdUnarchiveBoard, cmdMerge } = require('./sidequest-cmd-dispatch');
+const { cmdDispatch, cmdBriefing, cmdTempCleanup, cmdNativeAgent, cmdModels, cmdRoute, cmdBoardConfig, cmdProjects, cmdRouting, cmdArchiveBoard, cmdUnarchiveBoard, cmdMerge, cmdMoveBoard } = require('./sidequest-cmd-dispatch');
 const { cmdStory } = require('./sidequest-cmd-story');
 const { cmdAudit } = require('./sidequest-cmd-audit');
 const { cmdIssue } = require('./sidequest-cmd-issue');
@@ -73,6 +73,7 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   routing: ['enabled', 'disabled'],
   'archive-board': [],
   'unarchive-board': [],
+  'move-board': ['to-home', 'from-home', 'dry-run'],
   merge: ['dry-run'],
   story: ['title', 'desc', 'description', 'color', 'body', 'body-file', 'ref', 'by', 'rotate', 'full'],
   dashboard: ['port', 'open'],
@@ -88,6 +89,7 @@ const MUTATING_COMMANDS = new Set([
   'scope-request', 'scope_request', 'commit', 'rework', 'submit', 'assemble-wave', 'integrate', 'publish', 'release', 'unclaim',
   'assign', 'unassign', 'remind', 'unremind', 'comment', 'link', 'unlink', 'archive', 'unarchive', 'restore',
   'dispatch', 'archive-board', 'archive_board', 'unarchive-board', 'unarchive_board', 'restore-board', 'merge',
+  'move-board', 'move_board',
   'global-fallback', 'global_fallback',
 ]);
 
@@ -258,6 +260,7 @@ const HELP_COMMANDS: any = {
   routing: 'sidequest routing [enabled|disabled] [--project <path-or-slug>] [--json]',
   'archive-board': 'sidequest archive-board <board-ref> [--json]',
   'unarchive-board': 'sidequest unarchive-board <board-ref> [--json]',
+  'move-board': 'sidequest move-board <board-ref>... --to-home <dir> [--from-home <dir>] [--dry-run] [--json]',
   merge: 'sidequest merge <src> <dst> [--dry-run]',
   dashboard: 'sidequest dashboard [--port N] [--no-open]',
   serve: 'sidequest serve [--port N]',
@@ -303,6 +306,7 @@ Usage:
   sidequest routing [enabled|disabled] [--project <path-or-slug>] [--json]
   sidequest archive-board <board-ref>                  archive a board
   sidequest unarchive-board <board-ref>                restore an archived board
+  sidequest move-board <board-ref>... --to-home <dir> [--dry-run]   move boards into another SIDEQUEST_HOME
   sidequest dashboard [--port N] [--no-open]     open the live board in the browser
   sidequest serve [--port N]                     run the board server in the foreground
   sidequest stop                                 stop the running board server
@@ -403,6 +407,12 @@ Archive (put finished work out of the way, restorable):
   sidequest archive-board <board-ref>               archive a board (explicit reference required)
   sidequest unarchive-board <board-ref>             restore an archived board
   sidequest projects --archived                     list archived boards
+
+Split boards across homes (one SIDEQUEST_HOME per account):
+  sidequest move-board <board-ref>... --to-home <dir> [--from-home <dir>] [--dry-run] [--json]
+      moves tickets, stories, links, board config, notifications and projects/<slug>/ files;
+      refuses while a moved board has a live claim, a launched/bound dispatch or a held publish
+      lock. --from-home defaults to the current home. Existing worktrees stay where they are.
 
 User stories (a lightweight grouping tickets can belong to):
   sidequest story add -t "title" [-d desc] [--color <name|hex>]   create a story (prints its US-n ref)
@@ -650,6 +660,10 @@ async function main() {
     case 'unarchive_board':
     case 'restore-board':
       await cmdUnarchiveBoard(opts, positional);
+      break;
+    case 'move-board':
+    case 'move_board':
+      await cmdMoveBoard(opts, positional);
       break;
     case 'merge':
       await cmdMerge(opts, positional);
