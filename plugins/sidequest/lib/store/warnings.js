@@ -940,10 +940,47 @@ ${String(ticket?.description || "")}`;
     "--require",
     "-r"
   ]);
+  function shellWords(command) {
+    const text = String(command || "");
+    const words = [];
+    let word = "";
+    let inWord = false;
+    let quote = "";
+    for (let index = 0; index < text.length; index += 1) {
+      const character = text[index];
+      if (quote) {
+        if (character === quote) quote = "";
+        else if (quote === '"' && character === "\\" && /["\\$`]/.test(text[index + 1] || "")) word += text[++index];
+        else word += character;
+        continue;
+      }
+      if (character === '"' || character === "'") {
+        quote = character;
+        inWord = true;
+        continue;
+      }
+      if (character === "\\" && index + 1 < text.length) {
+        word += text[++index];
+        inWord = true;
+        continue;
+      }
+      if (/\s/.test(character) || /[|&;<>]/.test(character)) {
+        if (inWord) words.push(word);
+        word = "";
+        inWord = false;
+        if (/[|&;<>]/.test(character)) return words;
+        continue;
+      }
+      word += character;
+      inWord = true;
+    }
+    if (inWord) words.push(word);
+    return words;
+  }
   function nodeTestArguments(command) {
     const text = String(command || "").trim();
     if (!/^node(?:\.exe)?(?:\s|$)/.test(text)) return null;
-    const tokens = [...text.matchAll(/(?:["']([^"']*)["']|([^\s;&|]+))/g)].map((match) => match[1] ?? match[2]).slice(1);
+    const tokens = shellWords(text).slice(1);
     const operands = [];
     let test = false;
     for (let index = 0; index < tokens.length; index += 1) {
