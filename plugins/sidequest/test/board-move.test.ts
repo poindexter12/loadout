@@ -73,6 +73,7 @@ setTicketData(blocked.slug, claimed.ref, { claim: { by: 'exec-live', at: '2026-1
 test('dry run lists exactly what moves and changes nothing', async () => {
   const res = await moveBoards({ sourceHome: SOURCE, destHome: DEST, boards: ['Moved Board'], dryRun: true });
   assert.strictEqual(res.ok, true, res.refused);
+  assert.strictEqual(res.boards.length, 1, "the result carries one plan for the named board");
   const plan = res.boards[0];
   assert.strictEqual(plan.slug, moved.slug);
   assert.strictEqual(plan.rows.tickets, 4);
@@ -97,6 +98,7 @@ test('move carries tickets, comments, files and state; source no longer lists it
   const dry = await moveBoards({ sourceHome: SOURCE, destHome: DEST, boards: [moved.slug], dryRun: true });
   const res = await moveBoards({ sourceHome: SOURCE, destHome: DEST, boards: [moved.slug] });
   assert.strictEqual(res.ok, true, res.refused);
+  assert.strictEqual(res.boards.length, 1, "the result carries one plan for the named board");
   const plan = res.boards[0];
   assert.deepStrictEqual(plan.verified, dry.boards[0].rows, 'verified destination counts equal the dry-run plan');
   assert.deepStrictEqual(plan.files.list, dry.boards[0].files.list);
@@ -178,6 +180,7 @@ test('a submission parked in the source integrates from the destination home aft
 
   const res = await moveBoards({ sourceHome: SOURCE, destHome: DEST, boards: [repo] });
   assert.strictEqual(res.ok, true, res.refused);
+  assert.strictEqual(res.boards.length, 1, "the result carries one plan for the moved board");
   assert.deepStrictEqual(res.boards[0].gitRefs, [gitRef], 'the refs/sidequest pointer is reported and stays valid');
 
   const result = runCli(DEST, ['integrate', ticket.ref, '--by', 'orchestrator', '--json'], repo);
@@ -191,6 +194,13 @@ test('a submission parked in the source integrates from the destination home aft
 test('new tickets on the moved board continue the ref sequence without collisions', () => {
   const res = runCli(DEST, ['add', '-t', 'after the move', '--unclassified', '--json'], MOVED_PATH);
   assert.strictEqual(res.status, 0, res.stderr);
-  const ref = JSON.parse(res.stdout).ref;
-  assert.ok(![open.ref, released.ref, submitted.ref, finished.ref].includes(ref), `${ref} does not reuse a moved ref`);
+  const added = JSON.parse(res.stdout);
+  assert.strictEqual(added.project, moved.slug, 'the new ticket lands on the moved board');
+  const ref = added.ticket.ref;
+  const movedRefs = [open.ref, released.ref, submitted.ref, finished.ref];
+  assert.ok(!movedRefs.includes(ref), `${ref} does not reuse a moved ref`);
+  const number = (value: string) => Number(String(value).replace(/\D+/g, ''));
+  assert.ok(number(ref) > Math.max(...movedRefs.map(number)), `${ref} continues after ${movedRefs.join(', ')}`);
+  const listed = JSON.stringify(JSON.parse(runCli(DEST, ['list', '--json'], MOVED_PATH).stdout));
+  for (const movedRef of movedRefs.slice(0, 3)) assert.ok(listed.includes(movedRef), `${movedRef} still listed beside ${ref}`);
 });
