@@ -177,6 +177,86 @@ function runtimeModule(name) {
   return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
+// src/hooks/shared/heredocs.ts
+function hereDocAt(command, index) {
+  let cursor = index + 2;
+  const stripTabs = command[cursor] === "-";
+  if (stripTabs) cursor += 1;
+  while (command[cursor] === " " || command[cursor] === "	") cursor += 1;
+  const quote = command[cursor];
+  if (quote === "'" || quote === '"') {
+    const end = command.indexOf(quote, cursor + 1);
+    if (end < 0) return null;
+    return { hereDoc: { delimiter: command.slice(cursor + 1, end), stripTabs }, end: end + 1 };
+  }
+  const match = command.slice(cursor).match(/^[^\s|&;()<>]+/);
+  if (!match) return null;
+  return { hereDoc: { delimiter: match[0], stripTabs }, end: cursor + match[0].length };
+}
+function skipHereDocBodies(command, index, hereDocs) {
+  let cursor = index;
+  for (const { delimiter, stripTabs } of hereDocs) {
+    while (cursor < command.length) {
+      const lineEnd = command.indexOf("\n", cursor);
+      const end = lineEnd < 0 ? command.length : lineEnd;
+      let line = command.slice(cursor, end).replace(/\r$/, "");
+      if (stripTabs) line = line.replace(/^\t+/, "");
+      cursor = lineEnd < 0 ? command.length : lineEnd + 1;
+      if (line === delimiter) break;
+    }
+  }
+  return cursor;
+}
+function escapedNewline(command, index) {
+  let backslashes = 0;
+  for (let cursor = index - 1; command[cursor] === "\\"; cursor -= 1) backslashes += 1;
+  return backslashes % 2 === 1;
+}
+function commentStart(command, index) {
+  if (command[index] !== "#") return false;
+  const previous = command[index - 1];
+  return previous === void 0 || /[\s;&|(]/.test(previous);
+}
+function withoutHereDocBodies(command) {
+  let quote = "";
+  let hereDocs = [];
+  let result = "";
+  let copiedThrough = 0;
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index];
+    if (quote) {
+      if (character === "\\") index += 1;
+      else if (character === quote) quote = "";
+      continue;
+    }
+    if (character === "\n" && hereDocs.length > 0 && !escapedNewline(command, index)) {
+      result += command.slice(copiedThrough, index + 1);
+      index = skipHereDocBodies(command, index + 1, hereDocs) - 1;
+      copiedThrough = index + 1;
+      hereDocs = [];
+      continue;
+    }
+    if (commentStart(command, index)) {
+      const lineEnd = command.indexOf("\n", index);
+      if (lineEnd < 0) break;
+      index = lineEnd - 1;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === "<" && command[index - 1] !== "<" && command[index + 1] === "<") {
+      const parsed = hereDocAt(command, index);
+      if (parsed) {
+        hereDocs.push(parsed.hereDoc);
+        index = parsed.end - 1;
+      }
+    }
+  }
+  return result + command.slice(copiedThrough);
+}
+
 // src/hooks/guard-heredoc-isolated.ts
 function bashCommand(input) {
   const toolInput = input.tool_input;
@@ -217,6 +297,32 @@ function hasHereDoc(command) {
   }
   return false;
 }
+var PROGRAM_START = String.raw`(?:^|[;&|\n(\x60{]|\$\()\s*`;
+var COMMAND_PREFIX = String.raw`(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:(?:command|exec|env|sudo|nohup|time)\s+(?:-\S+\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*)*`;
+var GIT_PROGRAM = new RegExp(`${PROGRAM_START}${COMMAND_PREFIX}(?:\\S*/)?git(?=\\s|$|[;&|)])`, "g");
+var SHELL_PROGRAM = new RegExp(`${PROGRAM_START}${COMMAND_PREFIX}(?:\\S*/)?(?:ba|z|da|k)?sh(?=\\s|$|[;&|)])`, "g");
+function quotedAt(command, index) {
+  let quote = "";
+  for (let cursor = 0; cursor < index; cursor += 1) {
+    const character = command[cursor];
+    if (character === "\\") cursor += 1;
+    else if (quote) {
+      if (character === quote) quote = "";
+    } else if (character === '"' || character === "'") quote = character;
+  }
+  return Boolean(quote);
+}
+function programIn(text, pattern, honourQuotes) {
+  for (const match of text.matchAll(pattern)) {
+    if (!honourQuotes || !quotedAt(text, match.index || 0)) return true;
+  }
+  return false;
+}
+function carriesGitInvocation(command) {
+  const shell = withoutHereDocBodies(command);
+  if (programIn(shell, GIT_PROGRAM, true)) return true;
+  return programIn(shell, SHELL_PROGRAM, true) && programIn(command, GIT_PROGRAM, false);
+}
 function dispatchedInWorktree(input) {
   try {
     const store = require(runtimeModule("store"));
@@ -239,9 +345,10 @@ function harnessWorktreeCwd(input) {
 function main() {
   const input = readStdin();
   if (!input || stringField(input, "tool_name") !== "Bash") return;
-  if (!hasHereDoc(bashCommand(input))) return;
+  const command = bashCommand(input);
+  if (!hasHereDoc(command) || !carriesGitInvocation(command)) return;
   if (!dispatchedInWorktree(input) && !harnessWorktreeCwd(input)) return;
-  writeDeny("PreToolUse", "sidequest: the harness refuses heredocs in isolated worktrees; Write the script to your scratchpad and run it by path.");
+  writeDeny("PreToolUse", "sidequest: refusing a heredoc that carries a git invocation in an isolated worktree; the harness cannot verify that git stays inside the worktree. Run git as plain, separate commands, or Write the script to your scratchpad and run it by path. A heredoc with no git invocation is allowed.");
 }
 try {
   main();
