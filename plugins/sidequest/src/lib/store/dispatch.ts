@@ -7,6 +7,7 @@ const { resolveSuite } = require('../suite-resolver.js');
 const { defaultHostSleep } = require('../host-sleep.js');
 const { FILESYSTEM_SNAPSHOT_SOURCE, withPrecomputedFilesystemSnapshot } = require('../source-revision-capability.js');
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationOutcome } = require('../kernel/review-binding');
+const { normalizeTicketBaseRef } = require('./tickets.js');
 
 function unscopedWriteCannotAutoApprove(ticket?: any, options?: any) {
   const { dispatchReadOnly, normalizeFiles, autoApproveScope } = options;
@@ -1323,6 +1324,24 @@ function gitOutput(root?: any, args?: any[]) {
   }).trim();
 }
 
+// SQ-286. The commit a ticket's named base ref points at in the project checkout. A bare branch name
+// that only exists as a remote-tracking ref (the usual shape of someone else's open pull request) also
+// resolves through origin. Nothing is fetched: a base the checkout does not hold is refused, never
+// replaced by the integration target.
+function resolveTicketBaseRef(projectPath: string, ticketRef: string, baseRef: string): string {
+  const candidates = [baseRef];
+  if (!baseRef.startsWith('refs/')) candidates.push(`refs/remotes/origin/${baseRef}`);
+  for (const candidate of candidates) {
+    try {
+      const commit = gitOutput(projectPath, ['rev-parse', '--verify', '--quiet', `${candidate}^{commit}`]);
+      if (/^[0-9a-f]{40,64}$/.test(commit)) return commit;
+    } catch (_: unknown) { /* try the next spelling */ }
+  }
+  throw new Error(`prepare dispatch: ${ticketRef} names base ref "${baseRef}", which does not resolve to a commit in ${projectPath} (tried ${candidates.join(', ')}). `
+    + 'The worktree will not silently start from the integration target instead. Fetch the branch into the project checkout first, '
+    + 'name it exactly (for example origin/<branch> or a commit hash), or clear the ticket\'s baseRef to fork the integration target.');
+}
+
 function registeredWorktrees(repository?: any): string[] {
   return gitOutput(repository, ['worktree', 'list', '--porcelain'])
     .split(/\r?\n\r?\n/)
@@ -2007,6 +2026,17 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
     if (t.workingTreeDelivery === true && !sharedTree) {
       throw new Error(`prepare dispatch: ${t.ref} declares a working-tree deliverable and must run in the shared checkout. Re-dispatch with sharedTree:true.`);
     }
+    // SQ-286. A ticket that names its base (an open pull request branch, say) must get a worktree that
+    // starts there. A review's base is its candidate, which already pins the checkout, so the candidate
+    // wins. Anything that cannot start from the named commit is refused rather than quietly handed the
+    // integration target.
+    const namedBaseRef = reviewTargetState ? null : normalizeTicketBaseRef(t.baseRef);
+    if (namedBaseRef && (sharedTree || nonRepoOutput)) {
+      throw new Error(`prepare dispatch: ${t.ref} names base ref "${namedBaseRef}", and only an isolated worktree can start from a named base; `
+        + `this dispatch would run ${nonRepoOutput ? 'without a repository checkout' : 'in the shared checkout, which holds whatever is checked out there'}. `
+        + 'Re-dispatch with sharedTree:false on a board with worktree isolation enabled, or clear the ticket\'s baseRef.');
+    }
+    const namedBaseCommit = namedBaseRef ? resolveTicketBaseRef(String(projectPath || ''), t.ref, namedBaseRef) : null;
     const runtimeRefusal = sharedTree ? sharedTreeRuntimeRefusal(t, projectPath, opts.runtimeCwd, Boolean(worktreeIsolation)) : null;
     if (runtimeRefusal) throw new Error(runtimeRefusal);
     t.dispatchNonce = mintDispatchToken();
@@ -2089,6 +2119,8 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
     fs.mkdirSync(evidenceDirectory, { recursive: true, mode: 0o700 });
     const baseCommit = reviewTargetState?.candidate.source === 'git'
       ? reviewTargetState.candidate.value
+      : namedBaseCommit
+        ? namedBaseCommit
       : integrationTargetState
         ? integrationTargetCommit(readMeta(slug)?.path || '', integrationTargetState)
         : commitScope.headCommit(readMeta(slug)?.path || '');
@@ -2143,6 +2175,7 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
           // Record the integration target commit so an isolated executor can bring
           // its harness-created worktree forward before changing it.
           baseCommit,
+          ...(namedBaseRef && namedBaseCommit ? { baseRef: { ref: namedBaseRef, commit: namedBaseCommit } } : {}),
           ...(reviewTargetState ? { reviewTarget: t.reviewTarget } : {}),
           ...(integrationTargetState ? { integrationTarget: integrationTargetState } : {}),
           ...(localAheadWarning ? { localAheadWarning } : {}),

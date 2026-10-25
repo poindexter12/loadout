@@ -812,6 +812,17 @@ function ticketWorktreeSync(ticket?: any, projectPath?: any) {
       `A review also ENDS on its candidate: leave HEAD at ${commit}, because the board reads this worktree's revision when you close and refuses a verdict formed on a different tree. Comparing against the integration branch never needs HEAD to move, so use \`git diff ${commit}...main\` or \`git show\` instead of checking anything else out.`,
     ].join(' ');
   }
+  // SQ-286. A ticket that names its base forks that commit, not the integration target, so the generic
+  // line below (fetch the integration branch, reset to its commit) would be correct only by coincidence.
+  // Preparation resolved the commit in the project checkout, whose object database this worktree shares.
+  const namedBase = dispatch?.baseRef;
+  if (namedBase?.ref && namedBase.commit === commit && !dispatch?.continuation?.mode) {
+    return [
+      `Worktree synchronization (run before work): this ticket names base ref ${namedBase.ref}, so this worktree must start from ${commit}, not from the integration target.`,
+      `Check \`git merge-base --is-ancestor ${commit} HEAD\`. If it fails, run \`git reset --hard ${commit}\`; no fetch is needed, because this worktree shares the project repository's object database.`,
+      'If resetting fails, stop and report it instead of working from the integration target.',
+    ].join(' ');
+  }
   if (!target || !commit) return null;
   const branch = String(target.mode === 'remote' ? `refs/remotes/origin/${target.branch}` : target.branch || '').trim();
   if (!branch) return null;

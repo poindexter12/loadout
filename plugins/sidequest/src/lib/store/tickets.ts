@@ -28,6 +28,28 @@ function emptyVerifyCommandRefusal(
     + `which leaves the executor running a gate this ticket never asked for and no submission can match.`;
 }
 
+// SQ-286. A ticket can name the git ref its isolated worktree must start from, such as an open pull
+// request's branch, instead of the board's integration target. The value reaches `git rev-parse` at
+// dispatch, so anything option-shaped or outside plain ref/revision syntax is refused at filing rather
+// than resolved into something nobody named. Null/empty clears it.
+const TICKET_BASE_REF_MAX = 255;
+function normalizeTicketBaseRef(value: any): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') throw new Error('base ref must be a string naming a branch, remote-tracking ref, tag, or commit.');
+  const ref = value.trim();
+  if (!ref) return null;
+  if (ref.length > TICKET_BASE_REF_MAX
+    || ref.startsWith('-')
+    || /[\s\x00-\x1f\x7f~^:?*\[\\]/.test(ref)
+    || ref.includes('..')
+    || ref.includes('@{')
+    || ref.endsWith('/')
+    || ref.endsWith('.lock')) {
+    throw new Error(`base ref ${JSON.stringify(ref)} is not a plain branch, remote-tracking ref, tag, or commit name. Name the ref exactly, for example "feat/my-branch", "origin/feat/my-branch", or a commit hash.`);
+  }
+  return ref;
+}
+
 function createTickets(dependencies: any) {
   const {
     EXECUTOR_ANCHORS_MAX, EXECUTOR_VERIFY_MAX, acquireLock, assetPath, assetsDir, boardConfig,
@@ -270,6 +292,7 @@ function createTicket(slug?: any, fields?: any, reviewTarget?: any) {
     contractWaiver: !!fields.contractWaiver,
     readonlyOverride: requestedReadonlyOverride(fields),
     workingTreeDelivery: fields.workingTreeDelivery === true,
+    baseRef: normalizeTicketBaseRef(fields.baseRef),
     externalDeliverable: fields.externalDeliverable === true,
     externalWorktrees: normalizeExternalWorktrees(fields.externalWorktrees, readMeta(slug)?.path || null),
     executorAnchors: executorText(fields.executorAnchors, EXECUTOR_ANCHORS_MAX, 'executor anchors'),
@@ -1278,6 +1301,7 @@ function updateTicket(slug?: any, idOrRef?: any, patch?: any, reviewTarget?: any
     if (patch.contractWaiver !== undefined) t.contractWaiver = !!patch.contractWaiver;
     if (patch.readonly !== undefined || patch.readonlyOverride !== undefined) t.readonlyOverride = requestedReadonlyOverride(patch);
     if (patch.workingTreeDelivery !== undefined) t.workingTreeDelivery = patch.workingTreeDelivery === true;
+    if (patch.baseRef !== undefined) t.baseRef = normalizeTicketBaseRef(patch.baseRef);
     if (patch.externalDeliverable !== undefined) t.externalDeliverable = patch.externalDeliverable === true;
     if (patch.externalWorktrees !== undefined) t.externalWorktrees = normalizeExternalWorktrees(patch.externalWorktrees, readMeta(slug)?.path || null);
     if (patch.category !== undefined || patch.readonly !== undefined || patch.readonlyOverride !== undefined) {
@@ -1488,4 +1512,4 @@ function listActive(slug?: any) {
 
 // Exported so the MCP layer refuses the same pairing with its own field names
 // (verifyKind/verify) against one copy of the refusal text.
-module.exports = { createTickets, emptyVerifyCommandRefusal };
+module.exports = { createTickets, emptyVerifyCommandRefusal, normalizeTicketBaseRef };
