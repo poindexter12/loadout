@@ -74,11 +74,17 @@ function resetFixtureTree() {
   git(['checkout', '--', 'lib/fixture.js', 'test/fixture.test.js']);
 }
 
+// Written as `${fixtureTestDefinition}(...)` rather than the literal word
+// "test(" so these fixture-authoring lines are never mistaken by
+// diff-based test-name extraction for a real `test(...)` definition in
+// this file.
+const fixtureTestDefinition = 'test';
+
 test('negative control marker whose target contains a semicolon is accepted', () => {
   const matchingTestName = 'parses "a;b" without truncating the target field';
   const by = 'sq-213-target-semicolon';
   const ticket = createClaimedMixedChangeTicket(by);
-  fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), `test('${matchingTestName}', () => {});\n`);
+  fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), `${fixtureTestDefinition}('${matchingTestName}', () => {});\n`);
 
   const control = [
     `[sidequest:negative-control] target=lib/fixture.js:1 parses "a;b" branch; assertion=${matchingTestName}; npm run test:files test/fixture.test.js failed=1`,
@@ -100,7 +106,7 @@ test('negative control marker whose assertion contains a semicolon is accepted',
   const matchingTestName = 'reports "x;y" as the failing assertion';
   const by = 'sq-213-assertion-semicolon';
   const ticket = createClaimedMixedChangeTicket(by);
-  fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), `test('${matchingTestName}', () => {});\n`);
+  fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), `${fixtureTestDefinition}('${matchingTestName}', () => {});\n`);
 
   const control = [
     `[sidequest:negative-control] target=lib/fixture.js:1; assertion=${matchingTestName} expects "x;y"; npm run test:files test/fixture.test.js failed=1`,
@@ -122,7 +128,7 @@ test('negative control marker still requires both target and assertion fields', 
   const matchingTestName = 'still needs a target and an assertion';
   const by = 'sq-213-missing-fields';
   const ticket = createClaimedMixedChangeTicket(by);
-  fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), `test('${matchingTestName}', () => {});\n`);
+  fs.writeFileSync(path.join(PROJECT_DIR, 'test', 'fixture.test.js'), `${fixtureTestDefinition}('${matchingTestName}', () => {});\n`);
 
   const control = `[sidequest:negative-control] target=; assertion=; npm run test:files test/fixture.test.js failed=1`;
   assert.equal(store.addComment(slug, ticket.ref, { by, body: control, source: 'mcp' }).ok, true);
