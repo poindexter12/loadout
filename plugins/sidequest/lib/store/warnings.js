@@ -947,10 +947,10 @@ ${String(ticket?.description || "")}`;
     let inWord = false;
     let quote = "";
     for (let index = 0; index < text.length; index += 1) {
-      const character = text[index];
+      const character = text.charAt(index);
       if (quote) {
         if (character === quote) quote = "";
-        else if (quote === '"' && character === "\\" && /["\\$`]/.test(text[index + 1] || "")) word += text[++index];
+        else if (quote === '"' && character === "\\" && /["\\$`]/.test(text.charAt(index + 1))) word += text.charAt(++index);
         else word += character;
         continue;
       }
@@ -960,7 +960,7 @@ ${String(ticket?.description || "")}`;
         continue;
       }
       if (character === "\\" && index + 1 < text.length) {
-        word += text[++index];
+        word += text.charAt(++index);
         inWord = true;
         continue;
       }
