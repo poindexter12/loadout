@@ -3875,7 +3875,7 @@ const {
 
 projectsLayer = createProjects({
   acquireLock, assetsDir, claimReclaimable, cloneCached, database, db, defaultAlwaysInScope, defaultProjectName,
-  deleteCachedRow, ensureDir, fs, invalidateStoreCaches, listStories, listTickets, normalizeForHash,
+  deleteCachedRow, ensureDir, fs, invalidateStoreCaches, listStories, listTickets, nearestRepoRoot, normalizeForHash,
   path, projectDir, putProject, putStory, putTicket, releaseLock, residentCache, slugify, sourceRevisionAdapterForPath, ticketsDir, transaction,
 });
 

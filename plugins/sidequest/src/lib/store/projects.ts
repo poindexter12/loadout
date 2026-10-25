@@ -11,7 +11,7 @@ function refPrefixOf(meta?: any) {
   return /^[A-Z][A-Z0-9]*$/.test(raw) ? raw : DEFAULT_REF_PREFIX;
 }
 
-function createProjects({ acquireLock, assetsDir, claimReclaimable, cloneCached, database, db, defaultAlwaysInScope, defaultProjectName, deleteCachedRow, ensureDir, fs, invalidateStoreCaches, listStories, listTickets, normalizeForHash, path, projectDir, putProject, putStory, putTicket, releaseLock, residentCache, slugify, sourceRevisionAdapterForPath, ticketsDir, transaction }: any) {
+function createProjects({ acquireLock, assetsDir, claimReclaimable, cloneCached, database, db, defaultAlwaysInScope, defaultProjectName, deleteCachedRow, ensureDir, fs, invalidateStoreCaches, listStories, listTickets, nearestRepoRoot, normalizeForHash, path, projectDir, putProject, putStory, putTicket, releaseLock, residentCache, slugify, sourceRevisionAdapterForPath, ticketsDir, transaction }: any) {
   // A directory can be spelled several ways on Windows — an 8.3 alias, a junction —
   // and each spelling hashes to its own slug. Callers hold whichever spelling they
   // were handed, so lookups compare canonically rather than by the stored spelling.
@@ -314,6 +314,21 @@ function createProjects({ acquireLock, assetsDir, claimReclaimable, cloneCached,
     const wantedPath = normalizeForHash(canonicalize(arg));
     const byPath = projects.find((project?: any) => project.meta.path && normalizeForHash(canonicalize(project.meta.path)) === wantedPath);
     if (byPath) return { ok: true, slug: byPath.slug, meta: byPath.meta };
+
+    // SQ-237: a path that is not itself registered folds through nearestRepoRoot, the same
+    // resolution the CLI applies to its cwd, so a linked worktree living outside the main
+    // checkout (or a subdirectory of one) resolves to the main repository's board. Hooks hand
+    // the raw session cwd here; without the fold the Agent gate refused a registered project.
+    // A path registered as its own board already matched above, so it keeps that board.
+    if (path.isAbsolute(arg) && typeof nearestRepoRoot === 'function') {
+      let folded = '';
+      try { folded = nearestRepoRoot(arg); } catch (_: any) { folded = ''; }
+      const foldedKey = folded ? normalizeForHash(canonicalize(folded)) : '';
+      if (foldedKey && foldedKey !== wantedPath) {
+        const byFold = projects.find((project?: any) => project.meta.path && normalizeForHash(canonicalize(project.meta.path)) === foldedKey);
+        if (byFold) return { ok: true, slug: byFold.slug, meta: byFold.meta };
+      }
+    }
 
     return { ok: false, reason: 'not_found', known: projects.map((project?: any) => project.meta.name || project.slug) };
   }
