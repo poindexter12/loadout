@@ -690,6 +690,45 @@ test('verify timeout kills the whole process tree, not just the shell', { skip: 
   }
 });
 
+// SQ-172: SQ-124 put the verify command in its own process group so a timeout could kill the whole
+// tree. That same isolation means a kill aimed at the verify wrapper (the harness's own Bash timeout,
+// or any SIGKILL of the waiting node process) never reaches the test runner: spawnSync blocks the
+// event loop, so the wrapper cannot react, and the runner is orphaned to compete with the retry.
+// The verify script now carries a parent-death watchdog that terminates its own group.
+test('verify process group dies when the waiting wrapper is killed mid-run', { skip: process.platform === 'win32' }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sidequest-verify-orphan-'));
+  const pidFile = path.join(directory, 'runner.pid');
+  const processModule = path.join(__dirname, '..', 'lib', 'ports', 'process.js');
+  const wrapperSource = `
+    const { runProcessVerification } = require(${JSON.stringify(processModule)});
+    runProcessVerification(
+      { kind: 'command', command: ${JSON.stringify(`sh -c 'sleep 300 & echo $! > "${pidFile}"; wait'`)}, evidenceContract: 'command output' },
+      { cwd: ${JSON.stringify(directory)}, timeoutMilliseconds: 120000, logPath: ${JSON.stringify(path.join(directory, 'verify.log'))} },
+    );
+  `;
+  const wrapper = spawn(process.execPath, ['-e', wrapperSource], { stdio: 'ignore' });
+  let runner = 0;
+  try {
+    const started = Date.now();
+    while (!fs.existsSync(pidFile) || !fs.readFileSync(pidFile, 'utf8').trim()) {
+      assert.ok(Date.now() - started < 15_000, 'verify runner never started');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    runner = Number(fs.readFileSync(pidFile, 'utf8').trim());
+    assert.ok(Number.isInteger(runner) && runner > 1, 'runner pid recorded');
+    wrapper.kill('SIGKILL');
+    const deadline = Date.now() + 10_000;
+    while (processAlive(runner) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(processAlive(runner), false, `test runner ${runner} survived the death of its verify wrapper`);
+  } finally {
+    if (wrapper.exitCode === null && wrapper.signalCode === null) wrapper.kill('SIGKILL');
+    if (runner > 1) {
+      try { process.kill(runner, 'SIGKILL'); } catch { /* already gone */ }
+    }
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('verify capture preserves quoted absolute paths in verify commands', async () => {
   const scriptPath = path.join(os.tmpdir(), `sidequest quoted ${Date.now()}.js`);
   fs.writeFileSync(scriptPath, 'process.stdout.write(process.argv[2] + \'\\n\');\n', 'utf8');

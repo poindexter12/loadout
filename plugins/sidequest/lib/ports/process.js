@@ -69,13 +69,32 @@ function shellScript(command, shell) {
       ""
     ].join("\r\n");
   }
-  return `(
+  return `${parentDeathWatchdog(process.pid)}(
 ${command}
 )
 sidequest_exit_code=$?
-printf '\\n__SIDEQUEST_VERIFY_EXIT__=%s\\n' "$sidequest_exit_code"
+${stopParentDeathWatchdog()}printf '\\n__SIDEQUEST_VERIFY_EXIT__=%s\\n' "$sidequest_exit_code"
 exit "$sidequest_exit_code"
 `;
+}
+function parentDeathWatchdog(parentPid) {
+  if (!ownsProcessGroup) return "";
+  const graceSeconds = Math.ceil(PROCESS_GROUP_TERMINATE_GRACE_MILLISECONDS / 1e3);
+  return [
+    `sidequest_verify_parent=${parentPid}`,
+    "(",
+    '  while kill -0 "$sidequest_verify_parent" 2>/dev/null; do sleep 1; done',
+    "  trap '' TERM",
+    "  kill -TERM 0 2>/dev/null",
+    `  sleep ${graceSeconds}`,
+    "  kill -KILL 0 2>/dev/null",
+    ") </dev/null >/dev/null 2>&1 &",
+    "sidequest_verify_watchdog=$!",
+    ""
+  ].join("\n");
+}
+function stopParentDeathWatchdog() {
+  return ownsProcessGroup ? 'kill "$sidequest_verify_watchdog" 2>/dev/null\n' : "";
 }
 function temporaryScript(command) {
   const shell = shellDefinition();
