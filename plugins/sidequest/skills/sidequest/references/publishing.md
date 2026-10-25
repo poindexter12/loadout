@@ -92,9 +92,11 @@ In `pr` mode `integrate` does not touch the local integration branch. It builds 
 `<remote>/<target>`, pushes it as a wave branch, opens a pull request, enables auto-merge, and returns
 `awaiting-merge` with the PR number and url. Every participant stays `doing` until a later `integrate`
 of that same exact participant set reconciles the merge outcome; re-running it before then returns the
-open PR instead of opening a second one, and a partial participant set refuses. `integrate` never
-force-pushes: a wave branch that already exists on the remote without a board record refuses, and any
-failure after the push withdraws the branch and the PR it opened. A wave that adds no commits over
+open PR instead of opening a second one, and a partial participant set refuses. If `integrate` is
+interrupted while opening the PR, rerun it with that exact participant set: it adopts the recorded
+wave branch or PR and resumes PR delivery instead of refusing it. `integrate` never force-pushes: a wave
+branch that already exists on the remote without a board record refuses, and any failure after the
+push withdraws the branch and the PR it opened. A wave that adds no commits over
 `<remote>/<target>` refuses too — if its candidates already landed, record that with
 `integrate --delivery-commit`.
 
