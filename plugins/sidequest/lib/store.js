@@ -2830,9 +2830,17 @@ function linkedReviewPass(slug, ticket) {
 const HIGH_STAKES_REVIEW_WARNING = "high-stakes ticket integrated without a recorded review pass. Record one with a comment starting reviewed-by: <ref>, or link a completed review-audit ticket.";
 const DELIVERY_COMMIT_RE = /^[0-9a-f]{7,64}$/i;
 const RELEASE_FRAGMENT_PATH_RE = /^\.release\/unreleased\/[^/]+\.md$/;
+function repoUsesReleaseFragments(repo) {
+  try {
+    return fs.statSync(path.join(repo, ".release")).isDirectory();
+  } catch (_) {
+    return false;
+  }
+}
 function shippedPluginsWithoutReleaseFragment(repoPath, ref, changedPaths, fragmentExists, anyRefSatisfies) {
   const repo = String(repoPath || "").trim();
   if (!repo) return null;
+  if (!repoUsesReleaseFragments(repo)) return null;
   const marketplacePath = path.join(repo, ".claude-plugin", "marketplace.json");
   if (!fs.existsSync(marketplacePath)) return null;
   const manifest = JSON.parse(fs.readFileSync(marketplacePath, "utf8"));
@@ -2871,7 +2879,7 @@ function commitPublishedUnderReleaseTag(repoPath, commit) {
   }
 }
 function missingReleaseFragmentMessage(ref, fragmentPath, plugins) {
-  return `submit: refused ${ref}; submitted range changes shipped plugin paths (${plugins.map((plugin) => plugin.source).join(", ")}) but does not include ${fragmentPath}. Write the fragment, then commit it, then submit again. Next time write it BEFORE your first commit so it rides along:
+  return `submit: refused ${ref}; submitted range changes shipped plugin paths (${plugins.map((plugin) => plugin.source).join(", ")}) but does not include ${fragmentPath}. This repository keeps release fragments (it has a .release/ directory), so every shipped plugin change carries one. Write the fragment, then commit it, then submit again. Next time write it BEFORE your first commit so it rides along:
 ---
 ref: ${ref}
 title: <short user-facing title>

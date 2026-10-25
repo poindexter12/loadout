@@ -3148,9 +3148,24 @@ const DELIVERY_COMMIT_RE = /^[0-9a-f]{7,64}$/i;
 
 const RELEASE_FRAGMENT_PATH_RE = /^\.release\/unreleased\/[^/]+\.md$/;
 
+// Release fragments are a per-repository convention, not a property of every marketplace
+// (SQ-278). A repo that releases through Release Please or conventional commits ships plugins
+// from a marketplace.json too, but has no `.release/` directory and would never read a
+// fragment, so demanding one there blocks submit on a file the repo cannot use. The `.release/`
+// directory at the repository root is the opt-in marker; keep it tracked (a README is enough)
+// so a release cut that consumes every fragment does not drop the convention with them.
+function repoUsesReleaseFragments(repo: string) {
+  try {
+    return fs.statSync(path.join(repo, '.release')).isDirectory();
+  } catch (_: any) {
+    return false;
+  }
+}
+
 function shippedPluginsWithoutReleaseFragment(repoPath?: any, ref?: any, changedPaths?: any, fragmentExists?: any, anyRefSatisfies?: any) {
   const repo = String(repoPath || '').trim();
   if (!repo) return null;
+  if (!repoUsesReleaseFragments(repo)) return null;
   const marketplacePath = path.join(repo, '.claude-plugin', 'marketplace.json');
   if (!fs.existsSync(marketplacePath)) return null;
   const manifest = JSON.parse(fs.readFileSync(marketplacePath, 'utf8'));
@@ -3208,7 +3223,7 @@ function commitPublishedUnderReleaseTag(repoPath?: any, commit?: any) {
 }
 
 function missingReleaseFragmentMessage(ref?: any, fragmentPath?: any, plugins?: any) {
-  return `submit: refused ${ref}; submitted range changes shipped plugin paths (${plugins.map((plugin: any) => plugin.source).join(', ')}) but does not include ${fragmentPath}. Write the fragment, then commit it, then submit again. Next time write it BEFORE your first commit so it rides along:\n---\nref: ${ref}\ntitle: <short user-facing title>\nbump: patch\nplugins:\n${plugins.map((plugin: any) => `  - ${plugin.name}`).join('\n')}\n---\n\nDescribe the user-facing change.`;
+  return `submit: refused ${ref}; submitted range changes shipped plugin paths (${plugins.map((plugin: any) => plugin.source).join(', ')}) but does not include ${fragmentPath}. This repository keeps release fragments (it has a .release/ directory), so every shipped plugin change carries one. Write the fragment, then commit it, then submit again. Next time write it BEFORE your first commit so it rides along:\n---\nref: ${ref}\ntitle: <short user-facing title>\nbump: patch\nplugins:\n${plugins.map((plugin: any) => `  - ${plugin.name}`).join('\n')}\n---\n\nDescribe the user-facing change.`;
 }
 
 // Only reachable when a dispatch exists and recording still failed. A directly-claimed ticket has no

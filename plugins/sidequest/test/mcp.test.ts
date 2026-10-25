@@ -300,7 +300,10 @@ function addMarketplaceFixture(worktree: string) {
   fs.writeFileSync(path.join(marketplacePath, 'marketplace.json'), JSON.stringify({
     plugins: [{ name: 'fixture-plugin', source: './plugins/fixture-plugin' }],
   }));
-  gitAt(worktree, ['add', '.claude-plugin/marketplace.json']);
+  // SQ-278: the release fragment gate is opt-in per repo, marked by a .release/ directory.
+  fs.mkdirSync(path.join(worktree, '.release'), { recursive: true });
+  fs.writeFileSync(path.join(worktree, '.release', 'README.md'), 'Release fragments live in unreleased/.\n');
+  gitAt(worktree, ['add', '.claude-plugin/marketplace.json', '.release/README.md']);
   gitAt(worktree, ['commit', '-m', 'fixture marketplace']);
   gitAt(worktree, ['push']);
 }
