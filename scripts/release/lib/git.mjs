@@ -48,12 +48,17 @@ function configuredSshCommand(cwd, env) {
   return result.status === 0 ? result.stdout.trim() || null : null;
 }
 
-function killProbeProcessGroup(pid) {
+// ESRCH means the group is gone. Darwin also answers EPERM when every process left in the group is
+// a zombie awaiting its reaper, which is the usual state a moment after a timed-out git dies under
+// load: the group is already dead, so that EPERM is no reason to fail the cut (SQ-331).
+export function killProbeProcessGroup(pid, { kill = process.kill.bind(process), platform = process.platform } = {}) {
   if (!Number.isInteger(pid) || pid <= 0) return;
   try {
-    process.kill(-pid, 'SIGKILL');
+    kill(-pid, 'SIGKILL');
   } catch (error) {
-    if (error.code !== 'ESRCH') throw error;
+    if (error.code === 'ESRCH') return;
+    if (error.code === 'EPERM' && platform === 'darwin') return;
+    throw error;
   }
 }
 

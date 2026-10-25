@@ -8,7 +8,7 @@ import test from 'node:test';
 
 import * as cutModule from '../cut.mjs';
 import { assertGitHubReleasePublished, assertParentCiPassed, cut, defaultSuiteRunner, isGitHubRemote, readSuiteCoverage } from '../cut.mjs';
-import { createGit, spawnRunner } from '../lib/git.mjs';
+import { createGit, killProbeProcessGroup, probesRemote, spawnRunner } from '../lib/git.mjs';
 import { readValue } from '../lib/jsonedit.mjs';
 import { makeGitRepo } from './realrepo.mjs';
 
@@ -87,11 +87,13 @@ function gitFailing(context, fails) {
   });
 }
 
-// A probe gets PROBE_TIMEOUT_MS; a blocking host holds on for SSH_BLOCK_MS; a cut that refuses
-// within PROBE_DEADLINE_MS did not wait for the block to end.
+// A probe of the blocking host gets PROBE_TIMEOUT_MS; that host holds on for SSH_BLOCK_MS; a probe
+// that returned within PROBE_DEADLINE_MS did not wait for the block to end. The deadline sits just
+// under the block rather than near the timeout, so a busy host's slow process spawns cannot cross
+// it, while a probe that waited the block out (at least SSH_BLOCK_MS) always does (SQ-331).
 const PROBE_TIMEOUT_MS = 1000;
-const PROBE_DEADLINE_MS = 15_000;
 const SSH_BLOCK_MS = 30_000;
+const PROBE_DEADLINE_MS = SSH_BLOCK_MS - 5_000;
 const BLOCKING_ORIGIN = 'ssh://blocking.invalid/origin.git';
 
 // A stand-in for ssh, named ssh so git treats it as OpenSSH. It logs each call's arguments and the
@@ -139,15 +141,16 @@ function persistentFakeSsh(context, t) {
   const ssh = path.join(dir, 'ssh');
   writeFileSync(ssh, `#!/bin/sh\nprintf '%s' "$$" > ${JSON.stringify(pidPath)}\nexec '${process.execPath}' '${script}' "$@"\n`, { mode: 0o755 });
   const pid = () => Number(readFileSync(pidPath, 'utf8'));
+  const started = () => existsSync(pidPath) && pid() > 0;
   t.after(() => {
-    if (!existsSync(pidPath)) return;
+    if (!started()) return;
     try {
       process.kill(pid(), 'SIGKILL');
     } catch (error) {
       if (error.code !== 'ESRCH') throw error;
     }
   });
-  return { ssh, pid };
+  return { ssh, pid, started };
 }
 
 function processExists(pid) {
@@ -190,18 +193,36 @@ function sshThroughFake(t, context) {
   return fake;
 }
 
-// Real git with probes bounded at PROBE_TIMEOUT_MS, except that each command `blocks` matches asks
-// a host that never answers in place of origin. `blocked` records which of them ran.
+// Real git, except that each command `blocks` matches asks a host that never answers in place of
+// origin. Only those commands are bounded at PROBE_TIMEOUT_MS. Every other probe answers from a
+// local repository and is bounded at PROBE_DEADLINE_MS, so a busy host cannot turn an answering
+// probe into a timeout. `blocked` records each blocked command, how long that one command took, and
+// whether it timed out. Timing each blocked command alone keeps the many other spawns a cut makes out
+// of the measurement, so the evidence that the cut asked the blocking host and did not wait it out
+// is the runner's own record, not a race between the probe timeout and the stand-in ssh starting.
 function gitBlocking(context, blocks, blocked = []) {
-  const real = spawnRunner(context.root, { remoteTimeoutMs: PROBE_TIMEOUT_MS });
+  const answering = spawnRunner(context.root, { remoteTimeoutMs: PROBE_DEADLINE_MS });
+  const bounded = spawnRunner(context.root, { remoteTimeoutMs: PROBE_TIMEOUT_MS });
   return createGit({
     cwd: context.root,
     run: (args) => {
-      if (!blocks(args)) return real(args);
-      blocked.push(args.join(' '));
-      return real(args.map((arg) => (arg === 'origin' ? BLOCKING_ORIGIN : arg)));
+      if (!blocks(args)) return answering(args);
+      const started = Date.now();
+      const result = bounded(args.map((arg) => (arg === 'origin' ? BLOCKING_ORIGIN : arg)));
+      blocked.push({ command: args.join(' '), elapsed: Date.now() - started, timedOut: result.timedOut === true });
+      return result;
     },
   });
+}
+
+// Every command that asked the blocking host was cut off by the probe timeout, and none of them
+// waited out the block.
+function assertDidNotWaitOutBlock(blocked, label) {
+  assert.ok(blocked.length > 0, `${label}: the cut asked the host that never answers`);
+  for (const { command, elapsed, timedOut } of blocked) {
+    assert.ok(timedOut, `${label}: ${command} was cut off by the probe timeout`);
+    assert.ok(elapsed < PROBE_DEADLINE_MS, `${label}: ${command} returned after ${elapsed}ms, not within ${PROBE_DEADLINE_MS}ms`);
+  }
 }
 
 function assertBatchProbes(calls, label) {
@@ -749,26 +770,46 @@ test('a remote probe keeps the operator\'s ssh command, adds BatchMode, and turn
 test('a timed-out remote probe kills its persistent ssh child', async (t) => {
   const context = setup(t);
   const fake = persistentFakeSsh(context, t);
-  const runner = spawnRunner(context.root, {
-    env: { ...process.env, GIT_SSH_COMMAND: `'${fake.ssh}'`, GIT_SSH: undefined },
-    remoteTimeoutMs: 500,
-  });
+  const env = { ...process.env, GIT_SSH_COMMAND: `'${fake.ssh}'`, GIT_SSH: undefined };
 
-  const started = Date.now();
-  const result = runner(['ls-remote', 'ssh://blocking.invalid/origin.git']);
-  const elapsed = Date.now() - started;
+  // On a busy host the timeout can fire before git has started ssh at all, which leaves no child to
+  // prove killed. Each attempt that ends before the stand-in starts is retried with a longer timeout,
+  // so the group kill is always exercised against a child that is really running (SQ-331).
+  for (const remoteTimeoutMs of [500, 2_000, 8_000]) {
+    const runner = spawnRunner(context.root, { env, remoteTimeoutMs });
+    const started = Date.now();
+    const result = runner(['ls-remote', 'ssh://blocking.invalid/origin.git']);
+    const elapsed = Date.now() - started;
 
-  assert.equal(result.code, 124);
-  assert.ok(elapsed < PROBE_DEADLINE_MS, `probe returned after ${elapsed}ms, not within ${PROBE_DEADLINE_MS}ms`);
-  await eventually(() => !processExists(fake.pid()));
+    assert.equal(result.code, 124);
+    assert.ok(elapsed < PROBE_DEADLINE_MS, `probe returned after ${elapsed}ms, not within ${PROBE_DEADLINE_MS}ms`);
+    if (fake.started()) break;
+  }
+  assert.ok(fake.started(), 'the ssh stand-in started');
+  await eventually(() => !processExists(fake.pid()), 5_000);
+});
+
+test('killing a timed-out probe group treats an already-dead group as killed, and nothing else', () => {
+  const refusing = (code) => () => {
+    throw Object.assign(new Error(`kill ${code}`), { code });
+  };
+  const signalled = [];
+  killProbeProcessGroup(4242, { kill: (...args) => signalled.push(args), platform: 'linux' });
+  assert.deepEqual(signalled, [[-4242, 'SIGKILL']], 'the whole group is killed, not only git');
+
+  assert.doesNotThrow(() => killProbeProcessGroup(4242, { kill: refusing('ESRCH'), platform: 'linux' }), 'a vanished group');
+  // Darwin's answer for a group of zombies, seen under load as a cut refusing with "kill EPERM".
+  assert.doesNotThrow(() => killProbeProcessGroup(4242, { kill: refusing('EPERM'), platform: 'darwin' }), 'a zombie group on darwin');
+  assert.throws(() => killProbeProcessGroup(4242, { kill: refusing('EPERM'), platform: 'linux' }), /kill EPERM/, 'EPERM elsewhere is real');
+  assert.throws(() => killProbeProcessGroup(4242, { kill: refusing('EINVAL'), platform: 'darwin' }), /kill EINVAL/, 'other errors surface');
 });
 
 test('--force refuses within the probe deadline, and leaves the tag unmoved, when a remote probe never answers', async (t) => {
   const cases = {
     'a second remote never answers its tag listing': {
       prepare: (context) => context.git('remote', 'add', 'mirror', 'ssh://blocking.invalid/mirror.git'),
-      blocks: () => false,
-      probe: null,
+      blocks: (args) => probesRemote(args) && args.includes('mirror'),
+      probe: 'ls-remote --tags mirror',
       refusal: /could not prove these local release tags unpublished[^]*v3\.208\.0 \(mirror could not be listed\)/,
     },
     'origin never answers its tag listing': {
@@ -793,7 +834,7 @@ test('--force refuses within the probe deadline, and leaves the tag unmoved, whe
   };
   for (const [label, { prepare, blocks, probe, refusal }] of Object.entries(cases)) {
     const context = setup(t);
-    const fake = sshThroughFake(t, context);
+    sshThroughFake(t, context);
     context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
     const integration = context.commit('integrate');
     prepare(context);
@@ -801,15 +842,12 @@ test('--force refuses within the probe deadline, and leaves the tag unmoved, whe
     const tagObject = context.git('rev-parse', 'refs/tags/v3.208.0');
     const blocked = [];
 
-    const started = Date.now();
     const failure = await rejection(
       cut({ repoRoot: context.root, git: gitBlocking(context, blocks, blocked), skipTests: true, force: true, log: () => {} }),
     );
-    const elapsed = Date.now() - started;
 
-    assert.ok(elapsed < PROBE_DEADLINE_MS, `${label}: refused after ${elapsed}ms, not within ${PROBE_DEADLINE_MS}ms`);
-    if (probe) assert.ok(blocked.some((command) => command.startsWith(probe)), `${label}: ${probe} asked the host that never answers`);
-    assert.ok(fake.calls().some(({ args }) => args.includes('blocking.invalid')), `${label}: the blocking host was asked`);
+    assertDidNotWaitOutBlock(blocked, label);
+    assert.ok(blocked.some(({ command }) => command.startsWith(probe)), `${label}: ${probe} asked the host that never answers`);
     assert.match(failure.message, refusal, label);
     assert.doesNotMatch(failure.message, /leftovers from an unpublished attempt: /, label);
     assert.equal(context.git('rev-parse', 'refs/tags/v3.208.0'), tagObject, `${label}: the tag did not move`);
@@ -1205,14 +1243,12 @@ test('a failed cut is not rolled back, and stops within the probe deadline, when
       return failingSuite(suite);
     };
 
-    const started = Date.now();
     const failure = await rejection(
       cut({ repoRoot: context.root, git: gitBlocking(context, (args) => suitesRan && blocks(args), blocked), log: () => {}, runSuite }),
     );
-    const elapsed = Date.now() - started;
 
     assert.match(failure.message, /release suites failed/, label);
-    assert.ok(elapsed < PROBE_DEADLINE_MS, `${label}: stopped after ${elapsed}ms, not within ${PROBE_DEADLINE_MS}ms`);
+    assertDidNotWaitOutBlock(blocked, label);
     assert.equal(blocked.length, 1, `${label}: the rollback check asked the host that never answers once`);
     assert.equal(failure.rollback.status, 'skipped', label);
     assert.equal(failure.rollback.reason, 'the remote could not be checked', label);
