@@ -250,9 +250,40 @@ function createDispatch(dependencies) {
     }
     return null;
   }
-  function sharedTreeRuntimeRefusal(ticket, projectPath, runtimeCwd) {
-    if (!runtimeCwd || !staleWorktreeCwdWarning(runtimeCwd, projectPath, true)) return null;
-    return `prepare dispatch: refused ${ticket.ref}; sharedTree:true requires the spawning runtime to be rooted in the declared project checkout. This runtime is an isolated linked worktree. Record the follow-up on the owning ticket; the orchestration session must dispatch it.`;
+  function gitCheckoutRoot(cwd) {
+    try {
+      const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        cwd,
+        encoding: "utf8",
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "ignore"]
+      }).trim();
+      return root ? canonicalPath(root) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+  function sharedTreeForeignRuntimeRoot(projectPath, runtimeCwd) {
+    const project = String(projectPath || "").trim();
+    const runtime = String(runtimeCwd || "").trim();
+    if (!project || !runtime || !fs.existsSync(project) || !fs.existsSync(runtime)) return null;
+    const projectRoot = gitCheckoutRoot(project);
+    if (projectRoot) {
+      const runtimeRoot = gitCheckoutRoot(runtime);
+      return runtimeRoot === projectRoot ? null : runtimeRoot || canonicalPath(runtime);
+    }
+    const relative = path.relative(canonicalPath(project), canonicalPath(runtime));
+    return !relative || !relative.startsWith("..") && !path.isAbsolute(relative) ? null : canonicalPath(runtime);
+  }
+  function sharedTreeRuntimeRefusal(ticket, projectPath, runtimeCwd, worktreeIsolation = true) {
+    if (!runtimeCwd) return null;
+    if (staleWorktreeCwdWarning(runtimeCwd, projectPath, true)) {
+      return `prepare dispatch: refused ${ticket.ref}; sharedTree:true requires the spawning runtime to be rooted in the declared project checkout. This runtime is an isolated linked worktree. Record the follow-up on the owning ticket; the orchestration session must dispatch it.`;
+    }
+    const foreignRoot = sharedTreeForeignRuntimeRoot(projectPath, runtimeCwd);
+    if (!foreignRoot) return null;
+    const remedy = worktreeIsolation ? `Dispatch it without sharedTree so the board provisions an isolated worktree of ${projectPath}, or dispatch it from a session rooted in ${projectPath}.` : `Worktree isolation is disabled on this board, so every dispatch runs in the shared tree; dispatch it from a session rooted in ${projectPath}.`;
+    return `prepare dispatch: refused ${ticket.ref}; sharedTree:true requires the spawning runtime to be rooted in the declared project checkout ${projectPath}, but this runtime is rooted in ${foreignRoot}. A shared-tree spawn carries no isolation and no cwd, so the executor would inherit ${foreignRoot} and fail its worktree preflight. ${remedy}`;
   }
   function dispatchPreparationAttribution(opts) {
     return {
@@ -592,11 +623,13 @@ function createDispatch(dependencies) {
       const ticket = getTicket(slug, found.id);
       const state = dispatchState(ticket);
       if (!evidenceRetirableAttempt(ticket, state, taskId)) {
+        const nothingInFlight = !ticket?.claim?.by && (!ticket?.dispatchNonce || !state || Boolean(state.terminalAt));
+        const tail = nothingInFlight ? ` No recovery is needed: nothing is in flight on ${ticket?.ref || idOrRef}, so dispatch it again without recoveryEvidence.` : ticket?.claim?.by && hostTaskFailureRuntime(state, taskId) ? ` ${forcedClaimReleaseGuidance(String(ticket?.ref || idOrRef), ticket.claim.by)}` : " Anything past that waits for its own terminal record.";
         return {
           ok: false,
           reason: "unclaimed_launch_not_supersedable",
           ticket,
-          message: `${ticket?.ref || idOrRef} cannot be superseded on recovery evidence because its dispatch is ${evidenceSupersessionBlocker(ticket, state, taskId)}. Evidence retires an attempt whose runtime is gone: one that minted a token and never reached a runtime, one bound and unclaimed past the claim-idle backstop, or one whose own bound runtime is the failed task in a host task-failure notification, passed as recoveryTaskId.${ticket?.claim?.by && hostTaskFailureRuntime(state, taskId) ? ` ${forcedClaimReleaseGuidance(String(ticket?.ref || idOrRef), ticket.claim.by)}` : " Anything past that waits for its own terminal record."}`
+          message: `${ticket?.ref || idOrRef} cannot be superseded on recovery evidence because its dispatch is ${evidenceSupersessionBlocker(ticket, state, taskId)}. Evidence retires an attempt whose runtime is gone: one that minted a token and never reached a runtime, one bound and unclaimed past the claim-idle backstop, or one whose own bound runtime is the failed task in a host task-failure notification, passed as recoveryTaskId.${tail}`
         };
       }
       const failureShape = strandedBoundAttempt(ticket, state) ? "stranded_bound_launch_superseded" : supersedableUnboundAttempt(ticket, state) ? "unclaimed_launch_superseded" : "host_task_failure_superseded";
@@ -1485,7 +1518,7 @@ function createDispatch(dependencies) {
       if (t.workingTreeDelivery === true && !sharedTree) {
         throw new Error(`prepare dispatch: ${t.ref} declares a working-tree deliverable and must run in the shared checkout. Re-dispatch with sharedTree:true.`);
       }
-      const runtimeRefusal = sharedTree ? sharedTreeRuntimeRefusal(t, projectPath, opts.runtimeCwd) : null;
+      const runtimeRefusal = sharedTree ? sharedTreeRuntimeRefusal(t, projectPath, opts.runtimeCwd, Boolean(worktreeIsolation)) : null;
       if (runtimeRefusal) throw new Error(runtimeRefusal);
       t.dispatchNonce = mintDispatchToken();
       const category = getCategory(ticketCategory(t), { project: slug });

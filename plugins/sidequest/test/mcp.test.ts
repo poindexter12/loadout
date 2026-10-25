@@ -133,14 +133,31 @@ function committedRepo(prefix?: any) {
 // Call a tool through the JSON-RPC surface and return the parsed result object
 // (the text content decoded back to JSON), asserting it wasn't an error.
 let idc = 0;
+// SQ-309: a real board MCP server runs with cwd = the session's project root, and shared-tree dispatch
+// refuses a runtime rooted in another repository. These tests drive the in-process server against
+// temporary boards, so a dispatch (or native_agent) call runs from that board's checkout, as a session rooted there would.
+// `mcpDispatchCwd` overrides it for a test that simulates a session rooted elsewhere.
+let mcpDispatchCwd: string | null = null;
+async function inDispatchRuntime(name?: any, args?: any, run?: any) {
+  if (name !== 'dispatch' && name !== 'native_agent') return run();
+  let target = mcpDispatchCwd;
+  if (!target) {
+    try { target = require('../lib/mcp-shared.js').resolveProject(args && args.project).meta.path; } catch (_: any) { target = null; }
+  }
+  if (!target || !fs.existsSync(target)) return run();
+  const previous = process.cwd();
+  process.chdir(target);
+  try { return await run(); } finally { process.chdir(previous); }
+}
+
 async function callTool(name?: any, args?: any) {
-  const resp = await mcp.handleRequest({ jsonrpc: '2.0', id: ++idc, method: 'tools/call', params: { name, arguments: args || {} } });
+  const resp = await inDispatchRuntime(name, args, () => mcp.handleRequest({ jsonrpc: '2.0', id: ++idc, method: 'tools/call', params: { name, arguments: args || {} } }));
   assert.ok(resp && resp.result, `tool ${name} returned a result`);
   assert.ok(!resp.result.isError, `tool ${name} errored: ${resp.result.content && resp.result.content[0] && resp.result.content[0].text}`);
   return JSON.parse(resp.result.content[0].text);
 }
 async function callToolRaw(name?: any, args?: any) {
-  const resp = await mcp.handleRequest({ jsonrpc: '2.0', id: ++idc, method: 'tools/call', params: { name, arguments: args || {} } });
+  const resp = await inDispatchRuntime(name, args, () => mcp.handleRequest({ jsonrpc: '2.0', id: ++idc, method: 'tools/call', params: { name, arguments: args || {} } }));
   return resp.result;
 }
 async function callToolAsSession(sessionId: string, name?: any, args?: any) {
@@ -234,7 +251,7 @@ test('untrusted Sidequest versions refuse MCP and CLI writes before creating a b
 async function callHandler(name?: any, args?: any) {
   const tool = mcp.TOOLS.find((t: any) => t.name === name);
   assert.ok(tool, `tool ${name} exists in the registry`);
-  return tool.handler(args || {});
+  return inDispatchRuntime(name, args, () => tool.handler(args || {}));
 }
 
 function gitAt(cwd?: any, args?: any) {
@@ -4244,6 +4261,36 @@ test('dispatch returns a complete Claude worktree spawn spec', async () => {
   assert.doesNotMatch(prompt, /You are a sidequest ticket executor/);
   assert.equal(dispatched.effort, 'xhigh');
   assert.equal(dispatched.projectPath, PROJ);
+});
+
+test('MCP sharedTree dispatch from a session rooted in another repository refuses instead of handing out a broken spawn (SQ-309)', async () => {
+  const board = committedRepo('sq-mcp-sq309-board-');
+  const foreign = committedRepo('sq-mcp-sq309-foreign-');
+  const added = await callTool('add', {
+    project: board,
+    title: 'cross-repo shared-tree dispatch',
+    description: DISPATCH_DESCRIPTION,
+    category: 'coding.normal',
+    files: ['src/work.ts'],
+    verify: 'node --test test/work.test.ts',
+  });
+  mcpDispatchCwd = foreign;
+  let refused: any;
+  try {
+    refused = await callToolRaw('dispatch', { project: board, ref: added.ref, sharedTree: true, full: true });
+  } finally {
+    mcpDispatchCwd = null;
+  }
+  assert.equal(refused.isError, true);
+  const text = refused.content[0].text;
+  assert.match(text, /sharedTree:true requires the spawning runtime to be rooted in the declared project checkout/);
+  assert.ok(text.includes(fs.realpathSync.native(foreign)), `refusal names the foreign root: ${text}`);
+  assert.equal(store.getTicket(added.project, added.ref).dispatchNonce, null, 'no token was minted');
+
+  // The same request from a session rooted in the board's checkout is admitted.
+  const admitted = await callTool('dispatch', { project: board, ref: added.ref, sharedTree: true, full: true });
+  assert.strictEqual(admitted.spawn.isolation, undefined);
+  assert.strictEqual(store.getTicket(added.project, added.ref).dispatch.sharedTree, true);
 });
 
 test('MCP dispatch falls back to shared tree when the repo has no commits', async () => {

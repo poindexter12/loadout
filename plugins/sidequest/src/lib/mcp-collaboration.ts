@@ -327,7 +327,7 @@ const tools: ToolDefinition[] = [
       properties: {
         ref: { type: 'string' },
         project: PROJECT_PROP,
-        sharedTree: { type: 'boolean', description: 'Use the declared shared checkout only when the spawning runtime is already rooted there. Executors with a live claim cannot use this to dispatch child work.' },
+        sharedTree: { type: 'boolean', description: 'Use the declared shared checkout only when the spawning runtime is already rooted there: the spawn carries no isolation and no cwd, so the executor inherits this session\'s cwd. Refused when this session is rooted in a linked worktree or in another repository; dispatch another project\'s ticket without sharedTree instead. Executors with a live claim cannot use this to dispatch child work.' },
         allowRepeatFailure: { type: 'boolean' },
         allowUnscoped: { type: 'boolean', description: 'Explicitly allow a write ticket with no declared file scope.' },
         integrationBranch: { type: 'string' },
@@ -429,7 +429,7 @@ const tools: ToolDefinition[] = [
         project: PROJECT_PROP,
         prompt: { type: 'string', description: 'The bounded ticket-execution prompt augmented with stored anchors and verify command.' },
         session: { type: 'string' },
-        sharedTree: { type: 'boolean', description: 'Use the declared shared checkout only when the spawning runtime is already rooted there. Executors with a live claim cannot use this to dispatch child work.' },
+        sharedTree: { type: 'boolean', description: 'Use the declared shared checkout only when the spawning runtime is already rooted there: the spawn carries no isolation and no cwd, so the executor inherits this session\'s cwd. Refused when this session is rooted in a linked worktree or in another repository; dispatch another project\'s ticket without sharedTree instead. Executors with a live claim cannot use this to dispatch child work.' },
       },
       required: ['ref', 'prompt'],
     },
