@@ -196,6 +196,68 @@ test('read-only briefings keep scratch outside every repository worktree', () =>
   }
 });
 
+// SQ-327: every executor a session spawns shares that session's scratchpad, so two
+// concurrent executors once both wrote scratchpad/negative-control.js. The briefing
+// must name a directory that differs per dispatch: per ticket, per board, per launch.
+test('briefings name a per-dispatch scratch directory, never the shared scratchpad root', () => {
+  const brief = (ref: string, launchSeq?: number, slug?: string, extra: Record<string, unknown> = {}) => agentsync.renderTicketBriefing({
+    ref, model: 'opus', effort: 'high', dispatchExecutor: 'sidequest-exec-high', category: {},
+    dispatch: { sharedTree: false, launchSeq, ...extra },
+  }, 'scratch-token', slug);
+  const scratchDir = (briefing: string) => {
+    const match = briefing.match(/Per-dispatch scratch directory: `<scratchpad>\/([^`]+)\/`/);
+    assert.ok(match, 'briefing names a per-dispatch scratch directory');
+    return match![1];
+  };
+
+  const first = brief('SQ-267', 1, 'loadout-4d277aeb');
+  assert.equal(scratchDir(first), 'loadout-4d277aeb-SQ-267-d1');
+  assert.match(first, /shared by every executor the orchestrating session spawns/);
+  assert.match(first, /any source file you swap out for a control and must restore/);
+  assert.match(first, /Never write at the scratchpad root, and never read, edit, or delete another dispatch's directory\./);
+
+  // A concurrent sibling ticket on the same board, the SQ-267/SQ-224 collision.
+  assert.equal(scratchDir(brief('SQ-224', 1, 'loadout-4d277aeb')), 'loadout-4d277aeb-SQ-224-d1');
+  // The same ref on another board driven by the same session.
+  assert.equal(scratchDir(brief('SQ-267', 1, 'other-board-1234')), 'other-board-1234-SQ-267-d1');
+  // A relaunch of the same ticket while the earlier attempt may still be alive.
+  assert.equal(scratchDir(brief('SQ-267', 3, 'loadout-4d277aeb')), 'loadout-4d277aeb-SQ-267-d3');
+  // A missing or malformed launch sequence falls back to the first launch, never to the root.
+  assert.equal(scratchDir(brief('SQ-267', undefined, 'loadout-4d277aeb')), 'loadout-4d277aeb-SQ-267-d1');
+  assert.equal(scratchDir(brief('SQ-267', 0, 'loadout-4d277aeb')), 'loadout-4d277aeb-SQ-267-d1');
+  // Without a board slug the ref and launch still keep it off the root.
+  assert.equal(scratchDir(brief('SQ-267', 2)), 'SQ-267-d2');
+  // A ref carrying path or shell metacharacters cannot escape the scratchpad.
+  assert.equal(scratchDir(brief('SQ/../x y', 1, 'b')), 'b-SQ-..-x-y-d1');
+
+  // Shared-tree and read-only dispatches get the same namespace; read-only text points at it.
+  assert.equal(scratchDir(brief('SQ-9', 1, 'b', { sharedTree: true })), 'b-SQ-9-d1');
+  const readOnly = brief('SQ-9', 1, 'b', { readonly: true });
+  assert.equal(scratchDir(readOnly), 'b-SQ-9-d1');
+  assert.match(readOnly, /outside every repository worktree, inside the per-dispatch scratch directory named below/);
+
+  // No prepared dispatch, no directory to name.
+  const undispatched = agentsync.renderTicketBriefing({
+    ref: 'SQ-NO-DISPATCH', model: 'opus', effort: 'high', dispatchExecutor: 'sidequest-exec-high', category: {},
+  }, 'scratch-token', 'b');
+  assert.doesNotMatch(undispatched, /Per-dispatch scratch directory:/);
+});
+
+test('every generated executor definition carries the per-dispatch scratch rule', () => {
+  const definitions = {
+    claude: agentsync.renderExecAgent({ name: 'sidequest-exec-high', effort: 'high', marker: MARKER }),
+    readOnly: agentsync.renderReadOnlyClaudeAgent('medium'),
+    dispatch: agentsync.renderDispatchAgent(),
+    readOnlyDispatch: agentsync.renderReadOnlyDispatchAgent(),
+  };
+  for (const [kind, body] of Object.entries(definitions)) {
+    assert.match(body, /\*\*Per-dispatch scratch:\*\* The scratchpad directory your environment names belongs to the orchestrating session and is shared by every executor it spawns\. Never write a file at its root/, kind);
+    assert.match(body, /under the per-dispatch directory your briefing names, `<scratchpad>\/<project>-<ticket-ref>-d<launch>\/`/, kind);
+  }
+  const shipped = fs.readFileSync(path.join(__dirname, '..', 'agents', 'sidequest-exec-high.md'), 'utf8');
+  assert.match(shipped, /\*\*Per-dispatch scratch:\*\*/, 'the packaged executor definitions are regenerated with the rule');
+});
+
 test('briefings surface tracked generated outputs paired into effective scope', () => {
   const root = tmpDir();
   assert.equal(git(root, ['init', '-b', 'main']).status, 0);
