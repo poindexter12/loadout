@@ -700,6 +700,45 @@ test('project watch persists observed PR state across restarts', async () => {
   assert.deepEqual(restartLines, []);
 });
 
+test('project watch keeps healthy PR transitions when another PR read fails', async () => {
+  const tickets = new Map<string, any>([
+    ['SQ-1', { ref: 'SQ-1', comments: [] }],
+    ['SQ-2', { ref: 'SQ-2', comments: [] }],
+  ]);
+  const firstPr = { number: 41, url: 'https://github.com/example/repo/pull/41' };
+  const secondPr = { number: 42, url: 'https://github.com/example/repo/pull/42' };
+  const fakeStore = {
+    changesPayload: () => ({ serverTime: new Date().toISOString(), tickets: [] }),
+    findAwaitingMergeWaves: () => [
+      { waveId: 'wave-1', participants: ['SQ-1'], pr: firstPr },
+      { waveId: 'wave-2', participants: ['SQ-2'], pr: secondPr },
+    ],
+    readWavePr: (_slug: string, waveId: string) => waveId === 'wave-1' ? firstPr : secondPr,
+    getTicket: (_slug: string, ref: string) => tickets.get(ref),
+    addComment: (_slug: string, ref: string, comment: any) => tickets.get(ref).comments.push(comment),
+  };
+  const lines: string[] = [];
+  const boardWatch = createProjectBoardWatch({ slug: 'board-a', meta: { path: '/project' } }, {}, {
+    store: fakeStore,
+    createBoardWatch: (options: any) => createBoardWatch({ ...options, writeLine: (line: string) => lines.push(line) }),
+    createGitHubCiRunsProvider: () => null,
+    createGitHubPrPort: () => ({
+      viewPr: async ({ number }: { number: number }) => {
+        if (number === 41) throw new Error('transient gh error');
+        return { number, state: 'MERGED', checks: 'success', failingChecks: [] };
+      },
+    }),
+  });
+
+  await boardWatch.poll();
+
+  assert.deepEqual(lines, [
+    'PR delivery degraded: transient gh error',
+    'PR #42 merged: run integrate to close SQ-2',
+  ]);
+  assert.match(tickets.get('SQ-2').comments[0].body, /"state":"MERGED"/);
+});
+
 test('watch reports a degraded PR provider once without interrupting polling', async () => {
   const lines: string[] = [];
   const boardWatch = createBoardWatch({
