@@ -126,8 +126,10 @@ test('MCP list trims empty fields and ready returns summary rows', async () => {
   const list = await callTool('list', {});
   for (const ticket of list.tickets) assertMcpListRow(ticket);
   const ready = await callTool('ready', { brief: true });
+  // SQ-348: summary rows carry priority so the bands stay visible while a wave is chosen.
   for (const ticket of ready.tickets) {
-    assert.deepStrictEqual(Object.keys(ticket).sort(), ['ref', 'title']);
+    assert.deepStrictEqual(Object.keys(ticket).sort(), ['priority', 'ref', 'title']);
+    assert.match(String(ticket.priority), /^(urgent|high|normal|low)$/);
   }
   for (const wave of ready.waves) {
     for (const r of wave) assert.match(String(r), /^SQ-\d+$/, 'brief waves are refs');
@@ -136,7 +138,7 @@ test('MCP list trims empty fields and ready returns summary rows', async () => {
 
 test('MCP ready defaults to summary rows and full opt-in keeps ref waves', async () => {
   const brief = await callTool('ready', {});
-  for (const ticket of brief.tickets) assert.deepStrictEqual(Object.keys(ticket).sort(), ['ref', 'title']);
+  for (const ticket of brief.tickets) assert.deepStrictEqual(Object.keys(ticket).sort(), ['priority', 'ref', 'title']);
 
   const full = await callTool('ready', { full: true });
   for (const wave of full.waves) {

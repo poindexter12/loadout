@@ -230,7 +230,7 @@ test('shared-tree admission requires the project checkout while artifacts remain
 // ("Runtime worktree does not match dispatch target"). Dispatch must refuse up front instead.
 test('shared-tree dispatch from a session rooted in another repository is refused up front (SQ-309)', () => {
   const foreignRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-shared-tree-foreign-'));
-  execFileSync('git', ['init', '-q'], { cwd: foreignRepo });
+  execFileSync('git', ['init', '--quiet', '-b', 'main'], { cwd: foreignRepo });
   const foreignSubdir = path.join(foreignRepo, 'nested');
   fs.mkdirSync(foreignSubdir);
   try {

@@ -43,13 +43,21 @@ export const phaseBudgetOverrideVariable = 'SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS
 // Starting the longest chains first leaves the short files to fill in around them. Keep this
 // list ordered longest first; a file missing from the directory is skipped, and the test suite
 // fails if any name here stops matching a real file.
+//
+// SQ-382: SQ-137 split hooks, mcp, submission and integration-advance into topic shards, so the
+// heaviest chains moved. Measured alone and in sequence on 2026-10-25 (seconds of test time): 76,
+// 74, 69, 61, 59, 54, 53, 47 and 45 for the files below, then a drop to 30 and under for every
+// other shard (hooks.test.ts 10, mcp.test.ts 17). Re-measure when a file is split or merged.
 export const longRunningTestFiles = Object.freeze([
-  'hooks.test.ts',
-  'mcp.test.ts',
-  'dispatch-lifecycle.test.ts',
-  'integration-advance.test.ts',
   'submission.test.ts',
+  'integration-advance-manual.test.ts',
+  'integration-advance-verify.test.ts',
   'worktree-isolation.test.ts',
+  'dispatch-lifecycle.test.ts',
+  'submission-integration.test.ts',
+  'integration-advance-delivery.test.ts',
+  'submission-review.test.ts',
+  'submission-shared-tree.test.ts',
 ]);
 
 // The phase root is this script run with this flag, because only the programmatic runner keeps
