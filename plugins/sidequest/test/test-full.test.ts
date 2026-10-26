@@ -339,14 +339,15 @@ function loadScheduling(names: string[]): { longRunning: string[]; scheduled: st
 test('SQ-208: the longest serial test files start first, and every other file still runs once', () => {
   const { longRunning, scheduled, real } = loadScheduling([
     'zeta.test.ts',
-    'worktree-isolation.test.ts',
+    'dispatch-lifecycle.test.ts',
     'alpha.test.ts',
-    'mcp.test.ts',
+    'worktree-isolation.test.ts',
     'bench.perf.test.ts',
     'helper.ts',
   ]);
 
-  assert.deepEqual(scheduled, ['mcp.test.ts', 'worktree-isolation.test.ts', 'alpha.test.ts', 'zeta.test.ts']);
+  // The list order wins over alphabetical: worktree-isolation is listed ahead of dispatch-lifecycle.
+  assert.deepEqual(scheduled, ['worktree-isolation.test.ts', 'dispatch-lifecycle.test.ts', 'alpha.test.ts', 'zeta.test.ts']);
   // A renamed or deleted file would silently drop back into alphabetical order, which is the
   // late start this list exists to prevent.
   for (const name of longRunning) assert.ok(real.includes(name), `${name} is scheduled first but no longer exists in test/`);

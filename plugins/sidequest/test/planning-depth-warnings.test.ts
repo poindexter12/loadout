@@ -64,7 +64,9 @@ function cliJsonAt(project: any, args: any[]) {
 
 function cliResultAt(project: any, args: any[]) {
   const env = Object.assign({}, process.env, { SIDEQUEST_HOME, CLAUDE_PROJECT_DIR: project });
-  return spawnSync(process.execPath, [BIN, ...args, '--json'], { encoding: 'utf8', env });
+  // Root the child in the project it names. Dispatch reads process.cwd() as the spawning runtime, and
+  // since SQ-309 a shared-tree dispatch from a runtime rooted outside the project is refused up front.
+  return spawnSync(process.execPath, [BIN, ...args, '--json'], { encoding: 'utf8', env, cwd: project });
 }
 
 function cliResult(args: any[]) {
