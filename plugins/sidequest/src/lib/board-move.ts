@@ -211,7 +211,7 @@ function listFiles(root: string): { list: string[]; bytes: number } {
 function gitRefs(repo: string, refs: Set<string>): string[] {
   if (!repo || !fs.existsSync(repo)) return [];
   try {
-    const out = execFileSync('git', ['for-each-ref', '--format=%(refname)', 'refs/sidequest/'], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const out = execFileSync('git', ['for-each-ref', '--format=%(refname)', 'refs/sidequest/'], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     return out.split('\n').map((line) => line.trim()).filter((name) => name && refs.has(name.slice('refs/sidequest/'.length).toUpperCase())).sort();
   } catch {
     return [];

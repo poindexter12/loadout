@@ -157,7 +157,7 @@ function listFiles(root) {
 function gitRefs(repo, refs) {
   if (!repo || !import_node_fs.default.existsSync(repo)) return [];
   try {
-    const out = (0, import_node_child_process.execFileSync)("git", ["for-each-ref", "--format=%(refname)", "refs/sidequest/"], { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const out = (0, import_node_child_process.execFileSync)("git", ["for-each-ref", "--format=%(refname)", "refs/sidequest/"], { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
     return out.split("\n").map((line) => line.trim()).filter((name) => name && refs.has(name.slice("refs/sidequest/".length).toUpperCase())).sort();
   } catch {
     return [];
