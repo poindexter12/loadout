@@ -238,6 +238,20 @@ function ruleTooBroadReason(fingerprint) {
   return null;
 }
 
+// The never-learn git check runs over every statement and substitution, not
+// just the one a rule would be keyed on: `echo hi && git push` and
+// `X=$(git push)` both condemn their fingerprint.
+function runsNeverLearnGit(command) {
+  // Any unquoted `git` word counts, so a wrapper (`timeout 30 git push`) cannot
+  // hide it; a false positive only costs a rule, never grants one.
+  return simpleCommands(command).some((words) => words.some((word, index) => {
+    if (word.quoted || executableName(word.text).toLowerCase() !== 'git') return false;
+    const sub = words.slice(index + 1).find((next) => !next.text.startsWith('-'));
+    // The tokenizer leaves a substitution's closing paren glued on: `push)`.
+    return Boolean(sub) && NEVER_LEARN_GIT_SUBCOMMAND.test(sub.text.replace(/\)+$/, ''));
+  }));
+}
+
 function createPermissionCollector() {
   const fingerprints = new Map();
   const see = (name, input) => {
@@ -264,6 +278,10 @@ function createPermissionCollector() {
     if (isDestructive(input)) {
       entry.destructive = true;
       entry.destructiveCommand ??= String(input?.command ?? '');
+    }
+    if (name === 'Bash' && runsNeverLearnGit(input?.command)) {
+      entry.destructive = true;
+      entry.vetoReason ??= 'ref-mutating git command';
     }
     return entry;
   };
@@ -429,11 +447,15 @@ module.exports = {
   appendRulesToSettings,
   applyPermissionAllowlist,
   collectPermissionDecisions,
+  commandBody,
   enablePermissionAutomation,
   fingerprintFor,
+  hasUnmatchedQuote,
   isDestructive,
   normalizedCommandPrefix,
   permissionAutomationEnabled,
   ruleFor,
+  runsNeverLearnGit,
   settingsFile,
+  simpleCommands,
 };

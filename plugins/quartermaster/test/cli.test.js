@@ -88,7 +88,8 @@ test('allowlist summarizes large blocked sets and caps requested details', () =>
   const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'quartermaster-cli-test-'));
   const commands = Array.from({ length: 30 }, (_, index) => {
     const label = String(index).padStart(2, '0');
-    return Array.from({ length: 3 }, () => `safe-${label} list; rm -rf /tmp/quartermaster-${label}`);
+    // Single statements: a chained command no longer fingerprints at all (SQ-360).
+    return Array.from({ length: 3 }, () => `find /tmp/quartermaster-${label} -delete`);
   }).flat();
   const environment = permissionEnvironment(projectPath, commands);
 
@@ -115,16 +116,16 @@ test('allowlist identifies rule vetoes and sighted destructive commands', () => 
   const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'quartermaster-cli-test-'));
   const environment = permissionEnvironment(projectPath, [
     ...Array.from({ length: 3 }, () => 'git push origin main'),
-    ...Array.from({ length: 3 }, () => 'git log --oneline; rm -f /tmp/quartermaster-log'),
+    ...Array.from({ length: 3 }, () => 'find /tmp/quartermaster-log -delete'),
   ]);
 
   const result = run('allowlist', projectPath, environment);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /permission:Bash:git push: vetoed as too broad a rule \(ref-mutating git command\)/);
-  assert.match(result.stdout, /permission:Bash:git log: sighted destructive command "git log --oneline; rm -f \/tmp\/quartermaster-log"/);
+  assert.match(result.stdout, /permission:Bash:find \/tmp\/quartermaster-log: sighted destructive command "find \/tmp\/quartermaster-log -delete"/);
   const report = jsonReport(result);
   const push = report.blocked.top.find((entry) => entry.fingerprint === 'permission:Bash:git push');
-  const log = report.blocked.top.find((entry) => entry.fingerprint === 'permission:Bash:git log');
+  const log = report.blocked.top.find((entry) => entry.fingerprint === 'permission:Bash:find /tmp/quartermaster-log');
   assert.equal(push.reason, 'vetoed as too broad a rule (ref-mutating git command)');
-  assert.equal(log.reason, 'sighted destructive command "git log --oneline; rm -f /tmp/quartermaster-log"');
+  assert.equal(log.reason, 'sighted destructive command "find /tmp/quartermaster-log -delete"');
 });

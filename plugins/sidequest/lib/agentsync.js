@@ -1098,9 +1098,51 @@ function briefingTransportFilePath(ticket, slug) {
   const directory = crypto.createHash("sha256").update(identity, "utf8").digest("hex");
   return path.join(store.homeRoot(), "briefings", directory, "briefing.txt");
 }
+const EXECUTOR_USABLE_CONTEXT_TOKENS = 167e3;
+const BRIEFING_CHARS_PER_TOKEN = 4;
+const LAUNCH_BUDGET_WARN_FRACTION = 0.1;
+const LAUNCH_BUDGET_WARN_TOKENS = Math.floor(EXECUTOR_USABLE_CONTEXT_TOKENS * LAUNCH_BUDGET_WARN_FRACTION);
+function briefingSectionSizes(briefing) {
+  const text = String(briefing || "");
+  const sections = [];
+  const pattern = /^## (.+)$/gm;
+  const starts = [];
+  let match;
+  while ((match = pattern.exec(text)) !== null) starts.push({ heading: (match[1] ?? "").trim(), index: match.index });
+  if (!starts.length || starts[0].index > 0) starts.unshift({ heading: "(preamble)", index: 0 });
+  for (let index = 0; index < starts.length; index += 1) {
+    const start = starts[index];
+    const end = index + 1 < starts.length ? starts[index + 1].index : text.length;
+    const chars = end - start.index;
+    if (chars > 0) sections.push({ heading: start.heading, chars });
+  }
+  return sections;
+}
+function launchBudgetPacket(briefing) {
+  const text = String(briefing || "");
+  const chars = text.length;
+  const tokens = Math.ceil(chars / BRIEFING_CHARS_PER_TOKEN);
+  const percent = Math.round(tokens / EXECUTOR_USABLE_CONTEXT_TOKENS * 1e3) / 10;
+  const largest = briefingSectionSizes(text).sort((left, right) => right.chars - left.chars).slice(0, 3).map((section) => `"${section.heading}" ${section.chars} chars`).join(", ");
+  const lines = [
+    `Launch budget: this briefing is ${chars} chars, about ${tokens} tokens at ${BRIEFING_CHARS_PER_TOKEN} chars per token, ${percent}% of a ${EXECUTOR_USABLE_CONTEXT_TOKENS}-token usable window. Largest sections: ${largest || "(none)"}. The ambient surface (system prompt, tool, skill, and agent listings, the CLAUDE.md hierarchy) is paid before this briefing and is not counted here; your true per-turn usage is the usage Claude Code records for this agent's own turns.`
+  ];
+  if (tokens > LAUNCH_BUDGET_WARN_TOKENS) {
+    lines.push(`Launch budget warning: this briefing alone exceeds ${Math.round(LAUNCH_BUDGET_WARN_FRACTION * 100)}% of usable context. Read only the sections your next step needs, and if the work cannot fit, comment this measurement and the largest sections above before releasing, so the orchestrator can trim or split the ticket instead of redispatching it unchanged.`);
+  }
+  lines.push(
+    "Context warnings: a context-usage percentage injected by a session-level hook (a statusline-bridge monitor such as gsd-context-monitor) measures the orchestrator, not you, because a subagent shares its parent's session id. Do not stop, ask the user, or hand back on that warning; pace by the tool-round Continuation checkpoint rule instead.",
+    'If you do exhaust your own context, follow the Continuation checkpoint rule and begin the release reason with "context exhaustion:", naming the files touched and the next step, so the board can tell it apart from a planning or design blocker.'
+  );
+  return lines.join("\n");
+}
 function transportExecutorBriefing(briefing, ticket, slug, projectPath) {
   const fullBriefing = String(briefing || "");
-  if (fullBriefing.length <= BRIEFING_FILE_TRANSPORT_THRESHOLD_CHARS) return fullBriefing;
+  const budget = launchBudgetPacket(fullBriefing);
+  if (fullBriefing.length <= BRIEFING_FILE_TRANSPORT_THRESHOLD_CHARS) return `${fullBriefing}
+
+## Launch budget
+${budget}`;
   const briefingPath = briefingTransportFilePath(ticket, slug);
   fs.mkdirSync(path.dirname(briefingPath), { recursive: true, mode: 448 });
   fs.writeFileSync(briefingPath, fullBriefing, { encoding: "utf8", mode: 384 });
@@ -1108,7 +1150,8 @@ function transportExecutorBriefing(briefing, ticket, slug, projectPath) {
   return [
     `Token-gated executor briefing for ${ticket?.ref || "(unknown ticket)"}.`,
     `Project: ${String(projectPath || "").trim() || "(unavailable)"}. Token file: ${tokenFile}.`,
-    `Before acting, Read "${briefingPath}" in full. It contains the exact claim call, worktree contract, complete task and scope, comments, and verification instructions.`
+    `Before acting, Read "${briefingPath}" in full. It contains the exact claim call, worktree contract, complete task and scope, comments, and verification instructions.`,
+    budget
   ].join("\n");
 }
 function dispatchTicketContext(ticket, projectPath) {
@@ -1422,6 +1465,10 @@ module.exports = {
   renderBriefingPreview,
   BRIEFING_PREVIEW_PLACEHOLDERS,
   briefingTransportFilePath,
+  briefingSectionSizes,
+  launchBudgetPacket,
+  EXECUTOR_USABLE_CONTEXT_TOKENS,
+  LAUNCH_BUDGET_WARN_TOKENS,
   transportExecutorBriefing,
   rejectedSubmissionRows,
   taskAndScopeBody,

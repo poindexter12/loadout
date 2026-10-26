@@ -17,9 +17,9 @@
 // under-reporting a backend the shim has served for several releases.
 //
 // The write/read shells around this (writeCatalog, readCatalog, catalogCommand)
-// genuinely differ per host — the CLI writes the discovery cache alongside the
-// catalog and reads the shim's model objects, the worker reads bare ids off its
-// own SHIM_PORT — so they deliberately stay in their own files.
+// live in lib/commands.js only: the CLI writes the discovery cache alongside the
+// catalog and reads the shim's model objects. request-worker.js once kept a
+// second, never-called copy; SQ-35 removed it.
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');

@@ -4113,9 +4113,12 @@ test('dispatch returns a stable executor, one spawn prompt, and a token', async 
   assert.doesNotMatch(instant.spawn.prompt, /## This ticket/);
   assert.doesNotMatch(instant.spawn.prompt, /You are a sidequest ticket executor/);
   assert.doesNotMatch(instant.spawn.prompt, /^---$/m);
-  const expectedBriefing = agentsync.withProjectIdentity(agentsync.renderTicketBriefing(
+  // SQ-349: the CLI prints the briefing through transportExecutorBriefing, which ends an
+  // inline briefing with its measured launch budget, so pin the printed output to that.
+  const expectedBriefing = agentsync.transportExecutorBriefing(agentsync.withProjectIdentity(agentsync.renderTicketBriefing(
     store.getTicket(slug, addedInstant.ref), instant.token, slug, PROJ,
-  ), PROJ);
+  ), PROJ), store.getTicket(slug, addedInstant.ref), slug, PROJ);
+  assert.match(expectedBriefing, /\n## Launch budget\nLaunch budget: this briefing is \d+ chars/);
   const cli = path.join(__dirname, '..', 'bin', 'sidequest.js');
   const printedBriefing = execFileSync(process.execPath, [cli, 'briefing', addedInstant.ref, '--token-file', store.getTicket(slug, addedInstant.ref).dispatch.tokenFile, '--project', PROJ], {
     encoding: 'utf8', windowsHide: true,

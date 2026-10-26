@@ -1745,7 +1745,14 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
         }
       }
     }
+    // SQ-255. `dispatchNonce` is the one field both liveness gates read. The token file IS the claim
+    // credential, so a launched row whose token is gone has no runtime that can ever claim it and is not
+    // live. Omitting it here let this gate and the recovery gate (`evidenceRetirableAttempt`, which has
+    // always required the nonce) disagree about the same row: dispatch refused it as a live attempt and
+    // sent the orchestrator to `--recovery-evidence`, while this refusal's own tail and that route both
+    // answered "not an active attempt". Two refusals, no third route, and the ticket was unreachable.
     const activeRuntimeAttempt = current && !current.terminalAt && !(t.claim && t.claim.by)
+      && Boolean(t.dispatchNonce)
       && Boolean(current.launchedAt || current.boundAt);
     if (activeRuntimeAttempt) {
       const evidenceCall = `so the orchestrator can supersede it in one call: \`sidequest dispatch ${t.ref} --recovery-evidence "<observed failed-claim evidence>"\`.`;
@@ -2611,6 +2618,61 @@ function recoverDispatchWorktreeCreation(slug?: any, sessionId?: any, worktree?:
   return { ok: true, ticket: terminal.ticket, cleanup };
 }
 
+// SQ-255. A WorktreeCreate that throws BEFORE `git worktree add` created nothing: no checkout, no claim,
+// no agent. Only the post-creation catch rolled the attempt back, so the hook's two earlier refusals (an
+// incomplete binding, and a lease decision that denies creation) left a `launched` attempt bound to a
+// worktree path that does not exist. `bindDispatchWorktreeCreation` can only rebind that exact path and
+// the harness names every checkout freshly, so every later spawn missed both of its binding loops and was
+// refused `dispatch_binding_unavailable` forever. A replacement token cannot clear that: the new attempt
+// binds against the same absent path. Roll the attempt back from the hook instead. The bound worktree path
+// is the match when the hook got far enough to record one; otherwise the session id is, because the stale
+// path is precisely what no longer matches. `worktreeCreationCompletedAt` is the dividing line: a recorded
+// checkout identity means a checkout exists and `recoverDispatchWorktreeCreation` owns it, cleanup and all.
+function uncreatedWorktreeCreationAttempt(ticket?: any, state?: any, sessionId?: any, worktree?: any) {
+  if (!state || !ticket?.dispatchNonce) return false;
+  if (state.sessionId !== sessionId || state.sharedTree !== false) return false;
+  if (state.outcome !== 'launched' || state.terminalAt) return false;
+  if (state.worktreeBindingSource !== 'worktree-create' || !state.worktree) return false;
+  if (state.worktreeCreationCompletedAt) return false;
+  if (state.claimedAt || ticket.claim?.by || ticket.checkpoint) return false;
+  return !worktree || canonicalPath(state.worktree) === worktree;
+}
+
+function rollbackDispatchWorktreeCreation(sessionId?: any, opts?: any) {
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (!normalizedSessionId) return { ok: false, reason: 'missing_binding_facts' };
+  const target = String(opts?.worktree || '').trim();
+  const boundWorktree = target ? canonicalPath(target) : null;
+  const matches: { slug: any; id: any }[] = [];
+  for (const project of listProjects({ all: true })) {
+    if (!project?.slug) continue;
+    for (const candidate of listTickets(project.slug)) {
+      if (!uncreatedWorktreeCreationAttempt(candidate, dispatchState(candidate), normalizedSessionId, boundWorktree)) continue;
+      matches.push({ slug: project.slug, id: candidate.id });
+    }
+  }
+  // Retiring the wrong attempt would strand a live sibling, so an ambiguous session is refused rather than
+  // guessed; the hook says so in its stderr and the attempt stays visible to recovery evidence.
+  if (matches.length !== 1) return { ok: false, reason: matches.length ? 'ambiguous_binding' : 'dispatch_binding_unavailable' };
+  const match = matches[0]!;
+  return withTicketLock(match.slug, match.id, () => {
+    const ticket = getTicket(match.slug, match.id);
+    const state = dispatchState(ticket);
+    if (!uncreatedWorktreeCreationAttempt(ticket, state, normalizedSessionId, boundWorktree)) return { ok: false, reason: 'dispatch_binding_unavailable' };
+    const staleWorktree = String(state.worktree || '');
+    setDispatchTerminal(ticket, 'failed', 'worktree-create-rollback', {
+      slug: match.slug,
+      error: opts?.error,
+      failureShape: 'worktree_create_failed',
+    });
+    ticket.dispatchNonce = null;
+    ticket.dispatchExecutor = null;
+    stampDispatchEvent(ticket, 'worktree-create-rollback');
+    putTicket(match.slug, ticket);
+    return { ok: true, ref: ticket.ref, slug: match.slug, worktree: staleWorktree };
+  });
+}
+
 // Answers "was this running agent promised a linked worktree?" for the write
 // guard. The harness deletes an isolated worktree when an agent stops with it
 // unchanged, so a resumed executor is silently handed the shared checkout.
@@ -3466,6 +3528,7 @@ function reconcileLaunchedDispatches(sessionId?: any, opts?: any) {
     completeDispatchWorktreeCreation,
     recordDispatchWorktreeProvisioningFailure,
     recoverDispatchWorktreeCreation,
+    rollbackDispatchWorktreeCreation,
     dispatchIdentityDiagnosis,
     dispatchIsolationExpectation,
     dispatchUnboundClaim,

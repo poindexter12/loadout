@@ -12,8 +12,10 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 
-const { runVerifyCapture, runCapturedVerification, recordCapture, shellCommand, captureSlotDirectory, acquireCaptureSlot, fullSuiteCaptureTimeoutMilliseconds, captureBudget, captureBudgetClass, captureHardMaximumMilliseconds, runBudgetedCapture } = require('../lib/verify-capture.js');
+const { runVerifyCapture, runCapturedVerification, recordCapture, shellCommand, captureSlotDirectory, acquireCaptureSlot, fullSuiteCaptureTimeoutMilliseconds, captureBudget, captureBudgetClass, captureHardMaximumMilliseconds, runBudgetedCapture, effectiveTestWorkers, capacityScaledDeadlineMilliseconds } = require('../lib/verify-capture.js');
+const { waitForCapacity, capacityWaitTimeoutMessage, capacityWaitDeadlineMilliseconds, testWorkerConcurrency } = require('./_capacity-deadline.js');
 const store = require('../lib/store.js');
+const { commandVerificationResult } = require('../lib/kernel/verification.js');
 const SIDEQUEST_DIR = path.resolve(__dirname, '..');
 
 function deleteLog(capture: { logPath: string }) {
@@ -45,27 +47,133 @@ function runCaptureProcess(command: string, project: string, ticket: string): Pr
 // 10-core machine holding ~2.2 workers of real capacity, a node spawn plus a file write does
 // not reliably land inside 2 seconds. The deadline has to scale with the workers competing
 // for the machine, which is what SQ-58 established.
+// SQ-74: and the workers competing for the machine include load this suite did not start, so
+// the deadline also scales with the measured load through the capture budget's own model.
 const WAIT_FOR_FILE_PER_TEST_WORKER_MS = 2_000;
 
-function testWorkerConcurrency(): number {
-  const argument = process.execArgv.find((value: string) => value.startsWith('--test-concurrency='));
-  const requested = Number(argument?.slice('--test-concurrency='.length));
-  return Number.isInteger(requested) && requested > 0 ? requested : os.availableParallelism();
-}
-
 async function waitForFile(filePath: string): Promise<void> {
-  const deadline = Date.now() + WAIT_FOR_FILE_PER_TEST_WORKER_MS * testWorkerConcurrency();
-  while (Date.now() < deadline) {
-    if (fs.existsSync(filePath)) return;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  throw new Error(`Timed out waiting for ${filePath}`);
+  const result = await waitForCapacity(() => fs.existsSync(filePath), {
+    perTestWorkerMilliseconds: WAIT_FOR_FILE_PER_TEST_WORKER_MS,
+    pollMilliseconds: 20,
+  });
+  if (!result.ready) throw new Error(capacityWaitTimeoutMessage(filePath, result));
 }
 
 function readRecordedCaptures(project: string, ticket: string) {
   const reader = `const store = require(${JSON.stringify(path.join(SIDEQUEST_DIR, 'lib', 'store.js'))}); const target = store.findProject(process.argv.at(-2)); console.log(JSON.stringify(store.getTicket(target.slug, process.argv.at(-1)).verificationCaptures));`;
   return JSON.parse(execFileSync(process.execPath, ['--eval', reader, project, ticket], { encoding: 'utf8', env: process.env, windowsHide: true }));
 }
+
+// SQ-74: a fake clock for capacity waits. Each sleep advances time by the poll interval, so a
+// wait's deadline arithmetic runs in microseconds without depending on the host's real load.
+function fakeCapacityClock() {
+  let clock = 0;
+  return {
+    now: () => clock,
+    sleep: async (milliseconds: number) => { clock += milliseconds; },
+  };
+}
+
+test('SQ-74: an in-test per-worker deadline widens under a high load average instead of staying fixed', () => {
+  // Idle host with a core per worker: exactly SQ-58's per-worker deadline, unchanged.
+  assert.equal(capacityScaledDeadlineMilliseconds(2_000, 10, 10, 0), 20_000);
+  // The load measured during the 2026-09-22 false reds: 24.02 on 10 cores at concurrency 10.
+  const loaded = capacityScaledDeadlineMilliseconds(2_000, 10, 10, 24.02);
+  assert.ok(loaded > 20_000, `deadline under load 24.02 must widen past the fixed 20000ms, got ${loaded}`);
+  assert.equal(loaded, Math.round(20_000 * (10 + 24.02) / 10));
+  const deadlines = [0, 5, 10, 24.02, 33.6].map((load) => capacityScaledDeadlineMilliseconds(2_000, 10, 10, load));
+  for (let index = 1; index < deadlines.length; index += 1) {
+    assert.ok(deadlines[index] > deadlines[index - 1], `deadline must grow with load: ${deadlines.join(', ')}`);
+  }
+  // hooks.test.ts waitForPath keeps its 60000ms floor, and the 15-minute load measured that day
+  // (33.60) carries its capacity deadline past that floor.
+  assert.equal(capacityWaitDeadlineMilliseconds({ perTestWorkerMilliseconds: 2_000, floorMilliseconds: 60_000, testWorkers: 10, availableParallelism: 10 }, 0), 60_000);
+  assert.equal(capacityWaitDeadlineMilliseconds({ perTestWorkerMilliseconds: 2_000, floorMilliseconds: 60_000, testWorkers: 10, availableParallelism: 10 }, 33.6), 87_200);
+});
+
+test('SQ-74: the in-test deadline and the full-suite capture budget read one effective-worker model', () => {
+  for (const cores of [4, 10]) {
+    const testConcurrency = Math.min(8, Math.max(2, cores));
+    for (const load of [0, 5, 24.02, 27]) {
+      const budget = captureBudget('npm run test:full', cores, load, '');
+      assert.equal(budget.effectiveTestWorkers, effectiveTestWorkers(testConcurrency, cores, load), `cores=${cores} load=${load}`);
+    }
+  }
+  // Both sides of the gate degrade by the same factor: the capture's phase budget and an
+  // in-test deadline at the same concurrency widen in the same ratio as load rises.
+  const capturePhase = (load: number) => captureBudget('npm run test:full', 10, load, '').phaseBudgetMilliseconds;
+  const inTest = (load: number) => capacityScaledDeadlineMilliseconds(2_000, 8, 10, load);
+  for (const load of [5, 12]) {
+    const captureFactor = capturePhase(load) / capturePhase(0);
+    const inTestFactor = inTest(load) / inTest(0);
+    assert.ok(captureFactor > 1, `capture budget must widen under load ${load}`);
+    assert.ok(Math.abs(captureFactor - inTestFactor) < 0.001, `load ${load}: capture widened ${captureFactor}, in-test deadline ${inTestFactor}`);
+  }
+});
+
+test('SQ-74: a capacity wait under high load keeps waiting past the fixed per-worker deadline', async () => {
+  const options = { perTestWorkerMilliseconds: 2_000, testWorkers: 10, availableParallelism: 10, pollMilliseconds: 100 };
+  // The child lands at 30s: past SQ-58's fixed 20000ms, inside the 68040ms load-24.02 deadline.
+  const loadedClock = fakeCapacityClock();
+  const loaded = await waitForCapacity(() => loadedClock.now() >= 30_000, { ...options, sampleLoad: () => 24.02, now: loadedClock.now, sleep: loadedClock.sleep });
+  assert.equal(loaded.ready, true, `a starved child must still be waited for: ${JSON.stringify(loaded)}`);
+  assert.ok(loaded.waitedMilliseconds >= 30_000);
+  // Control: on an idle host the same wait gives up at the per-worker deadline.
+  const idleClock = fakeCapacityClock();
+  const idle = await waitForCapacity(() => idleClock.now() >= 30_000, { ...options, sampleLoad: () => 0, now: idleClock.now, sleep: idleClock.sleep });
+  assert.equal(idle.ready, false);
+  assert.equal(idle.deadlineMilliseconds, 20_000);
+  assert.match(capacityWaitTimeoutMessage('/tmp/report.json', idle), /capacity-scaled deadline 20000ms at a 1-minute load average of 0\.00/);
+});
+
+test('SQ-74: load that rises mid-wait extends the deadline, and load that falls never shortens it', async () => {
+  const options = { perTestWorkerMilliseconds: 2_000, testWorkers: 10, availableParallelism: 10, pollMilliseconds: 100 };
+  const rising = fakeCapacityClock();
+  // A sibling suite starts 10s into the wait.
+  const risen = await waitForCapacity(() => false, { ...options, sampleLoad: () => (rising.now() >= 10_000 ? 24.02 : 0), now: rising.now, sleep: rising.sleep });
+  assert.equal(risen.ready, false);
+  assert.equal(risen.deadlineMilliseconds, 68_040);
+  assert.equal(risen.loadAverage, 24.02);
+  assert.ok(risen.waitedMilliseconds >= 68_040, `the wait must run to the widened deadline, gave up at ${risen.waitedMilliseconds}ms`);
+  const falling = fakeCapacityClock();
+  // The sibling finishes 10s in; the deadline already granted stands.
+  const fallen = await waitForCapacity(() => false, { ...options, sampleLoad: () => (falling.now() >= 10_000 ? 0 : 24.02), now: falling.now, sleep: falling.sleep });
+  assert.equal(fallen.deadlineMilliseconds, 68_040);
+  assert.ok(fallen.waitedMilliseconds >= 68_040, `falling load must not shorten the deadline, gave up at ${fallen.waitedMilliseconds}ms`);
+});
+
+test('SQ-74: the in-test worker count comes from --test-concurrency, else the machine', () => {
+  assert.equal(testWorkerConcurrency(['--import', 'tsx', '--test-concurrency=3'], 10), 3);
+  assert.equal(testWorkerConcurrency([], 10), 10);
+  assert.equal(testWorkerConcurrency(['--test-concurrency=0'], 7), 7);
+});
+
+test('SQ-74: an ad-hoc full-suite run does not acquire the verification capture slot', async () => {
+  // Ruling: only a ticket-bound capture takes the per-host slot. A full-suite command run without
+  // a ticket must not queue behind a held slot; foreign load is absorbed by the capacity-scaled
+  // in-test deadlines instead.
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-74-adhoc-'));
+  const command = 'echo npm run test:full';
+  assert.equal(captureBudgetClass(command), 'full-suite', 'the fixture command must classify as a full-suite run');
+  const lease = await acquireCaptureSlot(project);
+  assert.ok('release' in lease, `fixture must hold the slot: ${JSON.stringify(lease)}`);
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const run = runCapturedVerification(command, null, project);
+    const blocked = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('the ad-hoc full-suite run queued behind the held capture slot')), 60_000); });
+    const { capture, recorded } = await Promise.race([run, blocked]) as { capture: any; recorded: unknown };
+    assert.equal(capture.status, 'passed', capture.evidence);
+    assert.equal(capture.waitedForSlotMs, undefined);
+    assert.equal(capture.queuePosition, undefined);
+    assert.equal(recorded, null);
+    assert.equal(fs.existsSync(path.join(captureSlotDirectory(project), 'active')), true, 'the held slot must be untouched');
+    if (capture.logPath) deleteLog(capture);
+  } finally {
+    if (timer) clearTimeout(timer);
+    await lease.release();
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
 
 test('full-suite capture uses the capacity phase budget plus ordinary setup allowance', () => {
   const originalOverride = process.env.SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS;
@@ -653,6 +761,8 @@ test('verification capture resolves a stale worktree --project back to the ticke
   execFileSync('git', ['worktree', 'add', '--detach', '--quiet', agentWorktree, 'HEAD'], { cwd: project, windowsHide: true });
   const registeredActiveSlot = path.join(captureSlotDirectory(project), 'active');
   fs.writeFileSync(path.join(agentWorktree, 'suite.js'), `const fs = require('node:fs'); fs.writeFileSync(${JSON.stringify(observedSlot)}, String(fs.existsSync(${JSON.stringify(registeredActiveSlot)})));\n`);
+  // SQ-76: the probe suite is committed, so the capture binds to a clean HEAD that is the code that runs.
+  execFileSync('git', ['-c', 'user.name=Sidequest Tests', '-c', 'user.email=sidequest@example.invalid', 'commit', '--quiet', '-am', 'slot probe suite'], { cwd: agentWorktree, windowsHide: true });
   const boardProject = store.ensureProject(project);
   const ticket = store.createTicket(boardProject.slug, {
     title: 'resolve the board from the ticket, not the inherited worktree',
@@ -842,6 +952,120 @@ test('SQ-162: a terminal dispatch no longer binds, so a later capture runs where
     assert.deepEqual(recorded?.capture?.candidate, { source: 'git', value: fixture.base });
     assert.equal(fs.realpathSync(fs.readFileSync(path.join(fixture.project, 'suite-ran'), 'utf8')), fs.realpathSync(fixture.project));
     assert.equal(fs.existsSync(path.join(fixture.worktree, 'suite-ran')), false);
+    fs.rmSync(capture.logPath, { force: true });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// SQ-76 fixture: a board project run in place (no isolated dispatch), the path
+// whose capture used to bind `git:<HEAD>` whatever the working tree held.
+function inPlaceCaptureFixture(prefix: string, suiteBody: string) {
+  const project = captureFixtureProject(prefix, suiteBody);
+  const git = (...args: string[]) => String(execFileSync('git', args, { cwd: project, encoding: 'utf8', windowsHide: true })).trim();
+  const commit = (message: string) => git('-c', 'user.name=Sidequest Tests', '-c', 'user.email=sidequest@example.invalid', 'commit', '--quiet', '-am', message);
+  const boardProject = store.ensureProject(project);
+  const ticket = store.createTicket(boardProject.slug, {
+    title: 'capture binds to the tree that ran',
+    files: ['suite.js'],
+    category: 'coding.normal',
+    executorVerifyKind: 'command',
+    executorVerify: 'node suite.js',
+  });
+  const gate = (candidate: { source: string; value: string }) => {
+    const current = store.getTicket(boardProject.slug, ticket.ref);
+    return commandVerificationResult({ kind: 'command', command: 'node suite.js' }, 'node suite.js', current.verificationCaptures || [], ticket.ref, candidate, String(current.dispatchNonce || ''));
+  };
+  const cleanup = () => fs.rmSync(project, { recursive: true, force: true });
+  return { project, slug: boardProject.slug, ticket, git, commit, gate, cleanup };
+}
+
+test('SQ-76: a capture started with an uncommitted in-scope edit is recorded against the dirty tree, never as git:HEAD', async () => {
+  const fixture = inPlaceCaptureFixture('sq-76-uncommitted-', 'process.exit(0);\n');
+  try {
+    const head = fixture.git('rev-parse', 'HEAD');
+    fs.appendFileSync(path.join(fixture.project, 'suite.js'), '// uncommitted edit that runs\n');
+    const { capture, recorded } = await runCapturedVerification('node suite.js', { project: fixture.project, ticket: fixture.ticket.ref }, fixture.project);
+    assert.equal(capture.status, 'passed', capture.evidence);
+    assert.equal(recorded?.ok, true, recorded?.reason);
+    assert.equal(recorded?.capture?.candidate.source, 'git-dirty-tree');
+    assert.notDeepEqual(recorded?.capture?.candidate, { source: 'git', value: head }, 'the dirty run is not certified as HEAD');
+    assert.match(recorded?.capture?.candidate.value || '', new RegExp(`^${head}\\+[0-9a-f]{64}$`), 'the identity names the base HEAD plus the exact modifications');
+    const gated = fixture.gate({ source: 'git', value: head });
+    assert.equal(gated.result.status, 'failed_check');
+    assert.equal(gated.diagnostic?.code, 'verification_capture_required', 'the dirty-tree capture does not satisfy the gate for HEAD');
+    fs.rmSync(capture.logPath, { force: true });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('SQ-76: a capture after git checkout <rev> -- <path> does not bind to HEAD as though clean', async () => {
+  const fixture = inPlaceCaptureFixture('sq-76-checkout-path-', 'process.exit(0);\n');
+  try {
+    const green = fixture.git('rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(fixture.project, 'suite.js'), 'process.exit(1);\n');
+    fixture.commit('red candidate');
+    const red = fixture.git('rev-parse', 'HEAD');
+    // The ticket's shape: HEAD stays on the red commit while the tree runs the green revision's code.
+    fixture.git('checkout', green, '--', 'suite.js');
+    assert.equal(fixture.git('rev-parse', 'HEAD'), red, 'HEAD did not move');
+    const { capture, recorded } = await runCapturedVerification('node suite.js', { project: fixture.project, ticket: fixture.ticket.ref }, fixture.project);
+    assert.equal(capture.status, 'passed', 'the borrowed green code passes');
+    assert.equal(recorded?.ok, true, recorded?.reason);
+    assert.equal(recorded?.capture?.candidate.source, 'git-dirty-tree');
+    assert.ok(!(store.getTicket(fixture.slug, fixture.ticket.ref).verificationCaptures || []).some((entry: { candidate: { source: string; value: string } }) => entry.candidate.source === 'git' && entry.candidate.value === red), 'no capture certifies the red HEAD');
+    assert.equal(fixture.gate({ source: 'git', value: red }).diagnostic?.code, 'verification_capture_required', 'the red commit cannot submit on the borrowed green');
+    fs.rmSync(capture.logPath, { force: true });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('SQ-76: the diagnostic run is recorded and reported as evidence that can never satisfy the gate', () => {
+  const fixture = inPlaceCaptureFixture('sq-76-diagnostic-', 'process.exit(0);\n');
+  try {
+    const head = fixture.git('rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(fixture.project, 'diagnostic-probe.txt'), 'is base red?\n');
+    const result = require('node:child_process').spawnSync(process.execPath, [path.join(SIDEQUEST_DIR, 'lib', 'verify-capture.js'), '--base64', Buffer.from('node suite.js').toString('base64'), '--project', fixture.project, '--ticket', fixture.ticket.ref], { cwd: fixture.project, encoding: 'utf8', windowsHide: true });
+    assert.match(result.stdout, /^verify=passed exit=0/m, result.stdout + result.stderr);
+    assert.match(result.stdout, /^capture=\S+ candidate=git-dirty-tree:/m);
+    assert.match(result.stdout, /^capture-diagnostic: .*can never satisfy the submit gate/m);
+    assert.equal(fixture.gate({ source: 'git', value: head }).diagnostic?.code, 'verification_capture_required');
+    // Control: the same command on the clean tree is gate-satisfying, so the refusal above is the dirt.
+    fs.rmSync(path.join(fixture.project, 'diagnostic-probe.txt'));
+    const clean = require('node:child_process').spawnSync(process.execPath, [path.join(SIDEQUEST_DIR, 'lib', 'verify-capture.js'), '--base64', Buffer.from('node suite.js').toString('base64'), '--project', fixture.project, '--ticket', fixture.ticket.ref], { cwd: fixture.project, encoding: 'utf8', windowsHide: true });
+    assert.match(clean.stdout, new RegExp(`^capture=\\S+ candidate=git:${head}$`, 'm'), clean.stdout + clean.stderr);
+    assert.doesNotMatch(clean.stdout, /capture-diagnostic/);
+    assert.equal(fixture.gate({ source: 'git', value: head }).result.status, 'passed');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('SQ-76: a capture whose tracked files change while the command runs is not recorded', async () => {
+  const fixture = inPlaceCaptureFixture('sq-76-dirtied-', `require('node:fs').writeFileSync('package.json', '{}');\n`);
+  try {
+    const head = fixture.git('rev-parse', 'HEAD');
+    const { capture, recorded } = await runCapturedVerification('node suite.js', { project: fixture.project, ticket: fixture.ticket.ref }, fixture.project);
+    assert.equal(capture.status, 'passed', capture.evidence);
+    assert.equal(recorded?.ok, false);
+    assert.match(recorded?.reason || '', new RegExp(`^capture_candidate_dirtied: .*clean tree at HEAD ${head}.*Modified: package\\.json`));
+    assert.equal((store.getTicket(fixture.slug, fixture.ticket.ref).verificationCaptures || []).length, 0, 'HEAD is not certified');
+    fs.rmSync(capture.logPath, { force: true });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('SQ-76: untracked output the command writes does not spoil a clean capture', async () => {
+  const fixture = inPlaceCaptureFixture('sq-76-run-output-', `require('node:fs').writeFileSync('suite-ran', 'yes');\n`);
+  try {
+    const head = fixture.git('rev-parse', 'HEAD');
+    const { capture, recorded } = await runCapturedVerification('node suite.js', { project: fixture.project, ticket: fixture.ticket.ref }, fixture.project);
+    assert.equal(capture.status, 'passed', capture.evidence);
+    assert.equal(recorded?.ok, true, recorded?.reason);
+    assert.deepEqual(recorded?.capture?.candidate, { source: 'git', value: head });
     fs.rmSync(capture.logPath, { force: true });
   } finally {
     fixture.cleanup();

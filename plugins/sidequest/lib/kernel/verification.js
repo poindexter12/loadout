@@ -260,7 +260,9 @@ function commandVerificationResult(requirement, evidence, captures, ticket, cand
       diagnostic: Object.freeze({ code: "executor_verify_mismatch", message, retryable: true })
     });
   }
-  const sameIdentity = (capture) => capture.ticket === ticket && capture.command === command && capture.candidate.source === candidate.source && capture.candidate.value === candidate.value && capture.dispatchNonce === dispatchNonce;
+  const carried = new Set((waiverOptions.carriedCandidates || []).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean));
+  const sameCandidate = (capture) => capture.candidate.source === candidate.source && (capture.candidate.value === candidate.value || candidate.source === "git" && carried.has(String(capture.candidate.value || "").toLowerCase()));
+  const sameIdentity = (capture) => capture.ticket === ticket && capture.command === command && sameCandidate(capture) && capture.dispatchNonce === dispatchNonce;
   const completedCapture = captures.find((capture) => sameIdentity(capture) && capture.status === "passed");
   if (!completedCapture) {
     const eligible = captures.filter((capture) => sameIdentity(capture) && LOAD_ONLY_CAPTURE_STATUSES.includes(capture.status));
@@ -299,7 +301,7 @@ function commandVerificationResult(requirement, evidence, captures, ticket, cand
         });
       }
     }
-    const message = `No completed passed verification capture exists for ${ticket}, dispatch attempt ${dispatchNonce || "<none>"}, ${candidate.source}:${candidate.value}, and declared command ${JSON.stringify(command)}. Run ${JSON.stringify(command)} through the dispatched verify-capture wrapper again after finalizing that candidate, then resubmit.${verifyCaptureRecoveryGuidance(command, ticket, project)}${captureWaiverGuidance(ticket, eligible, rejected)}`;
+    const message = `No completed passed verification capture exists for ${ticket}, dispatch attempt ${dispatchNonce || "<none>"}, ${candidate.source}:${candidate.value}, and declared command ${JSON.stringify(command)}. Run ${JSON.stringify(command)} through the dispatched verify-capture wrapper again after finalizing that candidate, then resubmit. An earlier capture carries forward only when that capture's commit is an ancestor of the candidate and the diff between them touches nothing outside .release/unreleased/, so commit the release fragment as its own commit after a green capture rather than with other changes.${verifyCaptureRecoveryGuidance(command, ticket, project)}${captureWaiverGuidance(ticket, eligible, rejected)}`;
     return Object.freeze({
       result: Object.freeze({ kind: requirement.kind, status: "failed_check", evidence: message, command, failureIdentities: Object.freeze(["verification:capture-required"]) }),
       expectedEvidence: null,

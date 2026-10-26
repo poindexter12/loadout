@@ -1366,7 +1366,7 @@ function createDispatch(dependencies) {
           }
         }
       }
-      const activeRuntimeAttempt = current && !current.terminalAt && !(t.claim && t.claim.by) && Boolean(current.launchedAt || current.boundAt);
+      const activeRuntimeAttempt = current && !current.terminalAt && !(t.claim && t.claim.by) && Boolean(t.dispatchNonce) && Boolean(current.launchedAt || current.boundAt);
       if (activeRuntimeAttempt) {
         const evidenceCall = `so the orchestrator can supersede it in one call: \`sidequest dispatch ${t.ref} --recovery-evidence "<observed failed-claim evidence>"\`.`;
         const taskIdCall = ` If the host already reported that task failed, retire it now with the failed task id: \`sidequest dispatch ${t.ref} --recovery-evidence "<host task-failure error>" --recovery-task-id ${current?.agentId || current?.agentName || "<failed task id>"}\` (MCP \`recoveryTaskId\`).`;
@@ -2101,6 +2101,47 @@ function createDispatch(dependencies) {
     const cleanup = reclaimUnclaimedDispatchWorktree(meta.path, dispatchState(terminal.ticket));
     return { ok: true, ticket: terminal.ticket, cleanup };
   }
+  function uncreatedWorktreeCreationAttempt(ticket, state, sessionId, worktree) {
+    if (!state || !ticket?.dispatchNonce) return false;
+    if (state.sessionId !== sessionId || state.sharedTree !== false) return false;
+    if (state.outcome !== "launched" || state.terminalAt) return false;
+    if (state.worktreeBindingSource !== "worktree-create" || !state.worktree) return false;
+    if (state.worktreeCreationCompletedAt) return false;
+    if (state.claimedAt || ticket.claim?.by || ticket.checkpoint) return false;
+    return !worktree || canonicalPath(state.worktree) === worktree;
+  }
+  function rollbackDispatchWorktreeCreation(sessionId, opts) {
+    const normalizedSessionId = String(sessionId || "").trim();
+    if (!normalizedSessionId) return { ok: false, reason: "missing_binding_facts" };
+    const target = String(opts?.worktree || "").trim();
+    const boundWorktree = target ? canonicalPath(target) : null;
+    const matches = [];
+    for (const project of listProjects({ all: true })) {
+      if (!project?.slug) continue;
+      for (const candidate of listTickets(project.slug)) {
+        if (!uncreatedWorktreeCreationAttempt(candidate, dispatchState(candidate), normalizedSessionId, boundWorktree)) continue;
+        matches.push({ slug: project.slug, id: candidate.id });
+      }
+    }
+    if (matches.length !== 1) return { ok: false, reason: matches.length ? "ambiguous_binding" : "dispatch_binding_unavailable" };
+    const match = matches[0];
+    return withTicketLock(match.slug, match.id, () => {
+      const ticket = getTicket(match.slug, match.id);
+      const state = dispatchState(ticket);
+      if (!uncreatedWorktreeCreationAttempt(ticket, state, normalizedSessionId, boundWorktree)) return { ok: false, reason: "dispatch_binding_unavailable" };
+      const staleWorktree = String(state.worktree || "");
+      setDispatchTerminal(ticket, "failed", "worktree-create-rollback", {
+        slug: match.slug,
+        error: opts?.error,
+        failureShape: "worktree_create_failed"
+      });
+      ticket.dispatchNonce = null;
+      ticket.dispatchExecutor = null;
+      stampDispatchEvent(ticket, "worktree-create-rollback");
+      putTicket(match.slug, ticket);
+      return { ok: true, ref: ticket.ref, slug: match.slug, worktree: staleWorktree };
+    });
+  }
   function recordSanctionedCommit(slug, idOrRef, opts) {
     const by = String(opts?.by || "").trim();
     const commit = String(opts?.commit || "").trim().toLowerCase();
@@ -2801,6 +2842,7 @@ function createDispatch(dependencies) {
     completeDispatchWorktreeCreation,
     recordDispatchWorktreeProvisioningFailure,
     recoverDispatchWorktreeCreation,
+    rollbackDispatchWorktreeCreation,
     dispatchIdentityDiagnosis,
     dispatchIsolationExpectation,
     dispatchUnboundClaim,

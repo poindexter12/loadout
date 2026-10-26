@@ -6,6 +6,12 @@
  * independently; the MCP layer serializes board mutations where required.
  */
 
+const { ensureLiveCwd } = require('../lib/cwd-guard.js');
+
+// Before anything else resolves paths: a session started in a since-deleted
+// worktree hands this server a dead cwd (SQ-368).
+ensureLiveCwd();
+
 const mcp = require('../lib/mcp.js');
 
 const CLIENT_HEARTBEAT_INTERVAL_MILLISECONDS = 60_000;
@@ -155,6 +161,8 @@ function main() {
   const dispatchMessage = (message: unknown) => {
     // writeMessage is the only stdout writer, so handing it over is what lets a
     // long-running tool emit notifications/progress mid-call (SQ-355).
+    // The cwd can be deleted while this long-lived server runs (SQ-368).
+    ensureLiveCwd();
     const operation: Promise<void> = Promise.resolve(mcp.handleRequest(message, { sendNotification: writeMessage })).then(
       (response: unknown) => { writeMessage(response); },
       () => undefined,

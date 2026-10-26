@@ -2286,3 +2286,61 @@ for (const variant of [
     assert.equal(dispatchBaseline('origin-main', 'terminal-wave', 'remote-terminal'), 'terminal-wave tip', 'origin-main forks the configured branch once its remote ref exists');
   });
 }
+
+// SQ-255. A WorktreeCreate that refused before `git worktree add` created nothing, yet the attempt it had
+// already bound stayed `launched` while holding a worktree path that never existed. Rebinding needs that
+// exact path and the harness names every checkout freshly, so every later spawn missed both binding loops
+// and was refused `dispatch_binding_unavailable` for good. SQ-51 and SQ-80 sat unreachable by any
+// documented action, and a replacement token did not help: the new attempt bound the same absent path.
+test('SQ-255: an attempt whose WorktreeCreate hook created nothing is dispatchable again with no flags', () => {
+  const { spawnSync } = require('node:child_process');
+  const ticket = store.createTicket(slug, {
+    title: 'worktree-create rollback fixture',
+    category: 'codebase-exploration',
+    description: 'A dispatch whose WorktreeCreate hook refuses before any checkout exists.',
+    files: ['README.md'],
+  });
+  const sessionId = 'sq255-rollback-session';
+  const prepared = store.prepareDispatch(slug, ticket.ref, { sessionId });
+  assert.equal(store.recordDispatchLaunch(slug, ticket.ref, {
+    token: prepared.token,
+    executor: prepared.ticket.dispatchExecutor,
+    sessionId,
+    agentName: 'sq255-rollback-agent',
+  }).ok, true);
+  // The first spawn bound this path and then threw inside the hook: no checkout, no claim, no agent.
+  const stale = worktrees.namedWorktreePath(PROJECT, 'sq255-rollback-stale');
+  assert.equal(store.bindDispatchWorktreeCreation(slug, sessionId, stale).ok, true);
+  assert.equal(fs.existsSync(stale), false, 'the bound path must not exist: the hook refused before creating it');
+
+  // The replacement spawn carries a fresh worktree name, which is exactly why rebinding the stale path is
+  // not the escape. The hook has to retire the attempt whose checkout it can no longer find.
+  const refusal = spawnSync(process.execPath, [path.join(HOOKS, 'worktree-create.js')], {
+    input: JSON.stringify({
+      hook_event_name: 'WorktreeCreate',
+      name: 'sq255-rollback-retry',
+      session_id: sessionId,
+      cwd: PROJECT,
+    }),
+    encoding: 'utf8',
+    env: { ...process.env, SIDEQUEST_HOME },
+    windowsHide: true,
+  });
+  assert.notEqual(refusal.status, 0, 'a spawn with no reachable binding must still refuse creation');
+  assert.match(refusal.stderr, /dispatch_binding_unavailable/);
+  assert.ok(
+    refusal.stderr.includes(`${ticket.ref} was rolled back to todo`),
+    `the refusal must name the attempt it retired, because this string is the orchestrator's only interface to the failure: ${refusal.stderr}`,
+  );
+
+  const rolled = store.getTicket(slug, ticket.ref);
+  assert.equal(rolled.dispatchNonce, null, 'the rolled-back attempt releases its token');
+  assert.equal(rolled.dispatch.outcome, 'failed');
+  assert.ok(rolled.dispatch.terminalAt, 'the retired attempt records a terminal fact');
+
+  // The whole point: no --recovery-evidence, no allowRepeatFailure, no --shared-tree.
+  const again = store.prepareDispatch(slug, ticket.ref, { sessionId: 'sq255-rollback-session-2' });
+  assert.equal(typeof again.token, 'string');
+  assert.equal(again.ticket.dispatch.outcome, 'prepared');
+  assert.ok(!again.ticket.dispatch.worktree, 'the fresh attempt carries no stale worktree binding');
+});

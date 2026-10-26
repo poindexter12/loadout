@@ -822,7 +822,9 @@ test('control-plane delivery validates a reviewed interaction and keeps no-submi
 // candidate, so the content check must compare the delivery against the
 // named reviewed descendant instead.
 function squashReviewedDescendant(label: string, reviewedBody: string) {
-  const verify = nodeVerify(`const fs=require('node:fs'); const {execFileSync}=require('node:child_process'); const branch=execFileSync('git',['branch','--show-current'],{encoding:'utf8'}).trim(); const expected=branch==='main'?${JSON.stringify(reviewedBody)}:'executor work\\n'; process.exit(fs.readFileSync('feature.txt','utf8')===expected?0:7)`);
+  // SQ-275: a recorded (non-working-tree) delivery is verified in a detached scratch worktree at the
+  // delivery commit, never in the user's checkout, so the integration-side verify sees no branch.
+  const verify = nodeVerify(`const fs=require('node:fs'); const {execFileSync}=require('node:child_process'); const branch=execFileSync('git',['branch','--show-current'],{encoding:'utf8'}).trim(); const expected=(branch==='main'||branch==='')?${JSON.stringify(reviewedBody)}:'executor work\\n'; process.exit(fs.readFileSync('feature.txt','utf8')===expected?0:7)`);
   const fixture = makeRepo(label);
   const { slug } = store.ensureProject(fixture.repo);
   const ticket = store.createTicket(slug, {

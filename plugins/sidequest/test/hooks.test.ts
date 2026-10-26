@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('node:crypto');
 const { execFileSync, spawn, spawnSync } = require('node:child_process');
+const { waitForCapacity, capacityWaitTimeoutMessage } = require('./_capacity-deadline.js');
 
 // A throwaway store home so the SubagentStop hook (which loads lib/store.js as a
 // subprocess and inherits this env) reads a fixture board, never the real one. The
@@ -172,21 +173,16 @@ function runHookProcessForBudget(script?: any, payload?: any, envOverrides?: any
 const WAIT_FOR_PATH_PER_TEST_WORKER_MS = 2_000;
 const WAIT_FOR_PATH_FLOOR_MS = 60_000;
 
-function testWorkerConcurrency(): number {
-  const argument = process.execArgv.find((value: string) => value.startsWith('--test-concurrency='));
-  const requested = Number(argument?.slice('--test-concurrency='.length));
-  return Number.isInteger(requested) && requested > 0 ? requested : os.availableParallelism();
-}
-
 async function waitForPath(file: string): Promise<void> {
   // Detached workers run slower under host load than worker count predicts; the poll returns
-  // as soon as the file lands, so the floor only lengthens a failure.
-  const deadline = Date.now() + Math.max(WAIT_FOR_PATH_FLOOR_MS, WAIT_FOR_PATH_PER_TEST_WORKER_MS * testWorkerConcurrency());
-  while (Date.now() < deadline) {
-    if (fs.existsSync(file)) return;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  throw new Error(`Timed out waiting for ${file}`);
+  // as soon as the file lands, so the floor only lengthens a failure. SQ-74: the per-worker
+  // term also scales with the measured load, the way the capture budget around it does.
+  const result = await waitForCapacity(() => fs.existsSync(file), {
+    perTestWorkerMilliseconds: WAIT_FOR_PATH_PER_TEST_WORKER_MS,
+    floorMilliseconds: WAIT_FOR_PATH_FLOOR_MS,
+    pollMilliseconds: 5,
+  });
+  if (!result.ready) throw new Error(capacityWaitTimeoutMessage(file, result));
 }
 
 function publishStateLock(lockDirectory: string, ownerPid: number): string {
@@ -2617,6 +2613,42 @@ test('fail-closed guard: guard-worktree-isolation denies an executor write it ca
 test('fail-closed guard: force-exec-bypass denies an executor call it cannot check while the board lock is held', async () => {
   const result = await runGuardUnderBoardLock(FORCE_BYPASS, executorPayload('Bash', { command: 'ls' }));
   assertBoardContentionDeny(result, 'force-exec-bypass');
+});
+
+test('fail-closed guard: guard-shared-tree-commit denies an executor raw commit it cannot check while the board lock is held', async () => {
+  // SQ-370: this guard reads the board to find the executor's shared-tree claim. Before the fix its catch swallowed
+  // the lock error and the raw commit went through unchecked.
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-fail-closed-shared-commit-'));
+  gitFixture(['init', '-q', '-b', 'main'], repo);
+  const result = await runGuardUnderBoardLock(
+    GUARD_SHARED_TREE_COMMIT,
+    executorPayload('Bash', { command: 'git commit -m unchecked' }, repo),
+  );
+  assertBoardContentionDeny(result, 'guard-shared-tree-commit');
+});
+
+test('guard-destructive-git spawns no git for a command that cannot destroy work or publish (SQ-370)', async () => {
+  // Every Bash call runs this guard under the harness's 10s hook timeout, and a guard killed there decides nothing.
+  // A slow git must therefore never be on the path of a plain command: the fake git records each invocation.
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-370-slow-git-'));
+  const marker = path.join(bin, 'git-invoked');
+  const fakeGit = path.join(bin, 'git');
+  fs.writeFileSync(fakeGit, `#!/bin/sh\necho "$*" >> "${marker}"\nsleep 3\nexit 1\n`, { mode: 0o755 });
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-370-plain-cwd-'));
+  for (const command of ['ls', 'git log --oneline -1', 'git status --short']) {
+    const started = Date.now();
+    const result = await runHookProcessForBudget(
+      path.join(HOOKS, 'guard-destructive-git.js'),
+      { hook_event_name: 'PreToolUse', session_id: `sq-370-${crypto.randomUUID()}`, tool_name: 'Bash', tool_input: { command }, cwd },
+      { PATH: `${bin}${path.delimiter}${process.env.PATH || ''}` },
+    );
+    const elapsedMs = Date.now() - started;
+    assert.equal(result.status, 0, `${command}: ${result.stderr}`);
+    assert.equal(result.stdout.trim(), '', `${command} must be allowed silently: ${result.stdout}`);
+    const invoked = fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8') : '';
+    assert.equal(invoked, '', `${command} must not spawn git, but the guard ran: ${invoked}`);
+    assert.ok(elapsedMs < 1000, `${command} took ${elapsedMs}ms; the guard must answer a non-git-write command without waiting on git`);
+  }
 });
 
 test('fail-closed guard: guard-home-delete, guard-process-signal and read-only git stay unrefused while the board lock is held', async () => {

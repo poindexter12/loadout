@@ -41,17 +41,27 @@ function captureBudgetClass(command) {
   if (isFullSuiteCommand(command)) return "full-suite";
   return isTestSuiteCommand(command) ? "test-suite" : "command";
 }
+function otherRunnableThreads(loadAverage) {
+  return typeof loadAverage === "number" && Number.isFinite(loadAverage) && loadAverage > 0 ? loadAverage : 0;
+}
+function effectiveTestWorkers(testConcurrency, availableParallelism, loadAverage) {
+  return Math.min(
+    testConcurrency,
+    Math.max(minimumEffectiveTestWorkers, availableParallelism * testConcurrency / (testConcurrency + otherRunnableThreads(loadAverage)))
+  );
+}
+function capacityScaledDeadlineMilliseconds(perTestWorkerMilliseconds, testWorkers, availableParallelism = os.availableParallelism(), loadAverage = os.loadavg()[0] || 0) {
+  const workers = Number.isFinite(testWorkers) && testWorkers > 0 ? testWorkers : 1;
+  const capacityScale = workers / effectiveTestWorkers(workers, availableParallelism, loadAverage);
+  return Math.round(perTestWorkerMilliseconds * workers * capacityScale);
+}
 function captureBudget(command, availableParallelism = os.availableParallelism(), loadAverage = os.loadavg()[0] || 0, rawOverride = process.env[phaseBudgetOverrideVariable]) {
   const budgetClass = captureBudgetClass(command);
   const testConcurrency = Math.min(maximumTestConcurrency, Math.max(minimumTestConcurrency, availableParallelism));
-  const otherRunnableThreads = typeof loadAverage === "number" && Number.isFinite(loadAverage) && loadAverage > 0 ? loadAverage : 0;
-  const effectiveTestWorkers = Math.min(
-    testConcurrency,
-    Math.max(minimumEffectiveTestWorkers, availableParallelism * testConcurrency / (testConcurrency + otherRunnableThreads))
-  );
+  const effectiveWorkers = effectiveTestWorkers(testConcurrency, availableParallelism, loadAverage);
   const capacityPhaseBudgetMilliseconds = Math.min(
     maximumTestPhaseTimeoutMilliseconds,
-    Math.round(baselineTestPhaseDurationMilliseconds * maximumTestConcurrency / effectiveTestWorkers * testPhaseBudgetSafetyFactor)
+    Math.round(baselineTestPhaseDurationMilliseconds * maximumTestConcurrency / effectiveWorkers * testPhaseBudgetSafetyFactor)
   );
   const measuredPhaseBudgetMilliseconds = budgetClass === "command" ? 0 : capacityPhaseBudgetMilliseconds;
   const requestedText = typeof rawOverride === "string" ? rawOverride.trim() : "";
@@ -79,8 +89,8 @@ function captureBudget(command, availableParallelism = os.availableParallelism()
     phaseBudgetMilliseconds,
     hardMaximumMilliseconds: captureHardMaximumMilliseconds,
     availableParallelism,
-    loadAverage: otherRunnableThreads,
-    effectiveTestWorkers,
+    loadAverage: otherRunnableThreads(loadAverage),
+    effectiveTestWorkers: effectiveWorkers,
     overrideVariable: phaseBudgetOverrideVariable,
     overrideMilliseconds: widened ? requested : null,
     clampedToHardMaximum,
@@ -360,6 +370,7 @@ async function runFullSuiteCapture(command, project, cwd, fileSystem = fs, optio
   let capture;
   let releaseFailure = null;
   try {
+    options.beforeRun?.();
     const budget = (options.resolveBudget || captureBudget)(command);
     capture = await runBudgetedCapture(command, cwd, budget, {
       ...process.env,
@@ -512,9 +523,46 @@ async function runCapturedVerification(command, target, cwd = process.cwd(), fil
     return Object.freeze({ capture: capture2, recorded: Object.freeze({ ok: false, reason: binding.reason.split(":")[0] || "capture_binding_refused", message: binding.reason }) });
   }
   const captureCwd = binding?.ok ? binding.cwd : cwd;
-  const capture = preflight || (target && isFullSuiteCommand(command) ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem, options) : await runBudgetedCapture(command, captureCwd, (options.resolveBudget || captureBudget)(command), void 0, options.announce));
-  const recorded = target ? recordCapture(target, capture, captureCwd, resolution, binding?.ok ? binding.head : void 0) : null;
+  const started = { before: null };
+  const beforeRun = () => {
+    options.beforeRun?.();
+    if (target && !preflight) started.before = treeSnapshot(captureCwd, true);
+  };
+  const capture = preflight || (target && isFullSuiteCommand(command) ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem, { ...options, beforeRun }) : (beforeRun(), await runBudgetedCapture(command, captureCwd, (options.resolveBudget || captureBudget)(command), void 0, options.announce)));
+  const before = started.before || (target && !preflight ? treeSnapshot(captureCwd, true) : null);
+  const recorded = target ? recordCapture(target, capture, captureCwd, resolution, binding?.ok ? binding.head : void 0, before) : null;
   return Object.freeze({ capture, recorded });
+}
+const DIRTY_TREE_CANDIDATE_SOURCE = "git-dirty-tree";
+function porcelainLines(output) {
+  return output.split("\n").filter((line) => line.trim());
+}
+function treeSnapshot(cwd, withIdentity = false) {
+  const head = (gitOutput(cwd, ["rev-parse", "--verify", "HEAD^{commit}"]) || "").toLowerCase();
+  if (!head) return null;
+  const status = gitOutput(cwd, ["status", "--porcelain=v1", "--untracked-files=all"], true);
+  if (status === null) return null;
+  const lines = porcelainLines(status);
+  const snapshot = { head, status: Object.freeze(lines), tracked: Object.freeze(lines.filter((line) => !line.startsWith("??"))) };
+  return Object.freeze(withIdentity && lines.length ? { ...snapshot, dirtyCandidate: dirtyTreeCandidate(cwd, snapshot) } : snapshot);
+}
+function dirtyTreeCandidate(cwd, snapshot) {
+  const hash = createHash("sha256").update(snapshot.head).update("\0").update(snapshot.status.join("\n")).update("\0");
+  hash.update(gitOutput(cwd, ["diff", "--binary", "HEAD"], true) || "");
+  for (const line of snapshot.status) {
+    if (!line.startsWith("??")) continue;
+    const file = line.slice(3);
+    try {
+      hash.update("\0").update(file).update("\0").update(fs.readFileSync(path.join(cwd, file)));
+    } catch (_) {
+      hash.update("\0").update(file).update("\0unreadable");
+    }
+  }
+  return Object.freeze({ source: DIRTY_TREE_CANDIDATE_SOURCE, value: `${snapshot.head}+${hash.digest("hex")}` });
+}
+function describeDirtyPaths(lines) {
+  const paths = lines.map((line) => line.slice(3).trim()).filter(Boolean);
+  return paths.slice(0, 10).join(", ") + (paths.length > 10 ? `, and ${paths.length - 10} more` : "");
 }
 function verifiedRevision(cwd) {
   try {
@@ -531,23 +579,31 @@ function verifiedRevision(cwd) {
     return null;
   }
 }
-function recordCapture(target, capture, cwd, resolved, boundRevision) {
+function recordCapture(target, capture, cwd, resolved, boundRevision, before) {
   const store = require("./store.js");
   const resolution = resolved || resolveCaptureProject(target);
   if (!resolution.ok) return { ok: false, reason: resolution.reason };
   const project = resolution.project;
   const ticket = store.getTicket(project.slug, target.ticket);
   const workingTreeCandidate = store.workingTreeDeliveryCandidate(project.slug, ticket);
-  if (!workingTreeCandidate && boundRevision) {
-    const after = verifiedRevision(cwd);
-    if (after?.value !== boundRevision) {
+  const bound = boundRevision || before?.head;
+  if (!workingTreeCandidate && bound) {
+    const after = treeSnapshot(cwd);
+    if (after?.head !== bound) {
       return {
         ok: false,
-        reason: `capture_candidate_moved: the capture for ${target.ticket} was bound to HEAD ${boundRevision} in ${JSON.stringify(path.resolve(cwd))}, but HEAD there is ${after?.value || "unresolvable"} now that the command has finished, so the run cannot be attributed to a single commit and was not recorded. Leave the worktree alone while the wrapper runs, then rerun it.`
+        reason: `capture_candidate_moved: the capture for ${target.ticket} was bound to HEAD ${bound} in ${JSON.stringify(path.resolve(cwd))}, but HEAD there is ${after?.head || "unresolvable"} now that the command has finished, so the run cannot be attributed to a single commit and was not recorded. Leave the worktree alone while the wrapper runs, then rerun it.`
+      };
+    }
+    if (before && !before.status.length && after.tracked.length) {
+      return {
+        ok: false,
+        reason: `capture_candidate_dirtied: the capture for ${target.ticket} started from a clean tree at HEAD ${bound} in ${JSON.stringify(path.resolve(cwd))}, but tracked files there differ from HEAD now that the command has finished, so HEAD may not be the code that ran and the run was not recorded. Leave the worktree alone while the wrapper runs, restore the tree, then rerun it. Modified: ${describeDirtyPaths(after.tracked)}`
       };
     }
   }
-  const candidate = workingTreeCandidate?.candidate || (boundRevision ? Object.freeze({ source: "git", value: boundRevision }) : verifiedRevision(cwd));
+  const dirty = !workingTreeCandidate && before && before.status.length ? before.dirtyCandidate || dirtyTreeCandidate(cwd, before) : null;
+  const candidate = workingTreeCandidate?.candidate || dirty || (bound ? Object.freeze({ source: "git", value: bound }) : verifiedRevision(cwd));
   if (!candidate) {
     return {
       ok: false,
@@ -587,6 +643,10 @@ function report(capture, recorded) {
   if (recorded?.ok && recorded.capture) {
     process.stdout.write(`capture=${recorded.capture.id} candidate=${recorded.capture.candidate.source}:${recorded.capture.candidate.value}
 `);
+    if (recorded.capture.candidate.source === DIRTY_TREE_CANDIDATE_SOURCE) {
+      process.stdout.write(`capture-diagnostic: the tree had uncommitted changes when this command started, so this capture is bound to that dirty tree (${DIRTY_TREE_CANDIDATE_SOURCE}), not to any commit. It is recorded as evidence and can never satisfy the submit gate. To verify a candidate, commit it with the board commit tool, restore everything else, and rerun the wrapper on the clean tree.
+`);
+    }
     if (LOAD_ONLY_CAPTURE_STATUSES.includes(capture.status)) {
       process.stdout.write(`capture-waiver: if this ${capture.status} came only from host load and reruns keep failing, do not hand-edit refs/sidequest; keep the claim, comment this capture's evidence, and ask the orchestrator to post "${CAPTURE_WAIVER_MARKER} capture=${recorded.capture.id} signature=${captureFailureSignature(capture)} authority=<who>; <reason and evidence>" on ${recorded.capture.ticket || "the ticket"}, then resubmit this same candidate.
 `);
@@ -617,5 +677,5 @@ async function main() {
   report(capture, recorded);
   process.exitCode = capture.exitCode === 0 && (!target || recorded?.ok) ? 0 : 2;
 }
-module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, acquireCaptureSlot, isFullSuiteCommand, isTestSuiteCommand, captureBudgetClass, captureBudget, captureHardMaximumMilliseconds, runBudgetedCapture, fullSuiteCaptureTimeoutMilliseconds, recordCapture, verifiedRevision };
+module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, acquireCaptureSlot, isFullSuiteCommand, isTestSuiteCommand, captureBudgetClass, captureBudget, captureHardMaximumMilliseconds, runBudgetedCapture, fullSuiteCaptureTimeoutMilliseconds, effectiveTestWorkers, capacityScaledDeadlineMilliseconds, recordCapture, verifiedRevision };
 if (require.main === module) void main();
