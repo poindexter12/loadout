@@ -761,7 +761,9 @@ async function stopRunningSupervisor({
 } = {}) {
   const owner = await resolveOwner(PUBLIC_SHIM_PORT);
   const reason = portOwnerRefusal(owner);
-  if (reason) return { ok: false, reason };
+  // ownerState lets a caller tell an unconfirmed (untouched, still serving)
+  // listener from a foreign install's conflict without parsing the reason.
+  if (reason) return { ok: false, reason, ownerState: owner.state };
   const pid = owner.pid;
   const targetPid = pid || readPid('guardian');
   // Read before stopProcess('guardian'), which retires the record it identifies by.

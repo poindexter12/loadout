@@ -46,6 +46,24 @@ async function waitFor(predicate, message) {
   throw new Error(message);
 }
 
+function waitForListeningPort(child) {
+  return new Promise((resolve, reject) => {
+    let buffered = '';
+    const timeout = setTimeout(() => reject(new Error(`model-gateway did not report a listening port: ${buffered}`)), 5000);
+    const onData = (chunk) => {
+      buffered += chunk;
+      const match = buffered.match(/listening on 127\.0\.0\.1:(\d+)/);
+      if (!match) return;
+      clearTimeout(timeout);
+      child.stdout.off('data', onData);
+      resolve(Number(match[1]));
+    };
+    child.stdout.on('data', onData);
+    child.once('error', (error) => { clearTimeout(timeout); reject(error); });
+    child.once('exit', (code, signal) => { clearTimeout(timeout); reject(new Error(`model-gateway exited before reporting a listening port (${code ?? signal}): ${buffered}`)); });
+  });
+}
+
 async function waitForShim(port) {
   await waitFor(async () => {
     try {
@@ -56,26 +74,20 @@ async function waitForShim(port) {
   }, 'shim did not start');
 }
 
-async function unusedPort() {
-  const probe = http.createServer();
-  const port = await listen(probe);
-  await new Promise((resolve) => probe.close(resolve));
-  return port;
-}
-
 async function spawnShim(t, proxyPort, extraEnv = {}) {
-  const shimPort = await unusedPort();
+  const requestedShimPort = '0';
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PORT: requestedShimPort,
       CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
       CODEX_GATEWAY_REQUEST_LOG: '0',
       ...extraEnv,
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
   await waitForShim(shimPort);
   return shimPort;
 }
@@ -281,7 +293,7 @@ test('telemetry transport failure cannot change the routed response', async (t) 
   });
   const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
-  const unavailableCollectorPort = await unusedPort();
+  const unavailableCollectorPort = 1;
   const shimPort = await spawnShim(t, proxyPort, {
     CLAUDE_CODE_PROPAGATE_TRACEPARENT: '1',
     CODEX_GATEWAY_TELEMETRY_ENDPOINT: `http://127.0.0.1:${unavailableCollectorPort}/v1/traces`,

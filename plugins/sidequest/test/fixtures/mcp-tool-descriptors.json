@@ -215,7 +215,7 @@
   },
   {
     "name": "ready",
-    "description": "List ready ticket refs.",
+    "description": "List ready ticket refs, by priority.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -276,6 +276,12 @@
             "type": "string"
           }
         },
+        "externalWorktrees": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "produces": {
           "type": "array",
           "items": {
@@ -302,6 +308,10 @@
         },
         "workingTreeDelivery": {
           "type": "boolean"
+        },
+        "baseRef": {
+          "type": "string",
+          "maxLength": 255
         },
         "anchors": {
           "type": "string",
@@ -453,6 +463,12 @@
             "type": "string"
           }
         },
+        "externalWorktrees": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "by": {
           "type": "string"
         },
@@ -482,6 +498,10 @@
         },
         "workingTreeDelivery": {
           "type": "boolean"
+        },
+        "baseRef": {
+          "type": "string",
+          "maxLength": 255
         },
         "externalDeliverable": {
           "type": "boolean"
@@ -1508,7 +1528,7 @@
   },
   {
     "name": "dispatch",
-    "description": "Dispatch; token and spawn spec.",
+    "description": "Dispatch; token and spawn spec. Flags skipped higher-priority ready work.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1527,6 +1547,9 @@
         },
         "allowUnscoped": {
           "type": "boolean"
+        },
+        "priorityOverride": {
+          "type": "string"
         },
         "integrationBranch": {
           "type": "string"

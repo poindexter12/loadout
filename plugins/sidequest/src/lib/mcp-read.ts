@@ -85,7 +85,9 @@ type ToolDefinition = {
 };
 
 function readySummary(payload?: any) {
-  const tickets = payload.tickets.map((ticket: any) => ({ ref: ticket.ref, title: ticket.title }));
+  // SQ-348: priority rides every row, so the bands are visible while a wave is being chosen, not
+  // only after dispatch warns about one. Waves group by file overlap and can mix priorities.
+  const tickets = payload.tickets.map((ticket: any) => ({ ref: ticket.ref, title: ticket.title, priority: ticket.priority }));
   return {
     count: tickets.length,
     tickets,
@@ -162,7 +164,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: 'pulse',
-    description: 'Compact liveness read: status, claim, latest comment, dispatch state, invalidated wave state, git activity.',
+    description: 'Compact liveness read: status, claim, latest comment, dispatch state, invalidated wave state, git activity. liveness host_sleep = host slept: keep claim, never change routes.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -336,7 +338,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: 'ready',
-    description: 'Ready tickets in safe waves. Default: count plus ref/title rows; full:true returns ticket records.',
+    description: 'Ready tickets in safe waves, rows in priority order. Default: count plus ref/title/priority rows; full:true returns ticket records. Waves group by file overlap, not priority: dispatch the highest band first.',
     inputSchema: {
       type: 'object',
       properties: {

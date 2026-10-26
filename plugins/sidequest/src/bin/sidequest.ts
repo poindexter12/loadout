@@ -9,7 +9,7 @@ const { cmdAdd, cmdList, cmdPulse, cmdChanges, cmdUpdate, cmdRm } = require('./s
 const { cmdProfile, cmdCategory, cmdGlobalFallback } = require('./sidequest-cmd-configuration');
 const { cmdClaim, cmdCheckpoint, cmdVerdict, cmdRelease, cmdDone, cmdGroomClose, cmdScopeRequest, cmdCommit, cmdRework, cmdSubmit, cmdAssembleWave, cmdIntegrate, cmdPublish } = require('./sidequest-cmd-execution');
 const { cmdSweepClaims, cmdWorktrees, cmdRecoverShared, cmdNext, cmdWork, cmdReconcile, cmdAssign, cmdRemind, cmdUnremind, cmdComment, cmdComments, cmdLink, cmdUnlink, cmdReady, cmdArchive, cmdUnarchive } = require('./sidequest-cmd-collaboration');
-const { cmdDispatch, cmdBriefing, cmdTempCleanup, cmdNativeAgent, cmdModels, cmdRoute, cmdBoardConfig, cmdProjects, cmdRouting, cmdArchiveBoard, cmdUnarchiveBoard, cmdMerge } = require('./sidequest-cmd-dispatch');
+const { cmdDispatch, cmdBriefing, cmdTempCleanup, cmdNativeAgent, cmdModels, cmdRoute, cmdBoardConfig, cmdProjects, cmdRouting, cmdArchiveBoard, cmdUnarchiveBoard, cmdMerge, cmdMoveBoard } = require('./sidequest-cmd-dispatch');
 const { cmdStory } = require('./sidequest-cmd-story');
 const { cmdAudit } = require('./sidequest-cmd-audit');
 const { cmdIssue } = require('./sidequest-cmd-issue');
@@ -61,7 +61,7 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   ready: ['model', 'category', 'brief'],
   archive: ['done'],
   unarchive: [],
-  dispatch: ['shared-tree', 'allow-repeat-failure', 'allow-unscoped', 'session', 'unverified-transport', 'recovery-evidence', 'recovery-task-id'],
+  dispatch: ['shared-tree', 'allow-repeat-failure', 'allow-unscoped', 'priority-override', 'session', 'unverified-transport', 'recovery-evidence', 'recovery-task-id'],
   briefing: ['token-file', 'dry-run', 'render'],
   temp: ['root'],
   'cleanup-temp': ['root'],
@@ -73,6 +73,7 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   routing: ['enabled', 'disabled'],
   'archive-board': [],
   'unarchive-board': [],
+  'move-board': ['to-home', 'from-home', 'dry-run'],
   merge: ['dry-run'],
   story: ['title', 'desc', 'description', 'color', 'body', 'body-file', 'ref', 'by', 'rotate', 'full'],
   dashboard: ['port', 'open'],
@@ -88,6 +89,7 @@ const MUTATING_COMMANDS = new Set([
   'scope-request', 'scope_request', 'commit', 'rework', 'submit', 'assemble-wave', 'integrate', 'publish', 'release', 'unclaim',
   'assign', 'unassign', 'remind', 'unremind', 'comment', 'link', 'unlink', 'archive', 'unarchive', 'restore',
   'dispatch', 'archive-board', 'archive_board', 'unarchive-board', 'unarchive_board', 'restore-board', 'merge',
+  'move-board', 'move_board',
   'global-fallback', 'global_fallback',
 ]);
 
@@ -246,7 +248,7 @@ const HELP_COMMANDS: any = {
   ready: 'sidequest ready [--model <model>] [--category <id>] [--json] [--brief]',
   archive: 'sidequest archive [<id|SQ-n>] [--done]',
   unarchive: 'sidequest unarchive <id|SQ-n>',
-  dispatch: 'sidequest dispatch <SQ-n> [--shared-tree] [--allow-repeat-failure] [--allow-unscoped] [--project <path-or-slug>] [--session id] [--unverified-transport] [--recovery-evidence "<observed failure evidence>" [--recovery-task-id <failed host task id>]]',
+  dispatch: 'sidequest dispatch <SQ-n> [--shared-tree] [--allow-repeat-failure] [--allow-unscoped] [--priority-override "<reason>"] [--project <path-or-slug>] [--session id] [--unverified-transport] [--recovery-evidence "<observed failure evidence>" [--recovery-task-id <failed host task id>]]',
   briefing: 'sidequest briefing <SQ-n> (--token-file <path> | --dry-run) [--project <path-or-slug>]',
   'native-agent': 'sidequest native-agent <SQ-n> [--prompt "task"] [--shared-tree] [--json] [--unverified-transport]',
   temp: 'sidequest temp cleanup [--root <path>] [--json]',
@@ -258,6 +260,7 @@ const HELP_COMMANDS: any = {
   routing: 'sidequest routing [enabled|disabled] [--project <path-or-slug>] [--json]',
   'archive-board': 'sidequest archive-board <board-ref> [--json]',
   'unarchive-board': 'sidequest unarchive-board <board-ref> [--json]',
+  'move-board': 'sidequest move-board <board-ref>... --to-home <dir> [--from-home <dir>] [--dry-run] [--json]',
   merge: 'sidequest merge <src> <dst> [--dry-run]',
   dashboard: 'sidequest dashboard [--port N] [--no-open]',
   serve: 'sidequest serve [--port N]',
@@ -303,13 +306,14 @@ Usage:
   sidequest routing [enabled|disabled] [--project <path-or-slug>] [--json]
   sidequest archive-board <board-ref>                  archive a board
   sidequest unarchive-board <board-ref>                restore an archived board
+  sidequest move-board <board-ref>... --to-home <dir> [--dry-run]   move boards into another SIDEQUEST_HOME
   sidequest dashboard [--port N] [--no-open]     open the live board in the browser
   sidequest serve [--port N]                     run the board server in the foreground
   sidequest stop                                 stop the running board server
 
   -d/-m accept full markdown (headings, lists, fenced code, blockquotes, links, **bold**/*italic*/inline
     code). Use real newlines in the value, never a literal backslash-n: $'line one\\nline two' works
-    everywhere, while a heredoc is refused inside an isolated worktree.
+    everywhere, while a heredoc that carries a git invocation is refused inside an isolated worktree.
 
 Working the board safely (multi-agent):
   sidequest ready [--model <model>] [--category <id>] [--json] [--brief]   the ready set (unclaimed, unblocked) — fan subagents over it
@@ -359,7 +363,7 @@ Complexity is legacy input. Category routing chooses the concrete model and effo
   Ticket model and effort are resolved from its category. Use category add/edit to change routing policy.
 
 Native Agent dispatch (routed work stays in this conversation):
-  sidequest dispatch <SQ-n> [--shared-tree] [--allow-repeat-failure] [--allow-unscoped] [--project <path-or-slug>] [--session id] [--unverified-transport] [--recovery-evidence "<observed failure evidence>" [--recovery-task-id <failed host task id>]]  prepare a token-gated dispatch: declared-file tickets use worktrees by default; shared-tree dispatch requires the spawning runtime to already be rooted in the declared checkout; executors with a live claim cannot dispatch child work; --recovery-evidence retires an attempt no runtime will finish, either one that never bound a runtime, claim, or checkpoint, or one bound and unclaimed past the claim-idle backstop, records that evidence on the failed attempt, and prepares one fresh identity; --recovery-task-id carries the failed task id from a host task-failure notification, and when it matches that unclaimed attempt's own bound runtime the evidence applies at once instead of waiting out the backstop
+  sidequest dispatch <SQ-n> [--shared-tree] [--allow-repeat-failure] [--allow-unscoped] [--priority-override "<reason>"] [--project <path-or-slug>] [--session id] [--unverified-transport] [--recovery-evidence "<observed failure evidence>" [--recovery-task-id <failed host task id>]]  prepare a token-gated dispatch: declared-file tickets use worktrees by default; shared-tree dispatch requires the spawning runtime to already be rooted in the declared checkout; executors with a live claim cannot dispatch child work; when unblocked, undispatched ready work outranks the ticket the result names it in higherPriorityReady and a warning, and --priority-override records why this one goes first anyway; --recovery-evidence retires an attempt no runtime will finish, either one that never bound a runtime, claim, or checkpoint, or one bound and unclaimed past the claim-idle backstop, records that evidence on the failed attempt, and prepares one fresh identity; --recovery-task-id carries the failed task id from a host task-failure notification, and when it matches that unclaimed attempt's own bound runtime the evidence applies at once instead of waiting out the backstop
   sidequest briefing <SQ-n> (--token-file <path> | --dry-run) [--project <path-or-slug>]  print the current token-gated executor briefing; --dry-run (alias --render) assembles and prints the same briefing read-only, with no token, claim, worktree, or dispatch row, substituting marked placeholders for the values dispatch mints, so briefing text can be reviewed without spending a dispatch
   sidequest native-agent <SQ-n> [--prompt "task"] [--shared-tree] [--json] [--unverified-transport]  return an already-registered native Agent spawn spec + bounded prompt; CLI transport refuses unless --unverified-transport
   sidequest native-agent cleanup --name <name>        clean up any legacy temporary native Agent definition
@@ -403,6 +407,12 @@ Archive (put finished work out of the way, restorable):
   sidequest archive-board <board-ref>               archive a board (explicit reference required)
   sidequest unarchive-board <board-ref>             restore an archived board
   sidequest projects --archived                     list archived boards
+
+Split boards across homes (one SIDEQUEST_HOME per account):
+  sidequest move-board <board-ref>... --to-home <dir> [--from-home <dir>] [--dry-run] [--json]
+      moves tickets, stories, links, board config, notifications and projects/<slug>/ files;
+      refuses while a moved board has a live claim, a launched/bound dispatch or a held publish
+      lock. --from-home defaults to the current home. Existing worktrees stay where they are.
 
 User stories (a lightweight grouping tickets can belong to):
   sidequest story add -t "title" [-d desc] [--color <name|hex>]   create a story (prints its US-n ref)
@@ -650,6 +660,10 @@ async function main() {
     case 'unarchive_board':
     case 'restore-board':
       await cmdUnarchiveBoard(opts, positional);
+      break;
+    case 'move-board':
+    case 'move_board':
+      await cmdMoveBoard(opts, positional);
       break;
     case 'merge':
       await cmdMerge(opts, positional);

@@ -89,15 +89,16 @@ function assemble(board: Board, refs: string[], waveId: string) {
   return wave;
 }
 
-type Call = { op: 'create' | 'auto'; cwd: string; head?: string; base?: string; title?: string; body?: string; number?: number };
+type Call = { op: 'create' | 'auto' | 'view'; cwd: string; head?: string; base?: string; title?: string; body?: string; number?: number };
 
-function fakePort(opts: { failCreate?: Error; failAuto?: Error; firstNumber?: number } = {}) {
+function fakePort(opts: { failCreate?: Error; failAuto?: Error; firstNumber?: number; headSha?: string; mergeCommit?: string } = {}) {
   const calls: Call[] = [];
   let next = opts.firstNumber || 100;
   return {
     calls,
     creates: () => calls.filter((call) => call.op === 'create'),
     autos: () => calls.filter((call) => call.op === 'auto'),
+    views: () => calls.filter((call) => call.op === 'view'),
     async createPr(o: { cwd: string; head: string; base: string; title: string; body: string }) {
       calls.push({ op: 'create', ...o });
       if (opts.failCreate) throw opts.failCreate;
@@ -108,8 +109,20 @@ function fakePort(opts: { failCreate?: Error; failAuto?: Error; firstNumber?: nu
       calls.push({ op: 'auto', ...o });
       if (opts.failAuto) throw opts.failAuto;
     },
-    async viewPr() {
-      throw new Error('opening a PR never views one');
+    // Re-integrating a wave that holds a PR reconciles it (SQ-106): the PR is
+    // still open with its checks pending, so the wave stays awaiting merge.
+    async viewPr(o: { cwd: string; number: number }) {
+      calls.push({ op: 'view', ...o });
+      return {
+        number: o.number,
+        url: `https://github.com/example/repo/pull/${o.number}`,
+        // With mergeCommit set the PR has merged with its checks green (SQ-374).
+        state: (opts.mergeCommit ? 'MERGED' : 'OPEN') as 'OPEN' | 'MERGED',
+        headSha: opts.headSha || 'f'.repeat(40),
+        mergeCommit: opts.mergeCommit || null,
+        checks: (opts.mergeCommit ? 'success' : 'pending') as 'success' | 'pending',
+        failingChecks: [],
+      };
     },
   };
 }
@@ -201,6 +214,7 @@ test('pr mode opens one PR for an assembled wave with auto-merge and leaves main
   assert.deepEqual(again.pr, result.pr);
   assert.equal(port.creates().length, 1, 'idempotent re-integrate opens no second PR');
   assert.equal(port.autos().length, 1);
+  assert.deepEqual(port.views().map((call) => call.number), [100], 're-integrate reads the recorded PR once');
   assert.equal(remoteBranch(board, branch).split(/\s+/)[0], head, 'branch never re-pushed');
 
   // A subset of an awaiting wave is refused, never opened separately.
@@ -397,6 +411,7 @@ test('CLI integrate opens the PR through gh and reports awaiting merge', () => {
     'case "$1 $2" in',
     '  "pr create") cat > /dev/null; echo "https://github.com/example/repo/pull/41" ;;',
     '  "pr merge") exit 0 ;;',
+    '  "pr view") echo \'{"number":41,"url":"https://github.com/example/repo/pull/41","state":"OPEN","headRefOid":"abc","mergeCommit":null,"statusCheckRollup":[]}\' ;;',
     '  *) echo "unexpected gh $*" >&2; exit 1 ;;',
     'esac',
     '',
@@ -424,5 +439,167 @@ test('CLI integrate opens the PR through gh and reports awaiting merge', () => {
   const again = runCli(['integrate', candidate.ref, '--by', 'orchestrator']);
   assert.equal(again.status, 0, again.stderr + again.stdout);
   assert.match(again.stdout, /already awaiting merge: PR #41 https:\/\/github\.com\/example\/repo\/pull\/41/);
-  assert.equal(fs.readFileSync(log, 'utf8').trim().split('\n').length, 2, 'no gh call on re-integrate');
+  // Re-integrating only reads the PR back (SQ-106 reconcile): no create, no merge.
+  const againCalls = fs.readFileSync(log, 'utf8').trim().split('\n');
+  assert.equal(againCalls.length, 3, againCalls.join('\n'));
+  assert.equal(againCalls[2], 'pr view 41 --json number,url,state,headRefOid,mergeCommit,statusCheckRollup');
+});
+
+// SQ-374: CLI integrate against a fake gh that SIGKILLs the integrate process
+// (its parent) at one step of the open: 'create' inside gh pr create, before the
+// PR is reported; 'merge' after GitHub armed auto-merge on PR #41. Either way the
+// process dies before markWaveAwaitingMerge, exactly as a crash would.
+function crashCliIntegrate(board: Board, ref: string, at: 'create' | 'merge') {
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-pr-open-crash-gh-'));
+  const log = path.join(binDir, 'gh.log');
+  fs.writeFileSync(path.join(binDir, 'gh'), [
+    '#!/bin/sh',
+    'printf "%s\\n" "$*" >> "$FAKE_GH_LOG"',
+    'case "$1 $2" in',
+    `  "pr create") cat > /dev/null; ${at === 'create' ? 'kill -9 $PPID; exit 0' : 'echo "https://github.com/example/repo/pull/41"'} ;;`,
+    `  "pr merge") ${at === 'merge' ? 'kill -9 $PPID; exit 0' : 'exit 0'} ;;`,
+    '  *) echo "unexpected gh $*" >&2; exit 1 ;;',
+    'esac',
+    '',
+  ].join('\n'), { mode: 0o755 });
+  const { runCli } = makeCliRunner(BIN, {
+    SIDEQUEST_HOME: home,
+    CLAUDE_PROJECT_DIR: board.repo,
+    FAKE_GH_LOG: log,
+    PATH: `${binDir}${path.delimiter}${process.env.PATH}`,
+  }, { cwd: board.repo });
+  const result = runCli(['integrate', ref, '--by', 'orchestrator', '--json']);
+  assert.notEqual(result.status, 0, `the integrate process died mid-open: ${result.stdout}`);
+  const calls = fs.readFileSync(log, 'utf8').trim().split('\n');
+  assert.match(calls[calls.length - 1]!, at === 'create' ? /^pr create / : /^pr merge 41 --auto --merge$/);
+  return calls;
+}
+
+const integrateViaStore = (board: Board, ref: string, port: ReturnType<typeof fakePort>) =>
+  withPort(port, () => store.integrateSubmission(board.slug, ref, { target: store.integrationTarget(board.slug) }));
+
+test('an integrate that dies after arming auto-merge leaves a PR the next integrate adopts, idempotently', async () => {
+  const board = makeBoard('crash-merge');
+  const candidate = submitCandidate(board, 'xi.txt');
+  assemble(board, [candidate.ref], 'wave-crash-merge');
+  const branch = 'sidequest/wave/wave-crash-merge';
+  crashCliIntegrate(board, candidate.ref, 'merge');
+  const head = remoteBranch(board, branch).split(/\s+/)[0]!;
+  let ticket = store.getTicket(board.slug, candidate.ref);
+  assert.notEqual(ticket.submission.integration?.outcome, 'awaiting-merge', 'the crash came before the board recorded the PR');
+  assert.equal(ticket.submission.wave.prOpening?.pr?.number, 41, 'the open was recorded before the crash');
+  assert.equal(ticket.submission.wave.prOpening.headSha, head);
+
+  const port = fakePort({ headSha: head });
+  const adopted = await integrateViaStore(board, candidate.ref, port);
+  assert.equal(adopted.ok, true, adopted.message || adopted.reason);
+  assert.equal(adopted.adopted, true);
+  assert.equal(adopted.state, 'awaiting-merge');
+  assert.equal(adopted.pr.number, 41);
+  assert.match(adopted.message, /^Adopted PR #41 \(https:\/\/github\.com\/example\/repo\/pull\/41\).*re-armed its auto-merge/);
+  assert.equal(port.creates().length, 0, 'no second PR is opened');
+  assert.deepEqual(port.autos().map((call) => call.number), [41], 'auto-merge is re-armed on the adopted PR');
+  ticket = store.getTicket(board.slug, candidate.ref);
+  assert.equal(ticket.status, 'doing');
+  assert.equal(ticket.submission.integration.outcome, 'awaiting-merge');
+  assert.deepEqual([ticket.submission.integration.pr.number, ticket.submission.integration.pr.headSha, ticket.submission.integration.pr.branch], [41, head, branch]);
+  assert.equal(ticket.submission.wave.prOpening, undefined, 'the durable PR record replaces the open record');
+
+  const again = await integrateViaStore(board, candidate.ref, port);
+  assert.equal(again.ok, true, again.message || again.reason);
+  assert.equal(again.existing, true);
+  assert.equal(again.adopted, undefined);
+  assert.equal(again.pr.number, 41);
+  assert.equal(port.creates().length, 0);
+  assert.equal(port.autos().length, 1, 'a recorded PR is only read back');
+  assert.equal(remoteBranch(board, branch).split(/\s+/)[0], head, 'the branch is never rebuilt or re-pushed');
+});
+
+test('an integrate that dies after arming auto-merge, whose PR then merges on its own, adopts and closes the wave on rerun', async () => {
+  const board = makeBoard('crash-merged');
+  const candidate = submitCandidate(board, 'sigma.txt');
+  assemble(board, [candidate.ref], 'wave-crash-merged');
+  const branch = 'sidequest/wave/wave-crash-merged';
+  crashCliIntegrate(board, candidate.ref, 'merge');
+  const head = remoteBranch(board, branch).split(/\s+/)[0]!;
+  // Auto-merge lands the PR while the board knows nothing of it.
+  git(['push', 'origin', `${head}:refs/heads/main`], board.repo);
+
+  // The store adopts and reconciles; the MCP integrate is what closes on merge.
+  const port = fakePort({ headSha: head, mergeCommit: head });
+  const previousDir = process.env.CLAUDE_PROJECT_DIR;
+  process.env.CLAUDE_PROJECT_DIR = board.repo;
+  let closed: any;
+  try {
+    closed = await withPort(port, () => callTool('integrate', { project: board.slug, ref: candidate.ref, by: 'pr-integrator' }));
+  } finally {
+    if (previousDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = previousDir;
+  }
+  assert.equal(closed.ok, true, closed.message || closed.reason);
+  assert.equal(port.creates().length + port.autos().length, 0, 'no PR is opened and a merged PR is not re-armed');
+  assert.deepEqual(port.views().map((call) => call.number), [41, 41], 'adoption reads PR #41, then the same call reconciles it');
+  const ticket = store.getTicket(board.slug, candidate.ref);
+  assert.equal(ticket.status, 'done', 'the adopted PR closes its participant');
+  assert.ok(ticket.submission.integratedAt, 'closed as integrated, not groomed');
+  assert.deepEqual([ticket.submission.integration.mode, ticket.submission.integration.deliveryCommit], ['pr', head]);
+});
+
+test('an integrate that dies inside gh pr create resumes from its pushed branch without rebuilding it', async () => {
+  const board = makeBoard('crash-create');
+  const candidate = submitCandidate(board, 'omicron.txt');
+  assemble(board, [candidate.ref], 'wave-crash-create');
+  const branch = 'sidequest/wave/wave-crash-create';
+  crashCliIntegrate(board, candidate.ref, 'create');
+  const head = remoteBranch(board, branch).split(/\s+/)[0]!;
+  const opening = store.getTicket(board.slug, candidate.ref).submission.wave.prOpening;
+  assert.deepEqual([opening.headSha, opening.pr], [head, undefined]);
+
+  const port = fakePort({ firstNumber: 51 });
+  const resumed = await integrateViaStore(board, candidate.ref, port);
+  assert.equal(resumed.ok, true, resumed.message || resumed.reason);
+  assert.equal(resumed.resumed, true);
+  assert.equal(resumed.pr.number, 51);
+  assert.match(resumed.message, /^Resumed an interrupted integrate of wave wave-crash-create/);
+  assert.deepEqual(port.creates().map((call) => call.head), [branch]);
+  assert.deepEqual(port.autos().map((call) => call.number), [51]);
+  const ticket = store.getTicket(board.slug, candidate.ref);
+  assert.equal(ticket.submission.integration.pr.headSha, head);
+  assert.equal(ticket.submission.wave.prOpening, undefined);
+  assert.equal(remoteBranch(board, branch).split(/\s+/)[0], head, 'the pushed branch is reused as is');
+});
+
+test('a wave branch or PR the interrupted-open record does not describe still refuses and records nothing', async () => {
+  // The PR GitHub reports no longer carries the recorded head.
+  const moved = makeBoard('crash-pr-moved');
+  const first = submitCandidate(moved, 'pi.txt');
+  assemble(moved, [first.ref], 'wave-crash-moved');
+  crashCliIntegrate(moved, first.ref, 'merge');
+  git(['push', '--force', 'origin', `${moved.base}:refs/heads/sidequest/wave/wave-crash-moved`], moved.repo);
+  const before = snapshot(moved, first.ref);
+  const movedPort = fakePort({ headSha: moved.base });
+  const refused = await integrateViaStore(moved, first.ref, movedPort);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.reason, 'pr_delivery_unavailable');
+  assert.match(refused.cause, /PR #41 does not match the interrupted open of wave wave-crash-moved/);
+  assert.equal(movedPort.creates().length + movedPort.autos().length, 0);
+  assert.equal(snapshot(moved, first.ref), before);
+
+  // The branch was replaced before any PR existed.
+  const foreign = makeBoard('crash-branch-foreign');
+  const second = submitCandidate(foreign, 'rho.txt');
+  assemble(foreign, [second.ref], 'wave-crash-foreign');
+  crashCliIntegrate(foreign, second.ref, 'create');
+  const branch = 'sidequest/wave/wave-crash-foreign';
+  const recorded = store.getTicket(foreign.slug, second.ref).submission.wave.prOpening.headSha;
+  git(['push', '--force', 'origin', `${foreign.base}:refs/heads/${branch}`], foreign.repo);
+  const foreignBefore = snapshot(foreign, second.ref);
+  const foreignPort = fakePort();
+  const taken = await integrateViaStore(foreign, second.ref, foreignPort);
+  assert.equal(taken.ok, false);
+  assert.equal(taken.reason, 'pr_delivery_unavailable');
+  assert.ok(taken.cause.includes(`already exists on origin at ${foreign.base} and no board record holds its PR (the interrupted open this board recorded pushed ${recorded})`), taken.cause);
+  assert.equal(foreignPort.calls.length, 0);
+  assert.equal(remoteBranch(foreign, branch).split(/\s+/)[0], foreign.base, 'never force-pushes over it');
+  assert.equal(snapshot(foreign, second.ref), foreignBefore);
 });

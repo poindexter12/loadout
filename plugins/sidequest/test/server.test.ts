@@ -10,9 +10,37 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const DASHBOARD_COMMAND_BIN = path.join(__dirname, '..', 'bin', 'sidequest-cmd-server.js');
+const { capacityWaitDeadlineMilliseconds } = require('./_capacity-deadline.js');
+
+const DASHBOARD_START_PER_TEST_WORKER_MS = 2_000;
+const DASHBOARD_START_FLOOR_MS = 9_000;
+
+function dashboardStartTestDeadlineMilliseconds(loadAverage = os.loadavg()[0] || 0) {
+  return capacityWaitDeadlineMilliseconds({
+    perTestWorkerMilliseconds: DASHBOARD_START_PER_TEST_WORKER_MS,
+    floorMilliseconds: DASHBOARD_START_FLOOR_MS,
+  }, loadAverage);
+}
+
+test('SQ-65 dashboardStartDeadlineMilliseconds: honors a positive integer override, else the 9s default', () => {
+  const { dashboardStartDeadlineMilliseconds } = require(DASHBOARD_COMMAND_BIN);
+  assert.equal(typeof dashboardStartDeadlineMilliseconds, 'function');
+  assert.equal(dashboardStartDeadlineMilliseconds({}), 9_000);
+  assert.equal(dashboardStartDeadlineMilliseconds({ SIDEQUEST_DASHBOARD_START_DEADLINE_MS: '45000' }), 45_000);
+  for (const bad of ['0', '-5', '1.5', 'soon', '']) {
+    assert.equal(dashboardStartDeadlineMilliseconds({ SIDEQUEST_DASHBOARD_START_DEADLINE_MS: bad }), 9_000, `override ${JSON.stringify(bad)}`);
+  }
+});
+
+test('SQ-65 dashboard start test deadline scales with machine load and never drops below the production default', () => {
+  const idle = dashboardStartTestDeadlineMilliseconds(0);
+  const busy = dashboardStartTestDeadlineMilliseconds(os.availableParallelism() * 4);
+  assert.ok(idle >= DASHBOARD_START_FLOOR_MS, `idle deadline ${idle}ms`);
+  assert.ok(busy >= idle, `busy ${busy}ms must not undercut idle ${idle}ms`);
+});
 const HOME_DIR = os.homedir();
 // Point the store at a throwaway home so any incidental store reads/writes
 // (findNewerInstall never touches it, but requiring server.js pulls in
@@ -402,6 +430,44 @@ function isAlive(pid?: any) {
   }
 }
 
+function isProcessGroupAlive(groupId?: any) {
+  try {
+    process.kill(-groupId, 0);
+    return true;
+  } catch (_: any) {
+    return false;
+  }
+}
+
+async function reapDetachedProcessGroup(groupId?: any) {
+  if (!groupId || !isProcessGroupAlive(groupId)) return;
+  try { process.kill(-groupId, 'SIGTERM'); } catch (_: any) {}
+  try {
+    await waitFor(() => !isProcessGroupAlive(groupId), 2000, `process group ${groupId} to exit`);
+    return;
+  } catch (_: any) {}
+  try { process.kill(-groupId, 'SIGKILL'); } catch (_: any) {}
+  await waitFor(() => !isProcessGroupAlive(groupId), 2000, `process group ${groupId} to exit after SIGKILL`);
+}
+
+function dashboardFixtureProcessIds(root?: any) {
+  const probe = spawnSync('ps', ['-A', '-o', 'pid=', '-o', 'command='], { encoding: 'utf8', windowsHide: true });
+  return probe.stdout.split('\n').flatMap((line?: any) => {
+    const match = line.trim().match(/^(\d+)\s+(.*)$/);
+    return match && match[2].includes(root) && /sidequest(?:-launcher)?\.js serve/.test(match[2]) ? [Number(match[1])] : [];
+  });
+}
+
+async function reapDashboardFixtureProcesses(root?: any) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const processIds = dashboardFixtureProcessIds(root);
+    if (processIds.length === 0) return;
+    await Promise.all(processIds.map((processId: any) => reapDetachedProcessGroup(processId)));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.deepStrictEqual(dashboardFixtureProcessIds(root), [], `dashboard fixture processes survived under ${root}`);
+}
+
 function runCli(script?: any, args?: any, env?: any) {
   return new Promise<any>((resolve?: any, reject?: any) => {
     const child = spawn(process.execPath, [script, ...args], { env, windowsHide: true });
@@ -573,16 +639,14 @@ test('dashboard self-updates to a newer cached install at the same URL', { timeo
     env,
     stdio: 'ignore',
     windowsHide: true,
+    detached: true,
   });
-  // The successor is detached and outlives this process unless we reap it —
+  // The successor is detached and outlives this process unless we reap its group —
   // a leaked dashboard keeps polling every 100ms for the rest of the suite.
   let upgradedPid: any = null;
-  t.after(() => {
-    for (const pid of [old.pid, upgradedPid]) {
-      if (pid && isAlive(pid)) {
-        try { process.kill(pid); } catch (_: any) {}
-      }
-    }
+  t.after(async () => {
+    await Promise.all([old.pid, upgradedPid].map((pid) => reapDetachedProcessGroup(pid)));
+    await reapDashboardFixtureProcesses(root);
     try { fs.rmSync(root, { recursive: true, force: true }); } catch (_: any) {}
   });
 
@@ -612,6 +676,9 @@ test('dashboard self-updates to a newer cached install at the same URL', { timeo
   assert.strictEqual(newHealth.version, '1.37.1');
   assert.notStrictEqual(newHealth.pid, oldHealth.pid);
   assert.strictEqual(isAlive(old.pid), false);
+  await reapDashboardFixtureProcesses(root);
+  assert.deepStrictEqual(dashboardFixtureProcessIds(root), [], 'the upgraded dashboard fixture leaves no process under its root');
+  upgradedPid = null;
 });
 
 test('dashboard heals a stale recorded server through the registry launcher', { timeout: 180000 }, async (t?: any) => {
@@ -633,19 +700,20 @@ test('dashboard heals a stale recorded server through the registry launcher', { 
     SIDEQUEST_HOME: home,
     SIDEQUEST_CLAUDE_HOME: claudeHome,
     SIDEQUEST_NO_HOT_RECYCLE: '1',
+    // SQ-65: the dashboard start wait scales with the workers competing for the machine instead
+    // of the production default, which lost a coin flip at load ~29 (SQ-62 Run B).
+    SIDEQUEST_DASHBOARD_START_DEADLINE_MS: String(dashboardStartTestDeadlineMilliseconds()),
   });
   const old = spawn(process.execPath, [path.join(oldRoot, 'bin', 'sidequest.js'), 'serve', '--port', String(port)], {
     env,
     stdio: 'ignore',
     windowsHide: true,
+    detached: true,
   });
   let replacementPid: any = null;
-  t.after(() => {
-    for (const pid of [old.pid, replacementPid]) {
-      if (pid && isAlive(pid)) {
-        try { process.kill(pid); } catch (_: any) {}
-      }
-    }
+  t.after(async () => {
+    await Promise.all([old.pid, replacementPid].map((pid) => reapDetachedProcessGroup(pid)));
+    await reapDashboardFixtureProcesses(root);
     try { fs.rmSync(root, { recursive: true, force: true }); } catch (_: any) {}
   });
 
@@ -662,6 +730,9 @@ test('dashboard heals a stale recorded server through the registry launcher', { 
       return false;
     }
   }, 30000, 'the healed dashboard');
+  await reapDashboardFixtureProcesses(root);
+  assert.deepStrictEqual(dashboardFixtureProcessIds(root), [], 'the healed dashboard fixture leaves no process under its root');
+  replacementPid = null;
 });
 
 

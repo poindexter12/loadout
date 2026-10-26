@@ -176,6 +176,19 @@ atomic: each subagent claims a different ticket, and any race just sends the los
 - **Resume Continuation checkpoints with a fresh dispatch.** Executors create a Continuation checkpoint around 100 tool rounds by committing verified declared-scope work, writing a `Continuation checkpoint` comment with the commit, files touched, next steps, and verification state, then releasing to `todo`. On a natural wakeup, use `pulse` and the latest comment to confirm that header, commit, and no live claim. Read the checkpoint before `dispatch <ref>`, then spawn its returned continuation unchanged so it gets a fresh token and context. The dispatch validates the registered retained worktree against the repository before carrying it forward, replays a retained checkpoint onto an advanced integration target, and reports its exact Git validation evidence if it must fall back. A rebase conflict stops the executor for escalation, without resetting the retained checkpoint or resolving toward either side. A live claim means the checkpoint has not completed, so do not launch beside it; use the normal salvage path if that worker stopped.
 - **Record wave links from board results.** Never write an `SQ-n` ref you did not read back from a board response. File related tickets first, collect their returned refs, then use `update` or, preferably, `link` (`blocks`, `depends-on`, or `related`) to record relationships. Links are board data, so they stay correct without prose cross-references.
 - **Read liveness from the board, not notifications.** Notifications wake the orchestrator but do not prove executor state. An idle notification can describe a working, dead, or already-finished executor, so read board truth before acting: use `pulse <ref>` for the ticket's `{claim:{by,at,ageMs}|null, comments, lastComment, git:{commit,dirty}|null}` state. Until `pulse` is available, read claim age, comments, and `git log`. If several tickets need checking, use `changes --since <iso>` for the `{tickets:[...]}` delta, sorted oldest first.
+- **Rule out host sleep before calling a stall or death.** Wall-clock silence is not executor silence when
+  the host slept. A laptop in Clamshell Sleep on battery runs executors only during seconds-long
+  maintenance DarkWakes, so an in-flight model request outlives its DarkWake and Claude Code's stream
+  watchdog later records `[Request interrupted by user]`. That is not a model, gateway, or route failure.
+  `pulse` and `changes` check the host sleep log (`pmset -g log` on macOS, a wall-versus-monotonic clock gap
+  elsewhere) for the silent window and report liveness `host_sleep`, and a watchdog death during sleep
+  records `failureShape: host_sleep`. On `host_sleep`: keep the claim, `SendMessage` the same executor to
+  continue once the host is awake, and never repoint categories, change model routes, or count the attempt
+  against the route. Claim backstops count only awake time, so the sweep will not release a sleeping
+  claim.
+- **Keep the host awake for long unattended runs.** Run the orchestrating session under `caffeinate -is`
+  (or keep the machine on AC power with the lid open). With the lid closed on battery every in-flight turn
+  dies, whatever the route.
 - **Read completion from the board.** An executor stop notification wakes the orchestrator; its terminal
   submit or done state is the completion signal. Do not expect or request a routine
   `SendMessage` report. Read a submission's canonical report body or a done completion comment for what changed, verification evidence, commit hash or
@@ -243,8 +256,8 @@ atomic: each subagent claims a different ticket, and any race just sends the los
   executor with anything heavier than a `SendMessage` (releasing, sweeping, redispatching) is a
   process failure, not caution. The costs to keep honest:
   idle notifications wake the lead at full context, and teams-style flows can run several times the
-  token spend of plain subagents, so answer executor questions promptly and retire terminal teammates
-  only after consuming board evidence. After spawning, end the
+  token spend of plain subagents, so answer executor questions promptly and let terminal executors end
+  on their own. After spawning, end the
   turn. Its stop notification is the only wakeup. On the next natural wakeup, whether a stop notification,
   user message, or other task notification, make opportunistic liveness checks for work that has run about
   5–8 minutes or longer. Never hold a session open with foreground or background `sleep`, blocking
@@ -258,11 +271,12 @@ atomic: each subagent claims a different ticket, and any race just sends the los
   lifecycle. Native Agent completion arrives on its own; at natural wakeups use `changes --since` / `pulse`,
   and read the artifact only after terminal board evidence. A genuine one-shot readiness watch for a local
   server or build is fine; waiting on an executor through a side channel is not.
-- **Retire terminal teammates.** Once terminal board evidence has been consumed and its submission report,
-  done comment, or recovery handoff has been preserved, call `TaskStop({ task_id: "<agent name>" })` once for
-  that exact native teammate. This is a Claude Code host action, not a Sidequest tool. It applies to submitted,
-  done, released, failed-before-claim, and superseded attempts. Never stop a live claim, retained continuation,
-  or candidate awaiting integration. Do not wake a completed executor, poll FleetView, or create a cleanup loop.
+- **Never `TaskStop` an executor.** A terminal executor has already stopped by the time its SubagentStop
+  verdict arrives, so there is nothing to retire. Its dispatch name is a `SendMessage` address, not a
+  `TaskStop` task id: `TaskStop({ task_id: "<agent name>" })` returns "No task found with ID" or, where it
+  resolves, raises a permission prompt the user rejects. `TaskStop` is only for background shell tasks you
+  started yourself. Never stop a live claim, retained continuation, or candidate awaiting integration. Do not
+  wake a completed executor, poll FleetView, or create a cleanup loop.
   A `READY_FOR_INTEGRATION` verdict additionally queues the ticket for the publish transaction
   ([publishing.md](publishing.md)) — publish the wave's submissions in one batch; never respawn an executor for a
   submitted ticket. Sweep ALL finished executors, not just the one that notified, so session exit only stops live work.

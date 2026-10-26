@@ -2,6 +2,7 @@
 const { execFileSync } = require("node:child_process");
 const { canonicalPreparedDispatchExecutor } = require("../prepared-dispatch.js");
 const { readPrWatchState } = require("./project-watch.js");
+const { HOST_SLEEP_GUIDANCE, defaultHostSleep, reclassifyLivenessForHostSleep } = require("../host-sleep.js");
 function createGitHubCiRunsProvider(projectPath, execute = execFileSync) {
   const command = (program, arguments_) => execute(program, arguments_, {
     cwd: projectPath,
@@ -57,6 +58,7 @@ function createPulse(dependencies) {
     execFileSync: execFileSync2,
     findAwaitingMergeWaves,
     getTicket,
+    hostSleep: injectedHostSleep,
     listTickets,
     normalizeRoute,
     oracleProjection,
@@ -168,7 +170,31 @@ function createPulse(dependencies) {
     const attempt = (Array.isArray(dispatch.attempts) ? dispatch.attempts : []).slice().reverse().find((entry) => entry?.outcome === "died" && entry.terminalAt);
     return attempt ? { at: attempt.terminalAt, source: attempt.terminalSource || null } : null;
   }
-  function livenessPulse(ticket, dispatch, claim, death) {
+  function livenessPulse(ticket, dispatch, claim, death, now = Date.now()) {
+    const liveness = wallClockLiveness(ticket, dispatch, claim, death);
+    if (death) {
+      if (deathFailureShape(dispatch) !== "host_sleep") return liveness;
+      return { state: "host_sleep", evidence: `died outcome recorded as host_sleep${death.source ? ` by ${death.source}` : ""}: the host slept while the request was in flight; ${HOST_SLEEP_GUIDANCE}` };
+    }
+    const quietMs = Number.isFinite(claim?.boardQuietMs) ? claim.boardQuietMs : Number.isFinite(claim?.idleMs) ? claim.idleMs : null;
+    const silenceDerived = liveness.state === "stalled" || liveness.state === "dead" && Boolean(claim?.reclaimable) || liveness.state === "unknown" && Boolean(claim);
+    const windowStart = claim ? quietMs == null ? null : now - quietMs : dispatch?.boundAt || dispatch?.launchedAt || null;
+    if (!silenceDerived || windowStart == null) return liveness;
+    const hostSleep = injectedHostSleep || defaultHostSleep();
+    return reclassifyLivenessForHostSleep(liveness, {
+      silenceDerived,
+      windowStart,
+      windowEnd: now,
+      overlap: (start, end) => hostSleep.overlap(start, end)
+    });
+  }
+  function deathFailureShape(dispatch) {
+    if (!dispatch) return null;
+    if (dispatch.outcome === "died" && dispatch.terminalAt) return dispatch.failureShape || null;
+    const attempt = (Array.isArray(dispatch.attempts) ? dispatch.attempts : []).slice().reverse().find((entry) => entry?.outcome === "died" && entry.terminalAt);
+    return attempt?.failureShape || null;
+  }
+  function wallClockLiveness(ticket, dispatch, claim, death) {
     if (death) return { state: "dead", evidence: `died outcome recorded${death.source ? ` by ${death.source}` : ""}` };
     if (claim?.reclaimable) return { state: "dead", evidence: `claim is reclaimable: ${claim.reclaimable}` };
     if (claim?.verifying) return { state: "alive", evidence: "verification marker is active" };
@@ -251,7 +277,7 @@ function createPulse(dependencies) {
     const now = Date.now();
     const claim = projectedClaim(ticket, now);
     const died = dispatchDeath(dispatch);
-    const liveness = livenessPulse(ticket, dispatch, claim, died);
+    const liveness = livenessPulse(ticket, dispatch, claim, died, now);
     const warnings = [...storyContractDriftWarnings(ticket), ...storyDecisionLogWarnings(ticket, slug), ...scopeDriftWarnings(slug, ticket)];
     if (dispatch?.verificationDerivation?.command) {
       warnings.push(
@@ -324,7 +350,7 @@ function createPulse(dependencies) {
       const warnings = [...storyContractDriftWarnings(ticket), ...storyDecisionLogWarnings(ticket, slug)];
       const dispatch = dispatchState(ticket);
       const claim = claimPulse(ticket, nowMs);
-      const liveness = livenessPulse(ticket, dispatch, claim, dispatchDeath(dispatch));
+      const liveness = livenessPulse(ticket, dispatch, claim, dispatchDeath(dispatch), nowMs);
       return {
         ref: ticket.ref,
         title: ticket.title,
@@ -353,6 +379,7 @@ function createPulse(dependencies) {
     boundedExcerpt,
     changesPayload,
     commentHistory,
+    livenessPulse,
     pulsePayload
   };
 }

@@ -153,7 +153,7 @@ optionally `--status todo`).
 - **Read the thread before working a ticket** (`sidequest comments <ref>`). Default reads retain all
   metadata; pass `--full` only for needed elided bodies.
 - **Claims release on observed death, not age**: use `pulse`, never a clock. For useful work needing a decision, `SendMessage` the same agent and keep its claim and worktree. A resume retains claim, token-file path, and worktree binding. On `matches no dispatch record`, its holder calls MCP `dispatch` with `recoveryEvidence`, `claimHolder`, and `worktree`; it re-mints and re-binds. On confirmed death, salvage, release, replace.
-- Agents report automatically. **Never use `TaskOutput`** for a Sidequest task ID or launch name. Poll with `changes --since` and `pulse <ref>`. After terminal evidence, use `TaskStop({ task_id: "<agent name>" })` once for that teammate. It is a Claude Code host action, not a Sidequest tool. Never stop a live claim, retained continuation, or candidate awaiting integration. **Never proxy-wait** with a shell/`Monitor`/cron task only waiting for an executor or artifact (a one-shot local readiness watch is fine).
+- Agents report automatically. **Never use `TaskOutput`** for a Sidequest task ID or launch name. Poll with `changes --since` and `pulse <ref>`. **Never `TaskStop` an executor.** A finished one has already stopped, and its dispatch name is a `SendMessage` address, not a `TaskStop` task id. `TaskStop` is only for background shell tasks you started. Never stop a live claim, retained continuation, or candidate awaiting integration. **Never proxy-wait** with a shell/`Monitor`/cron task only waiting for an executor or artifact (a one-shot local readiness watch is fine).
 
 **Repository publishing is the orchestrator's, alone.** Executors stop at verified local commits and
 `submit` (claim released, parked in `doing`); `submit.body` holds the canonical full report, so do not post a separate pre-submit report comment. The
@@ -187,10 +187,8 @@ full suite once while publishing the wave in one transaction → re-plan, spawn 
 executor mini-sessions from the spawn side: **the ticket is the spec** (the cheaper the model,
 the more patch-level the detail); **scope the spawn prompt only with logistics**, the ticket
 contract traveling in full and unnarrowed;
-**Executors keep useful work**: keep claim, checkpoint evidence, and await `SendMessage`
-steering for questions or failed checks. Release only for confirmed death or unsalvageable blockers; **batch small same-model tickets into ONE executor**
-(different models never batch); **parallel fan-out spawns one executor per ticket in a single
-message** when the wave justifies it.
+Executor retention, batching, and parallel fan-out detail:
+`references/orchestration.md`.
 
 **Ready** = unclaimed, unblocked, not done, not archived — `sidequest ready --json
 --brief` lists exactly this set, partitioned into **parallel-safe waves** by declared file scope.

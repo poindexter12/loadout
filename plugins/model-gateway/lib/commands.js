@@ -710,7 +710,9 @@ async function setup({ enablement = gatewayPluginEnablement(), stillWired = proj
     log('model-gateway: proxy unchanged; keeping its authenticated process running.');
   }
   const supervisorRestart = await restartShimIfOutdated({ operation: 'setup' });
-  if (supervisorRestart && !supervisorRestart.ok) die(`could not restart shim supervisor: ${supervisorRestart.reason}`);
+  const restartOutcome = supervisorRestartOutcome(supervisorRestart);
+  if (restartOutcome.fatal) die(restartOutcome.message);
+  if (restartOutcome.message) log(restartOutcome.message);
   if (!supervisorRestart) {
     const restarting = await restartWorkerWithDrain();
     if (!restarting.ok) die(`could not restart shim worker: ${restarting.reason}`);
@@ -1190,6 +1192,22 @@ async function restartSupervisorForVersionMismatch({ quiet = false, operation = 
   if (!stopped.ok) return stopped;
   reportSiblingSupervisorReplacement(stopped, quiet);
   return start({ quiet, lifecycleOperation: operation });
+}
+
+// How `update` treats a supervisor restart it attempted after installing the
+// proxy (SQ-183). An unconfirmed :18764 owner was left untouched and keeps
+// serving, so the update itself succeeded: the outdated supervisor refreshes
+// on the next `ensure`, just as a proxy that could not restart does. A foreign
+// install's conflict, or a stop that ran and failed, is still fatal.
+function supervisorRestartOutcome(result) {
+  if (!result || result.ok) return { fatal: false, message: null };
+  if (result.ownerState === 'unknown') {
+    return {
+      fatal: false,
+      message: `model-gateway: shim supervisor not restarted: ${result.reason}. The update is installed; the running supervisor keeps serving and refreshes on the next \`ensure\`.`,
+    };
+  }
+  return { fatal: true, message: `could not restart shim supervisor: ${result.reason}` };
 }
 
 async function restartShimIfOutdated({
@@ -2438,6 +2456,7 @@ module.exports = {
   shimNeedsRestart,
   servingShimVersion,
   restartShimIfOutdated,
+  supervisorRestartOutcome,
   restartSupervisorForVersionMismatch,
   stopShimWithDrain,
   PLUGIN_VERSION,

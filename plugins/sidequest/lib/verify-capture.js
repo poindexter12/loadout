@@ -17,6 +17,7 @@ const captureSlotProcessLiveness = Object.freeze({
   }
 });
 const captureSlotTimeoutMilliseconds = 30 * 60 * 1e3;
+const captureSlotScopeNotice = "The slot is per project: it serialises full-suite captures within this project only, and captures in other projects on this host are not serialised against it, so keep cross-project suites apart yourself.";
 const captureSlotStaleMilliseconds = 30 * 60 * 1e3;
 const captureSlotRetryMilliseconds = 50;
 const captureSlotOperationRetryLimit = 20;
@@ -29,8 +30,14 @@ const maximumTestPhaseTimeoutMilliseconds = 24e5;
 const minimumEffectiveTestWorkers = 0.5;
 const phaseBudgetOverrideVariable = "SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS";
 const captureHardMaximumMilliseconds = 2 * 60 * 60 * 1e3;
+const harnessForegroundMaximumMilliseconds = 6e5;
+const harnessBackgroundDefaultMilliseconds = 18e5;
+const harnessBackgroundMaximumMilliseconds = 72e5;
+const harnessTimeoutMarginMilliseconds = 6e5;
+const npmFullSuitePattern = /(?:^|[\s&;|()])npm\s+run\s+test:full(?:\s|$)/;
+const directFullSuitePattern = /(?:^|[\s&;|()])["']?(?:[^\s"'&;|()]*[\\/])?node(?:\.exe)?["']?\s(?:[^&;|()\n]*\s)?["']?(?:[^\s"'&;|()]*[\\/])?test-full\.mjs["']?(?=[\s&;|()]|$)/;
 function isFullSuiteCommand(command) {
-  return /(?:^|[\s&;()])npm\s+run\s+test:full(?:\s|$)/.test(command);
+  return npmFullSuitePattern.test(command) || directFullSuitePattern.test(command);
 }
 const nodeTestRunnerPattern = /(?:^|[\s&;|()])["']?(?:[^\s"'&;|()]*[\\/])?node(?:\.exe)?["']?\s(?:[^&;|()\n]*\s)?--test(?=[\s&;|()]|$)/;
 const npmTestScriptPattern = /(?:^|[\s&;|()])npm(?:\.cmd)?\s+(?:-[^\s&;|()]*(?:\s+[^-\s&;|()][^\s&;|()]*)?\s+)*(?:t|tst|test|run(?:-script)?\s+test(?::[^\s&;|()]+)?)(?=[\s&;|()]|$)/;
@@ -101,7 +108,7 @@ function fullSuiteCaptureTimeoutMilliseconds(availableParallelism = os.available
   return captureBudget("npm run test:full", availableParallelism, loadAverage, rawOverride).timeoutMilliseconds;
 }
 const captureBudgetClassDescriptions = Object.freeze({
-  "full-suite": "the npm run test:full suite, serialized per host",
+  "full-suite": "the test:full suite, serialized per project; captures in other projects are not serialized against it",
   "test-suite": "a node --test or npm test script run",
   command: "not a recognized test runner, so it gets no capacity phase budget"
 });
@@ -117,6 +124,22 @@ function captureBudgetLever(budget) {
     return `The budget is already at the ${budget.hardMaximumMilliseconds}ms hard maximum, so no override can raise it: ask the orchestrator to re-pin a narrower verify command, or rerun once the host is quieter.`;
   }
   return `To give it more wall clock, rerun the same wrapper with ${budget.overrideVariable}=<milliseconds> above ${budget.phaseBudgetMilliseconds} in its environment. The override only widens the phase budget, never shortens it or skips a test, and the capture still stops at the ${budget.hardMaximumMilliseconds}ms hard maximum.`;
+}
+function captureHarnessTimeoutMilliseconds(budget) {
+  return Math.min(harnessBackgroundMaximumMilliseconds, budget.timeoutMilliseconds + harnessTimeoutMarginMilliseconds);
+}
+function captureHarnessGuidance(budget, detached = false) {
+  if (detached) {
+    return `verify-capture: running detached, so no Bash timeout can stop this capture; it records its own verdict within its ${budget.timeoutMilliseconds}ms budget.`;
+  }
+  const required = captureHarnessTimeoutMilliseconds(budget);
+  const marginFits = budget.timeoutMilliseconds + harnessTimeoutMarginMilliseconds <= harnessBackgroundMaximumMilliseconds;
+  const parts = [`verify-capture: Bash timeout: this capture may run up to ${budget.timeoutMilliseconds}ms. The Bash tool stops a foreground call at ${harnessForegroundMaximumMilliseconds}ms and moves a longer one to the background under its ${harnessBackgroundDefaultMilliseconds}ms default, discarding the timeout you set, and a wrapper killed there records no verdict at all.`];
+  if (budget.timeoutMilliseconds >= harnessBackgroundDefaultMilliseconds) {
+    parts.push(`This budget is at or above that ${harnessBackgroundDefaultMilliseconds}ms default, so a backgrounded call without an explicit timeout is killed before this capture can record pass, fail, or capture_budget_exceeded.`);
+  }
+  parts.push(marginFits ? `If you background this call, pass timeout=${required} (the budget plus a ${harnessTimeoutMarginMilliseconds}ms margin, under the ${harnessBackgroundMaximumMilliseconds}ms harness maximum), never the default; or rerun with --detach, which no Bash timeout can stop.` : `This budget leaves less than the ${harnessTimeoutMarginMilliseconds}ms margin under the ${harnessBackgroundMaximumMilliseconds}ms harness maximum, so no Bash timeout reliably outlives it: rerun with --detach, which no Bash timeout can stop.`);
+  return parts.join(" ");
 }
 function captureBudgetTimeoutReason(budget, elapsedMilliseconds, loadAtDeadline, processReason) {
   return `capture_budget_exceeded: the verify command ran ${elapsedMilliseconds}ms and was stopped at its ${budget.timeoutMilliseconds}ms capture budget. This is a budget verdict, not a test failure: the command had not finished, so whatever it would have reported is unknown. Budget: ${describeCaptureBudget(budget)}; the load average was ${formatLoad(loadAtDeadline)} at the deadline. ${captureBudgetLever(budget)} ${processReason}`.trim();
@@ -145,10 +168,11 @@ async function runVerifyCapture(command, cwd = process.cwd(), timeoutMillisecond
     ...result.status === "passed" ? {} : { reason: result.evidence }
   });
 }
-async function runBudgetedCapture(command, cwd, budget, environment, announce) {
+async function runBudgetedCapture(command, cwd, budget, environment, announce, detached = false) {
   if (announce) {
     announce(`verify-capture: capture budget ${budget.timeoutMilliseconds}ms, ${describeCaptureBudget(budget)}.`);
     if (budget.notice) announce(`verify-capture: ${budget.notice}`);
+    announce(captureHarnessGuidance(budget, detached));
   }
   const startedAt = Date.now();
   const capture = await runVerifyCapture(command, cwd, budget.timeoutMilliseconds, environment);
@@ -309,7 +333,7 @@ async function acquireCaptureSlot(project, timeoutMilliseconds = captureSlotTime
     }
     if (!waitingAnnounced) {
       const siblingCount = queuePosition - 1;
-      process.stdout.write(`verify-capture: waiting for ${siblingCount} sibling capture${siblingCount === 1 ? "" : "s"} to finish (queue position ${queuePosition}).
+      process.stdout.write(`verify-capture: waiting for ${siblingCount} sibling capture${siblingCount === 1 ? "" : "s"} to finish (queue position ${queuePosition}). ${captureSlotScopeNotice}
 `);
       waitingAnnounced = true;
     }
@@ -319,7 +343,7 @@ async function acquireCaptureSlot(project, timeoutMilliseconds = captureSlotTime
       return Object.freeze({
         waitedForSlotMs,
         queuePosition,
-        reason: `Verification capture waited ${waitedForSlotMs}ms for the per-host full-suite slot at queue position ${queuePosition}; sibling capture contention exceeded the ${timeoutMilliseconds}ms limit.`
+        reason: `Verification capture waited ${waitedForSlotMs}ms for this project's full-suite slot at queue position ${queuePosition}; sibling capture contention exceeded the ${timeoutMilliseconds}ms limit. ${captureSlotScopeNotice}`
       });
     }
     await wait(captureSlotRetryMilliseconds);
@@ -360,7 +384,7 @@ async function runFullSuiteCapture(command, project, cwd, fileSystem = fs, optio
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     return captureSlotCouldNotRun(command, Object.freeze({
-      reason: `Verification capture could not acquire its per-host full-suite slot: ${reason}`,
+      reason: `Verification capture could not acquire this project's full-suite slot: ${reason}`,
       errorCode: captureSlotErrorCode(error)
     }));
   }
@@ -375,7 +399,7 @@ async function runFullSuiteCapture(command, project, cwd, fileSystem = fs, optio
     capture = await runBudgetedCapture(command, cwd, budget, {
       ...process.env,
       SIDEQUEST_FULL_SUITE_SIBLING_CAPTURE_COUNT: String(slot.queuePosition - 1)
-    }, options.announce);
+    }, options.announce, options.detached);
   } finally {
     releaseFailure = await slot.release();
   }
@@ -528,7 +552,7 @@ async function runCapturedVerification(command, target, cwd = process.cwd(), fil
     options.beforeRun?.();
     if (target && !preflight) started.before = treeSnapshot(captureCwd, true);
   };
-  const capture = preflight || (target && isFullSuiteCommand(command) ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem, { ...options, beforeRun }) : (beforeRun(), await runBudgetedCapture(command, captureCwd, (options.resolveBudget || captureBudget)(command), void 0, options.announce)));
+  const capture = preflight || (target && isFullSuiteCommand(command) ? await runFullSuiteCapture(command, project?.path || target.project, captureCwd, fileSystem, { ...options, beforeRun }) : (beforeRun(), await runBudgetedCapture(command, captureCwd, (options.resolveBudget || captureBudget)(command), void 0, options.announce, options.detached)));
   const before = started.before || (target && !preflight ? treeSnapshot(captureCwd, true) : null);
   const recorded = target ? recordCapture(target, capture, captureCwd, resolution, binding?.ok ? binding.head : void 0, before) : null;
   return Object.freeze({ capture, recorded });
@@ -637,7 +661,7 @@ function report(capture, recorded) {
   }
   if (capture.budget) {
     const budget = capture.budget;
-    process.stdout.write(`capture-budget class=${budget.budgetClass} budgetMs=${budget.timeoutMilliseconds} elapsedMs=${capture.elapsedMilliseconds ?? ""} setupMs=${budget.setupAllowanceMilliseconds} phaseMs=${budget.phaseBudgetMilliseconds} measuredPhaseMs=${budget.measuredPhaseBudgetMilliseconds} hardMaxMs=${budget.hardMaximumMilliseconds} cores=${budget.availableParallelism} load=${formatLoad(budget.loadAverage)} effectiveWorkers=${budget.effectiveTestWorkers.toFixed(2)}
+    process.stdout.write(`capture-budget class=${budget.budgetClass} budgetMs=${budget.timeoutMilliseconds} elapsedMs=${capture.elapsedMilliseconds ?? ""} setupMs=${budget.setupAllowanceMilliseconds} phaseMs=${budget.phaseBudgetMilliseconds} measuredPhaseMs=${budget.measuredPhaseBudgetMilliseconds} hardMaxMs=${budget.hardMaximumMilliseconds} cores=${budget.availableParallelism} load=${formatLoad(budget.loadAverage)} effectiveWorkers=${budget.effectiveTestWorkers.toFixed(2)} harnessTimeoutMs=${captureHarnessTimeoutMilliseconds(budget)}
 `);
   }
   if (recorded?.ok && recorded.capture) {
@@ -660,22 +684,160 @@ function report(capture, recorded) {
     }
   }
 }
+const detachedRunsDirectoryName = "sidequest-verify-capture-runs";
+const detachedWaitDefaultMilliseconds = 54e4;
+const detachedWaitMaximumMilliseconds = 57e4;
+const detachedPollMilliseconds = 500;
+const DETACHED_STILL_RUNNING_EXIT = 75;
+function optionValue(args, name) {
+  const index = args.indexOf(name);
+  return index >= 0 ? String(args[index + 1] || "").trim() : "";
+}
+function detachedWaitMilliseconds(args) {
+  const requested = optionValue(args, "--wait-ms");
+  if (!/^\d+$/.test(requested)) return detachedWaitDefaultMilliseconds;
+  return Math.min(detachedWaitMaximumMilliseconds, Number(requested));
+}
+function detachedChildArguments(args, exitFile) {
+  const kept = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "--detach") continue;
+    if (args[index] === "--wait-ms" || args[index] === "--exit-file") {
+      index += 1;
+      continue;
+    }
+    kept.push(String(args[index]));
+  }
+  return [...kept, "--exit-file", exitFile];
+}
+function writeExitFile(exitFile, exitCode) {
+  if (!exitFile) return;
+  const temporary = `${exitFile}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify({ exitCode, completedAt: (/* @__PURE__ */ new Date()).toISOString() }));
+  fs.renameSync(temporary, exitFile);
+}
+function startDetachedCapture(args, cwd) {
+  const { spawn } = require("node:child_process");
+  const root = path.join(os.tmpdir(), detachedRunsDirectoryName);
+  fs.mkdirSync(root, { recursive: true });
+  const runDirectory = fs.mkdtempSync(path.join(root, "run-"));
+  const output = fs.openSync(path.join(runDirectory, "output.log"), "a");
+  try {
+    const child = spawn(process.execPath, [...process.execArgv, __filename, ...detachedChildArguments(args, path.join(runDirectory, "exit.json"))], {
+      cwd,
+      env: process.env,
+      detached: true,
+      stdio: ["ignore", output, output],
+      windowsHide: true
+    });
+    if (!child.pid) throw new Error("the detached capture did not start");
+    const run = { pid: child.pid, startedAt: Date.now(), cwd };
+    fs.writeFileSync(path.join(runDirectory, "run.json"), JSON.stringify(run));
+    child.unref();
+    return Object.freeze({ runDirectory, pid: child.pid });
+  } finally {
+    fs.closeSync(output);
+  }
+}
+function readDetachedRun(runDirectory) {
+  try {
+    const run = JSON.parse(fs.readFileSync(path.join(runDirectory, "run.json"), "utf8"));
+    return Number.isInteger(run?.pid) && run.pid > 0 ? run : null;
+  } catch (_) {
+    return null;
+  }
+}
+function readDetachedExit(runDirectory) {
+  try {
+    const exit = JSON.parse(fs.readFileSync(path.join(runDirectory, "exit.json"), "utf8"));
+    return Number.isInteger(exit?.exitCode) ? exit.exitCode : null;
+  } catch (_) {
+    return null;
+  }
+}
+function detachedOutput(runDirectory) {
+  try {
+    return fs.readFileSync(path.join(runDirectory, "output.log"), "utf8");
+  } catch (_) {
+    return "";
+  }
+}
+function resumeCommand(runDirectory) {
+  return `node ${JSON.stringify(__filename)} --resume ${JSON.stringify(runDirectory)}`;
+}
+async function awaitDetachedCapture(runDirectory, waitMilliseconds, write = (text) => process.stdout.write(text)) {
+  const run = readDetachedRun(runDirectory);
+  if (!run) {
+    write(`verify=lost exit=2 reason=${JSON.stringify(`detached_run_unknown: ${runDirectory} holds no detached verify-capture run record, so there is nothing to wait for. Start the wrapper again with --detach.`)}
+`);
+    return 2;
+  }
+  const deadline = Date.now() + waitMilliseconds;
+  for (; ; ) {
+    const exitCode = readDetachedExit(runDirectory);
+    if (exitCode !== null) {
+      write(detachedOutput(runDirectory));
+      return exitCode;
+    }
+    if (!captureSlotProcessLiveness.isAlive(run.pid, run.startedAt)) {
+      const lateExit = readDetachedExit(runDirectory);
+      if (lateExit !== null) {
+        write(detachedOutput(runDirectory));
+        return lateExit;
+      }
+      write(detachedOutput(runDirectory));
+      write(`verify=lost exit=2 reason=${JSON.stringify(`detached_run_lost: the detached verify-capture process ${run.pid} ended without writing an exit status, so the capture did not complete and nothing new was recorded by it. Its output is above. Start the wrapper again with --detach.`)}
+`);
+      return 2;
+    }
+    if (Date.now() >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(detachedPollMilliseconds, Math.max(1, deadline - Date.now()))));
+  }
+  const elapsed = Math.max(0, Date.now() - run.startedAt);
+  write(`verify=running exit=${DETACHED_STILL_RUNNING_EXIT} pid=${run.pid} elapsedMs=${elapsed} run=${runDirectory}
+`);
+  write(`verify-resume: the capture is still running detached under its own budget, and the Bash ceiling cannot stop it. Do not start another one. Rerun this in the FOREGROUND with a 600000 ms timeout until it prints a final verify= line: ${resumeCommand(runDirectory)}
+`);
+  return DETACHED_STILL_RUNNING_EXIT;
+}
 async function main() {
   const args = process.argv.slice(2);
+  if (args[0] === "--resume") {
+    const runDirectory = String(args[1] || "").trim();
+    process.exitCode = runDirectory ? await awaitDetachedCapture(path.resolve(runDirectory), detachedWaitMilliseconds(args)) : 2;
+    if (!runDirectory) process.stderr.write("Usage: node verify-capture.js --resume <run directory> [--wait-ms <milliseconds>]\n");
+    return;
+  }
   const encoded = args[0] === "--base64" ? args[1] : "";
   const command = encoded ? Buffer.from(encoded, "base64").toString("utf8").trim() : "";
   if (!command) {
-    process.stderr.write("Usage: node verify-capture.js --base64 <base64 verify command> [--project <path> --ticket <ref>]\n");
+    process.stderr.write("Usage: node verify-capture.js --base64 <base64 verify command> [--project <path> --ticket <ref>] [--detach [--wait-ms <milliseconds>]]\n       node verify-capture.js --resume <run directory> [--wait-ms <milliseconds>]\n");
     process.exitCode = 2;
     return;
   }
-  const target = captureTarget(args);
-  const { capture, recorded } = await runCapturedVerification(command, target, process.cwd(), fs, {
-    announce: (line) => process.stderr.write(`${line}
-`)
-  });
-  report(capture, recorded);
-  process.exitCode = capture.exitCode === 0 && (!target || recorded?.ok) ? 0 : 2;
+  if (args.includes("--detach")) {
+    const { runDirectory, pid } = startDetachedCapture(args, process.cwd());
+    process.stderr.write(`verify-capture: detached run ${runDirectory} pid=${pid}; waiting up to ${detachedWaitMilliseconds(args)}ms in the foreground.
+`);
+    process.exitCode = await awaitDetachedCapture(runDirectory, detachedWaitMilliseconds(args));
+    return;
+  }
+  const exitFile = optionValue(args, "--exit-file");
+  try {
+    const target = captureTarget(args);
+    const { capture, recorded } = await runCapturedVerification(command, target, process.cwd(), fs, {
+      announce: (line) => process.stderr.write(`${line}
+`),
+      detached: Boolean(exitFile)
+    });
+    report(capture, recorded);
+    process.exitCode = capture.exitCode === 0 && (!target || recorded?.ok) ? 0 : 2;
+  } catch (error) {
+    process.stdout.write(`verify=error exit=2 reason=${JSON.stringify(String(error?.message || error))}
+`);
+    process.exitCode = 2;
+  }
+  writeExitFile(exitFile, Number(process.exitCode));
 }
-module.exports = { runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, acquireCaptureSlot, isFullSuiteCommand, isTestSuiteCommand, captureBudgetClass, captureBudget, captureHardMaximumMilliseconds, runBudgetedCapture, fullSuiteCaptureTimeoutMilliseconds, effectiveTestWorkers, capacityScaledDeadlineMilliseconds, recordCapture, verifiedRevision };
+module.exports = { awaitDetachedCapture, detachedChildArguments, DETACHED_STILL_RUNNING_EXIT, runVerifyCapture, runCapturedVerification, shellCommand, captureTarget, captureProject, resolveCaptureProject, captureSlotDirectory, acquireCaptureSlot, isFullSuiteCommand, isTestSuiteCommand, captureBudgetClass, captureBudget, captureHardMaximumMilliseconds, captureHarnessTimeoutMilliseconds, captureHarnessGuidance, runBudgetedCapture, fullSuiteCaptureTimeoutMilliseconds, effectiveTestWorkers, capacityScaledDeadlineMilliseconds, recordCapture, verifiedRevision };
 if (require.main === module) void main();

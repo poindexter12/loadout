@@ -133,9 +133,24 @@ function renderExecAgent({ name, effort, modelId, marker, extraNote, ticketBrief
 ${skills.map((skill) => `  - ${skill}`).join("\n")}
 ` : "";
   return template.split("{{NAME}}").join(String(name)).split("{{EFFORT}}").join(String(effort)).split("{{MODEL_FRONTMATTER}}").join(modelId ? `
-model: ${modelId}` : "").split("{{CHECKPOINT_TOOL_ROUNDS}}").join(String(EXECUTOR_CHECKPOINT_TOOL_ROUNDS)).split("permissionMode: bypassPermissions").join(`${toolsLine}${disallowedToolsLine}${skillsLine}permissionMode: bypassPermissions`).split("{{MARKER}}").join(marker || "").split("{{EXTRA_NOTE}}").join(extraNote || "").split("{{TICKET_BRIEF}}").join(`Teammate subagent fan-out must omit the Agent \`name\` parameter; named teammate spawns are rejected by the harness.${ticketBrief2 ? `
+model: ${modelId}` : "").split("{{CHECKPOINT_TOOL_ROUNDS}}").join(String(EXECUTOR_CHECKPOINT_TOOL_ROUNDS)).split("permissionMode: bypassPermissions").join(`${toolsLine}${disallowedToolsLine}${skillsLine}permissionMode: bypassPermissions`).split("{{MARKER}}").join(marker || "").split("{{EXTRA_NOTE}}").join(extraNote || "").split("{{TICKET_BRIEF}}").join(`${PER_DISPATCH_SCRATCH_RULE}
+Teammate subagent fan-out must omit the Agent \`name\` parameter; named teammate spawns are rejected by the harness.${ticketBrief2 ? `
 
 ${ticketBrief2}` : ""}`);
+}
+const PER_DISPATCH_SCRATCH_RULE = "**Per-dispatch scratch:** The scratchpad directory your environment names belongs to the orchestrating session and is shared by every executor it spawns. Never write a file at its root: a concurrent sibling writing the same generic name (`negative-control.js`, `verify.log`) overwrites yours between write and use, and a source file you swapped out and later restore from there can come back as another dispatch's copy. Keep every scratch file under the per-dispatch directory your briefing names, `<scratchpad>/<project>-<ticket-ref>-d<launch>/`, and never read, edit, or delete another dispatch's directory.";
+function dispatchScratchDirectoryName(ticket, slug) {
+  const ref = String(ticket?.ref || "").trim();
+  if (!ref) return null;
+  const round = Number(ticket?.dispatch?.launchSeq);
+  const launch = Number.isInteger(round) && round > 0 ? round : 1;
+  return [String(slug || "").trim(), ref, `d${launch}`].filter(Boolean).join("-").replace(/[^A-Za-z0-9._-]+/g, "-");
+}
+function ticketScratchSpace(ticket, slug) {
+  if (!ticket?.dispatch) return null;
+  const name = dispatchScratchDirectoryName(ticket, slug);
+  if (!name) return null;
+  return `Per-dispatch scratch directory: \`<scratchpad>/${name}/\`, where \`<scratchpad>\` is the Scratchpad directory your environment names. That scratchpad is shared by every executor the orchestrating session spawns, so create this directory before first use and keep every temporary file in it: scripts, logs, and any source file you swap out for a control and must restore. Never write at the scratchpad root, and never read, edit, or delete another dispatch's directory.`;
 }
 function dispatchNote() {
   return `
@@ -537,6 +552,14 @@ function ticketWorktreeSync(ticket, projectPath) {
       `A review also ENDS on its candidate: leave HEAD at ${commit}, because the board reads this worktree's revision when you close and refuses a verdict formed on a different tree. Comparing against the integration branch never needs HEAD to move, so use \`git diff ${commit}...main\` or \`git show\` instead of checking anything else out.`
     ].join(" ");
   }
+  const namedBase = dispatch?.baseRef;
+  if (namedBase?.ref && namedBase.commit === commit && !dispatch?.continuation?.mode) {
+    return [
+      `Worktree synchronization (run before work): this ticket names base ref ${namedBase.ref}, so this worktree must start from ${commit}, not from the integration target.`,
+      `Check \`git merge-base --is-ancestor ${commit} HEAD\`. If it fails, run \`git reset --hard ${commit}\`; no fetch is needed, because this worktree shares the project repository's object database.`,
+      "If resetting fails, stop and report it instead of working from the integration target."
+    ].join(" ");
+  }
   if (!target || !commit) return null;
   const branch = String(target.mode === "remote" ? `refs/remotes/origin/${target.branch}` : target.branch || "").trim();
   if (!branch) return null;
@@ -625,7 +648,7 @@ Git dir: ${gitDir}`;
 }
 function ticketReadOnlyScratchSpace(ticket) {
   if (ticket?.dispatch?.readonly !== true) return null;
-  return "Read-only dispatch: keep temporary files in the session scratchpad, outside every repository worktree. The scratchpad is not a durable ticket artifact.";
+  return "Read-only dispatch: keep temporary files in the session scratchpad, outside every repository worktree, inside the per-dispatch scratch directory named below. The scratchpad is not a durable ticket artifact. With no Write tool, write scratch and evidence files through Bash: a heredoc or printf redirected into the scratchpad or the board verification directory is allowed; only a heredoc that carries a git invocation is refused.";
 }
 function ticketIsolationContract(ticket, projectPath) {
   if (!ticket || !ticket.dispatch || ticket.dispatch.sharedTree !== false) return null;
@@ -635,7 +658,7 @@ function ticketIsolationContract(ticket, projectPath) {
   const expected = continuationWorktree || String(dispatch.worktree || "").trim() || "(immutable worktree binding unavailable; writes will be refused)";
   return [[
     "Worktree isolation contract: this dispatch runs in its own linked worktree, never in the shared checkout.",
-    "The harness refuses heredocs in isolated worktrees; Write scripts to your scratchpad and run them by path.",
+    "A heredoc that carries a git invocation is refused in an isolated worktree; run git as plain, separate commands, or Write the script to your scratchpad and run it by path. A heredoc with no git invocation is allowed.",
     `Expected worktree root: ${expected}`,
     "Confirm it before your first write, and again after any resume from a coordinator message: `git rev-parse --git-dir` must differ from `git rev-parse --git-common-dir`.",
     `If they match you are in the shared checkout ${root}. Stop. Write nothing, tell the orchestrator this ticket lost its worktree and needs re-dispatch, and name any work you already have staged there so it can be committed out of the shared tree rather than lost.`
@@ -754,7 +777,7 @@ function verificationGateBody(ticket, project) {
     verifierCommand ? "One pinned command verifies this ticket. Decide nothing about verification until you have read this section, and run no broader suite ahead of it." : "This ticket has one pinned verification contract. Decide nothing about verification until you have read this section, and record evidence against that contract rather than against a suite you picked yourself.",
     verify,
     amendmentNotice,
-    verifierCommand ? "Run it through " + capturedVerifyCommand(verifierCommand, ticket?.ref, project) + " in the FOREGROUND with an explicit generous timeout of up to 600000 ms; this is the pinned verifier. A successful wrapper run records its completed capture identity against this ticket and the checked Git revision, and submit refuses prose or a retyped command without that matching record. " + (ticket?.dispatch?.sharedTree === false && ticket?.dispatch?.workingTreeDelivery !== true ? "This dispatch is isolated, so the wrapper runs in and records your bound worktree whatever directory you start it from, and it refuses before running anything while that worktree has uncommitted changes: commit the candidate with the board commit tool first, then run the wrapper. " : "") + "A backgrounded verify's completion does not wake you, so going idle on it parks the claim indefinitely. If it genuinely exceeds the 10-minute Bash ceiling, use bounded foreground until-loops instead of backgrounding or going idle; post [sidequest:verify-start] before it only for an expected no-op, and always post [sidequest:verify-complete] with status first after it exits. Executors may report evidence only; they cannot replace, skip, or weaken this verifier." : "Record evidence for the pinned verifier. Executors may not replace, skip, or weaken it; skipping requires an authorized bounded waiver recorded as a Diagnostic.",
+    verifierCommand ? "Run it through " + capturedVerifyCommand(verifierCommand, ticket?.ref, project) + " --detach in the FOREGROUND with an explicit generous timeout of up to 600000 ms; this is the pinned verifier. A successful wrapper run records its completed capture identity against this ticket and the checked Git revision, and submit refuses prose or a retyped command without that matching record. " + (ticket?.dispatch?.sharedTree === false && ticket?.dispatch?.workingTreeDelivery !== true ? "This dispatch is isolated, so the wrapper runs in and records your bound worktree whatever directory you start it from, and it refuses before running anything while that worktree has uncommitted changes: commit the candidate with the board commit tool first, then run the wrapper. " : "") + "A backgrounded verify's completion does not wake you, so going idle on it parks the claim indefinitely. --detach runs the capture in its own process group under its own budget, so the 10-minute Bash ceiling cannot kill it, and waits for it in the foreground for up to 540000 ms. Never run the wrapper without --detach when it may pass ten minutes, and never count on a foreground timeout to cover that: the harness moves an over-limit foreground call to the background under its 1800000 ms default, discarding your timeout, and kills the wrapper there before it records any verdict. If a capture must run attached and may exceed ten minutes, background it with an explicit timeout of 7200000, strictly greater than the budget the wrapper announces, never the default. If it prints verify=running (exit 75), the capture is still going: do not start another, rerun the --resume command it prints in the FOREGROUND with the same timeout until a final verify= line, instead of backgrounding or going idle; post [sidequest:verify-start] before it only for an expected no-op, and always post [sidequest:verify-complete] with status first after it exits. Executors may report evidence only; they cannot replace, skip, or weaken this verifier." : "Record evidence for the pinned verifier. Executors may not replace, skip, or weaken it; skipping requires an authorized bounded waiver recorded as a Diagnostic.",
     ...verifierCommand ? [
       "That wrapper run is the gate, not one option among several. It is the ONLY run that produces the capture record submit requires, so a passing full suite neither substitutes for it nor satisfies the gate. Run the pinned command first, and reach for a broader suite only when a focused failure points outside the code you changed. A broad suite run alongside the gate is wasted work, not extra rigour: on SQ-32 an executor spent over an hour on two full suites, one of them killed by its own phase budget, ahead of a pinned gate that took eight seconds, and neither broad run counted for anything at submit. The wrapper prints its own elapsed time, so budget from the gate's measured duration rather than from a full suite's.",
       `The wrapper's recorded capture is the verdict, so read that record instead of parsing the runner's output yourself. A summary that greps for TAP "not ok" while the runner prints a different failure marker reports exit 0 over a genuine red, and a silent false-green is strictly worse than a lost verdict. Quote the recorded status and the capture log path as your evidence, and take the status you post in [sidequest:verify-complete] from that record rather than from your own scan of the output.`
@@ -763,7 +786,7 @@ function verificationGateBody(ticket, project) {
     ...highStakes.length ? [highStakes.join("\n")] : []
   ].filter(Boolean).join("\n\n");
 }
-function executorSafetyBody(ticket, nonce, tokenFile, project, executor, closeout, worktreeIdentity, readOnlyScratchSpace, worktreeSync) {
+function executorSafetyBody(ticket, nonce, tokenFile, project, executor, closeout, worktreeIdentity, readOnlyScratchSpace, worktreeSync, scratchSpace) {
   const claimCall = [
     "mcp__plugin_sidequest_board__claim({",
     `  ref: ${JSON.stringify(ticket.ref)},`,
@@ -781,6 +804,7 @@ function executorSafetyBody(ticket, nonce, tokenFile, project, executor, closeou
     ["```javascript", claimCall, "```"].join("\n"),
     ...worktreeIdentity ? [worktreeIdentity] : [],
     ...readOnlyScratchSpace ? [readOnlyScratchSpace] : [],
+    ...scratchSpace ? [scratchSpace] : [],
     ...worktreeSync ? [worktreeSync] : [],
     ...ticketIsolationContract(ticket, project) || [],
     "Execution survival: Budget tool calls and run the declared verify command early, rather than only at the end. If the budget nears exhaustion after partly completing the contract, commit and submit the verified portion with evidence and plainly name what remains: a partial submission with proof beats a dead run. Never leave verified work uncommitted. Board MCP is the executor lifecycle authority. If its transport is unavailable, do not use the Sidequest CLI or raw Agent as a fallback: reload or reconnect Sidequest, then re-dispatch.",
@@ -943,6 +967,7 @@ function ticketBrief(ticket, nonce, marker, slug, projectPath, readOnlyRender) {
   const worktreeSync = ticketWorktreeSync(ticket, project);
   const worktreeIdentity = ticketWorktreeIdentity(ticket, project);
   const readOnlyScratchSpace = ticketReadOnlyScratchSpace(ticket);
+  const scratchSpace = ticketScratchSpace(ticket, slug);
   const uncertainty = dispatchUncertaintyPacket(ticket, slug);
   const planDocument = planDocumentPacket(ticket, slug);
   const experimentLog = experimentLogPacket(ticket, slug);
@@ -965,7 +990,7 @@ This dispatch deliberately runs in the shared checkout. Write only within the de
     revision: Number(ticket?.dispatch?.launchSeq) || 1,
     items: [
       { id: "verification-gate", kind: "safety", priority: 700, order: 0, body: verificationGateBody(ticket, project) },
-      { id: "safety", kind: "safety", priority: 600, order: 1, body: executorSafetyBody(ticket, nonce, ticket?.dispatch?.tokenFile, project, executor, closeout, worktreeIdentity, readOnlyScratchSpace, worktreeSync) + artifactSafety },
+      { id: "safety", kind: "safety", priority: 600, order: 1, body: executorSafetyBody(ticket, nonce, ticket?.dispatch?.tokenFile, project, executor, closeout, worktreeIdentity, readOnlyScratchSpace, worktreeSync, scratchSpace) + artifactSafety },
       { id: "execution-contract", kind: "contract", priority: 500, order: 2, body: storyContractProjectionBody(snapshot) },
       ...storyLog ? [{ id: "story-decision-log", kind: "evidence", priority: 475, order: 3, body: storyDecisionLogProjectionBody(storyLog) }] : [],
       ...rejectionHistory ? [{ id: "rejection-history", kind: "evidence", priority: 450, order: 4, body: rejectionHistory }] : [],

@@ -128,7 +128,7 @@ function registeredProject(store: WorktreeStore, repository: string): ProjectLoo
 
 type BindingStore = WorktreeStore & {
   bindDispatchWorktreeCreation: (slug: string, sessionId: string, worktree: string) => CreationBinding;
-  dispatchWorktreeCreationBoards: (sessionId: string, excludeSlug?: string | null) => { slug: string; repository: string }[];
+  dispatchWorktreeCreationBoards: (sessionId: string, excludeSlug?: string | null, worktreeFor?: (repository: string) => string) => { slug: string; repository: string }[];
 };
 
 // The session cwd names the board to try first, but it is only where the
@@ -150,7 +150,7 @@ function bindCreation(cwdRepository: string | null, sessionId: string, name: str
   if (binding.ok || (binding.reason !== 'project_unavailable' && binding.reason !== 'dispatch_binding_unavailable')) {
     return binding;
   }
-  const boards = store.dispatchWorktreeCreationBoards(sessionId, cwdSlug);
+  const boards = store.dispatchWorktreeCreationBoards(sessionId, cwdSlug, (repository) => namedWorktreePath(repository, name));
   if (boards.length > 1) {
     return { ok: false, reason: `ambiguous_binding (session ${sessionId} has live worktree dispatches on ${boards.map((board) => board.slug).join(', ')})` };
   }

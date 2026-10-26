@@ -51,6 +51,7 @@ const {
   pageRows,
   pagedPayload,
   compactPulse,
+  compactDispatchWarnings,
   requiredText,
   requiredFinalReport,
   boundedSubmissionText,
@@ -320,21 +321,22 @@ const tools: ToolDefinition[] = [
   },
   {
     name: 'dispatch',
-    description: 'Prepare a token-gated dispatch. It returns a stable executor spawn spec and token. Each returned subagent_type is bundled in Sidequest and discoverable when the plugin loads, before SessionStart maintenance. Shared-tree dispatch requires the spawning runtime to already be rooted in the declared checkout. Executors with a live claim cannot dispatch child tickets, but the live claim holder can recover a missing isolated-worktree binding by supplying recoveryEvidence, claimHolder, and worktree; the board verifies the stored executor.',
+    description: 'Prepare a token-gated dispatch. It returns a stable executor spawn spec and token. Each returned subagent_type is bundled in Sidequest and discoverable when the plugin loads, before SessionStart maintenance. Shared-tree dispatch requires the spawning runtime to already be rooted in the declared checkout. Executors with a live claim cannot dispatch child tickets, but the live claim holder can recover a missing isolated-worktree binding by supplying recoveryEvidence, claimHolder, and worktree; the board verifies the stored executor. Dispatch by priority (urgent, high, normal, low): when unblocked, undispatched ready work outranks the ticket, the result names it in higherPriorityReady and a warning.',
     inputSchema: {
       type: 'object',
       properties: {
         ref: { type: 'string' },
         project: PROJECT_PROP,
-        sharedTree: { type: 'boolean', description: 'Use the declared shared checkout only when the spawning runtime is already rooted there. Executors with a live claim cannot use this to dispatch child work.' },
+        sharedTree: { type: 'boolean', description: 'Use the declared shared checkout only when the spawning runtime is already rooted there: the spawn carries no isolation and no cwd, so the executor inherits this session\'s cwd. Refused when this session is rooted in a linked worktree or in another repository; dispatch another project\'s ticket without sharedTree instead. Executors with a live claim cannot use this to dispatch child work.' },
         allowRepeatFailure: { type: 'boolean' },
         allowUnscoped: { type: 'boolean', description: 'Explicitly allow a write ticket with no declared file scope.' },
+        priorityOverride: { type: 'string', description: 'Why this goes ahead of higher-priority ready work (user named it, or that work is blocked in practice). Recorded; silences the priority notice.' },
         integrationBranch: { type: 'string' },
         recoveryEvidence: { type: 'string', description: 'Observed failure evidence. With claimHolder, executor, and worktree, recover that live isolated claim without releasing it.' },
         recoveryTaskId: { type: 'string', description: 'The failed task id from a host task-failure notification. When it matches the bound runtime of the unclaimed attempt being retired, recoveryEvidence applies at once instead of waiting out the claim-idle backstop.' },
         claimHolder: { type: 'string', description: 'The exact by identity holding the live claim being recovered.' },
         worktree: { type: 'string', description: 'The resumed executor\'s linked worktree path for live-claim recovery.' },
-        full: { type: 'boolean', description: 'Include token, executor, warnings, and recovery details.' },
+        full: { type: 'boolean', description: 'Include token, executor, and recovery details. Warnings ride the compact result too; if any are cut, warningsOmitted and warningsRetrieval say so.' },
       },
       required: ['ref'],
     },
@@ -360,6 +362,7 @@ const tools: ToolDefinition[] = [
           ...(Object.hasOwn(args, 'sharedTree') ? { sharedTree: args.sharedTree === true } : {}),
           allowRepeatFailure: args.allowRepeatFailure === true,
           allowUnscoped: args.allowUnscoped === true,
+          ...(typeof args.priorityOverride === 'string' ? { priorityOverride: args.priorityOverride } : {}),
           integrationBranch: args.integrationBranch,
           recoveryEvidence: args.recoveryEvidence,
           recoveryTaskId: args.recoveryTaskId,
@@ -379,19 +382,23 @@ const tools: ToolDefinition[] = [
       // Old prepared records lack the stored task label. Regenerate it instead of
       // letting Claude Code display the route marker from the prompt.
       const spawn = agentsync.agentSpawn(dispatchState.launchName, isolation, resolved && resolved.model, agent, prompt, description);
+      // SQ-348: unblocked, undispatched ready work that outranks this ticket. Structured so it survives
+      // the per-session warning dedupe; omitted when empty or when priorityOverride recorded a reason.
+      const higherPriorityReady = store.dispatchHigherPriorityReady(prepared.ticket, slug);
       const compact: any = {
         ref: prepared.ticket.ref,
         effort: prepared.ticket.effort,
         runsLabel: prepared.ticket.exec && prepared.ticket.exec.runsLabel,
         ...(prepared.ticket.dispatch?.fallbackReason ? { fallbackReason: prepared.ticket.dispatch.fallbackReason } : {}),
+        ...(higherPriorityReady.length ? { higherPriorityReady } : {}),
         spawn,
       };
       const warnings = store.presentWarnings(prepared.ticket, store.dispatchWarnings(prepared.ticket, slug), sessionId);
-      if (!args.full) {
-        const withWarnings = warnings.length ? Object.assign({}, compact, { warnings }) : compact;
-        // Compact dispatches must keep a bounded spawn payload. Warnings ride only when they fit the MCP ceiling.
-        return Buffer.byteLength(JSON.stringify(withWarnings, null, 2)) <= 1200 ? withWarnings : compact;
-      }
+      // SQ-320: warnings ride the compact result whole. They are already capped by
+      // presentWarnings and marked served for this session, so dropping them to fit the
+      // small spawn budget lost them for good; only the hard MCP ceiling may cut them, and
+      // then with a warningsOmitted count and a warningsRetrieval handle.
+      if (!args.full) return compactDispatchWarnings(slug, compact, warnings);
       return {
         project: slug,
         projectPath: meta.path,
@@ -404,6 +411,7 @@ const tools: ToolDefinition[] = [
         token: prepared.token,
         recovery: prepared.recovery || null,
         ...(dispatchState.fallbackReason ? { fallbackReason: dispatchState.fallbackReason } : {}),
+        ...(higherPriorityReady.length ? { higherPriorityReady } : {}),
         warnings,
         spawn,
         guidance: prepared.recovery?.kind === 'live_claim_resume'
@@ -428,7 +436,7 @@ const tools: ToolDefinition[] = [
         project: PROJECT_PROP,
         prompt: { type: 'string', description: 'The bounded ticket-execution prompt augmented with stored anchors and verify command.' },
         session: { type: 'string' },
-        sharedTree: { type: 'boolean', description: 'Use the declared shared checkout only when the spawning runtime is already rooted there. Executors with a live claim cannot use this to dispatch child work.' },
+        sharedTree: { type: 'boolean', description: 'Use the declared shared checkout only when the spawning runtime is already rooted there: the spawn carries no isolation and no cwd, so the executor inherits this session\'s cwd. Refused when this session is rooted in a linked worktree or in another repository; dispatch another project\'s ticket without sharedTree instead. Executors with a live claim cannot use this to dispatch child work.' },
       },
       required: ['ref', 'prompt'],
     },

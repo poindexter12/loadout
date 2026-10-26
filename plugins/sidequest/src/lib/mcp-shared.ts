@@ -73,6 +73,37 @@ function resolveProject(projectArg?: any) {
   return store.ensureProject(store.sessionProjectRoot());
 }
 
+// A call that names a ticket `ref` but no `project` defaults to the session
+// cwd's board. That is wrong for an executor whose claim lives on another
+// board: the same ref there can name an unrelated ticket, and the call lands on
+// it silently (SQ-284). When the caller holds a live claim on that ref (matched
+// by `by`, or by the dispatch session when `by` is omitted), return the board
+// that claim is on. Return null to keep the cwd default; throw when the ref is
+// ambiguous across boards and only `project` can say which one is meant.
+function claimedProjectForRef(args?: any) {
+  if (!args || typeof args !== 'object') return null;
+  if (String(args.project == null ? '' : args.project).trim()) return null;
+  const ref = String(args.ref == null ? '' : args.ref).trim();
+  if (!ref) return null;
+  const claims = store.liveClaimsForRef(ref);
+  if (!claims.length) return null;
+  const by = String(args.by == null ? '' : args.by).trim();
+  const session = runtimeSessionId();
+  const mine = by
+    ? claims.filter((claim: any) => claim.by === by)
+    : (session ? claims.filter((claim: any) => claim.sessionId === session) : []);
+  if (!mine.length) return null;
+  const cwd = store.findProject(store.sessionProjectRoot());
+  const cwdSlug = cwd && cwd.ok ? cwd.slug : null;
+  const boards: string[] = Array.from(new Set(mine.map((claim: any) => String(claim.slug))));
+  if (boards.length === 1 && boards[0] === cwdSlug) return null;
+  // A claim held under the caller's own `by` is decisive. A session-only match
+  // is not when the cwd board has its own ticket under the same ref.
+  if (boards.length === 1 && (by || !cwdSlug || !store.getTicket(cwdSlug, ref))) return boards[0];
+  const named = boards.concat(cwdSlug && !boards.includes(cwdSlug) ? [cwdSlug] : []);
+  throw new Error(`${ref} is ambiguous across boards (${named.join(', ')}): your claim is on ${boards.join(', ')} but this session's board is ${cwdSlug || 'unregistered'}. Pass \`project\` to name the board.`);
+}
+
 // The MCP server inherits its Claude Code session identity. Tool callers only
 // know labels, which cannot be used by the Agent lifecycle hooks.
 function runtimeSessionId() {
@@ -191,6 +222,7 @@ const PROJECT_PROP = { type: 'string', description: 'Board (current project).' }
 // exactly on its byte budget, so the bound would cost tokens no caller reads. The
 // store refuses an over-limit list and names the cap instead (SQ-900).
 const FILES_PROP = { type: 'array', items: { type: 'string' }, description: 'Declared file scope: paths, directory prefixes covering descendants, or globs matched consistently by hook and commit enforcement.' };
+const EXTERNAL_WORKTREES_PROP = { type: 'array', items: { type: 'string' }, description: 'Orchestrator-granted absolute roots of approved checkouts in OTHER repositories (for example a user-approved branch worktree). The claimed executor may Write/Edit under them while its claim is held; they are never committed by the board, never inside this project, and an executor cannot grant them to itself. Empty clears.' };
 const LABELS_PROP = { type: 'array', items: { type: 'string' } };
 const CONTRACT_PROP = (verb: string) => ({ type: 'array', items: { type: 'string' }, description: `Named contracts or interfaces this ticket ${verb}.` });
 const MODEL_FILTER_PROP = { type: 'string', description: 'Filter by resolved model slug.' };
@@ -213,7 +245,7 @@ const TOOL_DESCRIPTION_OVERRIDES: Record<string, string | undefined> = {
   list: 'List; poll via changes/pulse.',
   pulse: 'Liveness.',
   changes: 'Poll ticket changes.',
-  ready: 'List ready ticket refs.',
+  ready: 'List ready ticket refs, by priority.',
   story: 'Stories.',
   story_contract: 'Story contract.',
   story_log: 'Story log.',
@@ -234,7 +266,7 @@ const TOOL_DESCRIPTION_OVERRIDES: Record<string, string | undefined> = {
   link: 'Ticket link.',
   remove: 'Delete; force for claims.',
   claim: 'Claim before work; proceed only on ok:true.',
-  dispatch: 'Dispatch; token and spawn spec.',
+  dispatch: 'Dispatch; token and spawn spec. Flags skipped higher-priority ready work.',
   done: 'Finish; declared external needs current capture.',
   release: 'Release; reason required. oracle handoff needs ask until verdict. force takes a foreign claim under your own by and needs that reason: reasonless force refuses not_owner; a forced take stamps kind forced and takenFrom.',
   groomClose: 'Frozen ticket target; abandonSubmission:true; reset/working-tree/manual; reviewed interaction.',
@@ -757,6 +789,35 @@ function boundedReadPayload(tool: string, payload: any) {
   return visible;
 }
 
+// SQ-320: dispatch warnings are agent-facing contract, not decoration. They are the only
+// notice channel a dispatch result has (Dispatch update lines such as a fresh Codex pin or
+// a PYTHONIOENCODING write ride here), and presentWarnings has already marked them served
+// for this session, so a warning dropped here never comes back. The compact dispatch
+// therefore carries every warning whole, exempt from the small spawn-payload budget, and
+// only the hard MCP ceiling can cut the list. When it does, the cut is never silent:
+// `warningsOmitted` counts what was left out and `warningsRetrieval` is a context_page
+// handle that returns the complete list.
+function compactDispatchWarnings(project: string, compact: any, warnings: any, maxBytes = COMPACT_RESULT_MAX_BYTES) {
+  const all = (Array.isArray(warnings) ? warnings : []).map((warning) => String(warning)).filter(Boolean);
+  if (!all.length) return compact;
+  const whole = Object.assign({}, compact, { warnings: all });
+  if (mcpPayloadBytes(whole) <= maxBytes) return whole;
+  const warningsRetrieval = snapshotContextRetrieval({
+    tool: 'dispatch', project: String(project || '<global>'), kind: 'rows', field: 'warnings', position: 0, value: all, reason: 'budget', cursor: 0,
+  });
+  const marked = (retained: string[]) => Object.assign({}, compact, {
+    warnings: retained,
+    warningsOmitted: all.length - retained.length,
+    warningsRetrieval,
+  });
+  const retained: string[] = [];
+  for (const warning of all) {
+    if (mcpPayloadBytes(marked([...retained, warning])) > maxBytes) break;
+    retained.push(warning);
+  }
+  return marked(retained);
+}
+
 function compactCategoryBody(category: any, field: string, project: string) {
   const value = String(category[field] || '');
   if (utf8ByteLength(value) <= CONTEXT_ROW_EXCERPT_BYTES) return { [field]: value };
@@ -1030,6 +1091,7 @@ module.exports = {
   assertSidequestInstall,
   assertDispatchTransport,
   resolveProject,
+  claimedProjectForRef,
   runtimeSessionId,
   sessionOf,
   controlPlaneIdentity,
@@ -1041,7 +1103,7 @@ module.exports = {
   pathList,
   provenNoOpCloseout,
   PROJECT_PROP,
-  FILES_PROP,
+  FILES_PROP, EXTERNAL_WORKTREES_PROP,
   LABELS_PROP,
   CONTRACT_PROP,
   MODEL_FILTER_PROP,
@@ -1069,6 +1131,7 @@ module.exports = {
   snapshotContextRetrieval,
   resolveContextPage,
   boundedReadPayload,
+  compactDispatchWarnings,
   MAX_CONTEXT_PAGE_BYTES,
   categoryListEntry,
   pageArguments,

@@ -12,7 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 
-const { runVerifyCapture, runCapturedVerification, recordCapture, shellCommand, captureSlotDirectory, acquireCaptureSlot, fullSuiteCaptureTimeoutMilliseconds, captureBudget, captureBudgetClass, captureHardMaximumMilliseconds, runBudgetedCapture, effectiveTestWorkers, capacityScaledDeadlineMilliseconds } = require('../lib/verify-capture.js');
+const { runVerifyCapture, runCapturedVerification, recordCapture, shellCommand, captureSlotDirectory, acquireCaptureSlot, fullSuiteCaptureTimeoutMilliseconds, captureBudget, captureBudgetClass, captureHardMaximumMilliseconds, captureHarnessTimeoutMilliseconds, captureHarnessGuidance, runBudgetedCapture, effectiveTestWorkers, capacityScaledDeadlineMilliseconds } = require('../lib/verify-capture.js');
 const { waitForCapacity, capacityWaitTimeoutMessage, capacityWaitDeadlineMilliseconds, testWorkerConcurrency } = require('./_capacity-deadline.js');
 const store = require('../lib/store.js');
 const { commandVerificationResult } = require('../lib/kernel/verification.js');
@@ -149,7 +149,7 @@ test('SQ-74: the in-test worker count comes from --test-concurrency, else the ma
 });
 
 test('SQ-74: an ad-hoc full-suite run does not acquire the verification capture slot', async () => {
-  // Ruling: only a ticket-bound capture takes the per-host slot. A full-suite command run without
+  // Ruling: only a ticket-bound capture takes the per-project slot. A full-suite command run without
   // a ticket must not queue behind a held slot; foreign load is absorbed by the capacity-scaled
   // in-test deadlines instead.
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-74-adhoc-'));
@@ -210,6 +210,80 @@ test('SQ-169: any node --test command or npm test script is classified for the e
   assert.equal(captureBudgetClass('cd plugins/sidequest && npm run test:full'), 'full-suite');
   for (const command of ['npm run check', 'npm run typecheck', 'node scripts/build.mjs', 'node --test-reporter=spec x.js', 'git diff --check']) {
     assert.equal(captureBudgetClass(command), 'command', command);
+  }
+});
+
+// SQ-334: `node scripts/test-full.mjs` is the full suite by its direct entry point, but only the
+// npm spelling matched, so two direct runs in one project took no slot and ran side by side.
+test('SQ-334: the full suite by its direct entry point classifies as full-suite', () => {
+  const directSpellings = [
+    'node scripts/test-full.mjs',
+    'cd plugins/sidequest && node scripts/test-full.mjs',
+    'node ./scripts/test-full.mjs --verbose',
+    'node plugins/sidequest/scripts/test-full.mjs',
+    'node --import tsx scripts/test-full.mjs',
+    '/usr/local/bin/node scripts/test-full.mjs',
+    `"${process.execPath}" scripts/test-full.mjs`,
+    'node "scripts/test-full.mjs"',
+    'node.exe scripts\\test-full.mjs',
+    'npm run typecheck && node scripts/test-full.mjs',
+    '(node scripts/test-full.mjs)',
+  ];
+  for (const command of directSpellings) assert.equal(captureBudgetClass(command), 'full-suite', command);
+  // The npm spelling still matches, including after a pipe-free separator.
+  assert.equal(captureBudgetClass('npm run lint; npm run test:full'), 'full-suite');
+  for (const command of ['node scripts/test-full.mjsx', 'node scripts/build.mjs', 'cat scripts/test-full.mjs', 'git diff -- scripts/test-full.mjs']) {
+    assert.equal(captureBudgetClass(command), 'command', command);
+  }
+});
+
+test('SQ-334: a ticket-bound direct-entry full-suite capture takes the project slot', { skip: process.platform === 'win32' }, async () => {
+  const project = captureFixtureProject('sq-334-direct-full-suite-', '\n');
+  fs.mkdirSync(path.join(project, 'scripts'));
+  fs.writeFileSync(path.join(project, 'scripts', 'test-full.mjs'), '\n');
+  execFileSync('git', ['add', '--all'], { cwd: project, windowsHide: true });
+  execFileSync('git', ['-c', 'user.name=Sidequest Tests', '-c', 'user.email=sidequest@example.invalid', 'commit', '--quiet', '-m', 'direct entry'], { cwd: project, windowsHide: true });
+  const boardProject = store.ensureProject(project);
+  const command = 'node scripts/test-full.mjs';
+  const ticket = store.createTicket(boardProject.slug, { title: 'direct-entry full suite takes the slot', executorVerifyKind: 'command', executorVerify: command });
+  try {
+    const { capture } = await runCapturedVerification(command, { project, ticket: ticket.ref }, project, fs, {
+      resolveBudget: (candidate: string) => captureBudget(candidate, 8, 0, ''),
+    });
+    assert.equal(capture.status, 'passed', capture.evidence);
+    assert.equal(capture.budget?.budgetClass, 'full-suite');
+    assert.equal(capture.queuePosition, 1, 'the direct-entry full suite must queue for the project slot');
+    assert.equal(fs.existsSync(path.join(captureSlotDirectory(project), 'active')), false, 'the project slot is released after the run');
+    if (capture.logPath) deleteLog(capture);
+  } finally {
+    fs.rmSync(captureSlotDirectory(project), { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+// SQ-334: the slot is keyed per project by design (captureSlotDirectory hashes the registered
+// project path). The refusal called it "per-host", so an orchestrator concluded the machine was
+// serialised and stopped keeping cross-project suites apart.
+test('SQ-334: the slot-wait refusal names the slot per-project and says other projects are not serialised', async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-334-slot-scope-'));
+  const otherProject = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-334-slot-other-'));
+  const lease = await acquireCaptureSlot(project);
+  assert.ok('release' in lease, `fixture must hold the slot: ${JSON.stringify(lease)}`);
+  try {
+    const other = await acquireCaptureSlot(otherProject, 200);
+    assert.ok('release' in other, `a capture in another project is not serialised against this one: ${JSON.stringify(other)}`);
+    await other.release();
+    const waited = await acquireCaptureSlot(project, 200);
+    assert.ok(!('release' in waited) && 'queuePosition' in waited, `the second capture in the same project must time out: ${JSON.stringify(waited)}`);
+    assert.doesNotMatch(waited.reason, /per-host/);
+    assert.match(waited.reason, /waited \d+ms for this project's full-suite slot at queue position 2;/);
+    assert.match(waited.reason, /The slot is per project: it serialises full-suite captures within this project only, and captures in other projects on this host are not serialised against it/);
+  } finally {
+    await lease.release();
+    fs.rmSync(captureSlotDirectory(project), { recursive: true, force: true });
+    fs.rmSync(captureSlotDirectory(otherProject), { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+    fs.rmSync(otherProject, { recursive: true, force: true });
   }
 });
 
@@ -318,9 +392,9 @@ test('SQ-169: a full-suite capture that exceeds its budget is stopped, reported,
     assert.equal(capture.budget?.budgetClass, 'full-suite');
     assert.equal(capture.queuePosition, 1);
     assert.match(capture.reason, /^capture_budget_exceeded: the verify command ran \d+ms and was stopped at its 1500ms capture budget\./);
-    assert.match(capture.reason, /full-suite class \(the npm run test:full suite, serialized per host\)/);
+    assert.match(capture.reason, /full-suite class \(the test:full suite, serialized per project; captures in other projects are not serialized against it\)/);
     assert.match(announced.join('\n'), /^verify-capture: capture budget 1500ms, full-suite class/);
-    assert.equal(fs.existsSync(path.join(captureSlotDirectory(project), 'active')), false, 'the per-host slot is released after a budget timeout');
+    assert.equal(fs.existsSync(path.join(captureSlotDirectory(project), 'active')), false, 'the project slot is released after a budget timeout');
     fs.rmSync(capture.logPath, { force: true });
   } finally {
     fs.rmSync(captureSlotDirectory(project), { recursive: true, force: true });
@@ -339,9 +413,60 @@ test('SQ-169: the wrapper announces the budget before the run and reports it aft
   });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stderr, /^verify-capture: capture budget 600000ms, command class \(not a recognized test runner/m);
-  assert.match(result.stdout, /^capture-budget class=command budgetMs=600000 elapsedMs=\d+ setupMs=600000 phaseMs=0 measuredPhaseMs=0 hardMaxMs=7200000 cores=\d+ load=\d+\.\d\d effectiveWorkers=\d+\.\d\d$/m);
+  assert.match(result.stdout, /^capture-budget class=command budgetMs=600000 elapsedMs=\d+ setupMs=600000 phaseMs=0 measuredPhaseMs=0 hardMaxMs=7200000 cores=\d+ load=\d+\.\d\d effectiveWorkers=\d+\.\d\d harnessTimeoutMs=1200000$/m);
+  // SQ-332: the announcement names the Bash timeout a backgrounded caller must pass, before the run starts.
+  assert.match(result.stderr, /^verify-capture: Bash timeout: this capture may run up to 600000ms\. .* If you background this call, pass timeout=1200000 \(the budget plus a 600000ms margin, under the 7200000ms harness maximum\), never the default; or rerun with --detach/m);
+  assert.doesNotMatch(result.stderr, /at or above that 1800000ms default/, 'a budget under the background default does not claim the default kills it');
   const details = /^details=(.*)$/m.exec(result.stdout)?.[1];
   if (details) fs.rmSync(details, { force: true });
+});
+
+test('SQ-332: a budget past the 1800000ms background default names that default and the timeout that outlives it', () => {
+  // The capacity model's own ceiling under heavy load: 600000ms setup + 2400000ms phase.
+  const loaded = captureBudget('npm run test:full', 8, 64, '');
+  assert.equal(loaded.timeoutMilliseconds, 3_000_000);
+  assert.equal(captureHarnessTimeoutMilliseconds(loaded), 3_600_000);
+  const guidance = captureHarnessGuidance(loaded);
+  assert.match(guidance, /^verify-capture: Bash timeout: this capture may run up to 3000000ms\. The Bash tool stops a foreground call at 600000ms and moves a longer one to the background under its 1800000ms default, discarding the timeout you set, and a wrapper killed there records no verdict at all\./);
+  assert.match(guidance, /This budget is at or above that 1800000ms default, so a backgrounded call without an explicit timeout is killed before this capture can record pass, fail, or capture_budget_exceeded\./);
+  assert.match(guidance, /If you background this call, pass timeout=3600000 /);
+
+  // SQ-277's geometry: a 6000000ms phase override gives 6600000ms, which still fits the margin.
+  const widened = captureBudget('npm run test:full', 8, 0, '6000000');
+  assert.equal(widened.timeoutMilliseconds, 6_600_000);
+  assert.match(captureHarnessGuidance(widened), /pass timeout=7200000 /);
+
+  // At the hard maximum no Bash timeout can outlive the capture, so the only route is --detach.
+  const clamped = captureBudget('npm run test:full', 8, 0, '999999999');
+  assert.equal(captureHarnessTimeoutMilliseconds(clamped), 7_200_000);
+  const clampedGuidance = captureHarnessGuidance(clamped);
+  assert.match(clampedGuidance, /leaves less than the 600000ms margin under the 7200000ms harness maximum, so no Bash timeout reliably outlives it: rerun with --detach/);
+  assert.doesNotMatch(clampedGuidance, /pass timeout=/);
+  assert.match(captureHarnessGuidance(clamped, true), /^verify-capture: running detached, so no Bash timeout can stop this capture/);
+});
+
+test('SQ-332: a capture whose budget exceeds the harness default announces why a harness kill would leave no record before it runs', async () => {
+  const announced: string[] = [];
+  const longBudget = (command: string) => Object.freeze({ ...captureBudget(command, 8, 0, ''), timeoutMilliseconds: 2_400_000 });
+  const command = `"${process.execPath}" -e "process.stdout.write('quick')"`;
+  const { capture, recorded } = await runCapturedVerification(command, null, process.cwd(), fs, {
+    resolveBudget: longBudget,
+    announce: (line: string) => announced.push(line),
+  });
+  try {
+    assert.equal(capture.status, 'passed', capture.evidence);
+    assert.equal(recorded, null);
+    assert.equal(capture.budget?.timeoutMilliseconds, 2_400_000);
+    // `assert` is require()d, so it is typed any and assert.ok cannot narrow; fall back to '' explicitly.
+    const harnessLine = announced.find((line) => line.startsWith('verify-capture: Bash timeout:')) ?? '';
+    assert.ok(harnessLine, announced.join('\n'));
+    assert.match(harnessLine, /this capture may run up to 2400000ms/);
+    assert.match(harnessLine, /at or above that 1800000ms default, so a backgrounded call without an explicit timeout is killed before this capture can record/);
+    assert.match(harnessLine, /pass timeout=3000000 /);
+    assert.ok(announced.indexOf(harnessLine) > announced.findIndex((line) => line.startsWith('verify-capture: capture budget 2400000ms')), 'the harness line follows the budget line');
+  } finally {
+    deleteLog(capture);
+  }
 });
 
 test('full-suite capture serializes sibling captures and records the queue wait', async () => {
@@ -685,6 +810,45 @@ test('verify timeout kills the whole process tree, not just the shell', { skip: 
   } finally {
     for (const pid of survivors) {
       try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// SQ-172: SQ-124 put the verify command in its own process group so a timeout could kill the whole
+// tree. That same isolation means a kill aimed at the verify wrapper (the harness's own Bash timeout,
+// or any SIGKILL of the waiting node process) never reaches the test runner: spawnSync blocks the
+// event loop, so the wrapper cannot react, and the runner is orphaned to compete with the retry.
+// The verify script now carries a parent-death watchdog that terminates its own group.
+test('verify process group dies when the waiting wrapper is killed mid-run', { skip: process.platform === 'win32' }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sidequest-verify-orphan-'));
+  const pidFile = path.join(directory, 'runner.pid');
+  const processModule = path.join(__dirname, '..', 'lib', 'ports', 'process.js');
+  const wrapperSource = `
+    const { runProcessVerification } = require(${JSON.stringify(processModule)});
+    runProcessVerification(
+      { kind: 'command', command: ${JSON.stringify(`sh -c 'sleep 300 & echo $! > "${pidFile}"; wait'`)}, evidenceContract: 'command output' },
+      { cwd: ${JSON.stringify(directory)}, timeoutMilliseconds: 120000, logPath: ${JSON.stringify(path.join(directory, 'verify.log'))} },
+    );
+  `;
+  const wrapper = spawn(process.execPath, ['-e', wrapperSource], { stdio: 'ignore' });
+  let runner = 0;
+  try {
+    const started = Date.now();
+    while (!fs.existsSync(pidFile) || !fs.readFileSync(pidFile, 'utf8').trim()) {
+      assert.ok(Date.now() - started < 15_000, 'verify runner never started');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    runner = Number(fs.readFileSync(pidFile, 'utf8').trim());
+    assert.ok(Number.isInteger(runner) && runner > 1, 'runner pid recorded');
+    wrapper.kill('SIGKILL');
+    const deadline = Date.now() + 10_000;
+    while (processAlive(runner) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(processAlive(runner), false, `test runner ${runner} survived the death of its verify wrapper`);
+  } finally {
+    if (wrapper.exitCode === null && wrapper.signalCode === null) wrapper.kill('SIGKILL');
+    if (runner > 1) {
+      try { process.kill(runner, 'SIGKILL'); } catch { /* already gone */ }
     }
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -1177,4 +1341,153 @@ test.describe('SQ-367: a catalog aged past the stale window', () => {
       fixture.cleanup();
     }
   });
+});
+
+// SQ-225: a capture whose own budget outlives the Bash tool's 600000ms ceiling must not die with
+// the Bash call. `--detach` runs it in its own process group and waits in the foreground for a
+// bounded time; `--resume` waits again and relays the capture's own verdict.
+const VERIFY_CAPTURE_SCRIPT = path.join(SIDEQUEST_DIR, 'lib', 'verify-capture.js');
+const DETACHED_RESUME_WAIT_MS = '570000';
+
+function slowPassingCommand(directory: string, delayMilliseconds: number): Readonly<{ command: string; marker: string }> {
+  const script = path.join(directory, 'slow-pass.js');
+  const marker = path.join(directory, 'finished');
+  fs.writeFileSync(script, `setTimeout(() => { require('node:fs').writeFileSync(process.argv[2], 'done'); }, ${delayMilliseconds});\n`);
+  return Object.freeze({ command: nodeCommand(script, marker), marker });
+}
+
+function removeDetachedEvidence(stdout: string, runDirectory: string | undefined): void {
+  const details = /^details=(.*)$/m.exec(stdout)?.[1];
+  if (details) fs.rmSync(details, { force: true });
+  if (runDirectory) fs.rmSync(runDirectory, { recursive: true, force: true });
+}
+
+function resumeDetached(runDirectory: string) {
+  return require('node:child_process').spawnSync(process.execPath, [VERIFY_CAPTURE_SCRIPT, '--resume', runDirectory, '--wait-ms', DETACHED_RESUME_WAIT_MS], {
+    encoding: 'utf8',
+    env: process.env,
+    windowsHide: true,
+  });
+}
+
+test('SQ-225: a detached capture survives its wrapper process group being killed and --resume relays its verdict', { skip: process.platform === 'win32' }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-detach-kill-'));
+  let runDirectory: string | undefined;
+  let resumed = '';
+  try {
+    const { command, marker } = slowPassingCommand(directory, 1_500);
+    // The wrapper leads its own process group, standing in for the Bash call the harness kills at its ceiling.
+    const wrapper = spawn(process.execPath, [VERIFY_CAPTURE_SCRIPT, '--base64', Buffer.from(command).toString('base64'), '--detach', '--wait-ms', DETACHED_RESUME_WAIT_MS], {
+      cwd: directory,
+      env: process.env,
+      detached: true,
+      windowsHide: true,
+    });
+    const announced = await new Promise<string>((resolve, reject) => {
+      let stderr = '';
+      wrapper.stdout.resume();
+      wrapper.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf8');
+        const match = /^verify-capture: detached run (\S+) pid=\d+;/m.exec(stderr);
+        if (match) resolve(String(match[1]));
+      });
+      wrapper.once('error', reject);
+      wrapper.once('close', (status: number | null) => reject(new Error(`the wrapper finished (status ${status}) without announcing a detached run, so it ran attached to the call that would be killed:\n${stderr}`)));
+    });
+    runDirectory = announced;
+    process.kill(-wrapper.pid, 'SIGKILL');
+    const result = resumeDetached(runDirectory);
+    resumed = result.stdout;
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /^verify=passed exit=0$/m);
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'done', 'the verify command ran to completion after its wrapper was killed');
+  } finally {
+    removeDetachedEvidence(resumed, runDirectory);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('SQ-225: a detached capture still running at the wait bound reports verify=running with a resume command and exit 75', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-detach-running-'));
+  let runDirectory: string | undefined;
+  let resumed = '';
+  try {
+    const { command, marker } = slowPassingCommand(directory, 1_500);
+    const started = require('node:child_process').spawnSync(process.execPath, [VERIFY_CAPTURE_SCRIPT, '--base64', Buffer.from(command).toString('base64'), '--detach', '--wait-ms', '0'], {
+      cwd: directory,
+      encoding: 'utf8',
+      env: process.env,
+      windowsHide: true,
+    });
+    const running = /^verify=running exit=75 pid=\d+ elapsedMs=\d+ run=(.+)$/m.exec(started.stdout);
+    runDirectory = running?.[1];
+    assert.equal(started.status, 75, `${started.stdout}\n${started.stderr}`);
+    assert.ok(runDirectory, started.stdout);
+    assert.match(started.stdout, /^verify-resume: the capture is still running detached under its own budget, and the Bash ceiling cannot stop it\. Do not start another one\. Rerun this in the FOREGROUND with a 600000 ms timeout until it prints a final verify= line: node ".+verify-capture\.js" --resume ".+"$/m);
+    assert.doesNotMatch(started.stdout, /^verify=passed/m);
+    const result = resumeDetached(String(runDirectory));
+    resumed = result.stdout;
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /^verify=passed exit=0$/m);
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'done');
+    // SQ-332: the detached child says no Bash timeout reaches it, instead of telling the caller to background it.
+    assert.match(result.stdout, /^verify-capture: running detached, so no Bash timeout can stop this capture; it records its own verdict within its 600000ms budget\.$/m);
+    assert.doesNotMatch(result.stdout, /If you background this call/);
+  } finally {
+    removeDetachedEvidence(resumed, runDirectory);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('SQ-225: a detached capture relays a failing verdict with the capture exit code', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-detach-fail-'));
+  let stdout = '';
+  let stderr = '';
+  try {
+    const command = `"${process.execPath}" -e "process.exit(3)"`;
+    const result = require('node:child_process').spawnSync(process.execPath, [VERIFY_CAPTURE_SCRIPT, '--base64', Buffer.from(command).toString('base64'), '--detach', '--wait-ms', DETACHED_RESUME_WAIT_MS], {
+      cwd: directory,
+      encoding: 'utf8',
+      env: process.env,
+      windowsHide: true,
+    });
+    stdout = result.stdout;
+    stderr = result.stderr;
+    assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /^verify=failed_suite exit=3 /m);
+  } finally {
+    const run = /^verify-capture: detached run (\S+) pid=/m.exec(String(stderr));
+    removeDetachedEvidence(stdout, run?.[1]);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('SQ-225: --resume reports a run that ended without an exit status as lost, and an unknown run as unknown', async () => {
+  const { awaitDetachedCapture } = require('../lib/verify-capture.js');
+  const runDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-verify-detach-lost-'));
+  try {
+    const exited = require('node:child_process').spawnSync(process.execPath, ['-e', ''], { windowsHide: true });
+    fs.writeFileSync(path.join(runDirectory, 'run.json'), JSON.stringify({ pid: exited.pid, startedAt: Date.now(), cwd: runDirectory }));
+    fs.writeFileSync(path.join(runDirectory, 'output.log'), 'partial wrapper output\n');
+    let written = '';
+    const status = await awaitDetachedCapture(runDirectory, 60_000, (text: string) => { written += text; });
+    assert.equal(status, 2);
+    assert.match(written, /partial wrapper output/);
+    assert.match(written, /^verify=lost exit=2 reason=".*detached_run_lost: the detached verify-capture process \d+ ended without writing an exit status/m);
+
+    fs.rmSync(path.join(runDirectory, 'run.json'));
+    written = '';
+    assert.equal(await awaitDetachedCapture(runDirectory, 60_000, (text: string) => { written += text; }), 2);
+    assert.match(written, /^verify=lost exit=2 reason=".*detached_run_unknown/m);
+  } finally {
+    fs.rmSync(runDirectory, { recursive: true, force: true });
+  }
+});
+
+test('SQ-225: the detached child keeps every capture argument but drops the detach-only options', () => {
+  const { detachedChildArguments } = require('../lib/verify-capture.js');
+  assert.deepEqual(
+    detachedChildArguments(['--base64', 'ZWNobw==', '--detach', '--project', '/repo', '--wait-ms', '1000', '--ticket', 'SQ-1'], '/runs/run-1/exit.json'),
+    ['--base64', 'ZWNobw==', '--project', '/repo', '--ticket', 'SQ-1', '--exit-file', '/runs/run-1/exit.json'],
+  );
 });

@@ -132,7 +132,10 @@ function deliveredAck(slug: string, result: any, integration: any, changed: any 
   const commits = Array.isArray(delivery.pinnedCommits)
     ? delivery.pinnedCommits
     : delivery.pinnedCommit ? [delivery.pinnedCommit] : [];
-  const message = commits.length
+  const merged = delivery.mode === 'pr' && delivery.pr?.mergeCommit ? delivery.pr : null;
+  const message = merged
+    ? `Delivered ${commits.join(', ') || 'the wave'} to ${delivery.targetBranch || 'the integration target'} through PR #${merged.number} (${merged.url}), merged as ${merged.mergeCommit}.`
+    : commits.length
     ? `Delivered ${commits.join(', ')} to ${delivery.targetBranch || 'the integration target'}.`
     : delivery.sourceRevision
       ? `Delivered source revision ${delivery.sourceRevision.source}:${delivery.sourceRevision.value}.`
@@ -267,7 +270,7 @@ function prDeliveryMode(slug: string): boolean {
   }
 }
 
-const PR_DELIVERY_REFUSAL_KEYS = ['cause', 'pr', 'waveId', 'branch', 'conflictedPaths'];
+const PR_DELIVERY_REFUSAL_KEYS = ['cause', 'pr', 'waveId', 'branch', 'conflictedPaths', 'failingChecks', 'mergeCommit'];
 
 // PR-mode refusals keep their cause and PR identity; mutationAck drops them.
 function prDeliveryRefusalFields(delivery: any) {
@@ -288,6 +291,7 @@ function awaitingMergeAck(slug: string, delivery: any) {
     participantRefs: delivery.participants,
     tickets: tickets.map((entry: any) => (entry ? { ref: entry.ref, status: entry.status } : null)),
     ...(delivery.existing ? { existing: true } : {}),
+    ...(delivery.checks ? { checks: delivery.checks } : {}),
     message: delivery.message,
   });
 }
@@ -418,6 +422,15 @@ function collectGitSubmissionFacts(options: any) {
     targetFailure = { code: 'integration_target_unavailable', message: `submit: refused ${ticket.ref}; ${boundedSubmissionText((error && error.message) || String(error))}. Remedy: Fetch or recreate ${targetName}, then resubmit the preserved candidate.`, retryable: true };
   }
   const dispatchBase = String(ticket.dispatch?.baseCommit || '').trim() || null;
+  // SQ-287. A ticket that names its base (SQ-286: an open pull request's branch, say) was forked
+  // from that commit, and the dispatch recorded what the name resolved to. Without this the
+  // candidate had no route: its default range ran from the integration target and swallowed the
+  // PR's own commits (outside_scope), while `--base <PR head>` refused unrecognized_base because
+  // the PR head is not on the integration target. The recorded commit is the boundary: the
+  // default range starts there and an explicit base naming it is approved, so scope is checked
+  // over base..candidate only. A live re-resolution of the branch name is deliberately not
+  // trusted here; the recorded commit is the one the worktree actually started from.
+  const namedBase = String(ticket.dispatch?.baseRef?.commit || '').trim() || null;
   const approvedBoundaries = sharedTreeSubmissionBoundaries(slug, ticket);
   const boundaryCommits = approvedBoundaries.map((boundary: { ref: string; commit: string }) => boundary.commit);
   const calculatedRange = target
@@ -440,9 +453,11 @@ function collectGitSubmissionFacts(options: any) {
           allowedBases: [...(dispatchBase ? [dispatchBase] : []), ...boundaryCommits],
           baseCandidates: boundaryCommits,
         }
-        : ticket.dispatch?.sharedTree !== false && dispatchBase
-          ? { dispatchBase, allowedBases: [dispatchBase] }
-          : { allowedBases: [] }),
+        : namedBase
+          ? { dispatchBase: namedBase, allowedBases: [namedBase] }
+          : ticket.dispatch?.sharedTree !== false && dispatchBase
+            ? { dispatchBase, allowedBases: [dispatchBase] }
+            : { allowedBases: [] }),
     })
     : null;
   const range = calculatedRange && !calculatedRange.ok
@@ -1180,7 +1195,9 @@ const tools: ToolDefinition[] = [
             : mutationAck(slug, delivery);
         }
         if (delivery.state === 'awaiting-merge') return awaitingMergeAck(slug, delivery);
-        const reason = `Delivered assembled wave ${refs.join(', ')} via ${delivery.integration.mode}.`;
+        const reason = delivery.state === 'merged'
+          ? `Delivered assembled wave ${refs.join(', ')} via PR #${delivery.pr.number} (${delivery.pr.url}), merged as ${delivery.pr.mergeCommit}. Verify passed: ${delivery.integration.verify.evidence}`
+          : `Delivered assembled wave ${refs.join(', ')} via ${delivery.integration.mode}.`;
         const ticketsBeforeClosure = refs.map((ref: string) => store.getTicket(slug, ref));
         const closures = refs.map((ref: string) => store.completeTicketAsControlPlane(slug, ref, { by, reason, purpose: 'integration' }));
         const failedClosure = closures.find((closure: any) => !closure.ok);

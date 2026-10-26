@@ -81,7 +81,35 @@ function shellScript(command: string, shell: ShellDefinition): string {
       '',
     ].join('\r\n');
   }
-  return `(\n${command}\n)\nsidequest_exit_code=$?\nprintf '\\n__SIDEQUEST_VERIFY_EXIT__=%s\\n' "$sidequest_exit_code"\nexit "$sidequest_exit_code"\n`;
+  return `${parentDeathWatchdog(process.pid)}(\n${command}\n)\nsidequest_exit_code=$?\n${stopParentDeathWatchdog()}printf '\\n__SIDEQUEST_VERIFY_EXIT__=%s\\n' "$sidequest_exit_code"\nexit "$sidequest_exit_code"\n`;
+}
+
+// SQ-172: the verify command leads its own process group (SQ-124) so a timeout can kill the whole
+// tree. That isolation also hides the tree from any kill aimed at the waiting wrapper: the harness's
+// own Bash timeout, or a SIGKILL of the node process, reaches only the wrapper, and spawnSync blocks
+// its event loop so it cannot react. The test runner would then be orphaned and compete with the
+// retry. The script therefore starts a watchdog inside the group that polls the waiting process and,
+// once it is gone, terminates the group: SIGTERM, then SIGKILL after the same grace period. Only
+// owned POSIX groups get one; `kill 0` addresses the caller's own group, which is the verify group.
+function parentDeathWatchdog(parentPid: number): string {
+  if (!ownsProcessGroup) return '';
+  const graceSeconds = Math.ceil(PROCESS_GROUP_TERMINATE_GRACE_MILLISECONDS / 1_000);
+  return [
+    `sidequest_verify_parent=${parentPid}`,
+    '(',
+    '  while kill -0 "$sidequest_verify_parent" 2>/dev/null; do sleep 1; done',
+    "  trap '' TERM",
+    '  kill -TERM 0 2>/dev/null',
+    `  sleep ${graceSeconds}`,
+    '  kill -KILL 0 2>/dev/null',
+    ') </dev/null >/dev/null 2>&1 &',
+    'sidequest_verify_watchdog=$!',
+    '',
+  ].join('\n');
+}
+
+function stopParentDeathWatchdog(): string {
+  return ownsProcessGroup ? 'kill "$sidequest_verify_watchdog" 2>/dev/null\n' : '';
 }
 
 function temporaryScript(command: string): Readonly<{ scriptPath: string; shell: ShellCommand }> {

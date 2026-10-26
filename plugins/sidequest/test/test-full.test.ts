@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -339,14 +339,15 @@ function loadScheduling(names: string[]): { longRunning: string[]; scheduled: st
 test('SQ-208: the longest serial test files start first, and every other file still runs once', () => {
   const { longRunning, scheduled, real } = loadScheduling([
     'zeta.test.ts',
-    'worktree-isolation.test.ts',
+    'dispatch-lifecycle.test.ts',
     'alpha.test.ts',
-    'mcp.test.ts',
+    'worktree-isolation.test.ts',
     'bench.perf.test.ts',
     'helper.ts',
   ]);
 
-  assert.deepEqual(scheduled, ['mcp.test.ts', 'worktree-isolation.test.ts', 'alpha.test.ts', 'zeta.test.ts']);
+  // The list order wins over alphabetical: worktree-isolation is listed ahead of dispatch-lifecycle.
+  assert.deepEqual(scheduled, ['worktree-isolation.test.ts', 'dispatch-lifecycle.test.ts', 'alpha.test.ts', 'zeta.test.ts']);
   // A renamed or deleted file would silently drop back into alphabetical order, which is the
   // late start this list exists to prevent.
   for (const name of longRunning) assert.ok(real.includes(name), `${name} is scheduled first but no longer exists in test/`);
@@ -385,4 +386,116 @@ test('SQ-208: the phase root starts files in the order it is given and fails on 
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('the full-suite cleanup kills and reports a planted fixture under its temp root', async (t?: any) => {
+  const runner = await import(`${runnerModuleUrl}?sweep=${Date.now()}`) as {
+    sweepSuiteProcesses: (root: string) => Promise<number[]>;
+  };
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sidequest-full-suite-sweep-'));
+  const fixture = path.join(root, 'surviving-fixture.js');
+  fs.writeFileSync(fixture, 'setInterval(() => {}, 1000);\n');
+  const child = spawn(process.execPath, [fixture], { detached: true, stdio: 'ignore', windowsHide: true });
+  child.unref();
+  t.after(async () => {
+    try { process.kill(-child.pid!, 'SIGKILL'); } catch (_: unknown) {}
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  await new Promise<void>((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+  const childExit = new Promise<void>((resolve) => child.once('exit', resolve));
+
+  const survivors = await runner.sweepSuiteProcesses(root);
+  assert.deepEqual(survivors, [child.pid]);
+  await childExit;
+  assert.throws(() => process.kill(child.pid!, 0), { code: 'ESRCH' });
+});
+
+async function waitForCondition(check: () => boolean, label: string, timeoutMilliseconds = 10_000) {
+  const deadline = Date.now() + timeoutMilliseconds;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+function processIsGone(processId: number) {
+  try {
+    process.kill(processId, 0);
+    return false;
+  } catch (error: any) {
+    return error.code === 'ESRCH';
+  }
+}
+
+test('a fixture orphaned by a deadline-killed runner is reaped, reported with the suite failure, and its root removed', async (t?: any) => {
+  const runner = await import(`${runnerModuleUrl}?cleanup=${Date.now()}`) as {
+    cleanupSuiteRoot: (root: string, suiteError?: Error | null) => Promise<number[]>;
+  };
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sidequest-full-suite-orphan-'));
+  // A sibling root that merely shares this one as a prefix is not ours and must survive.
+  const siblingRoot = fs.mkdtempSync(`${root}-sibling-`);
+  const siblingFixture = path.join(siblingRoot, 'sibling-fixture.js');
+  fs.writeFileSync(siblingFixture, 'setInterval(() => {}, 1000);\n');
+  const sibling = spawn(process.execPath, [siblingFixture], { detached: true, stdio: 'ignore', windowsHide: true });
+  sibling.unref();
+
+  // The runner stands in for node:test: it launches a detached fixture, then is SIGKILLed at
+  // the deadline before any t.after hook can reap that fixture.
+  const orphanFixture = path.join(root, 'orphan-fixture.js');
+  const orphanPidFile = path.join(root, 'orphan.pid');
+  const runnerFixture = path.join(root, 'runner-fixture.js');
+  fs.writeFileSync(orphanFixture, 'setInterval(() => {}, 1000);\n');
+  fs.writeFileSync(runnerFixture, [
+    "const { spawn } = require('node:child_process');",
+    "const fs = require('node:fs');",
+    `const orphan = spawn(process.execPath, [${JSON.stringify(orphanFixture)}], { detached: true, stdio: 'ignore' });`,
+    'orphan.unref();',
+    `fs.writeFileSync(${JSON.stringify(orphanPidFile)}, String(orphan.pid));`,
+    'setInterval(() => {}, 1000);',
+  ].join('\n'));
+  const deadlineKilledRunner = spawn(process.execPath, [runnerFixture], { stdio: 'ignore', windowsHide: true });
+  let orphanPid = 0;
+  t.after(async () => {
+    for (const processId of [deadlineKilledRunner.pid, orphanPid, sibling.pid]) {
+      if (processId) { try { process.kill(processId, 'SIGKILL'); } catch (_: unknown) {} }
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(siblingRoot, { recursive: true, force: true });
+  });
+  await waitForCondition(() => fs.existsSync(orphanPidFile) && fs.readFileSync(orphanPidFile, 'utf8').length > 0, 'the runner to launch its fixture');
+  orphanPid = Number(fs.readFileSync(orphanPidFile, 'utf8'));
+  const runnerExit = new Promise<void>((resolve) => deadlineKilledRunner.once('exit', () => resolve()));
+  deadlineKilledRunner.kill('SIGKILL');
+  await runnerExit;
+  assert.equal(processIsGone(orphanPid), false, 'the fixture outlives its killed runner, which is the leak under test');
+
+  await assert.rejects(
+    runner.cleanupSuiteRoot(root, new Error('Sidequest functional tests exceeded their phase budget.')),
+    (error: Error) => {
+      assert.match(error.message, /^Sidequest functional tests exceeded their phase budget\./, 'the suite failure stays first, not masked by the leak');
+      assert.match(error.message, new RegExp(`Reaped leaked full-suite fixture processes before removing .*: (?:\\d+, )*${orphanPid}\\b`), 'the leak names the orphaned pid');
+      assert.doesNotMatch(error.message, new RegExp(`\\b${sibling.pid}\\b`), 'a sibling root sharing the prefix is not reported');
+      return true;
+    },
+  );
+  await waitForCondition(() => processIsGone(orphanPid), 'the orphaned fixture to be reaped');
+  assert.equal(fs.existsSync(root), false, 'the suite root is removed after the sweep');
+  assert.equal(processIsGone(sibling.pid!), false, 'a process under a sibling root sharing the prefix is left alone');
+});
+
+test('a clean full-suite root reports no leak and rethrows only the suite failure', async () => {
+  const runner = await import(`${runnerModuleUrl}?clean=${Date.now()}`) as {
+    cleanupSuiteRoot: (root: string, suiteError?: Error | null) => Promise<number[]>;
+  };
+  const cleanRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sidequest-full-suite-clean-'));
+  assert.deepEqual(await runner.cleanupSuiteRoot(cleanRoot), []);
+  assert.equal(fs.existsSync(cleanRoot), false);
+
+  const failedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sidequest-full-suite-failed-'));
+  const suiteError = new Error('functional tests failed');
+  await assert.rejects(runner.cleanupSuiteRoot(failedRoot, suiteError), (error: Error) => error === suiteError);
+  assert.equal(fs.existsSync(failedRoot), false);
 });

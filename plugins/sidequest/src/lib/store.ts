@@ -286,13 +286,22 @@ function staleWorktreeCwdWarning(...args: any[]) { return warningsLayer.staleWor
 function dispatchUncertaintyWarnings(...args: any[]) { return warningsLayer.dispatchUncertaintyWarnings(...args); }
 function dispatchWarnings(ticket?: any, slug?: any) {
   const project = !slug && process.env.CLAUDE_PROJECT_DIR ? findProject(process.env.CLAUDE_PROJECT_DIR) : null;
-  const warnings = warningsLayer.dispatchWarnings(ticket, slug || (project?.ok ? project.slug : null));
+  const board = slug || (project?.ok ? project.slug : null);
+  const warnings = warningsLayer.dispatchWarnings(ticket, board);
+  // SQ-348: unblocked ready work at a strictly higher priority, named first so the orchestrator
+  // reads it before anything else in the result; warningPriority ranks it with the defect warnings.
+  const priority = board && ticket?.ref ? priorityBypassNotice(ticket, readyTickets(board)) : null;
   // SQ-362: this is the only warnings array BOTH the MCP dispatch handler and the CLI present, so
   // it is where the pinned verify command becomes visible at dispatch time. Appended last and
   // worded without the phrase "verify command" so it ranks below the real defect warnings and is
   // the first thing dropped if a dispatch is already over the presented-warning budget.
   const pinned = pinnedVerifierNotice(ticket);
-  return pinned ? [...warnings, pinned] : warnings;
+  return [...(priority ? [priority] : []), ...warnings, ...(pinned ? [pinned] : [])];
+}
+// SQ-348: the structured twin of the priority notice, for the dispatch result's higherPriorityReady
+// field. It is not subject to the per-session warning dedupe, so a repeat dispatch still carries it.
+function dispatchHigherPriorityReady(ticket?: any, slug?: any) {
+  return slug && ticket?.ref ? dispatchPriorityBypass(ticket, readyTickets(slug)) : [];
 }
 function dispatchDeclaredFiles(...args: any[]) { return warningsLayer.dispatchDeclaredFiles(...args); }
 function externalDeclaredFiles(...args: any[]) { return warningsLayer.externalDeclaredFiles(...args); }
@@ -492,6 +501,8 @@ const {
   worktreeIsolationWarning,
   prepareDispatch,
   syncLiveDispatchVerification,
+  dispatchPriorityBypass,
+  priorityBypassNotice,
   retirePreparedCompatibilityStaleAttempt,
   preparedCompatibilityHasProvenMismatch,
   supersedeUnboundAttempt,
@@ -528,6 +539,7 @@ const {
   markDispatchStopped,
   reconcileLaunchedDispatches,
   ticketEvidenceDirectory,
+  setDispatchPlanObserver,
 } = (dispatch = createDispatch({
   ARTIFACT_BASELINE_MAX_PATHS,
   normalizeCategoryId: (...args: any[]) => normalizeCategoryId(...args),
@@ -606,7 +618,10 @@ const {
   storyExecutionContract: (...args: any[]) => storyExecutionContract(...args),
   ticketCategory: (...args: any[]) => ticketCategory(...args),
   ticketStorageRow,
+  transaction: (...args: any[]) => transaction(...args),
+  withTicketFileLock: (...args: any[]) => withTicketFileLock(...args),
   withTicketLock: (...args: any[]) => withTicketLock(...args),
+  withTicketLocks: (...args: any[]) => withTicketLocks(...args),
 }));
 
 function descriptionField(...candidates: any[]) {
@@ -685,12 +700,20 @@ const {
   releaseLock,
   testClaimLockDelayMs,
   ticketLockPath,
+  withTicketFileLock,
   withTicketLock,
+  withTicketLocks,
 } = createLocks({
   fs,
   path,
   ticketsDir,
   transaction,
+  // Reads the open-transaction depth without opening the database: opening it runs seed repair,
+  // which takes ticket locks of its own, so asking "is a transaction open" must never cause one.
+  inTransaction: () => {
+    const handle = dbByHome.get(homeRoot());
+    return Boolean(handle && transactionDepth.get(handle));
+  },
 });
 
 const { copyAsset, saveAssetData, assetPath } = createAssets({ assetsDir, ensureDir });
@@ -730,9 +753,27 @@ function isTestSidePath(file?: any) {
     || /(?:^|\/)[^/]+\.(?:test|spec)\.[^/]+$/.test(normalized);
 }
 
+// A clause ends at sentence punctuation followed by whitespace, a bracket, a
+// dash, or a contrastive/causal connective. Commas and "or" do not end it, so
+// a negation reaches every item of a negated list ("not TypeError,
+// ImportError, or a collection error"), while "not X but a collection error"
+// and "did not load because of a collection error" still report one (SQ-198).
+const NEGATIVE_CONTROL_CLAUSE_BOUNDARY = /[.;:!?](?=\s|$)|[()[\]—–]|\s-\s|(?<![\w-])(?:but|however|although|though|whereas|because|since|due\s+to|caused\s+by|which|so|then)(?![\w-])/gi;
+const NEGATIVE_CONTROL_NEGATION_CUE = /(?<![\w-])(?:none|no|not|never|without|neither|nor|rather\s+than|instead\s+of)(?![\w-])|n['’]?t(?![\w-])/i;
+
 function negativeControlFailureKindNegated(text: string, matchIndex: number) {
-  const preceding = text.slice(Math.max(0, matchIndex - 40), matchIndex);
-  return /\b(?:none|no|not|n't|never|isn'?t|aren'?t|wasn'?t|weren'?t|without|neither)\b/i.test(preceding);
+  const preceding = text.slice(0, matchIndex);
+  let clauseStart = 0;
+  for (const boundary of preceding.matchAll(NEGATIVE_CONTROL_CLAUSE_BOUNDARY)) clauseStart = (boundary.index || 0) + boundary[0].length;
+  return NEGATIVE_CONTROL_NEGATION_CUE.test(preceding.slice(clauseStart));
+}
+
+function negativeControlReportsFailureKind(text: string, pattern: RegExp) {
+  // Every mention counts: a negated first mention must not hide a genuine one.
+  for (const match of text.matchAll(pattern)) {
+    if (!negativeControlFailureKindNegated(text, match.index || 0)) return true;
+  }
+  return false;
 }
 
 function negativeControlFailureKind(markerLine?: unknown) {
@@ -743,10 +784,8 @@ function negativeControlFailureKind(markerLine?: unknown) {
   // that negates them, e.g. "none is an import or collection error") must
   // not be mistaken for a reported failure kind.
   const text = String(markerLine || '');
-  const importMatch = /\bimport\s*error\b/i.exec(text);
-  if (importMatch && !negativeControlFailureKindNegated(text, importMatch.index)) return 'import_error';
-  const collectionMatch = /\bcollection\s+(?:error|failed|failure)\b/i.exec(text);
-  if (collectionMatch && !negativeControlFailureKindNegated(text, collectionMatch.index)) return 'collection_error';
+  if (negativeControlReportsFailureKind(text, /\bimport\s*error\b/gi)) return 'import_error';
+  if (negativeControlReportsFailureKind(text, /\bcollection\s+(?:error|failed|failure)\b/gi)) return 'collection_error';
   return '';
 }
 
@@ -792,6 +831,132 @@ function testDefinitionName(line: string, extension: string) {
   return '';
 }
 
+// Index of the `)` that closes the call whose `(` sits at `openIndex`, or -1
+// when the source never balances it. Strings, template literals (with nested
+// `${...}` code), comments and backslash escapes are skipped, so a paren in
+// test data or a regex such as `/\(/` does not move the boundary.
+function matchingCallParen(source: string, openIndex: number) {
+  let depth = 0;
+  let braceDepth = 0;
+  let inTemplate = false;
+  const interpolations: number[] = [];
+  let index = openIndex;
+  while (index < source.length) {
+    const char = source[index];
+    const next = source[index + 1];
+    if (char === '\\') {
+      index += 2;
+      continue;
+    }
+    if (inTemplate) {
+      if (char === '`') inTemplate = false;
+      else if (char === '$' && next === '{') {
+        interpolations.push(braceDepth);
+        inTemplate = false;
+        index += 2;
+        continue;
+      }
+      index += 1;
+      continue;
+    }
+    if (char === '\'' || char === '"') {
+      index += 1;
+      while (index < source.length && source[index] !== char && source[index] !== '\n') index += source[index] === '\\' ? 2 : 1;
+      index += 1;
+      continue;
+    }
+    if (char === '`') {
+      inTemplate = true;
+    } else if (char === '/' && next === '/') {
+      const end = source.indexOf('\n', index);
+      index = end === -1 ? source.length : end;
+      continue;
+    } else if (char === '/' && next === '*') {
+      const end = source.indexOf('*/', index + 2);
+      index = end === -1 ? source.length : end + 2;
+      continue;
+    } else if (char === '{') {
+      braceDepth += 1;
+    } else if (char === '}') {
+      if (interpolations.length && interpolations.at(-1) === braceDepth) {
+        interpolations.pop();
+        inTemplate = true;
+      } else {
+        braceDepth -= 1;
+      }
+    } else if (char === '(') {
+      depth += 1;
+    } else if (char === ')') {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+    index += 1;
+  }
+  return -1;
+}
+
+// Each test definition with the 1-based line range of its own declaration:
+// from the `test(`/`def test_` line to the line that closes it. A diff line is
+// attributed to a test only when it falls inside this span (SQ-144), never to
+// whichever definition merely precedes it.
+function testDefinitionSpans(source: string, extension: string) {
+  const lines = source.split(/\r?\n/);
+  const lineStarts: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    lineStarts.push(offset);
+    offset += line.length + 1;
+  }
+  const lineOfOffset = (target: number) => {
+    let low = 0;
+    let high = lineStarts.length - 1;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if ((lineStarts[mid] ?? 0) <= target) low = mid;
+      else high = mid - 1;
+    }
+    return low + 1;
+  };
+  const normalized = lines.join('\n');
+  const spans: Array<{ start: number; end: number; name: string }> = [];
+  lines.forEach((line: string, index: number) => {
+    const name = testDefinitionName(line, extension);
+    if (!name) return;
+    const start = index + 1;
+    let end = 0;
+    if (CALL_STYLE_TEST_EXTENSIONS.has(extension)) {
+      const match = line.match(CALL_STYLE_TEST_DEFINITION);
+      const openIndex = (lineStarts[index] ?? 0) + (match?.index ?? 0) + (match?.[0].indexOf('(') ?? 0);
+      const closeIndex = matchingCallParen(normalized, openIndex);
+      if (closeIndex !== -1) end = lineOfOffset(closeIndex);
+    } else {
+      const indent = (line.match(/^\s*/)?.[0] ?? '').length;
+      end = start;
+      for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+        const body = lines[cursor] ?? '';
+        if (!body.trim()) continue;
+        if ((body.match(/^\s*/)?.[0] ?? '').length <= indent) break;
+        end = cursor + 1;
+      }
+    }
+    spans.push({ start, end, name });
+  });
+  // An unbalanced call (the scanner lost its place) ends where the next
+  // definition starts, or at the end of the file.
+  spans.forEach((span, index) => {
+    if (span.end) return;
+    const following = spans.slice(index + 1).find((entry) => entry.start > span.start);
+    span.end = following ? following.start - 1 : lines.length;
+  });
+  return spans;
+}
+
+function innermostTestSpan(spans: Array<{ start: number; end: number; name: string }>, ...lines: number[]) {
+  return spans
+    .filter((span) => lines.every((line) => span.start <= line && line <= span.end))
+    .reduce<{ start: number; end: number; name: string } | null>((best, span) => (!best || span.start > best.start ? span : best), null);
+}
+
 function changedTestNames(delta?: any, changedPaths?: any[]) {
   if (!delta?.workspace) return [];
   const names = new Set<string>();
@@ -815,10 +980,7 @@ function changedTestNames(delta?: any, changedPaths?: any[]) {
     } catch (_: any) {
       continue;
     }
-    const definitions = source.split(/\r?\n/).map((line: string, index: number) => {
-      const name = testDefinitionName(line, extension);
-      return name ? { line: index + 1, name } : null;
-    }).filter(Boolean) as Array<{ line: number; name: string }>;
+    const spans = testDefinitionSpans(source, extension);
     try {
       execFileSync('git', ['cat-file', '-e', `${delta.workspace.base}:${file}`], {
         cwd: delta.workspace.root,
@@ -826,38 +988,37 @@ function changedTestNames(delta?: any, changedPaths?: any[]) {
         windowsHide: true,
       });
     } catch (_: any) {
-      for (const definition of definitions) names.add(definition.name);
+      for (const span of spans) names.add(span.name);
       continue;
     }
+    // Only added and removed lines count, and only when they sit inside a
+    // test's own declaration span. A helper, comment or blank line between two
+    // tests belongs to neither, and the line after a hunk is never consulted,
+    // so an untouched neighbouring test is not reported as modified (SQ-144).
     let newLine = 0;
-    let changedInHunk = false;
-    const addNearestDefinition = (line: number) => {
-      const definition = definitions.filter((entry) => entry.line <= line).at(-1);
-      if (definition) names.add(definition.name);
-    };
     for (const line of diff.split(/\r?\n/)) {
-      const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
       if (hunk) {
-        if (changedInHunk) addNearestDefinition(newLine);
         newLine = Number(hunk[1]);
-        changedInHunk = false;
+        // A pure deletion leaves no added line to place. `+N,0` names the line
+        // the removed block followed, so the deletion is inside a test only
+        // when that line and the one after it share the test's span.
+        if (hunk[2] === '0') {
+          const span = innermostTestSpan(spans, newLine, newLine + 1);
+          if (span) names.add(span.name);
+        }
         continue;
       }
       if (line.startsWith('+') && !line.startsWith('+++')) {
-        changedInHunk = true;
         const addedName = testDefinitionName(line.slice(1), extension);
         if (addedName) names.add(addedName);
-        addNearestDefinition(newLine);
+        const span = innermostTestSpan(spans, newLine);
+        if (span) names.add(span.name);
         newLine += 1;
-        continue;
-      }
-      if (line.startsWith('-') && !line.startsWith('---')) {
-        changedInHunk = true;
         continue;
       }
       if (line.startsWith(' ')) newLine += 1;
     }
-    if (changedInHunk) addNearestDefinition(newLine);
   }
   return Array.from(names);
 }
@@ -898,7 +1059,13 @@ function negativeControlResult(ticket?: any, expectedTestNames: string[] = []) {
     const waived = markerLine.match(/^\[sidequest:negative-control\]\s+waived\s+(.+)/);
     const waiverReason = waived?.[1]?.trim();
     if (waiverReason) return waiverReason.length >= 20 ? { kind: 'waived' } : { kind: 'short_waiver' };
-    const failed = markerLine.match(/^\[sidequest:negative-control\]\s+target=([^;]+);\s*assertion=([^;]+);\s*(.+?)\s+failed=(\d+)/);
+    // Greedy `.+` for target/assertion backtracks to the LAST "; assertion="
+    // and the LAST "; " before "<command> failed=<n>", which is the real
+    // field boundary for the documented single-line format. A `[^;]+`
+    // field cannot hold a ';' (e.g. a quoted test name like `parses "a;b"`),
+    // which broke the whole-line match and surfaced as a false
+    // missing_target_or_assertion refusal (SQ-213, hit by SQ-199/SQ-201).
+    const failed = markerLine.match(/^\[sidequest:negative-control\]\s+target=(.+);\s*assertion=(.+);\s*(.+?)\s+failed=(\d+)/);
     if (failed) {
       if (!failed[1]?.trim() || !failed[2]?.trim()) return { kind: 'missing_target_or_assertion' };
       if (Number(failed[4]) === 0) return { kind: 'zero_failures' };
@@ -1844,6 +2011,34 @@ function getTicket(slug?: any, idOrRef?: any) {
     [String(slug || ''), wanted, wanted],
   );
   return row ? parseTicketData(String(slug || ''), row.data) : null;
+}
+
+// Every board where `ref` names a live-claimed, unarchived ticket, across all
+// projects. A board call that omits `project` uses this to follow the caller's
+// claim onto the board it was made on instead of silently resolving to the
+// session cwd's board, where the same ref can name an unrelated ticket (SQ-284).
+function liveClaimsForRef(ref?: any) {
+  const wanted = String(ref == null ? '' : ref).trim();
+  if (!wanted) return [];
+  const rows = db.selectRows(
+    database(),
+    "SELECT project, data FROM tickets WHERE upper(ref) = upper(?) AND archived = 0 AND claim_by IS NOT NULL AND claim_by <> ''",
+    [wanted],
+  );
+  const claims: any[] = [];
+  for (const row of rows) {
+    const slug = String(row.project || '');
+    let ticket: any;
+    try { ticket = parseTicketData(slug, row.data); } catch (_: any) { continue; }
+    if (!ticket || !ticket.claim || !ticket.claim.by) continue;
+    claims.push({
+      slug,
+      ref: ticket.ref,
+      by: String(ticket.claim.by),
+      sessionId: String(dispatchState(ticket)?.sessionId || '').trim() || null,
+    });
+  }
+  return claims;
 }
 
 function coerceStatus(s?: any, fallback?: any) {
@@ -2992,9 +3187,24 @@ const DELIVERY_COMMIT_RE = /^[0-9a-f]{7,64}$/i;
 
 const RELEASE_FRAGMENT_PATH_RE = /^\.release\/unreleased\/[^/]+\.md$/;
 
+// Release fragments are a per-repository convention, not a property of every marketplace
+// (SQ-278). A repo that releases through Release Please or conventional commits ships plugins
+// from a marketplace.json too, but has no `.release/` directory and would never read a
+// fragment, so demanding one there blocks submit on a file the repo cannot use. The `.release/`
+// directory at the repository root is the opt-in marker; keep it tracked (a README is enough)
+// so a release cut that consumes every fragment does not drop the convention with them.
+function repoUsesReleaseFragments(repo: string) {
+  try {
+    return fs.statSync(path.join(repo, '.release')).isDirectory();
+  } catch (_: any) {
+    return false;
+  }
+}
+
 function shippedPluginsWithoutReleaseFragment(repoPath?: any, ref?: any, changedPaths?: any, fragmentExists?: any, anyRefSatisfies?: any) {
   const repo = String(repoPath || '').trim();
   if (!repo) return null;
+  if (!repoUsesReleaseFragments(repo)) return null;
   const marketplacePath = path.join(repo, '.claude-plugin', 'marketplace.json');
   if (!fs.existsSync(marketplacePath)) return null;
   const manifest = JSON.parse(fs.readFileSync(marketplacePath, 'utf8'));
@@ -3052,7 +3262,7 @@ function commitPublishedUnderReleaseTag(repoPath?: any, commit?: any) {
 }
 
 function missingReleaseFragmentMessage(ref?: any, fragmentPath?: any, plugins?: any) {
-  return `submit: refused ${ref}; submitted range changes shipped plugin paths (${plugins.map((plugin: any) => plugin.source).join(', ')}) but does not include ${fragmentPath}. Write the fragment, then commit it, then submit again. Next time write it BEFORE your first commit so it rides along:\n---\nref: ${ref}\ntitle: <short user-facing title>\nbump: patch\nplugins:\n${plugins.map((plugin: any) => `  - ${plugin.name}`).join('\n')}\n---\n\nDescribe the user-facing change.`;
+  return `submit: refused ${ref}; submitted range changes shipped plugin paths (${plugins.map((plugin: any) => plugin.source).join(', ')}) but does not include ${fragmentPath}. This repository keeps release fragments (it has a .release/ directory), so every shipped plugin change carries one. Write the fragment, then commit it, then submit again. Next time write it BEFORE your first commit so it rides along:\n---\nref: ${ref}\ntitle: <short user-facing title>\nbump: patch\nplugins:\n${plugins.map((plugin: any) => `  - ${plugin.name}`).join('\n')}\n---\n\nDescribe the user-facing change.`;
 }
 
 // Only reachable when a dispatch exists and recording still failed. A directly-claimed ticket has no
@@ -3213,6 +3423,22 @@ function abandonUnconsumedPreparedDispatchForGrooming(slug?: any, idOrRef?: any)
   });
 }
 
+// PR delivery (US-3): a wave reconciled as merged records its merge commit on
+// every participant's integration. The integration close carries it as the
+// completion's delivery, so audit release detection reads the merge commit.
+function prMergeDelivery(ticket: any) {
+  const integration = ticket?.submission?.integration;
+  if (integration?.mode !== 'pr' || !integration.deliveryCommit || !integration.pr?.mergeCommit) return null;
+  return {
+    commit: integration.deliveryCommit,
+    targetBranch: integration.targetBranch,
+    targetRef: integration.targetUpstream,
+    integrationRevision: { source: 'git', value: integration.resultingHead || integration.deliveryCommit },
+    evidence: integration.evidence || integration.pr.url,
+    pr: { number: integration.pr.number, url: integration.pr.url },
+  };
+}
+
 function completeTicketAsControlPlane(slug?: any, idOrRef?: any, opts?: any) {
   opts = opts || {};
   const purpose = String(opts.purpose || '').trim();
@@ -3352,9 +3578,11 @@ function completeTicketAsControlPlane(slug?: any, idOrRef?: any, opts?: any) {
     message: missingReleaseFragmentMessage(ticket.ref, missingFragment.fragmentPath, missingFragment.plugins),
     ticket,
   };
+  let mergedPrDelivery: any = null;
   if (purpose === 'integration') {
     const admitted = validateIntegrationSubmission(slug, idOrRef, { requireDeliveredWave: true });
     if (!admitted.ok) return admitted;
+    mergedPrDelivery = prMergeDelivery(admitted.ticket);
   }
   const recorded = delivery;
   const advisory = purpose === 'integration' && ticket.highStakes && !recordedReviewPass(ticket) && !linkedReviewPass(slug, ticket)
@@ -3376,7 +3604,7 @@ function completeTicketAsControlPlane(slug?: any, idOrRef?: any, opts?: any) {
           ...(recorded.upstream ? { upstream: recorded.upstream } : {}),
           ...(recorded.identity ? { identity: recorded.identity } : {}),
         },
-      } : {},
+      } : mergedPrDelivery ? { delivery: mergedPrDelivery } : {},
     ),
     ...(recorded?.ok ? { recordedDelivery: recorded } : {}),
   }));
@@ -3701,7 +3929,7 @@ const {
 
 projectsLayer = createProjects({
   acquireLock, assetsDir, claimReclaimable, cloneCached, database, db, defaultAlwaysInScope, defaultProjectName,
-  deleteCachedRow, ensureDir, fs, invalidateStoreCaches, listStories, listTickets, normalizeForHash,
+  deleteCachedRow, ensureDir, fs, invalidateStoreCaches, listStories, listTickets, nearestRepoRoot, normalizeForHash,
   path, projectDir, putProject, putStory, putTicket, releaseLock, residentCache, slugify, sourceRevisionAdapterForPath, ticketsDir, transaction,
 });
 
@@ -3806,6 +4034,7 @@ module.exports = {
   dispatchDeclaredFiles,
   dispatchWorkspace,
   dispatchWarnings,
+  dispatchHigherPriorityReady,
   staleWorktreeCwdWarning,
   dispatchUncertaintyWarnings,
   ticketReferenceWarnings,
@@ -3936,6 +4165,7 @@ module.exports = {
   recordWorktreeGcCandidateCursor,
   listAllProjectTickets,
   getTicket,
+  liveClaimsForRef,
   addExternalLink,
   removeExternalLink,
   listExternalLinks,
@@ -4105,4 +4335,11 @@ module.exports = {
   markLongRunFlagged,
   reconcileSession,
   sessionClaims,
+  // Lock primitives (SQ-273), exported so the lock-order contract in store/locks.ts is testable.
+  setDispatchPlanObserver,
+  ticketLockPath,
+  transaction,
+  withTicketFileLock,
+  withTicketLock,
+  withTicketLocks,
 };

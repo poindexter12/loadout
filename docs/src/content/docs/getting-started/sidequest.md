@@ -23,7 +23,7 @@ Sidequest is local. The dashboard runs on your machine and ticket data stays in 
 1. Open the board with `/sidequest:board`, or tell Claude to show your Sidequest board.
 2. Describe the outcome you want and ask Claude to plan it as Sidequest work. For example: `Plan the checkout refresh as a Sidequest story and show me the backlog.` If work belongs on a feature branch, name that branch in the request.
 3. Review the proposed tickets, dependencies, and scope in the board. Adjust the plan before work starts.
-4. Ask Claude to dispatch the ready tickets. Claude chooses the configured route, starts the work, and reports verification results. Dispatch freezes each ticket's intended target branch, so two concurrent feature branches get separate targets without changing the board default.
+4. Ask Claude to dispatch the ready tickets. Claude chooses the configured route, starts the work, and reports verification results. Dispatch freezes each ticket's intended target branch, so two concurrent feature branches get separate targets without changing the board default. Work goes out by priority, urgent first, then high, normal, and low. If Claude dispatches a ticket while unblocked work at a higher priority is still waiting, the board names that work in the dispatch result. Asking for a specific ticket by name still works: Claude records that you asked for it, and the board stops flagging that dispatch.
 5. When a ticket is ready, ask Claude to review and integrate it if the checks pass. Larger or higher-risk work may need an extra review before integration.
 
 Each ticket carries a check that decides whether its work is ready. Claude records that check against the final candidate and reports what passed, failed, or needs your decision. The agent-facing reference covers capture, evidence, and delivery mechanics.
@@ -152,6 +152,8 @@ With PR delivery, the flow is:
 2. The pull request runs CI. The aggregate `test-gate` check is the wave gate. The tickets remain awaiting merge rather than being marked delivered.
 3. Run `integrate` again after the PR merges. Sidequest reconciles the PR, verifies the merge commit reached the target branch, and closes the participating tickets. `sidequest watch` or ticket pulse can alert you when the PR becomes merged or fails, with guidance to run `integrate` to close it.
 
+If `integrate` is interrupted while opening the PR, for example the process is killed after the push or after auto-merge was enabled, just run `integrate` again. Sidequest records the open before it pushes, so the rerun picks up the branch or PR it already made instead of refusing it. A branch or PR that does not match that record still refuses, and Sidequest never force-pushes over it.
+
 Before enabling PR delivery, the repository must have GitHub auto-merge enabled, a ruleset requiring the aggregate `test-gate` check, and an authenticated `gh` CLI with permission to fetch, push, open PRs, and enable auto-merge. Auto-merge is a GitHub request, not proof that the PR landed. If it appears green but does not merge, explicitly merge the PR when policy allows and confirm that the target branch actually moved before running `integrate` again.
 
 PR delivery never silently falls back to a local merge. Common outcomes are:
@@ -205,6 +207,38 @@ Mirroring obeys the same `--apply` rule as everything else. `sidequest audit` pl
 
 SessionStart runs the audit in report-only mode with a short background budget. When it finds something, the session context contains one summary line such as `sidequest audit: 2 untracked issues. Run sidequest audit for detail.` It stays quiet when every count is zero and never blocks startup. A release cut with `--push` runs `sidequest audit --apply` after publishing its tag; `--dry-run` runs the report mode only. Audit failures are warnings and never roll back a release cut.
 
+## Split boards by account
+
+Every board lives in the database of one Sidequest home. When `SIDEQUEST_HOME` is unset, the home follows `CLAUDE_CONFIG_DIR`: a session started with `CLAUDE_CONFIG_DIR=~/.work/claude` uses `~/.work/claude/sidequest`, and a session started with `~/.personal/claude` uses `~/.personal/claude/sidequest`. Boards created while every session shared one home stay in that home until you move them.
+
+`sidequest move-board` moves whole boards from one home to another:
+
+```bash
+# See exactly what would move. Nothing is written, and the destination is not created.
+sidequest move-board my-repo other-repo --from-home ~/.work/claude/sidequest --to-home ~/.personal/claude/sidequest --dry-run
+
+# Move them.
+sidequest move-board my-repo other-repo --from-home ~/.work/claude/sidequest --to-home ~/.personal/claude/sidequest
+```
+
+A board can be named by its slug, its display name, or its repository path. `--from-home` defaults to the current home. Add `--json` for the full plan.
+
+What moves: the board's tickets with their comments, claim history, submissions and dispatch records, its stories, links, categories, board config and notifications, and everything under `projects/<slug>/` (assets, plans, verification logs). Dispatch token files the tickets name move too, and paths inside the board that pointed at those files are rewritten to the destination. Routing profiles the board uses are copied when the destination lacks them and stay in the source for the boards still there. Ticket ids and refs do not change, so `refs/sidequest/<ref>` pointers in the repository stay valid and new tickets continue the ref sequence.
+
+What stays: existing worktrees. They are registered with Git at their current paths and keep working where they are, so a submission parked before the move integrates from the destination home. New dispatches create worktrees under the destination home. Remove the old ones with `git worktree remove` once their work is integrated.
+
+The move refuses, and names the cause, while any board it moves has a claimed ticket, a launched or bound dispatch, or a held publish lock. It also refuses when the destination already holds a board with the same slug that has tickets the source does not, or a different routing profile with the same name. A destination copy that is empty or left by an interrupted move is replaced. The destination database is created when absent. The source rows are deleted only after the destination copy commits and its per-table row counts match, so a crash at any point leaves the board in at least one home, and running the same move again finishes it.
+
+### Remove a global SIDEQUEST_HOME pin afterwards
+
+A shell profile that exports `SIDEQUEST_HOME` pins every account to one home and overrides the per-account default. Once each board sits in the home for its account:
+
+1. Move the boards that belong to the other account, as above.
+2. Delete the `export SIDEQUEST_HOME=...` line from your shell profile, or any `env` block that sets it.
+3. Start a new shell and a new Claude Code session for each account. Run `sidequest projects` in each and check it lists only that account's boards.
+
+Keep the old home until the second account has used its boards for a while. Its database still holds every board you did not move.
+
 ## If something stops working
 
 **The board does not open.** Reload Claude Code after installing Sidequest, then ask Claude to open the board again. If the browser still does not open, ask Claude to start the Sidequest dashboard and report its local URL.
@@ -221,15 +255,25 @@ SessionStart runs the audit in report-only mode with a short background budget. 
 
 **A worktree-isolated executor cannot write.** Ask Claude to redispatch if the recorded checkout is missing or does not match the assigned checkout.
 
+**An executor cannot write in another repository you approved.** Declared files only name paths inside the project, so a checkout of a different repository (for example a branch worktree you approved for a related change) has no write lease. Ask Claude to grant that checkout's absolute root on the ticket with `update` and `externalWorktrees`. The executor can then write under exactly that root while it holds its claim. The board never commits there, a grant can never point inside the project, and an executor cannot grant one to itself.
+
 **Work looks stuck in doing.** Ask Claude to inspect the ticket's current status and executor activity. Sidequest keeps the intended integration branch that was frozen at dispatch, even if you later change branches or the board default. For two feature branches, name the intended target on each ticket instead of changing that board-wide default between dispatches.
 
+**Executors stall or die with `[Request interrupted by user]` while the laptop lid is closed.** A Mac in Clamshell Sleep on battery runs nothing except seconds-long maintenance wakes, so a model request that starts in one wake cannot finish before the next sleep, and Claude Code's stream watchdog later records the interruption. That is not a model or gateway problem. Sidequest checks the macOS power log (`pmset -g log`; on other systems, a jump between the wall clock and the monotonic clock) and reports such a ticket as `host_sleep` instead of dead or stalled. It keeps the claim so the same executor can resume, and Claude is told not to change model routes because of it. For long unattended runs, keep the machine awake: run the session under `caffeinate -is`, or stay on AC power with the lid open.
+
 **A ticketed helper is refused while writing verification evidence.** Only the ticket's active owner and helpers admitted through that owner's recorded identity can write the ticket's exact board-owned evidence directory. Helpers cannot use another ticket's folder or a lookalike path. Ask Claude to inspect the ticket binding, not to request repository scope.
+
+**Two executors' temporary files collide.** Claude Code gives every executor its orchestrating session's scratchpad, so executors running side by side share one directory. Each executor's briefing names a subdirectory of its own, `<project>-<ticket>-d<launch>`, and tells it to keep every temporary file there and leave the scratchpad root alone. A generic file such as `negative-control.js` at the scratchpad root means an executor ignored that rule; ask Claude to check the affected worktrees for a source file that was swapped out for a control and not restored.
 
 **Stale agent worktrees keep accumulating.** Ask Claude to inspect local worktree storage and clean up entries it can safely remove. The generated reference has the lifecycle and recovery details.
 
 **A ticket contract forbids commits.** Ask Claude to declare working-tree delivery before dispatch. After verification, the declared edits stay uncommitted and unpushed in the shared checkout for your normal team handoff. Ticket closure records that handoff; it does not replace your project's commit, review, or push process.
 
-**A verify command keeps timing out on a busy machine.** Each captured verify run has a time budget: a fixed setup allowance, plus extra time for test-suite commands (`npm run test:full`, any `node --test` run, or any `npm test` script) that grows with how loaded the machine is. A run that hits the budget reports `capture_budget_exceeded` along with how long it ran, the budget and the load. That means it ran out of time, not that a test failed. Ask Claude to rerun the capture with `SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS` set higher. That setting only ever adds time, and every capture still stops at a two-hour hard limit, so a hung run cannot block other verifications forever. If a run needs more than that, ask Claude to pin a narrower verify command for the ticket. Only a ticket-bound capture of `npm run test:full` waits its turn for the per-host capture slot. A suite run straight from a shell, or through the wrapper without a ticket, does not, so its load lands on whatever capture is running beside it. Sidequest's own test waits widen with that load rather than failing under it, but other projects' suites may not, so avoid running ad-hoc full suites beside a pinned verification.
+**A verify command keeps timing out on a busy machine.** Each captured verify run has a time budget: a fixed setup allowance, plus extra time for test-suite commands (`npm run test:full` or its direct entry point `node scripts/test-full.mjs`, any `node --test` run, or any `npm test` script) that grows with how loaded the machine is. A run that hits the budget reports `capture_budget_exceeded` along with how long it ran, the budget and the load. That means it ran out of time, not that a test failed. Ask Claude to rerun the capture with `SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS` set higher. That setting only ever adds time, and every capture still stops at a two-hour hard limit, so a hung run cannot block other verifications forever. If a run needs more than that, ask Claude to pin a narrower verify command for the ticket. Only a ticket-bound capture of the full suite (`npm run test:full` or `node scripts/test-full.mjs`) waits its turn for the capture slot, and that slot is per project: it keeps two full-suite captures in the same project apart, but captures in other projects on the same machine are not serialized against it, so keeping different projects' suites from overlapping is up to you. A suite run straight from a shell, or through the wrapper without a ticket, does not, so its load lands on whatever capture is running beside it. Sidequest's own test waits widen with that load rather than failing under it, but other projects' suites may not, so avoid running ad-hoc full suites beside a pinned verification.
+
+**A verify run takes longer than ten minutes.** Claude Code stops a single shell command after ten minutes, which is shorter than a slow suite can need on a loaded machine (a Rust crate run beside another executor took about eleven). Executors therefore start the captured verify with `--detach`: the run moves into its own process group, keeps its own time budget, and cannot be stopped by that ten-minute limit. The executor waits on it for up to nine minutes at a time. If it is still going, the wrapper prints `verify=running` with a `--resume` command, and the executor reruns that command until the final verdict arrives. The capture is recorded exactly as an attached run would be.
+
+A capture run without `--detach` is still at the mercy of Claude Code's limits. A command longer than ten minutes gets moved to the background, where it is stopped after thirty minutes unless the call set a longer timeout, and a wrapper stopped that way records nothing at all: no pass, no fail, no budget verdict. Before it starts the command, the wrapper prints the timeout such a call needs (its budget plus a ten-minute margin, at most two hours), and the closing `capture-budget` line repeats it as `harnessTimeoutMs`. If the budget is too close to two hours for any timeout to outlive it, the wrapper says to rerun with `--detach` instead.
 
 **Submit keeps refusing work whose captures failed only because the machine was overloaded.** When captured verify runs of the exact candidate keep timing out or failing the suite because of host load, not because of the change, the `verification_capture_required` refusal names a waiver. Do not hand-edit `refs/sidequest` refs to get past it. Ask the orchestrating Claude session to post the waiver comment the refusal prints, `[sidequest:capture-waiver] capture=<id> signature=<status[:exit-N]> authority=<who>; <reason>`, with its own recorded `by` identity, and resubmit the same candidate. A waiver covers one timed-out or failed-suite capture of that candidate, verify command and dispatch attempt, and its signature must match the recorded failure. The executor that did the work cannot waive its own capture, and the `authority=` field does not override the comment's recorded author. The submission is recorded as skipped with the waiver attached, and integration still runs the verify command.
 

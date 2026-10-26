@@ -2,10 +2,22 @@
 const { refPrefixOf } = require("./projects.js");
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationRef } = require("../kernel/review-binding");
 const { classifyVerificationKind, verificationRequirement } = require("../kernel/verification.js");
+const { normalizeExternalWorktrees } = require("../kernel/worktree");
 function emptyVerifyCommandRefusal(kind, verify, fields) {
   if (String(kind ?? "").trim().toLowerCase() !== "command") return null;
   if (String(verify ?? "").trim()) return null;
   return `${fields.kind}: command requires a runnable ${fields.verify} command, but ${fields.verify} is empty. Pass the command the executor must run, or declare a kind that needs no command (suite, manual, attestation, document, link, schema, review, custom). An empty command under kind command is replaced at dispatch by a derived requirement, which leaves the executor running a gate this ticket never asked for and no submission can match.`;
+}
+const TICKET_BASE_REF_MAX = 255;
+function normalizeTicketBaseRef(value) {
+  if (value === void 0 || value === null) return null;
+  if (typeof value !== "string") throw new Error("base ref must be a string naming a branch, remote-tracking ref, tag, or commit.");
+  const ref = value.trim();
+  if (!ref) return null;
+  if (ref.length > TICKET_BASE_REF_MAX || ref.startsWith("-") || /[\s\x00-\x1f\x7f~^:?*\[\\]/.test(ref) || ref.includes("..") || ref.includes("@{") || ref.endsWith("/") || ref.endsWith(".lock")) {
+    throw new Error(`base ref ${JSON.stringify(ref)} is not a plain branch, remote-tracking ref, tag, or commit name. Name the ref exactly, for example "feat/my-branch", "origin/feat/my-branch", or a commit hash.`);
+  }
+  return ref;
 }
 function createTickets(dependencies) {
   const {
@@ -258,7 +270,9 @@ function createTickets(dependencies) {
       contractWaiver: !!fields.contractWaiver,
       readonlyOverride: requestedReadonlyOverride(fields),
       workingTreeDelivery: fields.workingTreeDelivery === true,
+      baseRef: normalizeTicketBaseRef(fields.baseRef),
       externalDeliverable: fields.externalDeliverable === true,
+      externalWorktrees: normalizeExternalWorktrees(fields.externalWorktrees, readMeta(slug)?.path || null),
       executorAnchors: executorText(fields.executorAnchors, EXECUTOR_ANCHORS_MAX, "executor anchors"),
       executorVerifyKind,
       executorAttestationArtifact: executorText(fields.executorAttestationArtifact, EXECUTOR_VERIFY_MAX, "executor attestation artifact"),
@@ -962,6 +976,7 @@ function createTickets(dependencies) {
       ...(patch.readonly !== void 0 || patch.readonlyOverride !== void 0) && requestedReadonlyOverride(patch) !== ticket.readonlyOverride ? ["readonly"] : [],
       ...patch.workingTreeDelivery !== void 0 && patch.workingTreeDelivery === true !== (ticket.workingTreeDelivery === true) ? ["workingTreeDelivery"] : [],
       ...patch.externalDeliverable !== void 0 && patch.externalDeliverable === true !== (ticket.externalDeliverable === true) ? ["externalDeliverable"] : [],
+      ...patch.externalWorktrees !== void 0 && !sameFiles(ticket.externalWorktrees, patch.externalWorktrees) ? ["externalWorktrees"] : [],
       ...patch.executorVerify !== void 0 && patch.executorVerify !== ticket.executorVerify ? ["verify"] : [],
       ...patch.executorVerifyKind !== void 0 && patch.executorVerifyKind !== ticket.executorVerifyKind ? ["verifyKind"] : [],
       ...patch.executorAttestationArtifact !== void 0 && patch.executorAttestationArtifact !== ticket.executorAttestationArtifact ? ["attestationArtifact"] : []
@@ -1099,7 +1114,9 @@ function createTickets(dependencies) {
       if (patch.contractWaiver !== void 0) t.contractWaiver = !!patch.contractWaiver;
       if (patch.readonly !== void 0 || patch.readonlyOverride !== void 0) t.readonlyOverride = requestedReadonlyOverride(patch);
       if (patch.workingTreeDelivery !== void 0) t.workingTreeDelivery = patch.workingTreeDelivery === true;
+      if (patch.baseRef !== void 0) t.baseRef = normalizeTicketBaseRef(patch.baseRef);
       if (patch.externalDeliverable !== void 0) t.externalDeliverable = patch.externalDeliverable === true;
+      if (patch.externalWorktrees !== void 0) t.externalWorktrees = normalizeExternalWorktrees(patch.externalWorktrees, readMeta(slug)?.path || null);
       if (patch.category !== void 0 || patch.readonly !== void 0 || patch.readonlyOverride !== void 0) {
         t.files = boundedFiles(t.files, {
           category: t.category,
@@ -1270,4 +1287,4 @@ function createTickets(dependencies) {
   }
   return { DECLARED_FILES_MAX, CONTRACT_NAMES_MAX, LABELS_MAX, categoryReadOnly, readOnlyOverrideActive, dispatchReadOnly, submissionReviewRelation, createTicket, normalizeLabels, normalizeFiles, scopeExpansionFiles, scopeExpansionCommand, requestScope, migrateLegacyScopeRequest, overlappingScopePaths, scopesOverlap, normalizeContracts, contractCollisionReasons, contractMetadata, readyWaves, readyWaveDependencies, normalizeAssignee, updateTicket, deleteTicket, archiveTicket, unarchiveTicket, archiveAllDone, listArchived, listActive };
 }
-module.exports = { createTickets, emptyVerifyCommandRefusal };
+module.exports = { createTickets, emptyVerifyCommandRefusal, normalizeTicketBaseRef };

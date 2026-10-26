@@ -1052,10 +1052,53 @@ const NODE_FLAGS_WITH_VALUES = new Set([
 // The operands of a `node --test` invocation, or null when the command is not one. An empty array is a
 // `node --test` that names no files and leaves discovery to Node, which is a meaningful case here: it is
 // the form that runs the whole suite with none of the package's own preloads.
+// SQ-335. The command's words, read the way the shell reads them: quotes group, an adjacent quoted and
+// unquoted part join into one word (`--test-skip-pattern="a b|c"` is a single word), a backslash escapes the
+// next character outside single quotes, and an unquoted `|`, `&`, `;`, `<` or `>` ends the simple command.
+// Splitting on whitespace instead read the second word of a quoted pattern, and each `|` alternative of a
+// quoted regex, as a test-file operand and refused the gate with a false "matches no files".
+function shellWords(command?: any) {
+  const text = String(command || '');
+  const words: string[] = [];
+  let word = '';
+  let inWord = false;
+  let quote = '';
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text.charAt(index);
+    if (quote) {
+      if (character === quote) quote = '';
+      else if (quote === '"' && character === '\\' && /["\\$`]/.test(text.charAt(index + 1))) word += text.charAt(++index);
+      else word += character;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      inWord = true;
+      continue;
+    }
+    if (character === '\\' && index + 1 < text.length) {
+      word += text.charAt(++index);
+      inWord = true;
+      continue;
+    }
+    if (/\s/.test(character) || /[|&;<>]/.test(character)) {
+      if (inWord) words.push(word);
+      word = '';
+      inWord = false;
+      if (/[|&;<>]/.test(character)) return words;
+      continue;
+    }
+    word += character;
+    inWord = true;
+  }
+  if (inWord) words.push(word);
+  return words;
+}
+
 function nodeTestArguments(command?: any) {
   const text = String(command || '').trim();
   if (!/^node(?:\.exe)?(?:\s|$)/.test(text)) return null;
-  const tokens = [...text.matchAll(/(?:["']([^"']*)["']|([^\s;&|]+))/g)].map((match) => match[1] ?? match[2]).slice(1);
+  const tokens = shellWords(text).slice(1);
   const operands: string[] = [];
   let test = false;
   for (let index = 0; index < tokens.length; index += 1) {
@@ -1745,7 +1788,9 @@ function requestedReadonlyOverride(fields?: any) {
 
 function warningPriority(warning?: any) {
   const text = String(warning || '');
-  if (/verify command|no file scope|outside the repo worktree|worktree visibility/i.test(text)) return 3;
+  // SQ-348: a dispatch that skips higher-priority ready work ranks with the defect warnings, so a
+  // crowded result never drops the one notice that says this ticket should not have gone first.
+  if (/^dispatch priority:|verify command|no file scope|outside the repo worktree|worktree visibility/i.test(text)) return 3;
   if (/build output|consumer|anchor|declared file scope|executor context/i.test(text)) return 2;
   return 1;
 }

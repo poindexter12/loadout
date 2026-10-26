@@ -109,6 +109,24 @@ for (const state of ['unknown', 'foreign-install']) {
     }
   });
 
+  test(`SQ-183: update treats a ${state} supervisor-restart refusal as ${state === 'unknown' ? 'deferred, not failed' : 'fatal'}`, async () => {
+    const safe = isolatedSupervision();
+    const resolveOwner = async () => ({ state, pid: 34373, installRoot: '/foreign/model-gateway' });
+    const refused = await safe.stopRunningSupervisor({ resolveOwner, report: () => {} });
+    assert.equal(refused.ownerState, state);
+    const outcome = gateway.supervisorRestartOutcome(refused);
+    if (state === 'unknown') {
+      assert.equal(outcome.fatal, false, 'an untouched, still-serving listener must not fail the update');
+      assert.match(outcome.message, /left the listener untouched.*refreshes on the next `ensure`/);
+    } else {
+      assert.equal(outcome.fatal, true);
+      assert.match(outcome.message, /^could not restart shim supervisor: .*different install root/);
+    }
+    assert.deepEqual(gateway.supervisorRestartOutcome(null), { fatal: false, message: null });
+    assert.deepEqual(gateway.supervisorRestartOutcome({ ok: true }), { fatal: false, message: null });
+    assert.equal(gateway.supervisorRestartOutcome({ ok: false, reason: 'stop timed out' }).fatal, true);
+  });
+
   test(`${state} startup refuses before cleanup, replacement or health HTTP`, async (t) => {
     // Startup's only allowed action here is the injected ownership resolution.
     t.mock.method(fs, 'existsSync', () => assert.fail('startup must refuse before checking/installing the proxy'));

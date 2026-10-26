@@ -1,7 +1,10 @@
 'use strict';
 
+const { defaultHostSleep } = require('../host-sleep.js');
+
 function createClaims(dependencies: any) {
   const {
+    hostSleep: injectedHostSleep,
     completionTreeCheck,
     dispatchDelta,
     dispatchState,
@@ -245,6 +248,20 @@ function createClaims(dependencies: any) {
     const idleMs = claimIdleAge(ticket, atMs);
     const dispatch = dispatchState(ticket);
     const verification = claimVerification(ticket);
+    // Wall-clock silence while the host slept is not silence from the executor (SQ-164): a
+    // laptop in Clamshell Sleep runs nothing, so only awake time counts against a backstop.
+    // Read lazily, only once raw idle age has already crossed the threshold being tested.
+    const idleBeyond = (thresholdMs: number) => {
+      if (!(idleMs > thresholdMs)) return false;
+      const latest = claimActivityMs(ticket);
+      if (!Number.isFinite(latest)) return true;
+      try {
+        const slept = (injectedHostSleep || defaultHostSleep()).overlap(latest, atMs).sleptMs;
+        return idleMs - (Number.isFinite(slept) ? slept : 0) > thresholdMs;
+      } catch (_error: unknown) {
+        return true;
+      }
+    };
     if (observedStop(dispatch, claim)) {
       return { kind: 'observed_stop', idleMs, at: dispatch.terminalAt, reason: 'its executor has a durable died outcome while still holding the claim' };
     }
@@ -252,21 +269,21 @@ function createClaims(dependencies: any) {
       return { kind: 'missing_worktree', idleMs, reason: 'its isolated executor worktree no longer exists' };
     }
     if (verification) {
-      if (idleMs > claimAbandonMs()) {
+      if (idleBeyond(claimAbandonMs())) {
         return { kind: 'abandoned_verifying', idleMs, at: verification.startedAt, reason: 'its verification marker never completed past the unobserved-death backstop' };
       }
       return null;
     }
     if (dispatch) {
-      if (idleMs > claimAbandonMs()) {
+      if (idleBeyond(claimAbandonMs())) {
         return { kind: 'abandoned', idleMs, reason: 'no board activity from the claim holder past the unobserved-death backstop' };
       }
       return null;
     }
-    if (idleMs > claimIdleMs()) {
+    if (idleBeyond(claimIdleMs())) {
       return { kind: 'idle', idleMs, reason: 'no board activity from the claim holder and no executor dispatch exists' };
     }
-    if (idleMs > claimAbandonMs()) {
+    if (idleBeyond(claimAbandonMs())) {
       return { kind: 'abandoned', idleMs, reason: 'no board activity from the claim holder past the unobserved-death backstop' };
     }
     return null;

@@ -28,13 +28,16 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var worktree_exports = {};
 __export(worktree_exports, {
+  EXTERNAL_WORKTREES_MAX: () => EXTERNAL_WORKTREES_MAX,
   canonicalPath: () => canonicalPath,
   checkoutInstanceIdentity: () => checkoutInstanceIdentity,
   checkoutLayout: () => checkoutLayout,
   createCheckoutInstanceMarker: () => createCheckoutInstanceMarker,
   createWorktreeLease: () => createWorktreeLease,
+  externalWorktreeWriteDecision: () => externalWorktreeWriteDecision,
   isCanonicalRegisteredWorktree: () => isCanonicalRegisteredWorktree,
   legacyWorktreeCleanupDecision: () => legacyWorktreeCleanupDecision,
+  normalizeExternalWorktrees: () => normalizeExternalWorktrees,
   sameCanonicalPath: () => sameCanonicalPath,
   worktreeCleanupDecision: () => worktreeCleanupDecision,
   worktreeCreateDecision: () => worktreeCreateDecision,
@@ -289,18 +292,67 @@ function legacyWorktreeCleanupDecision(facts) {
   if (!facts.settled) return denied("Legacy cleanup requires a reachable or patch-equivalent revision.");
   return allowed("the registered legacy worktree is clean, settled, and old enough.");
 }
+const EXTERNAL_WORKTREES_MAX = 8;
+function pathWithin(root, target) {
+  const relative = import_node_path.default.relative(root, target);
+  return relative === "" || !relative.startsWith("..") && !import_node_path.default.isAbsolute(relative);
+}
+function normalizeExternalWorktrees(value, repository) {
+  if (value == null) return [];
+  const entries = Array.isArray(value) ? value : [value];
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  const canonicalRepository = repository ? canonicalPath(repository) : null;
+  for (const entry of entries) {
+    const raw = String(entry ?? "").trim();
+    if (!raw) continue;
+    if (!import_node_path.default.isAbsolute(raw)) {
+      throw new Error(`externalWorktrees: "${raw}" must be an absolute path to the approved foreign checkout.`);
+    }
+    const resolved = import_node_path.default.resolve(raw);
+    const canonical = canonicalPath(resolved);
+    if (canonicalRepository && (pathWithin(canonicalRepository, canonical) || pathWithin(canonical, canonicalRepository))) {
+      throw new Error(`externalWorktrees: "${raw}" is inside the project repository or contains it; declare repository paths in files instead.`);
+    }
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    out.push(resolved);
+  }
+  if (out.length > EXTERNAL_WORKTREES_MAX) {
+    throw new Error(`externalWorktrees: at most ${EXTERNAL_WORKTREES_MAX} roots may be granted to one ticket.`);
+  }
+  return out;
+}
+function externalWorktreeWriteDecision(facts, target) {
+  if (!facts.roots.length) return denied("no external worktree is granted to this ticket.");
+  if (facts.terminal) return denied("the dispatch is terminal, so its external worktree grant has ended.");
+  if (!facts.identityBound) return denied("an external worktree write requires a bound runtime identity.");
+  if (!facts.claimHeld) return denied("an external worktree grant applies only while the claim is held.");
+  const canonicalTarget = canonicalPath(target);
+  if (facts.repository) {
+    const canonicalRepository = canonicalPath(facts.repository);
+    if (pathWithin(canonicalRepository, canonicalTarget)) return denied("the target is inside the dispatch repository, which no external grant covers.");
+    if (facts.targetCommonGitDirectory && canonicalPath(facts.targetCommonGitDirectory) === canonicalPath(import_node_path.default.join(canonicalRepository, ".git"))) {
+      return denied("the target is a checkout of the dispatch repository, which no external grant covers.");
+    }
+  }
+  return facts.roots.some((root) => pathWithin(canonicalPath(root), canonicalTarget)) ? allowed("target belongs to an external worktree granted to this ticket.") : denied("target is outside every external worktree granted to this ticket.");
+}
 function isCanonicalRegisteredWorktree(lease, registeredWorktrees) {
   return Boolean(lease.canonicalWorktree) && registeredWorktrees.some((registered) => sameCanonicalPath(registered, lease.canonicalWorktree));
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  EXTERNAL_WORKTREES_MAX,
   canonicalPath,
   checkoutInstanceIdentity,
   checkoutLayout,
   createCheckoutInstanceMarker,
   createWorktreeLease,
+  externalWorktreeWriteDecision,
   isCanonicalRegisteredWorktree,
   legacyWorktreeCleanupDecision,
+  normalizeExternalWorktrees,
   sameCanonicalPath,
   worktreeCleanupDecision,
   worktreeCreateDecision,

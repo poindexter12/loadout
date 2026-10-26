@@ -124,6 +124,54 @@ test('preparing a ticket without a recorded verifier pins the legacy custom requ
   assert.equal(store.releaseTicket(slug, ticket.ref, 'no-verifier-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
 });
 
+test('dispatching past unblocked higher-priority ready work names it, and priorityOverride records the reason (SQ-348)', () => {
+  const create = (title: string, priority: string) => store.createTicket(slug, { title, priority, category: 'dispatch.lifecycle', files: ['tracked.js'], source: 'test' });
+  const target = create('priority target', 'normal');
+  const waiting = create('priority waiting high', 'high');
+  const blocked = create('priority blocked high', 'high');
+  const blocker = create('priority open blocker', 'low');
+  const inFlight = create('priority urgent already dispatched', 'urgent');
+  const lower = create('priority lower', 'low');
+  const created = [target, waiting, blocked, blocker, inFlight, lower];
+  try {
+    assert.equal(store.linkTickets(slug, blocked.ref, 'blocked-by', blocker.ref).ok, true);
+    const urgentPrepared = store.prepareDispatch(slug, inFlight.ref);
+    assert.equal(urgentPrepared.ticket.dispatch.outcome, 'prepared');
+
+    const prepared = store.prepareDispatch(slug, target.ref);
+    // Only the unblocked, undispatched, strictly higher ticket is waiting: the blocked high, the urgent
+    // whose own dispatch is in flight, and the lower ticket are not.
+    assert.deepEqual(store.dispatchHigherPriorityReady(prepared.ticket, slug), [{ ref: waiting.ref, priority: 'high' }]);
+    const warnings = store.dispatchWarnings(prepared.ticket, slug);
+    assert.match(warnings[0], new RegExp(`^dispatch priority: ${target.ref} is normal priority, .*waiting undispatched: ${waiting.ref} \\(high\\)\\.`));
+    assert.match(warnings[0], /pass priorityOverride/);
+    for (const ref of [blocked.ref, blocker.ref, inFlight.ref, lower.ref]) assert.doesNotMatch(warnings[0], new RegExp(`${ref}\\b`));
+    // The notice ranks with the defect warnings, so a crowded result keeps it.
+    assert.match(store.presentWarnings(prepared.ticket, warnings, 'sq-348-priority-session').join('\n'), /^dispatch priority:/m);
+    assert.equal(store.releaseTicket(slug, target.ref, 'priority-target-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
+
+    // Releasing the urgent's dispatch puts it back in the waiting band, most urgent first.
+    assert.equal(store.releaseTicket(slug, inFlight.ref, 'priority-urgent-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
+    const reprepared = store.prepareDispatch(slug, target.ref);
+    assert.deepEqual(store.dispatchHigherPriorityReady(reprepared.ticket, slug).map((item: any) => item.ref), [inFlight.ref, waiting.ref]);
+    assert.equal(store.releaseTicket(slug, target.ref, 'priority-target-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
+
+    const overridden = store.prepareDispatch(slug, target.ref, { priorityOverride: '  the user named this ticket  ' });
+    assert.equal(overridden.ticket.dispatch.priorityOverride.reason, 'the user named this ticket');
+    assert.deepEqual(store.dispatchHigherPriorityReady(overridden.ticket, slug), []);
+    assert.doesNotMatch(store.dispatchWarnings(overridden.ticket, slug).join('\n'), /dispatch priority:/);
+    assert.equal(store.releaseTicket(slug, target.ref, 'priority-override-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
+
+    // The top band is never told about lower work.
+    const top = store.prepareDispatch(slug, inFlight.ref);
+    assert.deepEqual(store.dispatchHigherPriorityReady(top.ticket, slug), []);
+    assert.equal(store.releaseTicket(slug, inFlight.ref, 'priority-top-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
+  } finally {
+    // Archived so the higher-priority fixtures never leak a priority notice into later dispatch tests.
+    for (const ticket of created) store.archiveTicket(slug, ticket.ref, { source: 'test' });
+  }
+});
+
 test('executors cannot prepare a shared-tree child dispatch while the orchestrator can', () => {
   const executorSessionId = `executor-dispatch-guard-${Date.now()}`;
   const orchestratorSessionId = `orchestrator-dispatch-guard-${Date.now()}`;
@@ -175,6 +223,51 @@ test('shared-tree admission requires the project checkout while artifacts remain
   } finally {
     execFileSync('git', ['worktree', 'remove', '--force', linkedWorktree], { cwd: PROJECT });
   }
+});
+
+// SQ-309: an orchestrator rooted in repo A dispatched a sharedTree ticket on repo B's board. The spawn
+// carried no isolation and no cwd, so the executor inherited repo A and failed its worktree preflight
+// ("Runtime worktree does not match dispatch target"). Dispatch must refuse up front instead.
+test('shared-tree dispatch from a session rooted in another repository is refused up front (SQ-309)', () => {
+  const foreignRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-shared-tree-foreign-'));
+  execFileSync('git', ['init', '--quiet', '-b', 'main'], { cwd: foreignRepo });
+  const foreignSubdir = path.join(foreignRepo, 'nested');
+  fs.mkdirSync(foreignSubdir);
+  try {
+    const ticket = createFixture('shared-tree foreign runtime rejection');
+    assert.throws(
+      () => store.prepareDispatch(slug, ticket.ref, { sharedTree: true, runtimeCwd: foreignSubdir }),
+      (error: any) => {
+        assert.match(error.message, /sharedTree:true requires the spawning runtime to be rooted in the declared project checkout/);
+        assert.ok(error.message.includes(fs.realpathSync.native(foreignRepo)), `refusal names the foreign root: ${error.message}`);
+        assert.match(error.message, /Dispatch it without sharedTree/);
+        return true;
+      },
+    );
+    assert.equal(store.getTicket(slug, ticket.ref).dispatchNonce, null, 'a refused dispatch mints no token');
+
+    // A subdirectory of the project checkout is still the project checkout.
+    const projectSubdir = path.join(PROJECT, 'sq309-subdir');
+    fs.mkdirSync(projectSubdir, { recursive: true });
+    const admitted = store.prepareDispatch(slug, ticket.ref, { sharedTree: true, runtimeCwd: projectSubdir });
+    assert.equal(admitted.ok, true);
+    assert.equal(admitted.ticket.dispatch.sharedTree, true);
+    assert.equal(store.releaseTicket(slug, ticket.ref, 'sq309-cleanup', { force: true, status: 'todo', source: 'test' }).ok, true);
+    fs.rmSync(projectSubdir, { recursive: true, force: true });
+  } finally {
+    fs.rmSync(foreignRepo, { recursive: true, force: true });
+  }
+});
+
+test('recovery evidence on a ticket with nothing in flight says to dispatch plainly (SQ-309)', () => {
+  const ticket = createFixture('recovery evidence with nothing in flight');
+  assert.throws(
+    () => store.prepareDispatch(slug, ticket.ref, { recoveryEvidence: 'executor released: runtime worktree mismatch' }),
+    /not an active attempt\. .*No recovery is needed: nothing is in flight on .*dispatch it again without recoveryEvidence/,
+  );
+  const plain = store.prepareDispatch(slug, ticket.ref, { runtimeCwd: PROJECT });
+  assert.equal(plain.ok, true);
+  assert.equal(store.releaseTicket(slug, ticket.ref, 'sq309-recovery-cleanup', { force: true, status: 'todo', source: 'test' }).ok, true);
 });
 
 function windowsShortPathAlias(directory = '') {
@@ -2880,6 +2973,127 @@ test('preparing a dispatch does not hold the board write lock across its Git and
     `preparing a dispatch took ${prepareMs}ms and held the board write lock for ${worstHoldMs}ms of it, so the lock still covers the bulk of the work`,
   );
   assert.equal(store.releaseTicket(slug, ticket.ref, 'lock-hold-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
+});
+
+/**
+ * SQ-273. SQ-268 moved the dispatch plan out of the machine-global transaction, and because the
+ * ticket file lock was welded to that transaction it had to drop same-ticket serialisation too: two
+ * concurrent prepares of one ticket both planned, and the loser's worktree reclaim could run twice.
+ * The ticket file lock is now held across plan-then-commit on its own, so a second prepare waits for
+ * the first to store before it plans at all.
+ *
+ * The race needs two processes, because a prepare is synchronous. The first child parks inside its
+ * plan (the observer seam spins until the release file exists) with the file lock held and the
+ * transaction NOT held; the second child is launched into that window. The window is sized from the
+ * first child's own measured start-to-plan time, the same pre-lock work the second must get through
+ * before it could plan, so a loaded machine widens it instead of turning the test into a guess.
+ * Events are read in append order, which is a total order across both processes.
+ */
+test('two concurrent prepares of the same ticket run exactly one plan until the first is stored', async (t: any) => {
+  const spawnChild = require('node:child_process').spawn;
+  const testStart = Date.now();
+  const ticket = createFixture('concurrent prepares of one ticket serialise on its file lock');
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-dispatch-concurrent-prepare-'));
+  const childScript = path.join(scratch, 'prepare-child.js');
+  const eventsFile = path.join(scratch, 'events.jsonl');
+  const releaseFile = path.join(scratch, 'release');
+  fs.writeFileSync(childScript, [
+    "'use strict';",
+    "const fs = require('node:fs');",
+    'const [storePath, slug, ref, role, eventsFile, releaseFile] = process.argv.slice(2);',
+    'const store = require(storePath);',
+    "const emit = (event) => fs.appendFileSync(eventsFile, JSON.stringify({ role, at: Date.now(), ...event }) + '\\n');",
+    'const pause = new Int32Array(new SharedArrayBuffer(4));',
+    'store.setDispatchPlanObserver((event) => {',
+    '  emit({ phase: event.phase, attempt: event.attempt });',
+    "  if (role === 'first' && event.phase === 'plan' && event.attempt === 1) {",
+    '    const deadline = Date.now() + 25000;',
+    '    while (!fs.existsSync(releaseFile) && Date.now() < deadline) Atomics.wait(pause, 0, 0, 20);',
+    '  }',
+    '});',
+    "emit({ phase: 'started' });",
+    'let outcome;',
+    'try {',
+    '  const result = store.prepareDispatch(slug, ref);',
+    "  outcome = { ok: result && result.ok === true, reason: (result && result.reason) || null, error: null };",
+    '} catch (error) {',
+    "  outcome = { ok: false, reason: null, error: String((error && error.message) || error).slice(0, 400) };",
+    '}',
+    "emit({ phase: 'outcome', ...outcome });",
+  ].join('\n'));
+  const storePath = require.resolve('../lib/store.js');
+  const events = (): any[] => (fs.existsSync(eventsFile)
+    ? fs.readFileSync(eventsFile, 'utf8').split('\n').filter(Boolean).map((line: string) => JSON.parse(line))
+    : []);
+  const launch = (role: string) => {
+    const child = spawnChild(process.execPath, [childScript, storePath, slug, ticket.ref, role, eventsFile, releaseFile], {
+      env: process.env,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      windowsHide: true,
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk: any) => { stderr += String(chunk); });
+    const exited = new Promise<{ role: string; code: number | null; stderr: string; at: number }>((resolve) => {
+      child.on('exit', (code: number | null) => resolve({ role, code, stderr, at: Date.now() }));
+    });
+    return { child, exited };
+  };
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const waitFor = async (predicate: (list: any[]) => boolean, what: string) => {
+    const deadline = Date.now() + 20000;
+    while (!predicate(events())) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}; events so far: ${JSON.stringify(events())}`);
+      await sleep(20);
+    }
+  };
+
+  const first = launch('first');
+  let second: ReturnType<typeof launch> | null = null;
+  let windowMs = 0;
+  let duringWindow: any[] = [];
+  try {
+    await waitFor((list) => list.some((event) => event.role === 'first' && event.phase === 'plan'), 'the first prepare to start planning');
+    const firstStarted = events().find((event) => event.role === 'first' && event.phase === 'started');
+    const firstPlan = events().find((event) => event.role === 'first' && event.phase === 'plan');
+    // Three times what the first prepare needed to reach its plan, floored and capped well inside the
+    // 30s file-lock timeout, so the second prepare's wait can never turn into a busy refusal here.
+    windowMs = Math.min(10000, Math.max(1500, 3 * (firstPlan.at - firstStarted.at)));
+    second = launch('second');
+    await waitFor((list) => list.some((event) => event.role === 'second' && event.phase === 'started'), 'the second prepare to start');
+    await sleep(windowMs);
+    duringWindow = events();
+  } finally {
+    fs.writeFileSync(releaseFile, '');
+  }
+  const exits = await Promise.all([first.exited, ...(second ? [second.exited] : [])]);
+  const all = events();
+  fs.rmSync(scratch, { recursive: true, force: true });
+  // Offsets from the first child's start, so a slow run shows which phase the time went to.
+  const origin = all[0]?.at ?? Date.now();
+  t.diagnostic(`fixture ${origin - testStart}ms; race window ${windowMs}ms; events:${JSON.stringify(all.map(({ role, phase, attempt, ok, error, at }: any) => ({ role, phase, attempt, ok, error, ms: at - origin })))}; exits: ${JSON.stringify(exits.map(({ role, code, at }) => ({ role, code, ms: at - origin })))}`);
+  for (const exit of exits) assert.equal(exit.code, 0, `a prepare child crashed: ${exit.stderr}`);
+
+  const plansDuringWindow = duringWindow.filter((event) => event.phase === 'plan');
+  assert.deepEqual(
+    plansDuringWindow.map((event) => event.role),
+    ['first'],
+    'while the first prepare was planning, a second prepare of the same ticket must wait on the ticket file lock instead of planning alongside it',
+  );
+  const firstStoredAt = all.findIndex((event) => event.role === 'first' && event.phase === 'stored');
+  assert.ok(firstStoredAt >= 0, `the first prepare never stored its plan: ${JSON.stringify(all)}`);
+  const plansBeforeStore = all.slice(0, firstStoredAt).filter((event) => event.phase === 'plan');
+  assert.equal(plansBeforeStore.length, 1, 'exactly one plan may run before the first prepare stores; a second means the race planned twice');
+  assert.deepEqual(
+    all.filter((event) => event.phase === 'plan' && event.attempt > 1),
+    [],
+    'no prepare may go stale and replan: with the file lock held across plan and commit, the same-ticket race the recheck catches cannot happen',
+  );
+  const firstOutcome = all.find((event) => event.role === 'first' && event.phase === 'outcome');
+  assert.equal(firstOutcome?.ok, true, `the first prepare must store a prepared dispatch: ${JSON.stringify(firstOutcome)}`);
+  const secondOutcome = all.find((event) => event.role === 'second' && event.phase === 'outcome');
+  assert.ok(secondOutcome, 'the second prepare never finished');
+  assert.notEqual(secondOutcome.reason, 'busy', 'the second prepare outwaited the file lock, so the window was not inside the lock timeout');
+  assert.equal(store.releaseTicket(slug, ticket.ref, 'concurrent-prepare-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
 });
 
 // SQ-255. `dispatch` refused a row as a live attempt and sent the orchestrator to `--recovery-evidence`,

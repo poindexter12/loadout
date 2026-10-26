@@ -1018,8 +1018,7 @@ async function stripRegenerableQuarantineDirectories(worktree) {
   const removed = [];
   for (const directory of await regenerableQuarantineDirectories(worktree)) {
     try {
-      const status = await fs.lstat(directory);
-      if (!status.isDirectory()) continue;
+      if (!await directoryChainWithoutSymlinks(worktree, directory)) continue;
       await fs.rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
       removed.push(directory);
     } catch (error) {
@@ -1050,43 +1049,34 @@ async function quarantineCandidate(entry, message, options) {
   }
 }
 async function unsafeWorktreeSymlink(worktree) {
-  let root;
+  let status;
   try {
-    root = await fs.realpath(worktree);
+    status = await fs.lstat(worktree);
   } catch (_) {
     return { path: ".", target: "unresolvable worktree root" };
   }
-  async function inspect(pathname) {
-    let status;
+  if (status.isSymbolicLink()) {
+    let target;
     try {
-      status = await fs.lstat(pathname);
+      target = await fs.realpath(worktree);
     } catch (_) {
-      return { path: path.relative(worktree, pathname) || ".", target: "unreadable path" };
+      target = "dangling symlink";
     }
-    if (status.isSymbolicLink()) {
-      try {
-        const target = await fs.realpath(pathname);
-        if (!pathIsInside(root, target)) {
-          return { path: path.relative(worktree, pathname) || ".", target };
-        }
-      } catch (_) {
-      }
-      return null;
-    }
-    if (!status.isDirectory()) return null;
-    let entries;
-    try {
-      entries = await fs.readdir(pathname, { withFileTypes: true });
-    } catch (_) {
-      return { path: path.relative(worktree, pathname) || ".", target: "unreadable directory" };
-    }
-    for (const entry of entries) {
-      const unsafe = await inspect(path.join(pathname, entry.name));
-      if (unsafe) return unsafe;
-    }
-    return null;
+    return { path: ".", target };
   }
-  return inspect(worktree);
+  if (!status.isDirectory()) return { path: ".", target: "worktree root is not a directory" };
+  return null;
+}
+async function directoryChainWithoutSymlinks(root, candidate) {
+  const relative = path.relative(root, candidate);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return false;
+  let current = root;
+  for (const component of relative.split(path.sep)) {
+    current = path.join(current, component);
+    const status = await fs.lstat(current);
+    if (status.isSymbolicLink() || !status.isDirectory()) return false;
+  }
+  return true;
 }
 function blockedByUnsafeSymlink(entry, unsafe) {
   entry.classification = entry.reason;
@@ -1623,4 +1613,4 @@ async function sweep(repo, tickets, options = {}) {
     skipped: skippedSweepEntries(entries)
   };
 }
-module.exports = { DEFAULT_MIN_AGE_MS, DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_MS, DEFAULT_RECOVERY_RETENTION_AGE_MS, DEFAULT_RECOVERY_RETENTION_MAX_PER_AGENT, gitBashPath, canonicalPath, liveSweepSessionPaths, worktreeRoot, legacyWorktreeRoot, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, namedWorktreePath, agentWorktreeRoots, parseWorktreeList, isAgentWorktree, ignoredPathsMissingFromWorktree, provisionWorktree, preferredWorktreeIntegrationTarget, classifyWorktree, advanceIntegrationBranch, reclaimUnclaimedDispatchWorktree, quarantineCandidate, storageStatus, sweep };
+module.exports = { DEFAULT_MIN_AGE_MS, DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_MS, DEFAULT_RECOVERY_RETENTION_AGE_MS, DEFAULT_RECOVERY_RETENTION_MAX_PER_AGENT, gitBashPath, canonicalPath, liveSweepSessionPaths, worktreeRoot, legacyWorktreeRoot, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, namedWorktreePath, agentWorktreeRoots, parseWorktreeList, isAgentWorktree, ignoredPathsMissingFromWorktree, provisionWorktree, preferredWorktreeIntegrationTarget, classifyWorktree, advanceIntegrationBranch, reclaimUnclaimedDispatchWorktree, quarantineCandidate, directoryChainWithoutSymlinks, storageStatus, sweep };

@@ -366,9 +366,14 @@ function dispatchUncertaintyWarnings(...args) {
 }
 function dispatchWarnings(ticket, slug) {
   const project = !slug && process.env.CLAUDE_PROJECT_DIR ? findProject(process.env.CLAUDE_PROJECT_DIR) : null;
-  const warnings = warningsLayer.dispatchWarnings(ticket, slug || (project?.ok ? project.slug : null));
+  const board = slug || (project?.ok ? project.slug : null);
+  const warnings = warningsLayer.dispatchWarnings(ticket, board);
+  const priority = board && ticket?.ref ? priorityBypassNotice(ticket, readyTickets(board)) : null;
   const pinned = pinnedVerifierNotice(ticket);
-  return pinned ? [...warnings, pinned] : warnings;
+  return [...priority ? [priority] : [], ...warnings, ...pinned ? [pinned] : []];
+}
+function dispatchHigherPriorityReady(ticket, slug) {
+  return slug && ticket?.ref ? dispatchPriorityBypass(ticket, readyTickets(slug)) : [];
 }
 function dispatchDeclaredFiles(...args) {
   return warningsLayer.dispatchDeclaredFiles(...args);
@@ -591,6 +596,8 @@ const {
   worktreeIsolationWarning,
   prepareDispatch,
   syncLiveDispatchVerification,
+  dispatchPriorityBypass,
+  priorityBypassNotice,
   retirePreparedCompatibilityStaleAttempt,
   preparedCompatibilityHasProvenMismatch,
   supersedeUnboundAttempt,
@@ -626,7 +633,8 @@ const {
   dispatchMatchesStopIdentity,
   markDispatchStopped,
   reconcileLaunchedDispatches,
-  ticketEvidenceDirectory
+  ticketEvidenceDirectory,
+  setDispatchPlanObserver
 } = dispatch = createDispatch({
   ARTIFACT_BASELINE_MAX_PATHS,
   normalizeCategoryId: (...args) => normalizeCategoryId(...args),
@@ -705,7 +713,10 @@ const {
   storyExecutionContract: (...args) => storyExecutionContract(...args),
   ticketCategory: (...args) => ticketCategory(...args),
   ticketStorageRow,
-  withTicketLock: (...args) => withTicketLock(...args)
+  transaction: (...args) => transaction(...args),
+  withTicketFileLock: (...args) => withTicketFileLock(...args),
+  withTicketLock: (...args) => withTicketLock(...args),
+  withTicketLocks: (...args) => withTicketLocks(...args)
 });
 function descriptionField(...candidates) {
   for (const candidate of candidates) {
@@ -749,12 +760,20 @@ const {
   releaseLock,
   testClaimLockDelayMs,
   ticketLockPath,
-  withTicketLock
+  withTicketFileLock,
+  withTicketLock,
+  withTicketLocks
 } = createLocks({
   fs,
   path,
   ticketsDir,
-  transaction
+  transaction,
+  // Reads the open-transaction depth without opening the database: opening it runs seed repair,
+  // which takes ticket locks of its own, so asking "is a transaction open" must never cause one.
+  inTransaction: () => {
+    const handle = dbByHome.get(homeRoot());
+    return Boolean(handle && transactionDepth.get(handle));
+  }
 });
 const { copyAsset, saveAssetData, assetPath } = createAssets({ assetsDir, ensureDir });
 const {
@@ -789,16 +808,24 @@ function isTestSidePath(file) {
   const normalized = String(file || "").replace(/\\/g, "/").toLowerCase();
   return /(^|\/)(?:test|tests|__tests__)(?:\/|$)/.test(normalized) || /(?:^|\/)[^/]+\.(?:test|spec)\.[^/]+$/.test(normalized);
 }
+const NEGATIVE_CONTROL_CLAUSE_BOUNDARY = /[.;:!?](?=\s|$)|[()[\]—–]|\s-\s|(?<![\w-])(?:but|however|although|though|whereas|because|since|due\s+to|caused\s+by|which|so|then)(?![\w-])/gi;
+const NEGATIVE_CONTROL_NEGATION_CUE = /(?<![\w-])(?:none|no|not|never|without|neither|nor|rather\s+than|instead\s+of)(?![\w-])|n['’]?t(?![\w-])/i;
 function negativeControlFailureKindNegated(text, matchIndex) {
-  const preceding = text.slice(Math.max(0, matchIndex - 40), matchIndex);
-  return /\b(?:none|no|not|n't|never|isn'?t|aren'?t|wasn'?t|weren'?t|without|neither)\b/i.test(preceding);
+  const preceding = text.slice(0, matchIndex);
+  let clauseStart = 0;
+  for (const boundary of preceding.matchAll(NEGATIVE_CONTROL_CLAUSE_BOUNDARY)) clauseStart = (boundary.index || 0) + boundary[0].length;
+  return NEGATIVE_CONTROL_NEGATION_CUE.test(preceding.slice(clauseStart));
+}
+function negativeControlReportsFailureKind(text, pattern) {
+  for (const match of text.matchAll(pattern)) {
+    if (!negativeControlFailureKindNegated(text, match.index || 0)) return true;
+  }
+  return false;
 }
 function negativeControlFailureKind(markerLine) {
   const text = String(markerLine || "");
-  const importMatch = /\bimport\s*error\b/i.exec(text);
-  if (importMatch && !negativeControlFailureKindNegated(text, importMatch.index)) return "import_error";
-  const collectionMatch = /\bcollection\s+(?:error|failed|failure)\b/i.exec(text);
-  if (collectionMatch && !negativeControlFailureKindNegated(text, collectionMatch.index)) return "collection_error";
+  if (negativeControlReportsFailureKind(text, /\bimport\s*error\b/gi)) return "import_error";
+  if (negativeControlReportsFailureKind(text, /\bcollection\s+(?:error|failed|failure)\b/gi)) return "collection_error";
   return "";
 }
 function unescapeJsStringLiteral(raw) {
@@ -829,6 +856,117 @@ function testDefinitionName(line, extension) {
   if (PYTHON_TEST_EXTENSIONS.has(extension)) return line.match(PYTHON_TEST_DEFINITION)?.[1] || "";
   return "";
 }
+function matchingCallParen(source, openIndex) {
+  let depth = 0;
+  let braceDepth = 0;
+  let inTemplate = false;
+  const interpolations = [];
+  let index = openIndex;
+  while (index < source.length) {
+    const char = source[index];
+    const next = source[index + 1];
+    if (char === "\\") {
+      index += 2;
+      continue;
+    }
+    if (inTemplate) {
+      if (char === "`") inTemplate = false;
+      else if (char === "$" && next === "{") {
+        interpolations.push(braceDepth);
+        inTemplate = false;
+        index += 2;
+        continue;
+      }
+      index += 1;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      index += 1;
+      while (index < source.length && source[index] !== char && source[index] !== "\n") index += source[index] === "\\" ? 2 : 1;
+      index += 1;
+      continue;
+    }
+    if (char === "`") {
+      inTemplate = true;
+    } else if (char === "/" && next === "/") {
+      const end = source.indexOf("\n", index);
+      index = end === -1 ? source.length : end;
+      continue;
+    } else if (char === "/" && next === "*") {
+      const end = source.indexOf("*/", index + 2);
+      index = end === -1 ? source.length : end + 2;
+      continue;
+    } else if (char === "{") {
+      braceDepth += 1;
+    } else if (char === "}") {
+      if (interpolations.length && interpolations.at(-1) === braceDepth) {
+        interpolations.pop();
+        inTemplate = true;
+      } else {
+        braceDepth -= 1;
+      }
+    } else if (char === "(") {
+      depth += 1;
+    } else if (char === ")") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+    index += 1;
+  }
+  return -1;
+}
+function testDefinitionSpans(source, extension) {
+  const lines = source.split(/\r?\n/);
+  const lineStarts = [];
+  let offset = 0;
+  for (const line of lines) {
+    lineStarts.push(offset);
+    offset += line.length + 1;
+  }
+  const lineOfOffset = (target) => {
+    let low = 0;
+    let high = lineStarts.length - 1;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if ((lineStarts[mid] ?? 0) <= target) low = mid;
+      else high = mid - 1;
+    }
+    return low + 1;
+  };
+  const normalized = lines.join("\n");
+  const spans = [];
+  lines.forEach((line, index) => {
+    const name = testDefinitionName(line, extension);
+    if (!name) return;
+    const start = index + 1;
+    let end = 0;
+    if (CALL_STYLE_TEST_EXTENSIONS.has(extension)) {
+      const match = line.match(CALL_STYLE_TEST_DEFINITION);
+      const openIndex = (lineStarts[index] ?? 0) + (match?.index ?? 0) + (match?.[0].indexOf("(") ?? 0);
+      const closeIndex = matchingCallParen(normalized, openIndex);
+      if (closeIndex !== -1) end = lineOfOffset(closeIndex);
+    } else {
+      const indent = (line.match(/^\s*/)?.[0] ?? "").length;
+      end = start;
+      for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+        const body = lines[cursor] ?? "";
+        if (!body.trim()) continue;
+        if ((body.match(/^\s*/)?.[0] ?? "").length <= indent) break;
+        end = cursor + 1;
+      }
+    }
+    spans.push({ start, end, name });
+  });
+  spans.forEach((span, index) => {
+    if (span.end) return;
+    const following = spans.slice(index + 1).find((entry) => entry.start > span.start);
+    span.end = following ? following.start - 1 : lines.length;
+  });
+  return spans;
+}
+function innermostTestSpan(spans, ...lines) {
+  return spans.filter((span) => lines.every((line) => span.start <= line && line <= span.end)).reduce((best, span) => !best || span.start > best.start ? span : best, null);
+}
 function changedTestNames(delta, changedPaths) {
   if (!delta?.workspace) return [];
   const names = /* @__PURE__ */ new Set();
@@ -852,10 +990,7 @@ function changedTestNames(delta, changedPaths) {
     } catch (_) {
       continue;
     }
-    const definitions = source.split(/\r?\n/).map((line, index) => {
-      const name = testDefinitionName(line, extension);
-      return name ? { line: index + 1, name } : null;
-    }).filter(Boolean);
+    const spans = testDefinitionSpans(source, extension);
     try {
       execFileSync("git", ["cat-file", "-e", `${delta.workspace.base}:${file}`], {
         cwd: delta.workspace.root,
@@ -863,38 +998,30 @@ function changedTestNames(delta, changedPaths) {
         windowsHide: true
       });
     } catch (_) {
-      for (const definition of definitions) names.add(definition.name);
+      for (const span of spans) names.add(span.name);
       continue;
     }
     let newLine = 0;
-    let changedInHunk = false;
-    const addNearestDefinition = (line) => {
-      const definition = definitions.filter((entry) => entry.line <= line).at(-1);
-      if (definition) names.add(definition.name);
-    };
     for (const line of diff.split(/\r?\n/)) {
-      const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
       if (hunk) {
-        if (changedInHunk) addNearestDefinition(newLine);
         newLine = Number(hunk[1]);
-        changedInHunk = false;
+        if (hunk[2] === "0") {
+          const span = innermostTestSpan(spans, newLine, newLine + 1);
+          if (span) names.add(span.name);
+        }
         continue;
       }
       if (line.startsWith("+") && !line.startsWith("+++")) {
-        changedInHunk = true;
         const addedName = testDefinitionName(line.slice(1), extension);
         if (addedName) names.add(addedName);
-        addNearestDefinition(newLine);
+        const span = innermostTestSpan(spans, newLine);
+        if (span) names.add(span.name);
         newLine += 1;
-        continue;
-      }
-      if (line.startsWith("-") && !line.startsWith("---")) {
-        changedInHunk = true;
         continue;
       }
       if (line.startsWith(" ")) newLine += 1;
     }
-    if (changedInHunk) addNearestDefinition(newLine);
   }
   return Array.from(names);
 }
@@ -927,7 +1054,7 @@ function negativeControlResult(ticket, expectedTestNames = []) {
     const waived = markerLine.match(/^\[sidequest:negative-control\]\s+waived\s+(.+)/);
     const waiverReason = waived?.[1]?.trim();
     if (waiverReason) return waiverReason.length >= 20 ? { kind: "waived" } : { kind: "short_waiver" };
-    const failed = markerLine.match(/^\[sidequest:negative-control\]\s+target=([^;]+);\s*assertion=([^;]+);\s*(.+?)\s+failed=(\d+)/);
+    const failed = markerLine.match(/^\[sidequest:negative-control\]\s+target=(.+);\s*assertion=(.+);\s*(.+?)\s+failed=(\d+)/);
     if (failed) {
       if (!failed[1]?.trim() || !failed[2]?.trim()) return { kind: "missing_target_or_assertion" };
       if (Number(failed[4]) === 0) return { kind: "zero_failures" };
@@ -1753,6 +1880,33 @@ function getTicket(slug, idOrRef) {
     [String(slug || ""), wanted, wanted]
   );
   return row ? parseTicketData(String(slug || ""), row.data) : null;
+}
+function liveClaimsForRef(ref) {
+  const wanted = String(ref == null ? "" : ref).trim();
+  if (!wanted) return [];
+  const rows = db.selectRows(
+    database(),
+    "SELECT project, data FROM tickets WHERE upper(ref) = upper(?) AND archived = 0 AND claim_by IS NOT NULL AND claim_by <> ''",
+    [wanted]
+  );
+  const claims = [];
+  for (const row of rows) {
+    const slug = String(row.project || "");
+    let ticket;
+    try {
+      ticket = parseTicketData(slug, row.data);
+    } catch (_) {
+      continue;
+    }
+    if (!ticket || !ticket.claim || !ticket.claim.by) continue;
+    claims.push({
+      slug,
+      ref: ticket.ref,
+      by: String(ticket.claim.by),
+      sessionId: String(dispatchState(ticket)?.sessionId || "").trim() || null
+    });
+  }
+  return claims;
 }
 function coerceStatus(s, fallback) {
   s = String(s || "").toLowerCase();
@@ -2710,9 +2864,17 @@ function linkedReviewPass(slug, ticket) {
 const HIGH_STAKES_REVIEW_WARNING = "high-stakes ticket integrated without a recorded review pass. Record one with a comment starting reviewed-by: <ref>, or link a completed review-audit ticket.";
 const DELIVERY_COMMIT_RE = /^[0-9a-f]{7,64}$/i;
 const RELEASE_FRAGMENT_PATH_RE = /^\.release\/unreleased\/[^/]+\.md$/;
+function repoUsesReleaseFragments(repo) {
+  try {
+    return fs.statSync(path.join(repo, ".release")).isDirectory();
+  } catch (_) {
+    return false;
+  }
+}
 function shippedPluginsWithoutReleaseFragment(repoPath, ref, changedPaths, fragmentExists, anyRefSatisfies) {
   const repo = String(repoPath || "").trim();
   if (!repo) return null;
+  if (!repoUsesReleaseFragments(repo)) return null;
   const marketplacePath = path.join(repo, ".claude-plugin", "marketplace.json");
   if (!fs.existsSync(marketplacePath)) return null;
   const manifest = JSON.parse(fs.readFileSync(marketplacePath, "utf8"));
@@ -2751,7 +2913,7 @@ function commitPublishedUnderReleaseTag(repoPath, commit) {
   }
 }
 function missingReleaseFragmentMessage(ref, fragmentPath, plugins) {
-  return `submit: refused ${ref}; submitted range changes shipped plugin paths (${plugins.map((plugin) => plugin.source).join(", ")}) but does not include ${fragmentPath}. Write the fragment, then commit it, then submit again. Next time write it BEFORE your first commit so it rides along:
+  return `submit: refused ${ref}; submitted range changes shipped plugin paths (${plugins.map((plugin) => plugin.source).join(", ")}) but does not include ${fragmentPath}. This repository keeps release fragments (it has a .release/ directory), so every shipped plugin change carries one. Write the fragment, then commit it, then submit again. Next time write it BEFORE your first commit so it rides along:
 ---
 ref: ${ref}
 title: <short user-facing title>
@@ -2894,6 +3056,18 @@ function abandonUnconsumedPreparedDispatchForGrooming(slug, idOrRef) {
     return { ok: true, ticket, abandoned: true };
   });
 }
+function prMergeDelivery(ticket) {
+  const integration = ticket?.submission?.integration;
+  if (integration?.mode !== "pr" || !integration.deliveryCommit || !integration.pr?.mergeCommit) return null;
+  return {
+    commit: integration.deliveryCommit,
+    targetBranch: integration.targetBranch,
+    targetRef: integration.targetUpstream,
+    integrationRevision: { source: "git", value: integration.resultingHead || integration.deliveryCommit },
+    evidence: integration.evidence || integration.pr.url,
+    pr: { number: integration.pr.number, url: integration.pr.url }
+  };
+}
 function completeTicketAsControlPlane(slug, idOrRef, opts) {
   opts = opts || {};
   const purpose = String(opts.purpose || "").trim();
@@ -3019,9 +3193,11 @@ function completeTicketAsControlPlane(slug, idOrRef, opts) {
     message: missingReleaseFragmentMessage(ticket.ref, missingFragment.fragmentPath, missingFragment.plugins),
     ticket
   };
+  let mergedPrDelivery = null;
   if (purpose === "integration") {
     const admitted = validateIntegrationSubmission(slug, idOrRef, { requireDeliveredWave: true });
     if (!admitted.ok) return admitted;
+    mergedPrDelivery = prMergeDelivery(admitted.ticket);
   }
   const recorded = delivery;
   const advisory = purpose === "integration" && ticket.highStakes && !recordedReviewPass(ticket) && !linkedReviewPass(slug, ticket) ? HIGH_STAKES_REVIEW_WARNING : null;
@@ -3041,7 +3217,7 @@ function completeTicketAsControlPlane(slug, idOrRef, opts) {
           ...recorded.upstream ? { upstream: recorded.upstream } : {},
           ...recorded.identity ? { identity: recorded.identity } : {}
         }
-      } : {}
+      } : mergedPrDelivery ? { delivery: mergedPrDelivery } : {}
     ),
     ...recorded?.ok ? { recordedDelivery: recorded } : {}
   }));
@@ -3260,6 +3436,7 @@ projectsLayer = createProjects({
   invalidateStoreCaches,
   listStories,
   listTickets,
+  nearestRepoRoot,
   normalizeForHash,
   path,
   projectDir,
@@ -3393,6 +3570,7 @@ module.exports = {
   dispatchDeclaredFiles,
   dispatchWorkspace,
   dispatchWarnings,
+  dispatchHigherPriorityReady,
   staleWorktreeCwdWarning,
   dispatchUncertaintyWarnings,
   ticketReferenceWarnings,
@@ -3523,6 +3701,7 @@ module.exports = {
   recordWorktreeGcCandidateCursor,
   listAllProjectTickets,
   getTicket,
+  liveClaimsForRef,
   addExternalLink,
   removeExternalLink,
   listExternalLinks,
@@ -3691,5 +3870,12 @@ module.exports = {
   unregisterClaim,
   markLongRunFlagged,
   reconcileSession,
-  sessionClaims
+  sessionClaims,
+  // Lock primitives (SQ-273), exported so the lock-order contract in store/locks.ts is testable.
+  setDispatchPlanObserver,
+  ticketLockPath,
+  transaction,
+  withTicketFileLock,
+  withTicketLock,
+  withTicketLocks
 };

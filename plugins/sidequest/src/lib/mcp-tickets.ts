@@ -26,6 +26,7 @@ const {
   provenNoOpCloseout,
   PROJECT_PROP,
   FILES_PROP,
+  EXTERNAL_WORKTREES_PROP,
   LABELS_PROP,
   CONTRACT_PROP,
   MODEL_FILTER_PROP,
@@ -172,12 +173,14 @@ const tools: ToolDefinition[] = [
         highStakes: { type: 'boolean' },
         labels: LABELS_PROP,
         files: FILES_PROP,
+        externalWorktrees: EXTERNAL_WORKTREES_PROP,
         produces: CONTRACT_PROP('produces'),
         changes: CONTRACT_PROP('changes'),
         consumes: CONTRACT_PROP('consumes'),
         contractWaiver: { type: 'boolean', description: 'Explicitly reviewed waiver for contract-edge wave sequencing.' },
         readonly: { type: 'boolean', description: 'Closeout override.' },
         workingTreeDelivery: { type: 'boolean', description: 'Shared-checkout deliverable that forbids commits. The executor closes with done after the pinned verify-capture records the final declared working-tree paths.' },
+        baseRef: { type: 'string', maxLength: 255, description: 'Git ref (branch, origin/<branch>, tag, or commit) an isolated worktree starts from instead of the integration target, e.g. an open PR branch. Dispatch refuses when it cannot resolve the ref or the dispatch is shared-tree. Empty string clears.' },
         anchors: { type: 'string', maxLength: store.EXECUTOR_ANCHORS_MAX, description: 'Executor anchors, verbatim in the task prompt.' },
         verify: VERIFY_ORACLE_PROP,
         verifyKind: { type: 'string', enum: store.VERIFY_ORACLE_KINDS, description: 'Pinned verification kind. command and suite execute a validated command; document, link, schema, manual, review, attestation, and custom retain their evidence contract. attestation requires attestationArtifact, and attestationArtifact is rejected when verifyKind is command.' },
@@ -235,10 +238,12 @@ const tools: ToolDefinition[] = [
         highStakes: args.highStakes,
         labels: args.labels,
         files: args.files,
+        externalWorktrees: args.externalWorktrees,
         contracts: { produces: args.produces, changes: args.changes, consumes: args.consumes },
         contractWaiver: args.contractWaiver,
         readonly: args.readonly,
         workingTreeDelivery: args.workingTreeDelivery,
+        baseRef: args.baseRef,
         executorAnchors: args.anchors,
         executorVerifyKind: args.verifyKind,
         executorAttestationArtifact: args.attestationArtifact,
@@ -276,6 +281,7 @@ const tools: ToolDefinition[] = [
         highStakes: { type: 'boolean' },
         labels: LABELS_PROP,
         files: FILES_PROP,
+        externalWorktrees: EXTERNAL_WORKTREES_PROP,
         by: { type: 'string', description: 'Human-readable update label. It cannot authorize closeout fields on a live claim.' },
         produces: CONTRACT_PROP('produces'),
         changes: CONTRACT_PROP('changes'),
@@ -283,6 +289,7 @@ const tools: ToolDefinition[] = [
         contractWaiver: { type: 'boolean', description: 'Explicitly reviewed waiver for contract-edge wave sequencing.' },
         readonly: { type: 'boolean', description: 'Closeout override.' },
         workingTreeDelivery: { type: 'boolean', description: 'Orchestrator-only live-claim declaration for a shared-checkout deliverable that forbids commits. The executor closes with done after the pinned verify-capture records the final declared working-tree paths.' },
+        baseRef: { type: 'string', maxLength: 255, description: 'Git ref (branch, origin/<branch>, tag, or commit) an isolated worktree starts from instead of the integration target, e.g. an open PR branch. Dispatch refuses when it cannot resolve the ref or the dispatch is shared-tree. Empty string clears.' },
         externalDeliverable: { type: 'boolean', description: 'Explicitly declare the deliverable is outside the repository. The orchestrator may set this during a live claim; it lets that executor close a clean writable dispatch with its current-attempt pinned verify-capture.' },
         anchors: { type: 'string', maxLength: store.EXECUTOR_ANCHORS_MAX, description: 'Executor anchors, verbatim in the task prompt.' },
         verify: VERIFY_ORACLE_PROP,
@@ -355,7 +362,9 @@ const tools: ToolDefinition[] = [
       if (args.contractWaiver !== undefined) patch.contractWaiver = args.contractWaiver;
       if (args.readonly !== undefined) patch.readonly = args.readonly;
       if (args.workingTreeDelivery !== undefined) patch.workingTreeDelivery = args.workingTreeDelivery;
+      if (args.baseRef !== undefined) patch.baseRef = args.baseRef;
       if (args.externalDeliverable !== undefined) patch.externalDeliverable = args.externalDeliverable;
+      if (args.externalWorktrees !== undefined) patch.externalWorktrees = args.externalWorktrees;
       if (args.anchors !== undefined) patch.executorAnchors = args.anchors;
       if (args.verify !== undefined) patch.executorVerify = args.verify;
       if (args.verifyKind !== undefined) patch.executorVerifyKind = args.verifyKind;

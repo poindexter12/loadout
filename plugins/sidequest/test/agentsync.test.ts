@@ -190,8 +190,72 @@ test('read-only briefings keep scratch outside every repository worktree', () =>
       dispatch: { readonly: true, sharedTree },
     }, 'readonly-scratch-token');
     assert.match(briefing, /Read-only dispatch: keep temporary files in the session scratchpad, outside every repository worktree/);
+    // SQ-227: a readonly executor has no Write tool, so the briefing names the supported Bash write path.
+    assert.match(briefing, /With no Write tool, write scratch and evidence files through Bash: a heredoc or printf redirected into the scratchpad or the board verification directory is allowed/);
     assert.doesNotMatch(briefing, /keep temporary files in your own worktree/);
   }
+});
+
+// SQ-327: every executor a session spawns shares that session's scratchpad, so two
+// concurrent executors once both wrote scratchpad/negative-control.js. The briefing
+// must name a directory that differs per dispatch: per ticket, per board, per launch.
+test('briefings name a per-dispatch scratch directory, never the shared scratchpad root', () => {
+  const brief = (ref: string, launchSeq?: number, slug?: string, extra: Record<string, unknown> = {}) => agentsync.renderTicketBriefing({
+    ref, model: 'opus', effort: 'high', dispatchExecutor: 'sidequest-exec-high', category: {},
+    dispatch: { sharedTree: false, launchSeq, ...extra },
+  }, 'scratch-token', slug);
+  const scratchDir = (briefing: string) => {
+    const match = briefing.match(/Per-dispatch scratch directory: `<scratchpad>\/([^`]+)\/`/);
+    assert.ok(match, 'briefing names a per-dispatch scratch directory');
+    return match![1];
+  };
+
+  const first = brief('SQ-267', 1, 'loadout-4d277aeb');
+  assert.equal(scratchDir(first), 'loadout-4d277aeb-SQ-267-d1');
+  assert.match(first, /shared by every executor the orchestrating session spawns/);
+  assert.match(first, /any source file you swap out for a control and must restore/);
+  assert.match(first, /Never write at the scratchpad root, and never read, edit, or delete another dispatch's directory\./);
+
+  // A concurrent sibling ticket on the same board, the SQ-267/SQ-224 collision.
+  assert.equal(scratchDir(brief('SQ-224', 1, 'loadout-4d277aeb')), 'loadout-4d277aeb-SQ-224-d1');
+  // The same ref on another board driven by the same session.
+  assert.equal(scratchDir(brief('SQ-267', 1, 'other-board-1234')), 'other-board-1234-SQ-267-d1');
+  // A relaunch of the same ticket while the earlier attempt may still be alive.
+  assert.equal(scratchDir(brief('SQ-267', 3, 'loadout-4d277aeb')), 'loadout-4d277aeb-SQ-267-d3');
+  // A missing or malformed launch sequence falls back to the first launch, never to the root.
+  assert.equal(scratchDir(brief('SQ-267', undefined, 'loadout-4d277aeb')), 'loadout-4d277aeb-SQ-267-d1');
+  assert.equal(scratchDir(brief('SQ-267', 0, 'loadout-4d277aeb')), 'loadout-4d277aeb-SQ-267-d1');
+  // Without a board slug the ref and launch still keep it off the root.
+  assert.equal(scratchDir(brief('SQ-267', 2)), 'SQ-267-d2');
+  // A ref carrying path or shell metacharacters cannot escape the scratchpad.
+  assert.equal(scratchDir(brief('SQ/../x y', 1, 'b')), 'b-SQ-..-x-y-d1');
+
+  // Shared-tree and read-only dispatches get the same namespace; read-only text points at it.
+  assert.equal(scratchDir(brief('SQ-9', 1, 'b', { sharedTree: true })), 'b-SQ-9-d1');
+  const readOnly = brief('SQ-9', 1, 'b', { readonly: true });
+  assert.equal(scratchDir(readOnly), 'b-SQ-9-d1');
+  assert.match(readOnly, /outside every repository worktree, inside the per-dispatch scratch directory named below/);
+
+  // No prepared dispatch, no directory to name.
+  const undispatched = agentsync.renderTicketBriefing({
+    ref: 'SQ-NO-DISPATCH', model: 'opus', effort: 'high', dispatchExecutor: 'sidequest-exec-high', category: {},
+  }, 'scratch-token', 'b');
+  assert.doesNotMatch(undispatched, /Per-dispatch scratch directory:/);
+});
+
+test('every generated executor definition carries the per-dispatch scratch rule', () => {
+  const definitions = {
+    claude: agentsync.renderExecAgent({ name: 'sidequest-exec-high', effort: 'high', marker: MARKER }),
+    readOnly: agentsync.renderReadOnlyClaudeAgent('medium'),
+    dispatch: agentsync.renderDispatchAgent(),
+    readOnlyDispatch: agentsync.renderReadOnlyDispatchAgent(),
+  };
+  for (const [kind, body] of Object.entries(definitions)) {
+    assert.match(body, /\*\*Per-dispatch scratch:\*\* The scratchpad directory your environment names belongs to the orchestrating session and is shared by every executor it spawns\. Never write a file at its root/, kind);
+    assert.match(body, /under the per-dispatch directory your briefing names, `<scratchpad>\/<project>-<ticket-ref>-d<launch>\/`/, kind);
+  }
+  const shipped = fs.readFileSync(path.join(__dirname, '..', 'agents', 'sidequest-exec-high.md'), 'utf8');
+  assert.match(shipped, /\*\*Per-dispatch scratch:\*\*/, 'the packaged executor definitions are regenerated with the rule');
 });
 
 test('briefings surface tracked generated outputs paired into effective scope', () => {
@@ -1160,7 +1224,8 @@ test('briefings surface resolved worktree identities for linked and shared dispa
   assert.ok(linked.includes(`Path: ${linkedWorktree}`));
   assert.ok(linked.includes(`Git dir: ${linkedGitDirectory}`));
   assert.ok(!linked.includes(path.join(root, '.git', 'worktrees', 'agent-briefing-worker')));
-  assert.match(linked, /harness refuses heredocs in isolated worktrees; Write scripts to your scratchpad and run them by path/);
+  assert.match(linked, /A heredoc that carries a git invocation is refused in an isolated worktree; run git as plain, separate commands, or Write the script to your scratchpad and run it by path\. A heredoc with no git invocation is allowed\./);
+  assert.doesNotMatch(linked, /harness refuses heredocs in isolated worktrees/);
   assert.doesNotMatch(linked, /Working directory binding:/);
 
   const shared = agentsync.renderTicketBriefing(Object.assign({}, base, {
@@ -1363,7 +1428,16 @@ test('small-ticket lifecycle retires three optional board round trips', () => {
   assert.match(briefing, /runs in and records your bound worktree whatever directory you start it from/);
   assert.match(briefing, /commit the candidate with the board commit tool first, then run the wrapper/);
   assert.match(briefing, /A backgrounded verify's completion does not wake you, so going idle on it parks the claim indefinitely/);
-  assert.match(briefing, /use bounded foreground until-loops instead of backgrounding or going idle/);
+  // SQ-225: the pinned wrapper runs detached so the Bash ceiling cannot kill it, and the
+  // executor resumes it in the foreground rather than inventing an until-loop.
+  assert.match(briefing, /verify-capture\.js" --base64 \S+ --project "[^"]+" --ticket "SQ-1619" --detach in the FOREGROUND/);
+  assert.match(briefing, /so the 10-minute Bash ceiling cannot kill it/);
+  // SQ-332: the harness background default (30 minutes) is shorter than a capture may run, and a
+  // foreground timeout is discarded when the harness backgrounds the call, so the rule is stated once.
+  assert.match(briefing, /the harness moves an over-limit foreground call to the background under its 1800000 ms default, discarding your timeout, and kills the wrapper there before it records any verdict/);
+  assert.match(briefing, /background it with an explicit timeout of 7200000, strictly greater than the budget the wrapper announces, never the default/);
+  assert.match(briefing, /If it prints verify=running \(exit 75\), the capture is still going: do not start another, rerun the --resume command it prints in the FOREGROUND/);
+  assert.doesNotMatch(briefing, /bounded foreground until-loops/);
   assert.doesNotMatch(briefing, /only for background verification/);
   assert.match(briefing, /verify-start\] before it only for an expected no-op/);
   assert.match(briefing, /always post \[sidequest:verify-complete\]/);

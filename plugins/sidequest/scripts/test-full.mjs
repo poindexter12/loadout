@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { suiteEnvironment } from '../../../scripts/release/cut.mjs';
@@ -42,13 +43,21 @@ export const phaseBudgetOverrideVariable = 'SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS
 // Starting the longest chains first leaves the short files to fill in around them. Keep this
 // list ordered longest first; a file missing from the directory is skipped, and the test suite
 // fails if any name here stops matching a real file.
+//
+// SQ-382: SQ-137 split hooks, mcp, submission and integration-advance into topic shards, so the
+// heaviest chains moved. Measured alone and in sequence on 2026-10-25 (seconds of test time): 76,
+// 74, 69, 61, 59, 54, 53, 47 and 45 for the files below, then a drop to 30 and under for every
+// other shard (hooks.test.ts 10, mcp.test.ts 17). Re-measure when a file is split or merged.
 export const longRunningTestFiles = Object.freeze([
-  'hooks.test.ts',
-  'mcp.test.ts',
-  'dispatch-lifecycle.test.ts',
-  'integration-advance.test.ts',
   'submission.test.ts',
+  'integration-advance-manual.test.ts',
+  'integration-advance-verify.test.ts',
   'worktree-isolation.test.ts',
+  'dispatch-lifecycle.test.ts',
+  'submission-integration.test.ts',
+  'integration-advance-delivery.test.ts',
+  'submission-review.test.ts',
+  'submission-shared-tree.test.ts',
 ]);
 
 // The phase root is this script run with this flag, because only the programmatic runner keeps
@@ -277,6 +286,70 @@ async function runPhaseRoot(concurrencyText, files) {
   stream.compose(spec).pipe(process.stdout);
 }
 
+function suiteProcessIds(suiteTemporaryDirectory) {
+  const probe = spawnSync('ps', ['-A', '-o', 'pid=', '-o', 'command='], {
+    encoding: 'utf8',
+    windowsHide: true,
+    // A contended host is exactly when leaks happen; give ps room rather than fail the sweep.
+    timeout: 10_000,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  if (probe.error || probe.status !== 0) {
+    throw new Error(`Could not inspect processes before removing ${suiteTemporaryDirectory}: ${probe.error?.message ?? `ps exited ${probe.status}`}`);
+  }
+  // The root must end at a path boundary, so a sibling root sharing this one as a prefix is
+  // never mistaken for ours.
+  const ownedRoot = new RegExp(`${suiteTemporaryDirectory.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=[/\\s]|$)`);
+  return probe.stdout.split('\n').flatMap((line) => {
+    const match = line.trim().match(/^(\d+)\s+(.*)$/);
+    if (match === null || Number(match[1]) === process.pid) return [];
+    return ownedRoot.test(match[2]) ? [Number(match[1])] : [];
+  });
+}
+
+// A test timeout can kill node:test before its fixture's cleanup hook runs. The suite root is
+// the one trustworthy ownership marker left then: no surviving command is allowed to retain it.
+// Rescan after each kill pass so a fixture that forked between the scan and the kill is reaped too.
+export async function sweepSuiteProcesses(suiteTemporaryDirectory) {
+  const survivors = new Set();
+  for (let pass = 0; pass < 3; pass += 1) {
+    const found = suiteProcessIds(suiteTemporaryDirectory);
+    if (found.length === 0) break;
+    for (const processId of found) {
+      survivors.add(processId);
+      try { process.kill(processId, 'SIGKILL'); } catch (error) {
+        if (error.code !== 'ESRCH') throw error;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return [...survivors];
+}
+
+// Sweep, remove the root, then report. A leak must never hide the suite's own failure, and a
+// failing sweep must never keep the root from being removed.
+export async function cleanupSuiteRoot(suiteTemporaryDirectory, suiteError = null) {
+  let survivors = [];
+  let sweepError = null;
+  try {
+    survivors = await sweepSuiteProcesses(suiteTemporaryDirectory);
+  } catch (error) {
+    sweepError = error;
+  }
+  await fs.rm(suiteTemporaryDirectory, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+  const problems = [];
+  if (survivors.length > 0) {
+    problems.push(`Reaped leaked full-suite fixture processes before removing ${suiteTemporaryDirectory}: ${survivors.join(', ')}.`);
+  }
+  if (sweepError) problems.push(sweepError.message);
+  if (problems.length === 0) {
+    if (suiteError) throw suiteError;
+    return survivors;
+  }
+  if (suiteError) throw new Error(`${suiteError.message}\n${problems.join('\n')}`, { cause: suiteError });
+  throw new Error(problems.join('\n'));
+}
+
 async function runTests(phase, files, environment) {
   const phaseStartTime = performance.now();
   const result = await runOwnedPhase({
@@ -323,11 +396,13 @@ async function main() {
     SIDEQUEST_DISCOVERY_DIRS: suiteGatewayCatalogDirectory,
   };
 
+  let suiteError = null;
   try {
     await runTests('functional', testFiles, suiteTestEnvironment);
-  } finally {
-    await fs.rm(suiteTemporaryDirectory, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+  } catch (error) {
+    suiteError = error;
   }
+  await cleanupSuiteRoot(suiteTemporaryDirectory, suiteError);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

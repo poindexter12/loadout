@@ -106,7 +106,8 @@ function waveAssemblyAck(slug, result) {
 function deliveredAck(slug, result, integration, changed = {}) {
   const delivery = compactIntegrationDelivery(integration);
   const commits = Array.isArray(delivery.pinnedCommits) ? delivery.pinnedCommits : delivery.pinnedCommit ? [delivery.pinnedCommit] : [];
-  const message = commits.length ? `Delivered ${commits.join(", ")} to ${delivery.targetBranch || "the integration target"}.` : delivery.sourceRevision ? `Delivered source revision ${delivery.sourceRevision.source}:${delivery.sourceRevision.value}.` : "Delivered the submitted candidate.";
+  const merged = delivery.mode === "pr" && delivery.pr?.mergeCommit ? delivery.pr : null;
+  const message = merged ? `Delivered ${commits.join(", ") || "the wave"} to ${delivery.targetBranch || "the integration target"} through PR #${merged.number} (${merged.url}), merged as ${merged.mergeCommit}.` : commits.length ? `Delivered ${commits.join(", ")} to ${delivery.targetBranch || "the integration target"}.` : delivery.sourceRevision ? `Delivered source revision ${delivery.sourceRevision.source}:${delivery.sourceRevision.value}.` : "Delivered the submitted candidate.";
   return mutationAck(slug, result, {
     action: "delivered",
     delivery,
@@ -204,7 +205,7 @@ function prDeliveryMode(slug) {
     return false;
   }
 }
-const PR_DELIVERY_REFUSAL_KEYS = ["cause", "pr", "waveId", "branch", "conflictedPaths"];
+const PR_DELIVERY_REFUSAL_KEYS = ["cause", "pr", "waveId", "branch", "conflictedPaths", "failingChecks", "mergeCommit"];
 function prDeliveryRefusalFields(delivery) {
   const fields = {};
   for (const key of PR_DELIVERY_REFUSAL_KEYS) {
@@ -222,6 +223,7 @@ function awaitingMergeAck(slug, delivery) {
     participantRefs: delivery.participants,
     tickets: tickets.map((entry) => entry ? { ref: entry.ref, status: entry.status } : null),
     ...delivery.existing ? { existing: true } : {},
+    ...delivery.checks ? { checks: delivery.checks } : {},
     message: delivery.message
   });
 }
@@ -314,6 +316,7 @@ function collectGitSubmissionFacts(options) {
     targetFailure = { code: "integration_target_unavailable", message: `submit: refused ${ticket.ref}; ${boundedSubmissionText(error && error.message || String(error))}. Remedy: Fetch or recreate ${targetName}, then resubmit the preserved candidate.`, retryable: true };
   }
   const dispatchBase = String(ticket.dispatch?.baseCommit || "").trim() || null;
+  const namedBase = String(ticket.dispatch?.baseRef?.commit || "").trim() || null;
   const approvedBoundaries = sharedTreeSubmissionBoundaries(slug, ticket);
   const boundaryCommits = approvedBoundaries.map((boundary) => boundary.commit);
   const calculatedRange = target ? commitScope.submissionRange(root, {
@@ -333,7 +336,7 @@ function collectGitSubmissionFacts(options) {
       ...dispatchBase ? { dispatchBase } : {},
       allowedBases: [...dispatchBase ? [dispatchBase] : [], ...boundaryCommits],
       baseCandidates: boundaryCommits
-    } : ticket.dispatch?.sharedTree !== false && dispatchBase ? { dispatchBase, allowedBases: [dispatchBase] } : { allowedBases: [] }
+    } : namedBase ? { dispatchBase: namedBase, allowedBases: [namedBase] } : ticket.dispatch?.sharedTree !== false && dispatchBase ? { dispatchBase, allowedBases: [dispatchBase] } : { allowedBases: [] }
   }) : null;
   const range = calculatedRange && !calculatedRange.ok ? Object.assign({}, calculatedRange, { approvedBoundaries }) : calculatedRange;
   const scope = ticketCommitScope(slug, ticket);
@@ -1012,7 +1015,7 @@ const tools = [
           return groupPrDelivery ? Object.assign(mutationAck(slug, delivery2), prDeliveryRefusalFields(delivery2)) : mutationAck(slug, delivery2);
         }
         if (delivery2.state === "awaiting-merge") return awaitingMergeAck(slug, delivery2);
-        const reason2 = `Delivered assembled wave ${refs.join(", ")} via ${delivery2.integration.mode}.`;
+        const reason2 = delivery2.state === "merged" ? `Delivered assembled wave ${refs.join(", ")} via PR #${delivery2.pr.number} (${delivery2.pr.url}), merged as ${delivery2.pr.mergeCommit}. Verify passed: ${delivery2.integration.verify.evidence}` : `Delivered assembled wave ${refs.join(", ")} via ${delivery2.integration.mode}.`;
         const ticketsBeforeClosure = refs.map((ref) => store.getTicket(slug, ref));
         const closures = refs.map((ref) => store.completeTicketAsControlPlane(slug, ref, { by, reason: reason2, purpose: "integration" }));
         const failedClosure = closures.find((closure) => !closure.ok);

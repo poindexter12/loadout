@@ -24,6 +24,26 @@ function listen(server) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 }
 
+function waitForListeningPort(child) {
+  return new Promise((resolve, reject) => {
+    let buffered = '';
+    const timeout = setTimeout(() => reject(new Error(`model-gateway did not report a listening port: ${buffered}`)), 5000);
+    const finish = (callback) => {
+      clearTimeout(timeout);
+      child.stdout.off('data', onData);
+      callback();
+    };
+    const onData = (chunk) => {
+      buffered += chunk;
+      const match = buffered.match(/listening on 127\.0\.0\.1:(\d+)/);
+      if (match) finish(() => resolve(Number(match[1])));
+    };
+    child.stdout.on('data', onData);
+    child.once('error', (error) => finish(() => reject(error)));
+    child.once('exit', (code, signal) => finish(() => reject(new Error(`model-gateway exited before reporting a listening port (${code ?? signal}): ${buffered}`))));
+  });
+}
+
 function request(port, method, pathname, body, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port, method, path: pathname,
@@ -155,9 +175,6 @@ test('Codex discovery advertises client 1M aliases and forwards backend base ids
   const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
 
-  const shimProbe = http.createServer();
-  const shimPort = await listen(shimProbe);
-  await new Promise((resolve) => shimProbe.close(resolve));
 
   // SQ-19 withholds the Grok rows unless Grok CLI auth is present, and the
   // fixture home has none. This test is about the `[1m]` alias contract holding
@@ -165,7 +182,7 @@ test('Codex discovery advertises client 1M aliases and forwards backend base ids
   // readGrokAuth wants a `https://auth.x.ai::` entry with a non-empty `key`.
   const environment = gatewayTestEnvironment(t, {
     ...process.env,
-    CODEX_GATEWAY_PORT: String(shimPort),
+    CODEX_GATEWAY_PORT: '0',
     CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
     CODEX_GATEWAY_REQUEST_LOG: '0',
   });
@@ -176,9 +193,10 @@ test('Codex discovery advertises client 1M aliases and forwards backend base ids
 
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: environment,
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
   await waitForShim(shimPort);
 
   const models = JSON.parse((await request(shimPort, 'GET', '/v1/models')).body);
@@ -354,21 +372,19 @@ test('CODEX_GATEWAY_CONTEXT_WINDOW overrides the advertised max_input_tokens', a
   const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
 
-  const shimProbe = http.createServer();
-  const shimPort = await listen(shimProbe);
-  await new Promise((resolve) => shimProbe.close(resolve));
 
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PORT: '0',
       CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
       CODEX_GATEWAY_REQUEST_LOG: '0',
       CODEX_GATEWAY_CONTEXT_WINDOW: '200000',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
   await waitForShim(shimPort);
 
   const models = JSON.parse((await request(shimPort, 'GET', '/v1/models')).body);
@@ -400,22 +416,21 @@ test('default request route logging records Fable metadata but never prompt data
   const anthropicPort = await listen(anthropic);
   t.after(() => anthropic.close());
 
-  const shimProbe = http.createServer();
-  const shimPort = await listen(shimProbe);
-  await new Promise((resolve) => shimProbe.close(resolve));
   const testEnv = { ...process.env };
   delete testEnv.CODEX_GATEWAY_REQUEST_LOG;
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...testEnv,
-      CODEX_GATEWAY_PORT: String(shimPort),
-      CODEX_GATEWAY_PROXY_PORT: '0',
+      CODEX_GATEWAY_PORT: '0',
+      // Unserved on purpose: these requests never reach the proxy, and ':0' would be retargeted to port 80 (SQ-346).
+      CODEX_GATEWAY_PROXY_PORT: '1',
       CODEX_GATEWAY_ANTHROPIC_UPSTREAM: `http://127.0.0.1:${anthropicPort}`,
       CODEX_GATEWAY_REQUEST_LOG_PATH: logFile,
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
   await waitForShim(shimPort);
 
   const sentinel = 'DO-NOT-LOG-this-private-prompt';
@@ -444,21 +459,19 @@ test('CODEX_GATEWAY_REQUEST_LOG=0 disables request route logging', async (t) => 
   const anthropicPort = await listen(anthropic);
   t.after(() => anthropic.close());
 
-  const shimProbe = http.createServer();
-  const shimPort = await listen(shimProbe);
-  await new Promise((resolve) => shimProbe.close(resolve));
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
-      CODEX_GATEWAY_PROXY_PORT: '0',
+      CODEX_GATEWAY_PORT: '0',
+      CODEX_GATEWAY_PROXY_PORT: '1',
       CODEX_GATEWAY_ANTHROPIC_UPSTREAM: `http://127.0.0.1:${anthropicPort}`,
       CODEX_GATEWAY_REQUEST_LOG: '0',
       CODEX_GATEWAY_REQUEST_LOG_PATH: logFile,
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
   await waitForShim(shimPort);
 
   const response = await request(shimPort, 'POST', '/v1/messages', JSON.stringify({
@@ -754,19 +767,17 @@ test('an old-proxy context error is normalized to HTTP 413 request_too_large', a
   const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
 
-  const shimProbe = http.createServer();
-  const shimPort = await listen(shimProbe);
-  await new Promise((resolve) => shimProbe.close(resolve));
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PORT: '0',
       CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
       CODEX_GATEWAY_REQUEST_LOG: '0',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
   await waitForShim(shimPort);
 
   const response = await request(shimPort, 'POST', '/v1/messages', JSON.stringify({
@@ -796,19 +807,17 @@ test('an upstream 413 with parseable token counts passes through untouched', asy
   const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
 
-  const shimProbe = http.createServer();
-  const shimPort = await listen(shimProbe);
-  await new Promise((resolve) => shimProbe.close(resolve));
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PORT: '0',
       CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
       CODEX_GATEWAY_REQUEST_LOG: '0',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
   await waitForShim(shimPort);
 
   const response = await request(shimPort, 'POST', '/v1/messages', JSON.stringify({
@@ -866,14 +875,12 @@ test('Codex responses strip hallucinated plan-mode tools from JSON and SSE', asy
   const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
 
-  const shimProbe = http.createServer();
-  const shimPort = await listen(shimProbe);
-  await new Promise((resolve) => shimProbe.close(resolve));
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
-    env: { ...process.env, CODEX_GATEWAY_PORT: String(shimPort), CODEX_GATEWAY_PROXY_PORT: String(proxyPort), CODEX_GATEWAY_REQUEST_LOG: '0' },
-    stdio: 'ignore',
+    env: { ...process.env, CODEX_GATEWAY_PORT: '0', CODEX_GATEWAY_PROXY_PORT: String(proxyPort), CODEX_GATEWAY_REQUEST_LOG: '0' },
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
   await waitForShim(shimPort);
 
   const body = JSON.stringify({ model: 'claude-gpt-5.6-sol', max_tokens: 1, messages: [] });
@@ -1533,20 +1540,18 @@ test('claude-* passthrough is byte-identical and never subjected to Codex window
   const anthropicPort = await listen(anthropic);
   t.after(() => anthropic.close());
 
-  const shimProbe = http.createServer();
-  const shimPort = await listen(shimProbe);
-  await new Promise((resolve) => shimProbe.close(resolve));
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
-      CODEX_GATEWAY_PROXY_PORT: '0',
+      CODEX_GATEWAY_PORT: '0',
+      CODEX_GATEWAY_PROXY_PORT: '1',
       CODEX_GATEWAY_ANTHROPIC_UPSTREAM: `http://127.0.0.1:${anthropicPort}`,
       CODEX_GATEWAY_REQUEST_LOG: '0',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
   await waitForShim(shimPort);
 
   const sent = JSON.stringify({
@@ -1581,14 +1586,12 @@ test('count_tokens for a Codex model still routes to the proxy', async (t) => {
   const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
 
-  const shimProbe = http.createServer();
-  const shimPort = await listen(shimProbe);
-  await new Promise((resolve) => shimProbe.close(resolve));
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
-    env: { ...process.env, CODEX_GATEWAY_PORT: String(shimPort), CODEX_GATEWAY_PROXY_PORT: String(proxyPort), CODEX_GATEWAY_REQUEST_LOG: '0' },
-    stdio: 'ignore',
+    env: { ...process.env, CODEX_GATEWAY_PORT: '0', CODEX_GATEWAY_PROXY_PORT: String(proxyPort), CODEX_GATEWAY_REQUEST_LOG: '0' },
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
   await waitForShim(shimPort);
 
   const response = await request(shimPort, 'POST', '/v1/messages/count_tokens', JSON.stringify({
@@ -1615,20 +1618,18 @@ test('Codex SSE sends heartbeat comments while upstream is silent', async (t) =>
   const proxyPort = await listen(proxy);
   t.after(() => proxy.close());
 
-  const shimProbe = http.createServer();
-  const shimPort = await listen(shimProbe);
-  await new Promise((resolve) => shimProbe.close(resolve));
   const child = spawnGatewayProcess(t, process.execPath, [CLI, 'serve-shim'], {
     env: {
       ...process.env,
-      CODEX_GATEWAY_PORT: String(shimPort),
+      CODEX_GATEWAY_PORT: '0',
       CODEX_GATEWAY_PROXY_PORT: String(proxyPort),
       CODEX_GATEWAY_REQUEST_LOG: '0',
       CODEX_GATEWAY_SSE_HEARTBEAT_S: '0.02',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(() => child.kill());
+  const shimPort = await waitForListeningPort(child);
   await waitForShim(shimPort);
 
   const response = await requestStream(shimPort, JSON.stringify({

@@ -476,14 +476,6 @@ test('keeps an observer serving when the newest installed registry path is missi
   assert.equal(health.pluginVersion, '0.5.2');
 });
 
-async function availableLoopbackPort() {
-  const server = require('node:net').createServer();
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const { port } = server.address();
-  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-  return port;
-}
-
 async function waitForHealth(port, pluginVersion) {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
@@ -532,8 +524,11 @@ test('SessionStart restores an unbound observer port after an old observer retir
   const dataDir = path.join(home, '.claude', 'observability');
   const configFile = path.join(dataDir, 'observability.json');
   const databaseFile = path.join(dataDir, 'observability.db');
-  const observerPort = await availableLoopbackPort();
-  const collectorPort = await availableLoopbackPort();
+  // The observer binds port 0 and its real port is read back from start().
+  // The collector port is only configuration here; it is process-scoped and
+  // below the OS ephemeral ranges, never a released listen(0) reservation.
+  let observerPort = 0;
+  const collectorPort = 25000 + (process.pid % 5000);
   const successorRoot = path.resolve(__dirname, '..');
   const successorVersion = require('../.claude-plugin/plugin.json').version;
   fs.mkdirSync(path.join(home, '.claude', 'plugins'), { recursive: true });
@@ -566,11 +561,22 @@ test('SessionStart restores an unbound observer port after an old observer retir
     configFile,
     home,
     host: '127.0.0.1',
-    port: observerPort,
+    port: 0,
     pluginVersion: '0.0.0',
     sink: { id: 'none', egress: 'loopback', outbox: { enabled: false } },
   });
-  await oldObserver.start();
+  observerPort = (await oldObserver.start()).port;
+  writeObservabilityConfig(configFile, {
+    observability: {
+      enabled: true,
+      sink: 'none',
+      dashboard: false,
+      ports: { observer: observerPort, collector: collectorPort, dashboard: 15433, dashboardOtlp: 15434 },
+      sinks: {},
+      managedVersion: successorVersion,
+      collectorVersion: setup.COLLECTOR_VERSION,
+    },
+  });
   fs.writeFileSync(path.join(home, '.claude', 'plugins', 'installed_plugins.json'), JSON.stringify({
     plugins: {
       'observability@loadout': [
@@ -601,8 +607,13 @@ test('hands a retired observer to the newest installed observer', async (t) => {
   const registryFile = path.join(registryDirectory, 'installed_plugins.json');
   const successorRoot = path.resolve(__dirname, '..');
   const successorVersion = require('../.claude-plugin/plugin.json').version;
-  const observerPort = await availableLoopbackPort();
-  const collectorPort = await availableLoopbackPort();
+  // The successor must rebind the exact port the retiring observer was
+  // constructed with, so this port has to be known before start(). Use a
+  // process-scoped port below the Linux (32768+) and macOS (49152+)
+  // ephemeral ranges instead of a bind/close reservation that another
+  // test worker's listen(0) could be handed.
+  const observerPort = 30000 + (process.pid % 2000);
+  const collectorPort = 25000 + (process.pid % 5000);
   fs.mkdirSync(registryDirectory, { recursive: true });
   fs.mkdirSync(dataDir, { recursive: true });
   writeObservabilityConfig(configFile, {
@@ -644,6 +655,17 @@ test('hands a retired observer to the newest installed observer', async (t) => {
     sink: { id: 'none', egress: 'loopback', outbox: { enabled: false } },
   });
   await observer.start();
+  writeObservabilityConfig(configFile, {
+    observability: {
+      enabled: true,
+      sink: 'none',
+      dashboard: false,
+      ports: { observer: observerPort, collector: collectorPort, dashboard: 15433, dashboardOtlp: 15434 },
+      sinks: {},
+      managedVersion: successorVersion,
+      collectorVersion: setup.COLLECTOR_VERSION,
+    },
+  });
   fs.writeFileSync(registryFile, JSON.stringify({
     plugins: {
       'observability@loadout': [

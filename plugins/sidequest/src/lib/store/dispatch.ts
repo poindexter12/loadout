@@ -4,8 +4,10 @@ const { canonicalPreparedDispatchExecutor } = require('../prepared-dispatch.js')
 const { forcedClaimReleaseGuidance } = require('../refusal-guidance.js');
 const { classifyVerificationKind, verificationRequirement } = require('../kernel/verification.js');
 const { resolveSuite } = require('../suite-resolver.js');
+const { defaultHostSleep } = require('../host-sleep.js');
 const { FILESYSTEM_SNAPSHOT_SOURCE, withPrecomputedFilesystemSnapshot } = require('../source-revision-capability.js');
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationOutcome } = require('../kernel/review-binding');
+const { normalizeTicketBaseRef } = require('./tickets.js');
 
 function unscopedWriteCannotAutoApprove(ticket?: any, options?: any) {
   const { dispatchReadOnly, normalizeFiles, autoApproveScope } = options;
@@ -118,7 +120,7 @@ function requirementsMatch(left: any, right: any) {
 }
 
 function createDispatch(dependencies: any) {
-  const { ARTIFACT_BASELINE_MAX_PATHS, SHARED_TREE_ARTIFACT_MARKER, assertDispatchTransport, assertSidequestInstall, checkSidequestInstall, prepareAttempt, transitionAttempt, attemptDiagnostic, ensurePythonIoEncoding, localAheadOfUpstreamWarning, availableRoute, boardConfig, claimIdleMs, claimReclaimable, claimVerification, classifyDispatchFailure, terminalAgentFailure, commitScope, crypto, database, db, dispatchReadOnly, dispatchBaselineForProject, dispatchVerifyCommandError, dispatchRouteRefusal, dispatchRouteState, effectiveScope, execFileSync, execProjection, fs, getCategory, getStory, homeRoot, integrationTarget, integrationTargetCommit, legacyCategoryForComplexity, listProjects, listTickets, nonRepoExternalOutput, normalizeArtifactRoots, normalizeFiles, normalizeRoute, normalizeWorktreeIsolation, path, hasOriginRemote, pendingSubmission, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, reclaimUnclaimedDispatchWorktree, preparedDispatchTtlMs, putTicket, readMeta, releaseTerminalClaim, resolveCategoryFallback, resolveCategoryRoute, resolveTicketRoute, resolveExec, stableExecutorName, staleWorktreeCwdWarning, storyExecutionContract, ticketCategory, ticketStorageRow, withTicketLock, normalizeCategoryId, projectRoutingEnabled, routingDisabledMessage, getTicket, dispatchLaunchName, nextDispatchLaunchSeq, spawnDescription, claudeQuotaFailure, canonicalPath, checkoutInstanceIdentity, checkoutLayout, createWorktreeLease, worktreeResumeDecision, isCanonicalRegisteredWorktree } = dependencies;
+  const { ARTIFACT_BASELINE_MAX_PATHS, SHARED_TREE_ARTIFACT_MARKER, assertDispatchTransport, assertSidequestInstall, checkSidequestInstall, prepareAttempt, transitionAttempt, attemptDiagnostic, ensurePythonIoEncoding, localAheadOfUpstreamWarning, availableRoute, boardConfig, claimIdleMs, claimReclaimable, claimVerification, classifyDispatchFailure, terminalAgentFailure, commitScope, crypto, database, db, dispatchReadOnly, dispatchBaselineForProject, dispatchVerifyCommandError, dispatchRouteRefusal, dispatchRouteState, effectiveScope, execFileSync, execProjection, fs, getCategory, getStory, homeRoot, integrationTarget, integrationTargetCommit, legacyCategoryForComplexity, listProjects, listTickets, nonRepoExternalOutput, normalizeArtifactRoots, normalizeFiles, normalizeRoute, normalizeWorktreeIsolation, path, hasOriginRemote, pendingSubmission, agentWorktreePath, agentWorktreeCandidates, resolvedAgentWorktree, reclaimUnclaimedDispatchWorktree, preparedDispatchTtlMs, putTicket, readMeta, releaseTerminalClaim, resolveCategoryFallback, resolveCategoryRoute, resolveTicketRoute, resolveExec, stableExecutorName, staleWorktreeCwdWarning, storyExecutionContract, ticketCategory, ticketStorageRow, transaction, withTicketFileLock, withTicketLock, withTicketLocks, normalizeCategoryId, projectRoutingEnabled, routingDisabledMessage, getTicket, dispatchLaunchName, nextDispatchLaunchSeq, spawnDescription, claudeQuotaFailure, canonicalPath, checkoutInstanceIdentity, checkoutLayout, createWorktreeLease, worktreeResumeDecision, isCanonicalRegisteredWorktree } = dependencies;
 
   function syncLiveDispatchVerification(slug?: any, ticket?: any, amendment?: any) {
     const state = dispatchState(ticket);
@@ -344,9 +346,46 @@ function executorClaimDispatchRefusal(slug?: any, sessionId?: any) {
   return null;
 }
 
-function sharedTreeRuntimeRefusal(ticket?: any, projectPath?: any, runtimeCwd?: any) {
-  if (!runtimeCwd || !staleWorktreeCwdWarning(runtimeCwd, projectPath, true)) return null;
-  return `prepare dispatch: refused ${ticket.ref}; sharedTree:true requires the spawning runtime to be rooted in the declared project checkout. This runtime is an isolated linked worktree. Record the follow-up on the owning ticket; the orchestration session must dispatch it.`;
+function gitCheckoutRoot(cwd: string): string | null {
+  try {
+    const root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return root ? canonicalPath(root) : null;
+  } catch (_: any) {
+    return null;
+  }
+}
+
+// SQ-309: a shared-tree spawn carries neither `isolation` nor a cwd, so the executor inherits the
+// dispatching session's cwd. When that session is rooted in a different repository (the orchestrator
+// dispatching onto another project's board), the executor lands in the wrong checkout and is guaranteed
+// to fail its worktree preflight. Returns the foreign root, or null when the runtime is inside the
+// project checkout (or the facts needed to tell are unavailable).
+function sharedTreeForeignRuntimeRoot(projectPath?: any, runtimeCwd?: any): string | null {
+  const project = String(projectPath || '').trim();
+  const runtime = String(runtimeCwd || '').trim();
+  if (!project || !runtime || !fs.existsSync(project) || !fs.existsSync(runtime)) return null;
+  const projectRoot = gitCheckoutRoot(project);
+  if (projectRoot) {
+    const runtimeRoot = gitCheckoutRoot(runtime);
+    return runtimeRoot === projectRoot ? null : (runtimeRoot || canonicalPath(runtime));
+  }
+  const relative = path.relative(canonicalPath(project), canonicalPath(runtime));
+  return !relative || (!relative.startsWith('..') && !path.isAbsolute(relative)) ? null : canonicalPath(runtime);
+}
+
+function sharedTreeRuntimeRefusal(ticket?: any, projectPath?: any, runtimeCwd?: any, worktreeIsolation = true) {
+  if (!runtimeCwd) return null;
+  if (staleWorktreeCwdWarning(runtimeCwd, projectPath, true)) {
+    return `prepare dispatch: refused ${ticket.ref}; sharedTree:true requires the spawning runtime to be rooted in the declared project checkout. This runtime is an isolated linked worktree. Record the follow-up on the owning ticket; the orchestration session must dispatch it.`;
+  }
+  const foreignRoot = sharedTreeForeignRuntimeRoot(projectPath, runtimeCwd);
+  if (!foreignRoot) return null;
+  const remedy = worktreeIsolation
+    ? `Dispatch it without sharedTree so the board provisions an isolated worktree of ${projectPath}, or dispatch it from a session rooted in ${projectPath}.`
+    : `Worktree isolation is disabled on this board, so every dispatch runs in the shared tree; dispatch it from a session rooted in ${projectPath}.`;
+  return `prepare dispatch: refused ${ticket.ref}; sharedTree:true requires the spawning runtime to be rooted in the declared project checkout ${projectPath}, but this runtime is rooted in ${foreignRoot}. A shared-tree spawn carries no isolation and no cwd, so the executor would inherit ${foreignRoot} and fail its worktree preflight. ${remedy}`;
 }
 
 function dispatchPreparationAttribution(opts?: any) {
@@ -788,11 +827,20 @@ function supersedeUnboundAttempt(slug?: any, idOrRef?: any, opts?: any) {
     const ticket = getTicket(slug, found.id);
     const state = dispatchState(ticket);
     if (!evidenceRetirableAttempt(ticket, state, taskId)) {
+      // SQ-309: an unclaimed ticket with no live attempt (never dispatched, or its last attempt already
+      // terminal) needs no recovery at all. Say so, so the caller re-dispatches plainly instead of
+      // retrying the evidence route.
+      const nothingInFlight = !ticket?.claim?.by && (!ticket?.dispatchNonce || !state || Boolean(state.terminalAt));
+      const tail = nothingInFlight
+        ? ` No recovery is needed: nothing is in flight on ${ticket?.ref || idOrRef}, so dispatch it again without recoveryEvidence.`
+        : ticket?.claim?.by && hostTaskFailureRuntime(state, taskId)
+          ? ` ${forcedClaimReleaseGuidance(String(ticket?.ref || idOrRef), ticket.claim.by)}`
+          : ' Anything past that waits for its own terminal record.';
       return {
         ok: false,
         reason: 'unclaimed_launch_not_supersedable',
         ticket,
-        message: `${ticket?.ref || idOrRef} cannot be superseded on recovery evidence because its dispatch is ${evidenceSupersessionBlocker(ticket, state, taskId)}. Evidence retires an attempt whose runtime is gone: one that minted a token and never reached a runtime, one bound and unclaimed past the claim-idle backstop, or one whose own bound runtime is the failed task in a host task-failure notification, passed as recoveryTaskId.${ticket?.claim?.by && hostTaskFailureRuntime(state, taskId) ? ` ${forcedClaimReleaseGuidance(String(ticket?.ref || idOrRef), ticket.claim.by)}` : ' Anything past that waits for its own terminal record.'}`,
+        message: `${ticket?.ref || idOrRef} cannot be superseded on recovery evidence because its dispatch is ${evidenceSupersessionBlocker(ticket, state, taskId)}. Evidence retires an attempt whose runtime is gone: one that minted a token and never reached a runtime, one bound and unclaimed past the claim-idle backstop, or one whose own bound runtime is the failed task in a host task-failure notification, passed as recoveryTaskId.${tail}`,
       };
     }
     // Precedence is load-bearing and matches the pre-SQ-302 order. An incomplete WorktreeCreate checkout
@@ -990,7 +1038,14 @@ function setDispatchTerminal(ticket?: any, outcome?: any, source?: any, opts?: a
     reason: opts.releaseReason || null,
     evidence: opts.releaseEvidence || null,
   } : null;
-  const failureShape = opts?.failureShape || release?.kind || classifyDispatchFailure(opts?.error);
+  // The attempt's silent window runs from its last runtime milestone to this terminal record;
+  // host sleep inside it turns a watchdog-shaped death into host_sleep (SQ-164). Lazy, so
+  // the host is only read when the error actually looks like a watchdog death.
+  const attemptStart = state.claimedAt || state.boundAt || state.launchedAt || state.preparedAt || null;
+  const hostSleep = opts?.hostSleep || defaultHostSleep();
+  const failureShape = opts?.failureShape || release?.kind || classifyDispatchFailure(opts?.error, {
+    hostSleptDuring: () => Boolean(attemptStart) && hostSleep.sleptDuring(attemptStart, at),
+  });
   state.outcome = outcome;
   state.failureShape = failureShape;
   state.terminalAt = at;
@@ -1106,6 +1161,59 @@ function expiredPreparedDispatch(state?: any, now?: any) {
   return Number.isFinite(preparedAt) && now - preparedAt > preparedDispatchTtlMs();
 }
 
+// SQ-348: `ready` and `claimNext` both hand out urgent, then high, then normal, then low, but
+// `dispatch` takes an explicit ref, so an orchestrator picking a wave by file-overlap cluster could
+// start a normal while unblocked highs sat waiting, and nothing said so. This names that waiting
+// work. `readySet` is the board's own ready list, so it already excludes done, archived, parked
+// (pending submission), actively claimed, and blocked-by-open tickets. What it still contains that
+// is not actually waiting is filtered here: the ticket being dispatched, a ticket awaiting an oracle
+// verdict, and a ticket whose own dispatch is already in flight (prepared and not expired, launched,
+// or bound), which is how the rest of the same wave looks while it is being dispatched in order.
+const DISPATCH_PRIORITY_RANK: Record<string, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+
+function dispatchPriorityRank(priority?: any) {
+  const key = String(priority || '').toLowerCase();
+  return Object.prototype.hasOwnProperty.call(DISPATCH_PRIORITY_RANK, key) ? (DISPATCH_PRIORITY_RANK[key] ?? 9) : 9;
+}
+
+function dispatchInFlight(state?: any, now = Date.now()) {
+  return Boolean(state && state.outcome && !state.terminalAt && !expiredPreparedDispatch(state, now));
+}
+
+function higherPriorityReadyWork(ticket?: any, readySet?: any, now = Date.now()) {
+  if (!ticket) return [];
+  const rank = dispatchPriorityRank(ticket.priority);
+  return (Array.isArray(readySet) ? readySet : [])
+    .filter((candidate: any) => candidate && candidate.id !== ticket.id && candidate.ref !== ticket.ref)
+    .filter((candidate: any) => dispatchPriorityRank(candidate.priority) < rank)
+    .filter((candidate: any) => candidate.status !== 'awaiting-oracle')
+    .filter((candidate: any) => !dispatchInFlight(dispatchState(candidate), now))
+    .sort((left: any, right: any) => dispatchPriorityRank(left.priority) - dispatchPriorityRank(right.priority)
+      || String(left.createdAt).localeCompare(String(right.createdAt)))
+    .map((candidate: any) => ({ ref: candidate.ref, priority: candidate.priority }));
+}
+
+// The waiting work a dispatch result reports: empty when nothing outranks the ticket, and empty when
+// this attempt recorded a priorityOverride reason, because the orchestrator already said why.
+function dispatchPriorityBypass(ticket?: any, readySet?: any, now = Date.now()) {
+  if (dispatchState(ticket)?.priorityOverride) return [];
+  return higherPriorityReadyWork(ticket, readySet, now);
+}
+
+const PRIORITY_NOTICE_REF_LIMIT = 8;
+
+function priorityBypassNotice(ticket?: any, readySet?: any, now = Date.now()) {
+  const waiting = dispatchPriorityBypass(ticket, readySet, now);
+  if (!waiting.length) return null;
+  const listed = waiting.slice(0, PRIORITY_NOTICE_REF_LIMIT).map((item: any) => `${item.ref} (${item.priority})`).join(', ');
+  const more = waiting.length > PRIORITY_NOTICE_REF_LIMIT ? `, and ${waiting.length - PRIORITY_NOTICE_REF_LIMIT} more` : '';
+  return `dispatch priority: ${String(ticket?.ref || 'this ticket')} is ${String(ticket?.priority || 'unprioritized')} priority, `
+    + `but unblocked ready work at a higher priority is waiting undispatched: ${listed}${more}. `
+    + 'The board hands work out urgent, then high, then normal, then low; dispatch those first. '
+    + 'When this ticket is the right call anyway (the user named it, or a listed ticket is blocked in practice), '
+    + 'pass priorityOverride with that reason on the dispatch so the board records it.';
+}
+
 function recentNoCommitAttemptSelection(state?: any) {
   const attempts = Array.isArray(state?.attempts) ? state.attempts : [];
   const recent: any[] = [];
@@ -1214,6 +1322,24 @@ function gitOutput(root?: any, args?: any[]) {
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'ignore'],
   }).trim();
+}
+
+// SQ-286. The commit a ticket's named base ref points at in the project checkout. A bare branch name
+// that only exists as a remote-tracking ref (the usual shape of someone else's open pull request) also
+// resolves through origin. Nothing is fetched: a base the checkout does not hold is refused, never
+// replaced by the integration target.
+function resolveTicketBaseRef(projectPath: string, ticketRef: string, baseRef: string): string {
+  const candidates = [baseRef];
+  if (!baseRef.startsWith('refs/')) candidates.push(`refs/remotes/origin/${baseRef}`);
+  for (const candidate of candidates) {
+    try {
+      const commit = gitOutput(projectPath, ['rev-parse', '--verify', '--quiet', `${candidate}^{commit}`]);
+      if (/^[0-9a-f]{40,64}$/.test(commit)) return commit;
+    } catch (_: unknown) { /* try the next spelling */ }
+  }
+  throw new Error(`prepare dispatch: ${ticketRef} names base ref "${baseRef}", which does not resolve to a commit in ${projectPath} (tried ${candidates.join(', ')}). `
+    + 'The worktree will not silently start from the integration target instead. Fetch the branch into the project checkout first, '
+    + 'name it exactly (for example origin/<branch> or a commit hash), or clear the ticket\'s baseRef to fork the integration target.');
 }
 
 function registeredWorktrees(repository?: any): string[] {
@@ -1687,6 +1813,9 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
   }
   const verifyError = dispatchVerifyCommandError(found, projectPath);
   if (verifyError) throw new Error(verifyError);
+  // SQ-348: the stated reason this dispatch goes ahead of higher-priority ready work. It is recorded
+  // on the dispatch row, and a recorded reason is what silences the priority notice for this attempt.
+  const priorityOverride = String(opts.priorityOverride ?? '').trim();
   const installCheck = projectPath ? assertSidequestInstall(projectPath) : null;
   const preparedPluginInstall = installCheck?.installPath || null;
   const preparedPluginIdentity = installCheck?.identity || null;
@@ -1897,7 +2026,18 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
     if (t.workingTreeDelivery === true && !sharedTree) {
       throw new Error(`prepare dispatch: ${t.ref} declares a working-tree deliverable and must run in the shared checkout. Re-dispatch with sharedTree:true.`);
     }
-    const runtimeRefusal = sharedTree ? sharedTreeRuntimeRefusal(t, projectPath, opts.runtimeCwd) : null;
+    // SQ-286. A ticket that names its base (an open pull request branch, say) must get a worktree that
+    // starts there. A review's base is its candidate, which already pins the checkout, so the candidate
+    // wins. Anything that cannot start from the named commit is refused rather than quietly handed the
+    // integration target.
+    const namedBaseRef = reviewTargetState ? null : normalizeTicketBaseRef(t.baseRef);
+    if (namedBaseRef && (sharedTree || nonRepoOutput)) {
+      throw new Error(`prepare dispatch: ${t.ref} names base ref "${namedBaseRef}", and only an isolated worktree can start from a named base; `
+        + `this dispatch would run ${nonRepoOutput ? 'without a repository checkout' : 'in the shared checkout, which holds whatever is checked out there'}. `
+        + 'Re-dispatch with sharedTree:false on a board with worktree isolation enabled, or clear the ticket\'s baseRef.');
+    }
+    const namedBaseCommit = namedBaseRef ? resolveTicketBaseRef(String(projectPath || ''), t.ref, namedBaseRef) : null;
+    const runtimeRefusal = sharedTree ? sharedTreeRuntimeRefusal(t, projectPath, opts.runtimeCwd, Boolean(worktreeIsolation)) : null;
     if (runtimeRefusal) throw new Error(runtimeRefusal);
     t.dispatchNonce = mintDispatchToken();
     const category = getCategory(ticketCategory(t), { project: slug });
@@ -1979,6 +2119,8 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
     fs.mkdirSync(evidenceDirectory, { recursive: true, mode: 0o700 });
     const baseCommit = reviewTargetState?.candidate.source === 'git'
       ? reviewTargetState.candidate.value
+      : namedBaseCommit
+        ? namedBaseCommit
       : integrationTargetState
         ? integrationTargetCommit(readMeta(slug)?.path || '', integrationTargetState)
         : commitScope.headCommit(readMeta(slug)?.path || '');
@@ -2015,6 +2157,7 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
           ...(worktreeWarning ? { worktreeWarning } : {}),
           ...(pythonIoEncoding.written ? { pythonIoEncoding } : {}),
           ...(opts.dispatchSkew ? { dispatchSkew: opts.dispatchSkew } : {}),
+          ...(priorityOverride ? { priorityOverride: { reason: priorityOverride, at: now } } : {}),
           declaredFiles,
           ...(!sharedTree && releasedContinuation?.continuation ? {
             continuation: releasedContinuation.continuation,
@@ -2032,6 +2175,7 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
           // Record the integration target commit so an isolated executor can bring
           // its harness-created worktree forward before changing it.
           baseCommit,
+          ...(namedBaseRef && namedBaseCommit ? { baseRef: { ref: namedBaseRef, commit: namedBaseCommit } } : {}),
           ...(reviewTargetState ? { reviewTarget: t.reviewTarget } : {}),
           ...(integrationTargetState ? { integrationTarget: integrationTargetState } : {}),
           ...(localAheadWarning ? { localAheadWarning } : {}),
@@ -2097,42 +2241,73 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
       },
     };
   };
-  for (let attempt = 1; ; attempt += 1) {
-    // Sampled before the plan reads anything, so a change anywhere between the plan's first read
-    // and the store is caught, not only one that lands after the expensive work finished. Both the
-    // keys and the stamps are taken again per attempt, so a replan addresses current rows.
-    const planKeys = dispatchPlanKeys(slug, getTicket(slug, found.id) || found);
-    const boardStamp = dispatchPlanBoardStamp(planKeys);
-    const repositoryStamp = dispatchRepositoryStamp(projectPath);
-    let staleReason: string | null = null;
-    stagedToken = null;
-    const committed = withPrecomputedProjectSnapshot(slug, projectPath, () => {
-      const planned = planDispatch();
-      // Unconditional, and safe after a publish because the rename already moved the file away.
-      // It also covers the lock itself refusing, where the commit never runs at all.
-      try {
-        return withTicketLock(slug, found.id, () => {
-          const boardNow = dispatchPlanBoardStamp(planKeys);
-          if (boardNow !== boardStamp) {
-            staleReason = 'the board rows it read were rewritten';
-            return STALE_DISPATCH_PLAN;
-          }
-          const repositoryNow = dispatchRepositoryStamp(projectPath);
-          if (repositoryNow !== repositoryStamp) {
-            staleReason = `the repository moved (${stampDifference(repositoryStamp, repositoryNow)})`;
-            return STALE_DISPATCH_PLAN;
-          }
-          return planned.commit();
-        });
-      } finally {
-        stagedToken?.discard();
+  // SQ-273: the ticket's FILE lock is held across the whole plan-then-commit sequence, and the
+  // machine-global transaction is entered only for the short recheck-and-store inside it. That is
+  // the lock order every ticket writer follows (file lock first, transaction second; see
+  // store/locks.ts). It restores the same-ticket serialisation SQ-268 had to give up while the two
+  // locks were welded together: a second prepare of this ticket now waits here instead of planning
+  // in parallel and running the worktree reclaim a second time, then plans against whatever the
+  // first one stored. The board and repository stamps stay exactly as strict as before. The file
+  // lock only excludes this ticket's other prepares; it does nothing about other writers to the
+  // rows the plan read, other tickets' rows, or the repository moving underneath, and the stamps
+  // are what catch those.
+  //
+  // Nothing in the plan may take a ticket file lock: a second acquisition of this one would wait out
+  // the full lock timeout against itself. The plan reads the board and Git and writes nothing.
+  const prepared = withTicketFileLock(slug, found.id, () => {
+    for (let attempt = 1; ; attempt += 1) {
+      // Sampled before the plan reads anything, so a change anywhere between the plan's first read
+      // and the store is caught, not only one that lands after the expensive work finished. Both the
+      // keys and the stamps are taken again per attempt, so a replan addresses current rows.
+      const planKeys = dispatchPlanKeys(slug, getTicket(slug, found.id) || found);
+      const boardStamp = dispatchPlanBoardStamp(planKeys);
+      const repositoryStamp = dispatchRepositoryStamp(projectPath);
+      let staleReason: string | null = null;
+      stagedToken = null;
+      const committed = withPrecomputedProjectSnapshot(slug, projectPath, () => {
+        dispatchPlanObserver?.({ phase: 'plan', slug, id: found.id, ref: found.ref, attempt });
+        const planned = planDispatch();
+        // Unconditional, and safe after a publish because the rename already moved the file away.
+        // It also covers the commit refusing or throwing, where nothing was published.
+        try {
+          return transaction(() => {
+            const boardNow = dispatchPlanBoardStamp(planKeys);
+            if (boardNow !== boardStamp) {
+              staleReason = 'the board rows it read were rewritten';
+              return STALE_DISPATCH_PLAN;
+            }
+            const repositoryNow = dispatchRepositoryStamp(projectPath);
+            if (repositoryNow !== repositoryStamp) {
+              staleReason = `the repository moved (${stampDifference(repositoryStamp, repositoryNow)})`;
+              return STALE_DISPATCH_PLAN;
+            }
+            return planned.commit();
+          });
+        } finally {
+          stagedToken?.discard();
+        }
+      });
+      if (committed !== STALE_DISPATCH_PLAN) {
+        dispatchPlanObserver?.({ phase: 'stored', slug, id: found.id, ref: found.ref, attempt });
+        return committed;
       }
-    });
-    if (committed !== STALE_DISPATCH_PLAN) return committed;
-    if (attempt >= DISPATCH_PLAN_MAX_ATTEMPTS) {
-      throw new Error(`prepare dispatch: ${found.ref} was planned ${DISPATCH_PLAN_MAX_ATTEMPTS} times and each plan went stale before it could be stored, the last because ${staleReason}. Nothing was written. Let the concurrent work settle, then dispatch again.`);
+      if (attempt >= DISPATCH_PLAN_MAX_ATTEMPTS) {
+        throw new Error(`prepare dispatch: ${found.ref} was planned ${DISPATCH_PLAN_MAX_ATTEMPTS} times and each plan went stale before it could be stored, the last because ${staleReason}. Nothing was written. Let the concurrent work settle, then dispatch again.`);
+      }
     }
-  }
+  });
+  return prepared;
+}
+
+// Test seam, not configuration: called with phase 'plan' at the start of every dispatch plan and
+// with phase 'stored' once the plan is stored, both inside the ticket file lock. A test uses it to
+// count plans, and to hold one plan open while a second prepare of the same ticket races it from
+// another process, which is how "two concurrent prepares produce exactly one plan" is proven.
+let dispatchPlanObserver: ((event: any) => void) | null = null;
+function setDispatchPlanObserver(observer?: any) {
+  const previous = dispatchPlanObserver;
+  dispatchPlanObserver = typeof observer === 'function' ? observer : null;
+  return previous;
 }
 
 function readDispatchBriefing(slug?: any, idOrRef?: any, token?: any, tokenFile?: any) {
@@ -2383,6 +2558,7 @@ function recoverDispatchQuotaFailure(slug?: any, idOrRef?: any, opts?: any) {
       route: dispatchRouteState(fallback.model, fallback.effort, fallback.exec),
       storyContract: state.storyContract || storyExecutionContract(t.storyId ? getStory(slug, t.storyId) : null),
       ...(state.storyContractDrift ? { storyContractDrift: state.storyContractDrift } : {}),
+      ...(state.priorityOverride ? { priorityOverride: state.priorityOverride } : {}),
       preparedAt: now,
       launchedAt: null,
       boundAt: null,
@@ -2475,25 +2651,39 @@ function bindDispatchWorktreeCreation(slug?: any, sessionId?: any, worktree?: an
 // session instead of assuming the cwd board. `excludeSlug` is the board the hook
 // already tried. Each match reports the registered repository the checkout must
 // be created from.
-function dispatchWorktreeCreationBoards(sessionId?: any, excludeSlug?: any) {
+//
+// Only a board that can actually take THIS creation counts (SQ-308): one holding
+// an unbound launched dispatch, or one whose dispatch is already bound to the very
+// checkout this name resolves to there (a re-entered creation). A dispatch already
+// bound to a different checkout belongs to an earlier spawn, so counting it made
+// one session's live executors on board A refuse every new spawn on board B as
+// ambiguous_binding. `worktreeFor` maps a board's repository to the checkout path
+// this creation would take in it; without it no bound dispatch can be matched.
+function dispatchWorktreeCreationBoards(sessionId?: any, excludeSlug?: any, worktreeFor?: any) {
   const normalizedSessionId = String(sessionId || '').trim();
   if (!normalizedSessionId) return [];
   const excluded = String(excludeSlug || '').trim();
-  const boards: any[] = [];
+  const resumed: any[] = [];
+  const pending: any[] = [];
   for (const project of listProjects({ all: true })) {
     if (!project?.slug || project.slug === excluded) continue;
     const meta = readMeta(project.slug);
     if (!meta?.path) continue;
-    const live = listTickets(project.slug).some((candidate?: any) => {
+    const repository = canonicalPath(meta.path);
+    const target = typeof worktreeFor === 'function' ? canonicalPath(worktreeFor(repository)) : null;
+    let unbound = false;
+    let reentered = false;
+    for (const candidate of listTickets(project.slug)) {
       const state = dispatchState(candidate);
-      if (dispatchCreationCandidate(state, normalizedSessionId)) return true;
-      return Boolean(state && state.sessionId === normalizedSessionId && state.sharedTree === false
+      if (dispatchCreationCandidate(state, normalizedSessionId)) unbound = true;
+      else if (target && state && state.sessionId === normalizedSessionId && state.sharedTree === false
         && state.outcome === 'launched' && !state.terminalAt && state.worktreeBindingSource === 'worktree-create'
-        && state.worktree);
-    });
-    if (live) boards.push({ slug: project.slug, repository: canonicalPath(meta.path) });
+        && state.worktree && canonicalPath(state.worktree) === target) reentered = true;
+    }
+    if (reentered) resumed.push({ slug: project.slug, repository });
+    else if (unbound) pending.push({ slug: project.slug, repository });
   }
-  return boards;
+  return resumed.length ? resumed : pending;
 }
 
 function completeDispatchWorktreeCreation(slug?: any, sessionId?: any, worktree?: any) {
@@ -2761,6 +2951,7 @@ function dispatchIsolationExpectation(identity?: any) {
         sanctionedRevisions: sanctionedRevisionsForLiveClaim(ticket, state),
         claimHeld: Boolean(ticket.claim && ticket.claim.by),
         phase: state.terminalAt ? 'terminal' : state.outcome === 'claimed' ? 'claimed' : 'bound',
+        externalWorktrees: Array.isArray(ticket.externalWorktrees) ? ticket.externalWorktrees.map(String) : [],
       };
       if (agentId && candidate.agentId === agentId) byAgent.push(candidate);
       else if (!terminalWithoutClaim && sessionId && executor && state.sessionId === sessionId && state.executor === executor
@@ -2793,6 +2984,7 @@ function dispatchIsolationExpectation(identity?: any) {
     expectedCheckoutInstance: expectation.worktreeCheckoutInstance,
     expectedRevision: expectation.worktreeObservedRevision,
     worktreeBindingSource: expectation.worktreeBindingSource,
+    externalWorktrees: expectation.externalWorktrees,
   };
 }
 
@@ -3051,7 +3243,9 @@ function exchangeCrossedCreationBinding(slug?: any, ticketId?: any, sessionId?: 
   const [firstId, secondId] = [target.id, holder.id].sort();
   const factsFor = new Map([[target.id, reportedFacts], [holder.id, heldFacts]]);
   const refFor = new Map([[target.id, holder.ref], [holder.id, target.ref]]);
-  return withTicketLock(slug, firstId, () => withTicketLock(slug, secondId, () => {
+  // Both file locks before the one transaction, in sorted order (SQ-273 lock ordering): nesting
+  // withTicketLock took the second file lock inside the first lock's open transaction.
+  return withTicketLocks(slug, [firstId, secondId], () => {
     const now = new Date().toISOString();
     for (const id of [firstId, secondId]) {
       const ticket = getTicket(slug, id);
@@ -3064,7 +3258,7 @@ function exchangeCrossedCreationBinding(slug?: any, ticketId?: any, sessionId?: 
       putTicket(slug, ticket);
     }
     return { ok: true, exchangedWith: holder.ref };
-  }));
+  });
 }
 
 // SQ-324. Creation attribution is a guess (see the comment above), and until something corrects it the
@@ -3139,7 +3333,9 @@ function exchangeClaimedCreationBinding(slug?: any, ticketId?: any, opts?: any) 
   const [firstId, secondId] = [target.id, holder.id].sort();
   const factsFor = new Map([[target.id, reportedFacts], [holder.id, heldFacts]]);
   const refFor = new Map([[target.id, holder.ref], [holder.id, target.ref]]);
-  const exchanged = withTicketLock(slug, firstId, () => withTicketLock(slug, secondId, () => {
+  // Both file locks before the one transaction, in sorted order (SQ-273 lock ordering): nesting
+  // withTicketLock took the second file lock inside the first lock's open transaction.
+  const exchanged = withTicketLocks(slug, [firstId, secondId], () => {
     const now = new Date().toISOString();
     for (const id of [firstId, secondId]) {
       const ticket = getTicket(slug, id);
@@ -3153,7 +3349,7 @@ function exchangeClaimedCreationBinding(slug?: any, ticketId?: any, opts?: any) 
       putTicket(slug, ticket);
     }
     return { ok: true, exchanged: true, holder: holder.ref };
-  }));
+  });
   return exchanged || { ok: false, reason: 'exchange_lost_race', holder: holder.ref };
 }
 
@@ -3517,7 +3713,12 @@ function reconcileLaunchedDispatches(sessionId?: any, opts?: any) {
     expiredPreparedDispatch,
     worktreeIsolationWarning,
     prepareDispatch,
+    setDispatchPlanObserver,
     syncLiveDispatchVerification,
+    // SQ-348: store.dispatchWarnings and the dispatch result read these with the board's ready list.
+    higherPriorityReadyWork,
+    dispatchPriorityBypass,
+    priorityBypassNotice,
     readDispatchBriefing,
     recoverLiveClaimDispatch,
     recordDispatchLaunch,

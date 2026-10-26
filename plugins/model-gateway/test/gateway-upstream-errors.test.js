@@ -158,10 +158,10 @@ test('SQ-22 e2e: a 429 from the codex proxy is rewritten before it reaches the c
 test('SQ-21 e2e: an unreachable local proxy produces the named-component 502', async (t) => {
   const { gatewayTestEnvironment } = require('./support.js');
   const environment = gatewayTestEnvironment(t);
-  // Reserve a port and immediately release it so nothing is listening there.
-  const probe = http.createServer();
-  const deadPort = await listen(probe);
-  await new Promise((resolve) => probe.close(resolve));
+  // Port 1 is deliberately unserved: this test needs a refused connection,
+  // not a bind/close reservation whose released ephemeral port another worker
+  // could take before the shim tries it.
+  const deadPort = 1;
 
   const { port: shimPort } = await startGateway(t, 'serve-shim', environment, {
     isolatedOverrides: {

@@ -57,6 +57,25 @@ function resolveProject(projectArg) {
   }
   return store.ensureProject(store.sessionProjectRoot());
 }
+function claimedProjectForRef(args) {
+  if (!args || typeof args !== "object") return null;
+  if (String(args.project == null ? "" : args.project).trim()) return null;
+  const ref = String(args.ref == null ? "" : args.ref).trim();
+  if (!ref) return null;
+  const claims = store.liveClaimsForRef(ref);
+  if (!claims.length) return null;
+  const by = String(args.by == null ? "" : args.by).trim();
+  const session = runtimeSessionId();
+  const mine = by ? claims.filter((claim) => claim.by === by) : session ? claims.filter((claim) => claim.sessionId === session) : [];
+  if (!mine.length) return null;
+  const cwd = store.findProject(store.sessionProjectRoot());
+  const cwdSlug = cwd && cwd.ok ? cwd.slug : null;
+  const boards = Array.from(new Set(mine.map((claim) => String(claim.slug))));
+  if (boards.length === 1 && boards[0] === cwdSlug) return null;
+  if (boards.length === 1 && (by || !cwdSlug || !store.getTicket(cwdSlug, ref))) return boards[0];
+  const named = boards.concat(cwdSlug && !boards.includes(cwdSlug) ? [cwdSlug] : []);
+  throw new Error(`${ref} is ambiguous across boards (${named.join(", ")}): your claim is on ${boards.join(", ")} but this session's board is ${cwdSlug || "unregistered"}. Pass \`project\` to name the board.`);
+}
 function runtimeSessionId() {
   const v = process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || "";
   return String(v).trim() || null;
@@ -137,6 +156,7 @@ function provenNoOpCloseout(slug, ticket) {
 }
 const PROJECT_PROP = { type: "string", description: "Board (current project)." };
 const FILES_PROP = { type: "array", items: { type: "string" }, description: "Declared file scope: paths, directory prefixes covering descendants, or globs matched consistently by hook and commit enforcement." };
+const EXTERNAL_WORKTREES_PROP = { type: "array", items: { type: "string" }, description: "Orchestrator-granted absolute roots of approved checkouts in OTHER repositories (for example a user-approved branch worktree). The claimed executor may Write/Edit under them while its claim is held; they are never committed by the board, never inside this project, and an executor cannot grant them to itself. Empty clears." };
 const LABELS_PROP = { type: "array", items: { type: "string" } };
 const CONTRACT_PROP = (verb) => ({ type: "array", items: { type: "string" }, description: `Named contracts or interfaces this ticket ${verb}.` });
 const MODEL_FILTER_PROP = { type: "string", description: "Filter by resolved model slug." };
@@ -169,7 +189,7 @@ const TOOL_DESCRIPTION_OVERRIDES = {
   list: "List; poll via changes/pulse.",
   pulse: "Liveness.",
   changes: "Poll ticket changes.",
-  ready: "List ready ticket refs.",
+  ready: "List ready ticket refs, by priority.",
   story: "Stories.",
   story_contract: "Story contract.",
   story_log: "Story log.",
@@ -190,7 +210,7 @@ const TOOL_DESCRIPTION_OVERRIDES = {
   link: "Ticket link.",
   remove: "Delete; force for claims.",
   claim: "Claim before work; proceed only on ok:true.",
-  dispatch: "Dispatch; token and spawn spec.",
+  dispatch: "Dispatch; token and spawn spec. Flags skipped higher-priority ready work.",
   done: "Finish; declared external needs current capture.",
   release: "Release; reason required. oracle handoff needs ask until verdict. force takes a foreign claim under your own by and needs that reason: reasonless force refuses not_owner; a forced take stamps kind forced and takenFrom.",
   groomClose: "Frozen ticket target; abandonSubmission:true; reset/working-tree/manual; reviewed interaction.",
@@ -675,6 +695,33 @@ function boundedReadPayload(tool, payload) {
   }
   return visible;
 }
+function compactDispatchWarnings(project, compact, warnings, maxBytes = COMPACT_RESULT_MAX_BYTES) {
+  const all = (Array.isArray(warnings) ? warnings : []).map((warning) => String(warning)).filter(Boolean);
+  if (!all.length) return compact;
+  const whole = Object.assign({}, compact, { warnings: all });
+  if (mcpPayloadBytes(whole) <= maxBytes) return whole;
+  const warningsRetrieval = snapshotContextRetrieval({
+    tool: "dispatch",
+    project: String(project || "<global>"),
+    kind: "rows",
+    field: "warnings",
+    position: 0,
+    value: all,
+    reason: "budget",
+    cursor: 0
+  });
+  const marked = (retained2) => Object.assign({}, compact, {
+    warnings: retained2,
+    warningsOmitted: all.length - retained2.length,
+    warningsRetrieval
+  });
+  const retained = [];
+  for (const warning of all) {
+    if (mcpPayloadBytes(marked([...retained, warning])) > maxBytes) break;
+    retained.push(warning);
+  }
+  return marked(retained);
+}
 function compactCategoryBody(category, field, project) {
   const value = String(category[field] || "");
   if (utf8ByteLength(value) <= CONTEXT_ROW_EXCERPT_BYTES) return { [field]: value };
@@ -934,6 +981,7 @@ module.exports = {
   assertSidequestInstall,
   assertDispatchTransport,
   resolveProject,
+  claimedProjectForRef,
   runtimeSessionId,
   sessionOf,
   controlPlaneIdentity,
@@ -946,6 +994,7 @@ module.exports = {
   provenNoOpCloseout,
   PROJECT_PROP,
   FILES_PROP,
+  EXTERNAL_WORKTREES_PROP,
   LABELS_PROP,
   CONTRACT_PROP,
   MODEL_FILTER_PROP,
@@ -973,6 +1022,7 @@ module.exports = {
   snapshotContextRetrieval,
   resolveContextPage,
   boundedReadPayload,
+  compactDispatchWarnings,
   MAX_CONTEXT_PAGE_BYTES,
   categoryListEntry,
   pageArguments,

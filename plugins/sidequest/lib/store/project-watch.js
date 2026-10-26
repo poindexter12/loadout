@@ -60,35 +60,36 @@ function createProjectBoardWatch(project, environment = process.env, dependencie
     ciRunsProvider: createGitHubCiRunsProvider(projectPath),
     awaitingMergeWavesProvider: async () => {
       const waves = store.findAwaitingMergeWaves?.(project.slug) || [];
-      try {
+      const settled = await Promise.allSettled(waves.map(async (wave) => {
+        const pr = store.readWavePr?.(project.slug, wave.waveId) || wave.pr;
+        const status = await prPort.viewPr({ cwd: projectPath, number: pr.number });
         return {
-          waves: await Promise.all(waves.map(async (wave) => {
-            const pr = store.readWavePr?.(project.slug, wave.waveId) || wave.pr;
-            const status = await prPort.viewPr({ cwd: projectPath, number: pr.number });
-            return {
-              ...wave,
-              pr,
-              status,
-              recorded: Boolean(recordedState(wave.participants[0], status)),
-              terminalRecorded: recordedTerminalState(wave.participants[0], status)
-            };
-          })),
-          recordState: (wave, status) => {
-            if (recordedState(wave.participants[0], status)) return;
-            store.addComment(project.slug, wave.participants[0], {
-              by: watchingActor || "sidequest-watch",
-              body: prWatchMarker(status),
-              kind: "comment",
-              source: "watch",
-              sourceSession: watchingSession,
-              actor: watchingActor,
-              operation: "pr-watch"
-            });
-          }
+          ...wave,
+          pr,
+          status,
+          recorded: Boolean(recordedState(wave.participants[0], status)),
+          terminalRecorded: recordedTerminalState(wave.participants[0], status)
         };
-      } catch (error) {
-        return { waves: [], degraded: error instanceof Error ? error.message : String(error) };
-      }
+      }));
+      const failed = settled.filter((result) => result.status === "rejected");
+      return {
+        waves: settled.filter((result) => result.status === "fulfilled").map((result) => result.value),
+        ...failed.length ? {
+          degraded: failed.map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason)).join("; ")
+        } : {},
+        recordState: (wave, status) => {
+          if (recordedState(wave.participants[0], status)) return;
+          store.addComment(project.slug, wave.participants[0], {
+            by: watchingActor || "sidequest-watch",
+            body: prWatchMarker(status),
+            kind: "comment",
+            source: "watch",
+            sourceSession: watchingSession,
+            actor: watchingActor,
+            operation: "pr-watch"
+          });
+        }
+      };
     },
     includeAllTickets,
     watchingAuthor: watchingActor,

@@ -2344,3 +2344,189 @@ test('SQ-255: an attempt whose WorktreeCreate hook created nothing is dispatchab
   assert.equal(again.ticket.dispatch.outcome, 'prepared');
   assert.ok(!again.ticket.dispatch.worktree, 'the fresh attempt carries no stale worktree binding');
 });
+
+// SQ-258. An executor whose user approved work on a branch of ANOTHER repository checked that branch out
+// as its own worktree, and every Write/Edit there was refused as "no write lease for this linked worktree":
+// the lease only knows the dispatch repository, and declared files cannot name a path outside it. The only
+// way through was copying files in with Bash, which the guard never sees. The orchestrator now grants the
+// foreign worktree on the ticket (externalWorktrees), and the guard admits writes under exactly that root,
+// for exactly as long as the claim is held.
+test('SQ-258: an orchestrator-granted foreign repository worktree carries a write lease while the claim is held', () => {
+  const agentId = 'a258external';
+  const { ticket, sessionId, executor } = dispatched(agentId);
+  const linked = ticket.dispatch.worktree;
+  execFileSync('git', ['worktree', 'add', '--detach', linked], { cwd: PROJECT, windowsHide: true });
+  completeCheckoutCreation(sessionId, linked);
+  assert.equal(store.bindDispatchAgent(sessionId, executor, agentId, agentId, linked).ok, true);
+  const foreignRepo = initRepo('sq-isolation-foreign-repo-');
+  const foreignWorktree = path.join(fs.realpathSync(os.tmpdir()), `sq-isolation-kev-stack-${process.pid}-${Date.now()}`);
+  execFileSync('git', ['worktree', 'add', '--quiet', '-b', 'feat/kev-stack', foreignWorktree], { cwd: foreignRepo, windowsHide: true });
+  const worker = `${agentId}-worker`;
+  const foreignWrite = () => runHook(GUARD_ISOLATION, writePayload(agentId, executor, sessionId, path.join(foreignWorktree, 'stack', 'main.tf'), linked));
+  try {
+    assert.equal(store.claimTicket(slug, ticket.ref, worker, {
+      token: store.getTicket(slug, ticket.ref).dispatchNonce,
+      executor,
+    }).ok, true);
+    assert.equal(runHook(GUARD_ISOLATION, writePayload(agentId, executor, sessionId, path.join(linked, 'README.md'), linked)), null);
+
+    const ungranted = foreignWrite();
+    assert.equal(ungranted.hookSpecificOutput.permissionDecision, 'deny', 'an ungranted foreign worktree stays refused');
+    assert.match(ungranted.hookSpecificOutput.permissionDecisionReason, /externalWorktrees/, 'the refusal names the grant that would admit it');
+
+    assert.throws(
+      () => store.updateTicket(slug, ticket.ref, { externalWorktrees: [foreignWorktree], by: worker }, undefined, { allowLiveClaimCloseoutUpdate: true }),
+      /externalWorktrees/,
+      'the claim holder cannot grant itself a foreign write lease',
+    );
+    assert.throws(
+      () => store.updateTicket(slug, ticket.ref, { externalWorktrees: ['relative/kev-stack'], by: 'orchestrator' }, undefined, { allowLiveClaimCloseoutUpdate: true }),
+      /absolute/,
+    );
+    assert.throws(
+      () => store.updateTicket(slug, ticket.ref, { externalWorktrees: [path.join(PROJECT, 'nested')], by: 'orchestrator' }, undefined, { allowLiveClaimCloseoutUpdate: true }),
+      /inside the project/,
+      'a grant can never reopen the dispatch repository itself',
+    );
+
+    const granted = store.updateTicket(slug, ticket.ref, { externalWorktrees: [foreignWorktree], by: 'orchestrator' }, undefined, { allowLiveClaimCloseoutUpdate: true });
+    assert.deepEqual(granted.externalWorktrees, [foreignWorktree]);
+    assert.equal(foreignWrite(), null, 'the granted foreign worktree admits Write/Edit');
+    assert.equal(
+      runHook(GUARD_ISOLATION, writePayload(agentId, executor, sessionId, path.join(foreignRepo, 'README.md'), linked))
+        .hookSpecificOutput.permissionDecision,
+      'deny',
+      'the grant covers its root only, not the foreign repository main checkout',
+    );
+    assert.equal(
+      runHook(GUARD_ISOLATION, writePayload(agentId, executor, sessionId, path.join(PROJECT, 'README.md'), linked))
+        .hookSpecificOutput.permissionDecision,
+      'deny',
+      'the shared checkout stays refused',
+    );
+
+    assert.equal(store.releaseTicket(slug, ticket.ref, worker, { status: 'todo' }).ok, true);
+    assert.equal(foreignWrite().hookSpecificOutput.permissionDecision, 'deny', 'the grant ends with the claim');
+  } finally {
+    store.releaseTicket(slug, ticket.ref, worker, { status: 'todo', source: 'test', force: true });
+    execFileSync('git', ['worktree', 'remove', '--force', foreignWorktree], { cwd: foreignRepo, windowsHide: true });
+    execFileSync('git', ['worktree', 'remove', '--force', linked], { cwd: PROJECT, windowsHide: true });
+  }
+});
+
+// SQ-308. One session ran isolated executors on two boards at once. Their dispatches were already bound to
+// their own checkouts, yet the hook counted every board holding any live bound dispatch as a candidate for
+// the NEXT creation, so a third spawn on either board was refused ambiguous_binding until the first two
+// went idle. A dispatch bound to another checkout cannot take this creation; only the board holding the
+// unbound launch can.
+test('SQ-308: one session with live worktree dispatches on two boards can spawn a third on either board', () => {
+  const { spawnSync } = require('node:child_process');
+  const repoA = initRepo('sq308-board-a-');
+  const repoB = initRepo('sq308-board-b-');
+  const cwdRepo = initRepo('sq308-session-cwd-');
+  const boardA = store.ensureProject(repoA, 'sq308 board a').slug;
+  const boardB = store.ensureProject(repoB, 'sq308 board b').slug;
+  store.ensureProject(cwdRepo, 'sq308 session cwd');
+  const sessionId = 'sq308-two-board-session';
+  const launch = (board: string, label: string) => {
+    const ticket = store.createTicket(board, { title: `sq308 ${label}`, category: 'codebase-exploration', description: 'two-board fixture', files: ['README.md'] });
+    const prepared = store.prepareDispatch(board, ticket.ref, { sharedTree: false, sessionId });
+    assert.equal(store.recordDispatchLaunch(board, ticket.ref, { token: prepared.token, executor: prepared.ticket.dispatchExecutor, sessionId, agentName: label }).ok, true);
+    return ticket.ref;
+  };
+  // The two executors already running: each bound to its own checkout on its own board.
+  launch(boardA, 'sq308-live-a');
+  assert.equal(store.bindDispatchWorktreeCreation(boardA, sessionId, worktrees.namedWorktreePath(repoA, 'agent-sq308livea')).ok, true);
+  launch(boardB, 'sq308-live-b');
+  assert.equal(store.bindDispatchWorktreeCreation(boardB, sessionId, worktrees.namedWorktreePath(repoB, 'agent-sq308liveb')).ok, true);
+  const created: { repo: string; target: string; name: string }[] = [];
+  const spawn = (board: string, repo: string, other: string, name: string) => {
+    const ref = launch(board, name);
+    const target = worktrees.namedWorktreePath(repo, name);
+    created.push({ repo, target, name });
+    const result = spawnSync(process.execPath, [path.join(HOOKS, 'worktree-create.js')], {
+      input: JSON.stringify({ hook_event_name: 'WorktreeCreate', name, session_id: sessionId, cwd: cwdRepo }),
+      encoding: 'utf8',
+      env: { ...process.env, SIDEQUEST_HOME },
+      windowsHide: true,
+    });
+    assert.equal(result.status, 0, `the spawn on ${board} must not be refused: ${result.stderr}`);
+    assert.equal(worktrees.canonicalPath(result.stdout.trim()), worktrees.canonicalPath(target), 'the checkout lands in the dispatch board repository');
+    assert.equal(fs.existsSync(worktrees.namedWorktreePath(other, name)), false, 'the other board repository must not receive the checkout');
+    const dispatch = store.getTicket(board, ref).dispatch;
+    assert.equal(worktrees.canonicalPath(dispatch.worktree), worktrees.canonicalPath(target));
+    assert.equal(dispatch.worktreeBindingSource, 'worktree-create');
+  };
+  try {
+    spawn(boardB, repoB, repoA, 'agent-sq308thirdb');
+    spawn(boardA, repoA, repoB, 'agent-sq308thirda');
+  } finally {
+    for (const entry of created) {
+      if (fs.existsSync(entry.target)) execFileSync('git', ['worktree', 'remove', '--force', entry.target], { cwd: entry.repo, windowsHide: true });
+      try { execFileSync('git', ['branch', '-D', `worktree-${entry.name}`], { cwd: entry.repo, windowsHide: true, stdio: 'ignore' }); } catch (_) {}
+    }
+  }
+});
+
+// SQ-286. A ticket asked for a fix on top of an open PR branch, and its isolated executor's worktree was
+// created from the integration target instead, so none of the PR's code was there. A ticket can now name
+// its base; an isolated dispatch forks from exactly that commit, and a dispatch that cannot honor the
+// named base refuses instead of silently starting from main.
+test('SQ-286: an isolated dispatch forks from the base ref its ticket names, or refuses', () => {
+  const repository = initRepo('sq-ticket-base-');
+  const git = (args: string[], cwd = repository) => execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true }).trim();
+  const commit = (message: string) => {
+    fs.appendFileSync(path.join(repository, 'README.md'), `${message}\n`);
+    git(['add', 'README.md']);
+    git(['commit', '--quiet', '-m', message]);
+    return git(['rev-parse', 'HEAD']);
+  };
+  const mainTip = git(['rev-parse', 'HEAD']);
+  git(['checkout', '--quiet', '-b', 'feat/pr-branch']);
+  const prTip = commit('open pull request work');
+  git(['checkout', '--quiet', 'main']);
+  assert.notEqual(prTip, mainTip, 'the PR branch must sit off the integration target');
+
+  const baseSlug = store.ensureProject(repository, 'ticket base ref').slug;
+  store.setCategory({ id: 'ticket-base', name: 'ticket base', route: { model: 'sonnet', effort: 'medium' }, fallback: null, enabled: true, readonly: false });
+  store.setBoardConfig(baseSlug, { worktreeBase: 'local-main', integrationBranch: 'main', worktreeIsolation: true });
+
+  const plain = store.createTicket(baseSlug, { title: 'no named base', category: 'ticket-base', files: ['README.md'], source: 'test' });
+  store.prepareDispatch(baseSlug, plain.ref, { sessionId: 'sq286-plain', sharedTree: false });
+  assert.equal(store.getTicket(baseSlug, plain.ref).dispatch.baseCommit, mainTip, 'a ticket with no named base still forks the integration target');
+
+  const onPr = store.createTicket(baseSlug, { title: 'fix on top of the PR', category: 'ticket-base', files: ['README.md'], baseRef: 'feat/pr-branch', source: 'test' });
+  assert.equal(store.getTicket(baseSlug, onPr.ref).baseRef, 'feat/pr-branch', 'the ticket records the base it names');
+  const prepared = store.prepareDispatch(baseSlug, onPr.ref, { sessionId: 'sq286-pr', sharedTree: false });
+  const dispatched = store.getTicket(baseSlug, onPr.ref).dispatch;
+  assert.equal(dispatched.baseCommit, prTip, 'the isolated worktree baseline is the named PR branch tip, not the integration target');
+  assert.deepEqual(dispatched.baseRef, { ref: 'feat/pr-branch', commit: prTip });
+  const briefing = agentsync.renderTicketBriefing(store.getTicket(baseSlug, onPr.ref), prepared.token, baseSlug, repository);
+  assert.ok(briefing.includes(`feat/pr-branch`) && briefing.includes(`git reset --hard ${prTip}`), `the briefing must bring the worktree onto the named base: ${briefing}`);
+
+  // A base the board cannot resolve is refused before any token is minted.
+  const missing = store.createTicket(baseSlug, { title: 'unknown base', category: 'ticket-base', files: ['README.md'], baseRef: 'feat/never-pushed', source: 'test' });
+  assert.throws(
+    () => store.prepareDispatch(baseSlug, missing.ref, { sessionId: 'sq286-missing', sharedTree: false }),
+    /names base ref "feat\/never-pushed"[\s\S]*does not resolve to a commit/,
+  );
+  assert.equal(store.getTicket(baseSlug, missing.ref).dispatchNonce, null, 'a refused base mints no token');
+
+  // A shared-checkout dispatch runs on whatever the checkout holds, so it cannot honor a named base.
+  const shared = store.createTicket(baseSlug, { title: 'shared base', category: 'ticket-base', files: ['README.md'], baseRef: 'feat/pr-branch', source: 'test' });
+  assert.throws(
+    () => store.prepareDispatch(baseSlug, shared.ref, { sessionId: 'sq286-shared', sharedTree: true }),
+    /names base ref "feat\/pr-branch"[\s\S]*isolated worktree/,
+  );
+  assert.equal(store.getTicket(baseSlug, shared.ref).dispatchNonce, null, 'a refused shared-tree base mints no token');
+
+  // An option-shaped ref is refused at filing, so it can never reach git as a flag.
+  assert.throws(
+    () => store.createTicket(baseSlug, { title: 'flag base', category: 'ticket-base', files: ['README.md'], baseRef: '--upload-pack=x', source: 'test' }),
+    /base ref/,
+  );
+
+  // Clearing the base restores the integration-target fork.
+  store.updateTicket(baseSlug, shared.ref, { baseRef: null });
+  assert.equal(store.getTicket(baseSlug, shared.ref).baseRef, null);
+});

@@ -24,7 +24,7 @@
 
 const path = require('path');
 const store = require('./store');
-const { compactSchema, conciseDescription, resolveProject, TOOL_DESCRIPTION_OVERRIDES, boundedReadPayload } = require('./mcp-shared');
+const { compactSchema, conciseDescription, resolveProject, claimedProjectForRef, TOOL_DESCRIPTION_OVERRIDES, boundedReadPayload } = require('./mcp-shared');
 const { sidequestMutationFreshness } = require('./plugin-freshness');
 const { tools: readTools } = require('./mcp-read');
 const { tools: ticketTools } = require('./mcp-tickets');
@@ -245,6 +245,13 @@ function assertMutationFreshness(projectArg: unknown) {
 
 async function runTool(tool: ToolDefinition, rawArgs: any, context?: ToolContext) {
   const { args, aliases } = validateToolArguments(tool, rawArgs);
+  // Follow the caller's live claim to its board when `project` is omitted, so a
+  // later call on a ref claimed elsewhere does not land on the cwd board's
+  // unrelated ticket of the same ref (SQ-284). Claim keeps its own binding.
+  if (tool.name !== 'claim' && tool.inputSchema?.properties?.project) {
+    const claimedProject = claimedProjectForRef(args);
+    if (claimedProject) args.project = claimedProject;
+  }
   if (!toolMutates(tool.name, args)) {
     const output = await tool.handler(args, context);
     return acknowledgeAliases(tool.name === 'context_page' ? output : boundedReadPayload(tool.name, output), aliases);
