@@ -1,28 +1,34 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap');
 @import "tailwindcss";
 
+/* Shared docs theme: ember on graphite. */
 :root,
 :root[data-theme="light"] {
   color-scheme: light;
-  --font-sans: "Karla Variable", "Segoe UI", sans-serif;
-  --font-serif: "Newsreader Variable", Georgia, serif;
-  --font-mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
-  --bg: #f4f2ec;
-  --bg-deep: #eae8e1;
-  --surface-card: #fffefa;
-  --surface-muted: #e2e0d8;
-  --surface-column: #eceae3;
-  --card-border: #d9d6cd;
-  --text: #202329;
-  --text-muted: #5a6067;
-  --accent: #46528e;
-  --accent-strong: #323f76;
-  --accent-wash: #e5e7ef;
-  --text-on-accent: #faf9f5;
-  --border: #cdcac0;
-  --border-strong: #8c9298;
-  --danger: #a84035;
-  --warning: #9a6900;
-  --success: #3f745c;
+  --ember-a: oklch(0.84 0.155 80);
+  --ember-b: oklch(0.73 0.185 50);
+  --ember-c: oklch(0.65 0.21 30);
+  --ember-gradient: linear-gradient(115deg, var(--ember-a), var(--ember-b) 55%, var(--ember-c));
+  --font-sans: 'Inter', 'Segoe UI', sans-serif;
+  --font-serif: 'Space Grotesk', 'Inter', 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', Consolas, monospace;
+  --bg: #fbfaf7;
+  --bg-deep: #f4f2ec;
+  --surface-card: #fffefd;
+  --surface-muted: #eee9dc;
+  --surface-column: color-mix(in oklch, var(--bg-deep) 78%, var(--surface-card));
+  --card-border: #e0dbd0;
+  --text: #403d37;
+  --text-muted: #625d55;
+  --accent: #a75617;
+  --accent-strong: #773711;
+  --accent-wash: #f2dfbc;
+  --text-on-accent: #fffdf9;
+  --border: var(--card-border);
+  --border-strong: #aaa297;
+  --danger: #a83e29;
+  --warning: #986000;
+  --success: #39755c;
   --status-todo: var(--accent);
   --status-doing: var(--warning);
   --status-done: var(--success);
@@ -31,33 +37,35 @@
   --surface-1: var(--bg-deep);
   --surface: var(--surface-card);
   --accent-soft: var(--accent-wash);
-  --radius: 3px;
+  --radius: .85rem;
   --control-height: 2.125rem;
-  --focus-ring: 0 0 0 3px var(--accent-strong);
-  --tour-scrim: rgb(12 16 22 / .48);
-  --motion-fast: 100ms cubic-bezier(.2, .8, .2, 1);
+  --focus-ring: 0 0 0 3px rgb(167 86 23 / .42);
+  --tour-scrim: oklch(0.18 0.018 262 / .48);
+  --elevation-1: 0 1px 2px oklch(0.25 0.03 50 / .05), 0 10px 32px oklch(0.25 0.03 50 / .05);
+  --elevation-2: 0 3px 10px oklch(0.25 0.03 50 / .09), 0 18px 48px oklch(0.25 0.03 50 / .1);
+  --motion-fast: 150ms ease;
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #171a1e;
-  --bg-deep: #1d2227;
-  --surface-card: #242a30;
-  --surface-muted: #14181c;
-  --surface-column: #1d2227;
-  --card-border: #3c444c;
-  --text: #ece9e0;
-  --text-muted: #a8aca9;
-  --accent: #9eaaFF;
-  --accent-strong: #c3cafF;
-  --accent-wash: #2c3554;
-  --text-on-accent: #171a1e;
-  --border: #343b42;
-  --border-strong: #626b74;
+  --bg: #242832;
+  --bg-deep: #2e333e;
+  --surface-card: #383d49;
+  --surface-muted: #4a3b25;
+  --surface-column: color-mix(in oklch, var(--bg-deep) 72%, var(--bg));
+  --card-border: #4d5361;
+  --text: #f0ece4;
+  --text-muted: #c5c9d0;
+  --accent: #e6a641;
+  --accent-strong: #f4c36a;
+  --accent-wash: #59451d;
+  --text-on-accent: #242832;
+  --border: var(--card-border);
+  --border-strong: #6a7180;
   --tour-scrim: rgb(0 0 0 / .62);
-  --danger: #f08a79;
-  --warning: #e0af4e;
-  --success: #76b393;
+  --danger: #ef8e79;
+  --warning: #e8b44f;
+  --success: #83be9a;
   --status-todo: var(--accent);
   --status-doing: var(--warning);
   --status-done: var(--success);
@@ -66,10 +74,12 @@
   --surface-1: var(--bg-deep);
   --surface: var(--surface-card);
   --accent-soft: var(--accent-wash);
-  --radius: 3px;
+  --radius: .85rem;
   --control-height: 2.125rem;
-  --focus-ring: 0 0 0 3px var(--accent-strong);
-  --motion-fast: 100ms cubic-bezier(.2, .8, .2, 1);
+  --focus-ring: 0 0 0 3px rgb(230 166 65 / .45);
+  --elevation-1: 0 1px 3px oklch(0 0 0 / .3), 0 10px 34px oklch(0 0 0 / .22);
+  --elevation-2: 0 4px 14px oklch(0 0 0 / .4), 0 20px 52px oklch(0 0 0 / .3);
+  --motion-fast: 150ms ease;
 }
 
 :focus-visible { outline: none; box-shadow: var(--focus-ring); }

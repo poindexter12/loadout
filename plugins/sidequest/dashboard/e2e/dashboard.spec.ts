@@ -235,7 +235,8 @@ test('serves the committed production app and covers the seeded board surface', 
     return response.text();
   }))).join('\n');
   expect(bundle).toContain('questline');
-  expect(bundle).toContain('#f4f2ec');
+  expect(bundle).toContain('Space Grotesk');
+  expect(bundle).toContain('JetBrains Mono');
 
   await openBoard(page, dashboard);
   await expect(page.getByText('Alpha board').first()).toBeVisible();
