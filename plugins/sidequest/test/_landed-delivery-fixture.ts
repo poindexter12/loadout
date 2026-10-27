@@ -62,10 +62,21 @@ export interface LandedFixture {
   branch: string;
 }
 
+// SQ-383: a multi-line file that both the candidate and a concurrent main commit edit, at
+// opposite ends, so a forge squash of the candidate onto the advanced main merges cleanly
+// while carrying content the candidate itself never had.
+export const SHARED_FILE = 'shared.txt';
+export const SHARED_BASE_LINES = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel'];
+
+export interface LandedFixtureOptions {
+  sharedFile?: boolean;
+}
+
 // One ticket, one submitted candidate commit sitting on its OWN branch (never on `main`),
 // against a clone of a bare `origin`. `main` starts out at the pre-candidate base, so no
-// landing has happened yet until a test calls `landDelivery`.
-export function makeLandedFixture(label: string, verify: string = nodeVerify('process.exit(0)')): LandedFixture {
+// landing has happened yet until a test calls `landDelivery`. With `sharedFile`, the base also
+// carries SHARED_FILE and the candidate edits its FIRST line in a second commit after feature.txt.
+export function makeLandedFixture(label: string, verify: string = nodeVerify('process.exit(0)'), options: LandedFixtureOptions = {}): LandedFixture {
   const origin = fs.mkdtempSync(path.join(os.tmpdir(), `sq-landed-origin-${label}-`));
   execFileSync('git', ['init', '-b', 'main', '--bare', origin], { encoding: 'utf8', windowsHide: true });
 
@@ -75,6 +86,7 @@ export function makeLandedFixture(label: string, verify: string = nodeVerify('pr
   git(repo, ['config', 'user.email', 'sidequest-test@example.invalid']);
   fs.writeFileSync(path.join(repo, 'README.md'), 'landed delivery fixture\n');
   fs.writeFileSync(path.join(repo, '.gitignore'), '.claude/*\n');
+  if (options.sharedFile) fs.writeFileSync(path.join(repo, SHARED_FILE), `${SHARED_BASE_LINES.join('\n')}\n`);
   git(repo, ['add', '.']);
   git(repo, ['commit', '-m', 'base']);
   git(repo, ['remote', 'add', 'origin', origin]);
@@ -86,7 +98,7 @@ export function makeLandedFixture(label: string, verify: string = nodeVerify('pr
     title: `${label} landed delivery fixture`,
     complexity: 2,
     complexityWhy: 'single-file fixture candidate for the SQ-275 landed-authority tests',
-    files: ['feature.txt'],
+    files: options.sharedFile ? ['feature.txt', SHARED_FILE] : ['feature.txt'],
     source: 'cli',
     labels: ['direct-ok'],
   });
@@ -95,6 +107,16 @@ export function makeLandedFixture(label: string, verify: string = nodeVerify('pr
   fs.writeFileSync(path.join(repo, 'feature.txt'), 'candidate content\n');
   git(repo, ['add', 'feature.txt']);
   git(repo, ['commit', '-m', `${ticket.ref} candidate`]);
+  const commits: string[] = [git(repo, ['rev-parse', 'HEAD'])];
+  if (options.sharedFile) {
+    // A second candidate commit, so a squash of the range is one combined diff whose patch-id
+    // matches neither candidate commit (patch-ids are taken at zero context, so a single-commit
+    // squash would still match its candidate and never reach the forge-squash check).
+    fs.writeFileSync(path.join(repo, SHARED_FILE), `${['ALPHA (candidate)', ...SHARED_BASE_LINES.slice(1)].join('\n')}\n`);
+    git(repo, ['add', SHARED_FILE]);
+    git(repo, ['commit', '-m', `${ticket.ref} candidate shared-file edit`]);
+    commits.push(git(repo, ['rev-parse', 'HEAD']));
+  }
   const candidate = git(repo, ['rev-parse', 'HEAD']);
   git(repo, ['update-ref', `refs/sidequest/${ticket.ref}`, candidate]);
   git(repo, ['checkout', 'main']);
@@ -112,12 +134,20 @@ export function makeLandedFixture(label: string, verify: string = nodeVerify('pr
     base,
     upstream: 'origin/main',
     upstreamCommit: base,
-    commits: [candidate],
-    changedPaths: ['feature.txt'],
+    commits,
+    changedPaths: options.sharedFile ? ['feature.txt', SHARED_FILE] : ['feature.txt'],
   });
   persist(slug, fresh);
 
   return { origin, repo, slug, ticketRef: ticket.ref, candidate, base, branch: 'main' };
+}
+
+// SQ-383: overwrite a stored ticket field the public API never sets directly (a frozen
+// dispatch integration target, say), the same way the fixture pins its submission facts.
+export function patchTicket(fixture: LandedFixture, patch: (ticket: any) => void) {
+  const fresh = store.getTicket(fixture.slug, fixture.ticketRef);
+  patch(fresh);
+  persist(fixture.slug, fresh);
 }
 
 // Squash-lands the fixture's candidate onto `branch` (default the fixture's own branch,
@@ -257,8 +287,11 @@ export function landDeliveryMulti(fixture: LandedFixture, candidates: string[], 
 }
 
 module.exports = {
+  SHARED_FILE,
+  SHARED_BASE_LINES,
   nodeVerify,
   makeLandedFixture,
+  patchTicket,
   landDelivery,
   pushDelivery,
   fetchOrigin,

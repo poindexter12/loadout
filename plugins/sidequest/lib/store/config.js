@@ -316,6 +316,13 @@ function createConfig({ DEFAULT_INTEGRATION_VERIFY_TIMEOUT_MS, DELIVERY_MODES, e
       return false;
     }
   }
+  class IntegrationRefMissingError extends Error {
+    missing;
+    constructor(missing) {
+      super(`Configured integration ref "${missing.ref}" for branch "${missing.branch}" does not exist. Create or fetch it, or set integrationBranch with board-config --integration-branch <branch>.`);
+      this.missing = missing;
+    }
+  }
   function integrationTarget(slug, override) {
     const meta = readMeta(slug);
     if (!meta) return null;
@@ -325,10 +332,24 @@ function createConfig({ DEFAULT_INTEGRATION_VERIFY_TIMEOUT_MS, DELIVERY_MODES, e
     const branch = normalizeIntegrationBranch(requested.branch ?? (typeof override === "string" ? override : meta.integrationBranch));
     const upstream = mode === "local" ? branch : `origin/${branch}`;
     const ref = mode === "local" ? `refs/heads/${branch}` : `refs/remotes/origin/${branch}`;
-    if (!integrationBranchExists(meta.path, ref)) {
-      throw new Error(`Configured integration ref "${ref}" for branch "${branch}" does not exist. Create or fetch it, or set integrationBranch with board-config --integration-branch <branch>.`);
-    }
+    if (!integrationBranchExists(meta.path, ref)) throw new IntegrationRefMissingError({ mode, upstream, branch, ref });
     return { mode, upstream, branch };
+  }
+  function resolveFrozenIntegrationTarget(slug, frozen) {
+    if (!frozen) return integrationTarget(slug);
+    try {
+      return integrationTarget(slug, frozen);
+    } catch (error) {
+      if (!(error instanceof IntegrationRefMissingError)) throw error;
+      const fallback = integrationTarget(slug);
+      if (!fallback) throw error;
+      const missing = error.missing;
+      if (fallback.mode === missing.mode && fallback.branch === missing.branch) throw error;
+      return Object.assign({}, fallback, {
+        frozenTarget: { mode: missing.mode, upstream: missing.upstream, branch: missing.branch },
+        fallback: { reason: "frozen_integration_ref_missing", ref: missing.ref, detail: error.message }
+      });
+    }
   }
   function integrationTargetCommit(absPath, target) {
     return execFileSync("git", ["rev-parse", "--verify", `${target.upstream}^{commit}`], {
@@ -468,6 +489,6 @@ function createConfig({ DEFAULT_INTEGRATION_VERIFY_TIMEOUT_MS, DELIVERY_MODES, e
     const paired = trackedGeneratedPaths(Object.assign({}, generatedConfig, { generatedPairs }), files);
     return Array.from(/* @__PURE__ */ new Set([...Array.isArray(files) ? files : [], ...Array.isArray(granted) ? granted : [], ...config && config.alwaysInScope || [], ...paired]));
   }
-  return { defaultProjectName, normalizeAlwaysInScope, normalizeReadOnlyDeniedTools, normalizeGeneratedPairPath, normalizeGeneratedPairs, generatedPathFor, trackedGeneratedPaths, derivedGeneratedPairs, defaultAlwaysInScope, normalizeDeliveryMode, normalizeDeliveryChannel, resolveDeliveryConfig, normalizeIssueMirror, normalizeIntegrationMode, normalizeIntegrationBranch, normalizeWorktreeIsolation, normalizeWorktreeBase, normalizeNotIntegratedSalvageAgeHours, normalizeWorktreeRecoveryRetentionAgeHours, normalizeWorktreeRecoveryRetentionMaxPerAgent, normalizeAutoApproveTestScope, normalizeAutoApproveScope, normalizeWorktreeSetup, normalizeWorktreeDependencyPaths, normalizeIntegrationVerifyTimeoutMs, hasOriginRemote, integrationBranchExists, integrationTarget, integrationTargetCommit, normalizeBoardName, boardConfig, setBoardConfig, effectiveScope };
+  return { defaultProjectName, normalizeAlwaysInScope, normalizeReadOnlyDeniedTools, normalizeGeneratedPairPath, normalizeGeneratedPairs, generatedPathFor, trackedGeneratedPaths, derivedGeneratedPairs, defaultAlwaysInScope, normalizeDeliveryMode, normalizeDeliveryChannel, resolveDeliveryConfig, normalizeIssueMirror, normalizeIntegrationMode, normalizeIntegrationBranch, normalizeWorktreeIsolation, normalizeWorktreeBase, normalizeNotIntegratedSalvageAgeHours, normalizeWorktreeRecoveryRetentionAgeHours, normalizeWorktreeRecoveryRetentionMaxPerAgent, normalizeAutoApproveTestScope, normalizeAutoApproveScope, normalizeWorktreeSetup, normalizeWorktreeDependencyPaths, normalizeIntegrationVerifyTimeoutMs, hasOriginRemote, integrationBranchExists, integrationTarget, resolveFrozenIntegrationTarget, integrationTargetCommit, normalizeBoardName, boardConfig, setBoardConfig, effectiveScope };
 }
 module.exports = { createConfig };
