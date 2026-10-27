@@ -197,6 +197,70 @@ function contextTimeline(store) {
   });
 }
 
+const COMPACTION_NOT_REQUESTED = 'not requested; pass --compaction or --transcripts to scan transcripts for compaction records';
+const COMPACTION_TEXT_ROW_LIMIT = 25;
+
+// Counts and means are derived by the scan; a boundary's preTokens and jev's own
+// per-replacement reduction are values Claude Code or jev recorded, so their extremes stay exact.
+function labeledCompactionSummary(summary) {
+  const derived = (value) => labeled(value, 'derived_exact');
+  const recorded = (value) => labeled(value, 'exact_client');
+  return {
+    compactions: Object.fromEntries(Object.entries(summary.compactions).map(([trigger, count]) => [trigger, derived(count)])),
+    pre_tokens_max: recorded(summary.pre_tokens_max),
+    pre_tokens_mean: derived(summary.pre_tokens_mean),
+    boundary_reduction_percent_mean: derived(summary.boundary_reduction_percent_mean),
+    jev: {
+      replacements: derived(summary.jev.replacements),
+      fallbacks: derived(summary.jev.fallbacks),
+      fallback_rate: derived(summary.jev.fallback_rate),
+      fallback_reasons: Object.fromEntries(Object.entries(summary.jev.fallback_reasons).map(([reason, count]) => [reason, derived(count)])),
+      reduction_percent_mean: derived(summary.jev.reduction_percent_mean),
+      reduction_percent_min: recorded(summary.jev.reduction_percent_min),
+      reduction_percent_max: recorded(summary.jev.reduction_percent_max),
+      messages_kept: derived(summary.jev.messages_kept),
+      messages_total: derived(summary.jev.messages_total),
+    },
+  };
+}
+
+// scan is readCompactionOutcomes() output, computed by the caller only on explicit request.
+function compactionOutcomes(scan) {
+  if (!scan) return { available: false, reason: COMPACTION_NOT_REQUESTED };
+  if (!scan.available) return { available: false, reason: scan.reason || 'unavailable' };
+  return {
+    available: true,
+    source: scan.source,
+    totals: { transcripts: scan.totals.transcripts, ...labeledCompactionSummary(scan.totals) },
+    transcripts: scan.transcripts.map((row) => ({
+      session_id: row.session_id, agent_id: row.agent_id, kind: row.kind, ...labeledCompactionSummary(row),
+    })),
+  };
+}
+
+function compactionLine(summary) {
+  const c = summary.compactions;
+  const reasons = summary.jev.fallback_reasons;
+  return `${c.total.value} compactions (${c.auto.value} auto, ${c.manual.value} manual, ${c.other.value} other)`
+    + ` | jev ${summary.jev.replacements.value} replacements, ${summary.jev.fallbacks.value} fallbacks`
+    + ` (${reasons.below_minimum.value} below minimum, ${reasons.request_failed.value} request failed, ${reasons.other.value} other),`
+    + ` fallback rate ${textValue(summary.jev.fallback_rate)} | jev reduction % mean ${textValue(summary.jev.reduction_percent_mean)}`
+    + ` | boundary reduction % mean ${textValue(summary.boundary_reduction_percent_mean)} | pre-compaction tokens max ${textValue(summary.pre_tokens_max)}`;
+}
+
+function formatCompactionOutcomes(outcomes, lines) {
+  if (!outcomes.available) {
+    lines.push('', `Compaction outcomes unavailable: ${outcomes.reason}`);
+    return;
+  }
+  lines.push('', `Compaction outcomes (${outcomes.transcripts.length} transcripts)`, `Totals: ${compactionLine(outcomes.totals)}`);
+  for (const row of outcomes.transcripts.slice(0, COMPACTION_TEXT_ROW_LIMIT)) {
+    lines.push(`${row.session_id || 'unknown session'} ${row.kind}${row.agent_id ? ` ${row.agent_id}` : ''}: ${compactionLine(row)}`);
+  }
+  const hidden = outcomes.transcripts.length - COMPACTION_TEXT_ROW_LIMIT;
+  if (hidden > 0) lines.push(`... ${hidden} more transcripts (use --format json)`);
+}
+
 function executionTree(store) {
   const agents = store.queryView('agent_tree').map((row) => ({
     kind: 'agent', id: row.agent_id, parent_id: row.parent_agent_id || null,
@@ -294,6 +358,7 @@ function buildTokenUsageReport(store, options = {}) {
     agent_usage: agentUsage(store),
     input_composition: inputComposition(store),
     context_timeline: contextTimeline(store),
+    compaction_outcomes: compactionOutcomes(options.compaction),
     cache_economics: cacheEconomics(store),
     limit_signals: limitSignals(store),
     execution_tree: executionTree(store), tools: toolTable(store), route_comparison: routeComparison(store),
@@ -311,6 +376,7 @@ function formatTokenUsageReport(report) {
   lines.push(`Cache economics (${report.cache_economics.length})`, `Limit signals (${report.limit_signals.length})`);
   lines.push('', `Context timeline (${report.context_timeline.length})`);
   for (const row of report.context_timeline) lines.push(`${row.observed_at} context ${textValue(row.context_tokens)} / window ${textValue(row.context_window_tokens)} | occupancy ${textValue(row.occupancy)} | growth ${textValue(row.growth_tokens)} | compaction pre ${textValue(row.compaction.pre_tokens)} post ${textValue(row.compaction.post_tokens)}`);
+  formatCompactionOutcomes(report.compaction_outcomes, lines);
   lines.push('', `Execution tree (${report.execution_tree.length})`, `Tools (${report.tools.length})`, `Route comparison (${report.route_comparison.length})`, `Ticket usage (${report.ticket_usage.length})`);
   for (const row of report.ticket_usage) lines.push(`${row.ticket_ref || 'unattributed'}: ${textValue(row.request_count)} requests, cost ${textValue(row.estimated_cost_usd)} (${row.attribution})`);
   const board = report.board_costs;
