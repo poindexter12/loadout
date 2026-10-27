@@ -1329,6 +1329,60 @@ test('repeat contradiction releases identify the ticket premise as the likely pr
   assert.equal(store.releaseTicket(slug, ticket.ref, 'repeat-contradiction-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
 });
 
+// SQ-350: an executor that exhausts its own context right after claim releases with a
+// reason, not a recorded blocker. The board flags it (failureShape context_exhaustion) and
+// never refuses the release, and the repeat guard says a same-briefing redispatch starts as
+// full. The second reason is attempt 5's free text from the muxification SQ-38 incident.
+test('SQ-350: a context-exhaustion release is flagged as context_exhaustion, not refused', () => {
+  const ticket = createFixture('context exhaustion release fixture');
+  // A handback is flagged but, as before, never counts toward the repeat breaker; the two
+  // technical_blocker releases do, and the breaker then names the exhaustion.
+  const releases = [
+    { kind: 'handback', reason: 'context exhaustion: claimed, read the briefing, touched no files; next step is the ssh probe.' },
+    { kind: 'technical_blocker', reason: 'executor context exhausted (96%) right after claim, before any ssh' },
+    { kind: 'technical_blocker', reason: 'Context window exhausted before the ssh probe.' },
+  ];
+  for (const [index, release] of releases.entries()) {
+    const prepared = store.prepareDispatch(slug, ticket.ref, { sessionId: `context-exhaustion-${index}-${Date.now()}` });
+    const worker = `context-exhaustion-worker-${index}`;
+    assert.equal(store.claimTicket(slug, ticket.ref, worker, {
+      token: prepared.token,
+      executor: prepared.ticket.dispatchExecutor,
+    }).ok, true);
+    const released = store.releaseTicket(slug, ticket.ref, worker, {
+      status: 'todo', source: 'mcp', releaseKind: release.kind, releaseReason: release.reason,
+      ...(release.kind === 'technical_blocker'
+        ? { releaseEvidence: { kind: 'technical_blocker', command: 'ssh -G host', outputTail: 'route ok' } }
+        : {}),
+    });
+    assert.equal(released.ok, true, 'a context-exhaustion release is never refused');
+    const attempt = store.getTicket(slug, ticket.ref).dispatch.attempts.at(-1);
+    assert.equal(attempt.failureShape, 'context_exhaustion');
+    assert.equal(attempt.release.kind, release.kind, 'the release kind the executor chose is kept');
+  }
+
+  assert.throws(() => store.prepareDispatch(slug, ticket.ref), (error: any) => {
+    assert.match(error.message, /ran out of executor context/);
+    assert.match(error.message, /Launch budget/);
+    return true;
+  });
+  assert.equal(store.prepareDispatch(slug, ticket.ref, { allowRepeatFailure: true }).ticket.dispatch.repeatFailureOverride.priorAttempts, 2);
+  assert.equal(store.releaseTicket(slug, ticket.ref, 'context-exhaustion-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
+});
+
+test('SQ-350: an ordinary handback is not flagged as context exhaustion', () => {
+  const ticket = createFixture('ordinary handback fixture');
+  const prepared = store.prepareDispatch(slug, ticket.ref, { sessionId: `ordinary-handback-${Date.now()}` });
+  assert.equal(store.claimTicket(slug, ticket.ref, 'ordinary-handback-worker', {
+    token: prepared.token,
+    executor: prepared.ticket.dispatchExecutor,
+  }).ok, true);
+  assert.equal(store.releaseTicket(slug, ticket.ref, 'ordinary-handback-worker', {
+    status: 'todo', source: 'mcp', releaseKind: 'handback', releaseReason: 'Scope refused for src/other.ts; in-scope work committed.',
+  }).ok, true);
+  assert.equal(store.getTicket(slug, ticket.ref).dispatch.attempts.at(-1).failureShape, 'handback');
+});
+
 test('dispatch does not count an attempt that checkpointed a commit toward the repeat-failure breaker', () => {
   const ticket = createFixture('checkpointed attempt fixture');
   const checkpointCommit = '1590b92abc1234def5678abc1234def5678abcd';
