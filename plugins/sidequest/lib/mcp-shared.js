@@ -204,7 +204,9 @@ const TOOL_DESCRIPTION_OVERRIDES = {
   supersede_submission: "candidate rejection permits supersession.",
   submit: "Submit verified work; clear/force need owner.",
   integrate: "Comma-ref group; wave=options, refs in ref; pinned deliveryMethod; reviewed interaction.",
-  comment: "Handoff.",
+  // SQ-387: the served text for `comment`. Briefings defer comment bodies past a 16 KiB budget
+  // (agentsync BRIEFING_COMMENT_BODY_BUDGET_BYTES), so the tool says to keep them short.
+  comment: "Short handoff: summary plus pointers (paths, shas, ids), no reports or logs. Briefings defer bodies past 16 KiB.",
   comments: "Read comments before work.",
   plan: "Plan.",
   link: "Ticket link.",

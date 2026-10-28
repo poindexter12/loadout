@@ -545,6 +545,31 @@ test('SQ-350: a long comment history keeps the newest bodies within the budget a
   assert.equal(oldest.complete, true);
 });
 
+// SQ-387: the cap is enforced at render time, so the advice to stay under it belongs at the
+// source, on the `comment` tool an agent writes through. Both the served tools/list text and the
+// full description must say to keep comments short and name the same budget the briefing uses.
+test('SQ-387: the comment tool tells agents to keep comments short and names the briefing budget', () => {
+  const mcp = require('../lib/mcp.js');
+  const { tools: collaborationTools } = require('../lib/mcp-collaboration.js');
+  const served = mcp.toolDescriptors().find((tool: any) => tool.name === 'comment');
+  const full = collaborationTools.find((tool: any) => tool.name === 'comment').description;
+  const briefing = agentsync.renderTicketBriefing({
+    ref: 'SQ-9387', title: 'Comment guidance', model: 'sonnet', effort: 'high',
+    dispatchExecutor: 'sidequest-exec-high', category: {},
+    comments: [{ id: 'c_old', by: 'older', body: 'o'.repeat(16 * 1024) }, { id: 'c_new', by: 'newest', body: 'n'.repeat(16) }],
+  }, 'comment-guidance-token');
+  const budgetBytes = Number(/deferred to keep this section within (\d+) bytes/.exec(briefing)?.[1]);
+  assert.equal(budgetBytes, 16 * 1024, 'the briefing budget is the 16 KiB the descriptions name');
+
+  assert.match(served.description, /^Short handoff/);
+  assert.match(served.description, /pointers \(paths, shas, ids\)/);
+  assert.match(served.description, /no reports or logs/);
+  assert.match(served.description, /Briefings defer bodies past 16 KiB/);
+  assert.match(full, /Keep it short: a comment is a summary with pointers \(log paths, commit shas, comment ids\), not a full report or a dumped log\./);
+  assert.ok(full.includes(`16 KiB (${budgetBytes}-byte) budget`), 'the full description names the agentsync budget');
+  assert.match(full, /defer every older body past it to a retrieval call/);
+});
+
 test('SQ-350: a single oversized newest comment is still inlined whole', () => {
   const body = `NEWEST-${'n'.repeat(40 * 1024)}-END`;
   const briefing = agentsync.renderTicketBriefing({
