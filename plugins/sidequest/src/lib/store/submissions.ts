@@ -1592,6 +1592,73 @@ function landedCommitWithContent(repo: string, submission: any, contentCommit: s
   return null;
 }
 
+// SQ-383 (SQ-366 fix 3, the SQ-236 residual case): a forge squash-merges the candidate onto
+// whatever the target had become by then, so a submitted path that the target edited
+// concurrently lands as the MERGE of both edits. Neither the candidate's exact content nor its
+// patch-id ever appears on the target, and the exact-content proofs above can never match. Accept
+// `squashCommit` as the delivery of `contentCommit` only when it is provably that merge and
+// nothing else: it does not predate the candidate, its first-parent diff touches submitted paths
+// only, and on every submitted path it holds exactly what a CLEAN 3-way merge of the candidate
+// onto that first parent produces. A conflicted merge, an extra path, or any edit beyond the merge
+// is refused. `mergedPaths` names the paths whose landed content differs from the candidate's,
+// which is the evidence a reviewer needs to see what the forge folded in.
+function forgeSquashOfCandidate(repo: string, submission: any, contentCommit: string, squashCommit: string, extraPaths: string[] = []) {
+  const paths: string[] = Array.from(new Set([...changedIntegrationPaths(repo, submission), ...extraPaths]));
+  if (!paths.length) return null;
+  const parent = resolveCommitOrNull(repo, `${squashCommit}^1`);
+  if (!parent) return null;
+  if (isAncestorCommit(repo, squashCommit, contentCommit)) return null;
+  const touched = integrationGit(repo, ['diff', '--name-only', '--no-renames', parent, squashCommit]).split(/\r?\n/).filter(Boolean);
+  if (!touched.length || touched.some((file: string) => !paths.includes(file))) return null;
+  let mergedTree: string;
+  try {
+    mergedTree = String(integrationGit(repo, ['merge-tree', '--write-tree', '--no-messages', parent, contentCommit]).split(/\r?\n/)[0] || '').trim();
+  } catch (error: any) {
+    // merge-tree exits 1 when the merge conflicts: the forge resolved something by hand, and a
+    // hand resolution is not provably the candidate's content.
+    if (error?.status === 1) return null;
+    throw error;
+  }
+  if (!mergedTree) return null;
+  const mergedPaths: string[] = [];
+  for (const file of paths) {
+    const merged = objectAtPath(repo, mergedTree, file);
+    if (merged !== objectAtPath(repo, squashCommit, file)) return null;
+    if (merged !== objectAtPath(repo, contentCommit, file)) mergedPaths.push(file);
+  }
+  return { landingCommit: squashCommit.toLowerCase(), parent: parent.toLowerCase(), mergedPaths: mergedPaths.sort() };
+}
+
+// The target's first-parent history since the candidate forked from it, oldest first: the only
+// commits a forge squash of this candidate can be.
+function firstParentSinceFork(repo: string, submission: any, head: string) {
+  const candidate = String(submission.commit || '').toLowerCase();
+  let forkPoint: string;
+  try {
+    forkPoint = integrationGit(repo, ['merge-base', candidate, head]).toLowerCase();
+  } catch (error: any) {
+    if (error?.status === 1) return [];
+    throw error;
+  }
+  if (!forkPoint) return [];
+  return integrationGit(repo, ['rev-list', '--first-parent', '--reverse', head, `^${forkPoint}`]).split(/\r?\n/).filter(Boolean).map((commit: string) => commit.toLowerCase());
+}
+
+// A named delivery commit is a forge squash only when it sits on the target's first-parent line.
+function forgeSquashDelivery(repo: string, submission: any, contentCommit: string, deliveryCommit: string, head: string, extraPaths: string[] = []) {
+  if (!firstParentSinceFork(repo, submission, head).includes(deliveryCommit.toLowerCase())) return null;
+  return forgeSquashOfCandidate(repo, submission, contentCommit, deliveryCommit, extraPaths);
+}
+
+// A manual delivery that names only the pinned candidate: find its forge squash on the target.
+function forgeSquashOnHistory(repo: string, submission: any, contentCommit: string, head: string, extraPaths: string[] = []) {
+  for (const commit of firstParentSinceFork(repo, submission, head)) {
+    const found = forgeSquashOfCandidate(repo, submission, contentCommit, commit, extraPaths);
+    if (found) return found;
+  }
+  return null;
+}
+
 function workingTreeDeliveryPaths(repo: string) {
   const tracked = integrationGit(repo, ['diff', '--name-only', 'HEAD']).split(/\r?\n/).filter(Boolean);
   const untracked = integrationGit(repo, ['ls-files', '--others', '--exclude-standard']).split(/\r?\n/).filter(Boolean);
@@ -1695,14 +1762,18 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
     }
     const deliveryCommit = integrationGit(repo, ['rev-parse', '--verify', `${requestedCommit}^{commit}`]).toLowerCase();
     const resultingHead = integrationGit(repo, ['rev-parse', 'HEAD']).toLowerCase();
-    if (currentBranch !== target.branch && !targetBranchMergedIntoHead(repo, target.branch, deliveryCommit, resultingHead)) {
-      return { ok: false, reason: 'branch_not_checked_out', ticket, message: `${target.branch} must be checked out before recording an external delivery; currently on ${currentBranch || 'detached HEAD'}.` };
-    }
-    // SQ-275: the check above is CHECKOUT STATE and rightly reads local refs. LANDEDNESS is a
+    // SQ-275: the check below is CHECKOUT STATE and rightly reads local refs. LANDEDNESS is a
     // different question: when the target delivers to a remote, only that remote's live
     // advertisement answers it (landed-authority.ts), and local reachability never contributes.
     // `landedHead` is the head every landedness computation below measures against.
     const landedRemote = landedRemoteFromTarget(target);
+    const checkoutCarriesTarget = currentBranch === target.branch || targetBranchMergedIntoHead(repo, target.branch, deliveryCommit, resultingHead);
+    const checkoutRefusal = { ok: false, reason: 'branch_not_checked_out', ticket, message: `${target.branch} must be checked out before recording an external delivery; currently on ${currentBranch || 'detached HEAD'}.` };
+    // SQ-383 (SQ-366 Case B): on a local-mode board the checkout IS the integration line, so it
+    // must carry the target. On a remote-mode board the remote decides landedness and the delivery
+    // is verified in a scratch worktree, so the checkout matters only when the working tree is the
+    // evidence; that case is refused further down, once no landed commit was found instead.
+    if (!checkoutCarriesTarget && !landedRemote) return checkoutRefusal;
     let reachable = true;
     let landedHead = resultingHead;
     let landedTip: string | null = null;
@@ -1756,11 +1827,6 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
       };
     }
     const workingTreeDelivery = deliveryMethod !== null && !reachable;
-    // SQ-275: a working-tree delivery proves its content from the checkout, so its revision names
-    // the checkout, never the upstream (which was consulted and did not carry the commit).
-    if (workingTreeDelivery && landedRemote) {
-      deliveryRevision = { source: `git-checkout:${target.branch}`, value: resultingHead, observedAt: deliveryRevision.observedAt };
-    }
     if (!reachable && !workingTreeDelivery) {
       const where = landedRemote
         ? `the live ${landedRemote.remote}/${landedRemote.branch} tip ${landedTip} that remote ${landedRemote.remote} advertised just now. Landedness is decided only by that advertisement; local refs, the checkout, and other local branches are not consulted, so a commit present only on this machine is refused`
@@ -1770,7 +1836,7 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
         reason: 'delivery_not_reachable',
         ticket,
         ...(landedRemote ? { remote: landedRemote.remote, branch: landedRemote.branch, remoteTip: landedTip } : {}),
-        message: `${ticket.ref} reconciliation refused: delivery commit ${deliveryCommit} is not reachable from ${where}. Record a reset, working-tree, or manual delivery with this pinned candidate, deliveryMethod, and the candidate content present in the integration working tree.`,
+        message: `${ticket.ref} reconciliation refused: delivery commit ${deliveryCommit} is not reachable from ${where}. Record a reset, working-tree, or manual delivery with this pinned candidate and deliveryMethod; its content must be present in the integration working tree, or have landed on the target's first-parent history, exactly or as a clean forge squash of the candidate onto that commit's parent.`,
       };
     }
     if (workingTreeDelivery && !pinnedCandidateMatches(repo, ticket, deliveryCommit)) {
@@ -1781,18 +1847,39 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
         message: `${ticket.ref} reconciliation refused: non-reachable delivery must name its immutable ${submissionGitRef(ticket)} candidate, not ${deliveryCommit}.`,
       };
     }
+    // A checkout that does not carry the target cannot be the evidence (SQ-383); its tree is
+    // skipped and only the target's own history can prove the delivery.
+    const workingTreeContent = (commit: string, extraPaths: string[] = []) => (checkoutCarriesTarget
+      ? workingTreeContainsSubmittedContent(repo, ticket.submission, commit, extraPaths)
+      : { ok: false, missing: Array.from(new Set([...changedIntegrationPaths(repo, ticket.submission), ...extraPaths])) });
     let content: any = workingTreeDelivery && !reachable
-      ? workingTreeContainsSubmittedContent(repo, ticket.submission, deliveryCommit)
+      ? workingTreeContent(deliveryCommit)
       : deliveryContainsSubmittedContent(repo, ticket.submission, deliveryCommit);
     let descendant: any = null;
     let landingCommit: string | null = null;
+    let forgeSquash: any = null;
     if (!content.ok && workingTreeDelivery) {
       landingCommit = landedCommitWithContent(repo, ticket.submission, deliveryCommit, landedHead);
       if (landingCommit) content = { ok: true, evidence: 'landed_candidate_content' };
     }
+    // SQ-383: the forge squash of a candidate whose shared file the target edited concurrently.
+    if (!content.ok) {
+      // A named delivery commit is the squash; the content it must carry is the pinned candidate's.
+      const pinnedCandidate = workingTreeDelivery ? deliveryCommit : resolveCommitOrNull(repo, String(ticket.submission.commit || ''));
+      forgeSquash = !pinnedCandidate
+        ? null
+        : workingTreeDelivery
+          ? forgeSquashOnHistory(repo, ticket.submission, pinnedCandidate, landedHead)
+          : forgeSquashDelivery(repo, ticket.submission, pinnedCandidate, deliveryCommit, landedHead);
+      if (forgeSquash) {
+        if (workingTreeDelivery) landingCommit = forgeSquash.landingCommit;
+        content = { ok: true, evidence: 'forge_squash_merge' };
+      }
+    }
     if (!content.ok) {
       const candidate = String(ticket.submission.commit || '').toLowerCase();
       const reviewed: any = reviewedCandidateDescendant(repo, ticket, opts.deliveryInteractionCommit);
+      if (!reviewed.applicable && workingTreeDelivery && !checkoutCarriesTarget) return checkoutRefusal;
       if (!reviewed.applicable) {
         const requested = String(opts.deliveryInteractionCommit || '').trim();
         const hint = requested
@@ -1812,12 +1899,13 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
       }
       descendant = reviewed.interaction;
       content = workingTreeDelivery
-        ? workingTreeContainsSubmittedContent(repo, ticket.submission, descendant.commit, descendant.paths)
+        ? workingTreeContent(descendant.commit, descendant.paths)
         : deliveryContainsReviewedDescendant(repo, ticket.submission, descendant.commit, deliveryCommit);
       if (!content.ok && workingTreeDelivery) {
         landingCommit = landedCommitWithContent(repo, ticket.submission, descendant.commit, landedHead, descendant.paths);
         if (landingCommit) content = { ok: true, evidence: 'landed_candidate_content' };
       }
+      if (!content.ok && workingTreeDelivery && !checkoutCarriesTarget) return checkoutRefusal;
       if (!content.ok) {
         return {
           ok: false,
@@ -1832,11 +1920,19 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
       ? { ok: true, interaction: null }
       : reviewedMergedTreeInteraction(repo, ticket, deliveryCommit, landedHead, opts.deliveryInteractionCommit);
     if (!interaction.ok) return Object.assign({ ticket }, interaction);
+    // SQ-275: a delivery proven from the working tree names the checkout as its source, never the
+    // upstream (which was consulted and did not carry the commit). SQ-383: one proven from a
+    // landed commit on the target's history keeps the remote source that history was read from.
+    const contentFromWorkingTree = workingTreeDelivery && !landingCommit;
+    if (contentFromWorkingTree && landedRemote) {
+      deliveryRevision = { source: `git-checkout:${target.branch}`, value: resultingHead, observedAt: deliveryRevision.observedAt };
+    }
     // SQ-275: a working-tree delivery is verified where its content lives; every other delivery is
-    // verified in a detached scratch worktree at the delivery commit, never in the user's checkout.
-    const verify = workingTreeDelivery
+    // verified in a detached scratch worktree at the commit carrying it (SQ-383: the landing commit
+    // for a candidate found on the target's history), never in the user's checkout.
+    const verify = contentFromWorkingTree
       ? verifyDeliveredSubmission(slug, ticket)
-      : verifyInScratchWorktree(repo, deliveryCommit, (cwd: string) => verifyDeliveredSubmission(slug, ticket, { cwd }));
+      : verifyInScratchWorktree(repo, landingCommit || deliveryCommit, (cwd: string) => verifyDeliveredSubmission(slug, ticket, { cwd }));
     if (!verificationAccepted(verify)) {
       return integrationFailure(slug, ticket, {
         reason: `${verificationOutcome(verify)}_recorded_delivery`,
@@ -1854,7 +1950,7 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
     const deliveryIdentity = {
       kind: descendant
         ? 'reviewed-candidate-descendant'
-        : interaction.interaction ? 'reviewed-merged-tree-interaction' : landingCommit ? 'landed-candidate-content' : workingTreeDelivery ? 'pinned-working-tree' : 'reachable-commit',
+        : interaction.interaction ? 'reviewed-merged-tree-interaction' : forgeSquash ? 'forge-squash' : landingCommit ? 'landed-candidate-content' : workingTreeDelivery ? 'pinned-working-tree' : 'reachable-commit',
       pinnedRef: submissionGitRef(ticket),
       candidate: ticket.submission.commit,
       sourceRevision: deliveryRevision,
@@ -1862,18 +1958,23 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
       ...(descendant ? { sourceCommit: deliveryCommit, interaction: descendant } : {}),
       ...(workingTreeDelivery ? { method: deliveryMethod } : {}),
       ...(landingCommit ? { landingCommit } : {}),
+      ...(forgeSquash ? { forgeSquash } : {}),
     };
+    // SQ-383: a checkout that does not carry the target played no part in this delivery, so the
+    // recorded head is the live target tip the delivery was proven against, not that checkout.
+    const recordedHead = checkoutCarriesTarget ? resultingHead : landedHead;
     const recorded = updateSubmissionIntegration(slug, ticket.id, {
       mode: interaction.interaction || (descendant && (!workingTreeDelivery || landingCommit)) ? 'recorded-reviewed-interaction' : workingTreeDelivery && !landingCommit ? 'recorded-working-tree' : 'recorded',
       pinnedRef: submissionGitRef(ticket),
       pinnedCommit: ticket.submission.commit,
       deliveryCommit,
-      resultingHead,
-      contentCommit: landingCommit || (workingTreeDelivery ? deliveryCommit : resultingHead),
+      resultingHead: recordedHead,
+      contentCommit: landingCommit || (workingTreeDelivery ? deliveryCommit : recordedHead),
       deliveryRevision,
       deliveryIdentity,
       targetBranch: target.branch,
       targetUpstream: target.upstream,
+      ...frozenTargetEvidence(target),
       changedPaths: changedIntegrationPaths(repo, ticket.submission),
       deliveredFiles,
       verify,
@@ -1892,13 +1993,41 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
   }
 }
 
-function recordAlreadyLandedSubmission(slug: any, found: any, target: any, candidate: string, reason: string, repo: string) {
-  const resultingHead = integrationGit(repo, ['rev-parse', `refs/heads/${target.branch}`]).toLowerCase();
+// SQ-383: a target resolved by falling back from a frozen dispatch target whose ref is gone (see
+// config.resolveFrozenIntegrationTarget) records which target it replaced and why; a target that
+// could not be resolved at all (abandonment only) records why no reachability was measured.
+function frozenTargetEvidence(target: any) {
+  return {
+    ...(target?.frozenTarget ? { frozenTarget: target.frozenTarget, targetFallback: target.fallback } : {}),
+    ...(target?.unavailable ? { targetUnavailable: target.unavailable } : {}),
+  };
+}
+
+// SQ-383 (SQ-366 side defect): whether `commit` is on the integration target, measured where the
+// target lives. A remote-mode target is answered by the remote's live advertisement (SQ-275); if
+// the remote cannot be reached, the last-fetched remote-tracking ref stands in and the source says
+// so. A local-mode target is its local branch. `head` is null when no such ref exists.
+function candidateLandedOnTarget(repo: string, target: any, commit: string) {
+  const landedRemote = landedRemoteFromTarget(target);
+  if (landedRemote) {
+    const proof = proveLandedOnRemote({ repo, remote: landedRemote.remote, branch: landedRemote.branch, commit });
+    if (proof.ok) return { landed: proof.landed, head: proof.tip, source: proof.source, observedAt: proof.observedAt };
+  }
+  const ref = landedRemote ? `refs/remotes/${landedRemote.remote}/${landedRemote.branch}` : `refs/heads/${target.branch}`;
+  const head = resolveCommitOrNull(repo, ref);
+  const source = landedRemote ? `git-tracking:${landedRemote.remote}/${landedRemote.branch}` : `git:${target.upstream || target.branch}`;
+  const observedAt = new Date().toISOString();
+  if (!head) return { landed: false, head: null, source, observedAt };
+  return { landed: isAncestorCommit(repo, commit, head), head: head.toLowerCase(), source, observedAt };
+}
+
+function recordAlreadyLandedSubmission(slug: any, found: any, target: any, candidate: string, reason: string, repo: string, landed?: any) {
+  const resultingHead = landed?.head || integrationGit(repo, ['rev-parse', `refs/heads/${target.branch}`]).toLowerCase();
   const now = new Date().toISOString();
   const deliveryRevision = {
-    source: `git:${target.upstream || target.branch}`,
+    source: landed?.source || `git:${target.upstream || target.branch}`,
     value: resultingHead,
-    observedAt: now,
+    observedAt: landed?.observedAt || now,
   };
   return withTicketLock(slug, found.id, () => {
     const ticket = getTicket(slug, found.id);
@@ -1924,6 +2053,7 @@ function recordAlreadyLandedSubmission(slug: any, found: any, target: any, candi
       },
       targetBranch: target.branch,
       targetUpstream: target.upstream,
+      ...frozenTargetEvidence(target),
       changedPaths,
       deliveredFiles: changedPaths,
       evidence: reason,
@@ -1956,26 +2086,38 @@ function recordAbandonedSubmission(slug?: any, idOrRef?: any, opts?: any) {
   if (!repo || !target?.branch) return { ok: false, reason: 'integration_target_unavailable', ticket: found };
   const candidate = String(found.submission?.commit || '').trim();
   let candidateState = 'unresolvable';
+  let candidateStateSource: string | null = null;
   let landedCandidate: string | null = null;
+  let landed: any = null;
   if (submissionUsesGit(found) && candidate) {
+    let resolved: string | null = null;
     try {
-      const resolved = integrationGit(repo, ['rev-parse', '--verify', `${candidate}^{commit}`]).toLowerCase();
-      try {
-        integrationGit(repo, ['merge-base', '--is-ancestor', resolved, `refs/heads/${target.branch}`]);
-        landedCandidate = resolved;
-      } catch (error: any) {
-        if (error?.status !== 1) throw error;
-        candidateState = 'unreachable';
-      }
-    } catch (error: any) {
+      resolved = integrationGit(repo, ['rev-parse', '--verify', `${candidate}^{commit}`]).toLowerCase();
+    } catch (_) {
       // A stored candidate whose object no longer resolves is dead by definition, and refusing
       // here would deadlock the exact case this path exists for. Record which of the two it was.
       candidateState = 'unresolvable';
     }
+    if (resolved && target.unavailable) {
+      // SQ-383: neither the frozen nor the board target resolves, so there is no line to measure
+      // against. Abandonment does not depend on one; the record says reachability went unmeasured.
+      candidateState = 'unmeasured';
+    } else if (resolved) {
+      try {
+        // SQ-383 (SQ-366 side defect): measured where the target lives, not refs/heads/<branch>,
+        // which a remote-mode board may never have fetched or may hold stale.
+        landed = candidateLandedOnTarget(repo, target, resolved);
+        candidateStateSource = landed.source;
+        if (landed.landed && landed.head) landedCandidate = resolved;
+        else candidateState = 'unreachable';
+      } catch (_) {
+        candidateState = 'unresolvable';
+      }
+    }
   }
   if (landedCandidate) {
     try {
-      return recordAlreadyLandedSubmission(slug, found, target, landedCandidate, reason, repo);
+      return recordAlreadyLandedSubmission(slug, found, target, landedCandidate, reason, repo, landed);
     } catch (error: any) {
       return { ok: false, reason: 'delivery_evidence_unavailable', ticket: found, message: `${found.ref} landed delivery evidence could not be recorded: ${integrationGitError(error)}` };
     }
@@ -1990,8 +2132,10 @@ function recordAbandonedSubmission(slug?: any, idOrRef?: any, opts?: any) {
       pinnedRef: submissionGitRef(ticket),
       pinnedCommit: candidate || null,
       candidateState,
+      ...(candidateStateSource ? { candidateStateSource } : {}),
       targetBranch: target.branch,
       targetUpstream: target.upstream,
+      ...frozenTargetEvidence(target),
       evidence: reason,
       abandonedAt: now,
       completedAt: now,
