@@ -108,6 +108,12 @@ function stringField(input, ...names) {
   }
   return "";
 }
+function isSubagent(input) {
+  return ["agent_id", "agentId", "agent_type", "agentType"].some((name) => {
+    const identity = String(input[name] || "").trim().toLowerCase();
+    return identity && identity !== "main" && identity !== "main-thread";
+  });
+}
 
 // src/hooks/shared/paths.ts
 var import_node_path2 = __toESM(require("node:path"));
@@ -118,11 +124,11 @@ function runtimeModule(name) {
   return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
-// src/hooks/shared/worktree-sweep.ts
-var import_node_child_process2 = require("node:child_process");
-var import_node_fs4 = __toESM(require("node:fs"));
-var import_promises = require("node:fs/promises");
-var import_node_path5 = __toESM(require("node:path"));
+// src/hooks/shared/sweep-handoff.ts
+var import_node_child_process = require("node:child_process");
+var import_node_crypto = __toESM(require("node:crypto"));
+var import_node_fs3 = __toESM(require("node:fs"));
+var import_node_path4 = __toESM(require("node:path"));
 
 // src/lib/claude-home.ts
 var import_node_os = __toESM(require("node:os"));
@@ -135,11 +141,8 @@ function resolveSidequestHome(env = process.env) {
 }
 
 // src/hooks/shared/sweep-handoff.ts
-var import_node_child_process = require("node:child_process");
-var import_node_crypto = __toESM(require("node:crypto"));
-var import_node_fs3 = __toESM(require("node:fs"));
-var import_node_path4 = __toESM(require("node:path"));
 var EMPTY_SWEEP_PROGRESS = { planned: 0, removed: 0, keptByReason: {}, considered: 0, total: 0 };
+var HANDOFF_FAILED_NOTICE = "sidequest: worktree sweep could not run, so stale agent worktrees were not collected this session.";
 function stateDirectory() {
   const home = resolveSidequestHome();
   return import_node_path4.default.join(home, "sweep-reports");
@@ -171,58 +174,105 @@ function writeSweepProgress(cwd, progress) {
   } catch (_) {
   }
 }
-
-// src/hooks/shared/worktree-sweep.ts
-var MAX_PROJECTS_PER_START = 3;
-var MAX_CANDIDATES_PER_PROJECT = 8;
-var DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_HOURS = 7 * 24;
-var MAX_ORPHAN_SUBJECT_LENGTH = 120;
-function windowsProcesses() {
+function clearSweepProgress(cwd) {
   try {
-    const result = (0, import_node_child_process2.spawnSync)("powershell.exe", [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      "Get-CimInstance Win32_Process | Select-Object ProcessId,Name,CreationDate,KernelModeTime,UserModeTime,CommandLine | ConvertTo-Json -Compress"
-    ], { encoding: "utf8", timeout: 3e3, windowsHide: true });
-    if (result.status !== 0) return [];
-    const parsed = JSON.parse(String(result.stdout || ""));
-    return (Array.isArray(parsed) ? parsed : [parsed]).flatMap((entry) => {
-      const pid = Number(entry?.ProcessId);
-      if (!Number.isInteger(pid) || pid <= 0) return [];
-      const kernelSeconds = Number(entry.KernelModeTime) / 1e7;
-      const userSeconds = Number(entry.UserModeTime) / 1e7;
-      return [{
-        pid,
-        imageName: String(entry.Name || "unknown"),
-        startTime: String(entry.CreationDate || ""),
-        cpuSeconds: Number.isFinite(kernelSeconds + userSeconds) ? Math.floor(kernelSeconds + userSeconds) : null,
-        command: String(entry.CommandLine || "")
-      }];
-    });
+    import_node_fs3.default.rmSync(progressFile(cwd), { force: true });
+  } catch (_) {
+  }
+}
+function drainReport(cwd) {
+  const file = reportFile(cwd);
+  let raw;
+  try {
+    raw = import_node_fs3.default.readFileSync(file, "utf8");
+  } catch (_) {
+    return null;
+  }
+  import_node_fs3.default.rmSync(file, { force: true });
+  clearSweepProgress(cwd);
+  try {
+    const parsed = JSON.parse(raw);
+    const notices = parsed?.notices;
+    return Array.isArray(notices) ? notices.map((notice) => String(notice)).filter(Boolean) : [];
   } catch (_) {
     return [];
   }
 }
-function normalizedWindowsPath(value) {
-  return value.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+function sweepCwd(data) {
+  return stringField(data, "cwd", "project_dir", "projectDir") || process.env.CLAUDE_PROJECT_DIR || process.cwd();
 }
-function referencesWorktree(command, worktreePath) {
-  const target = normalizedWindowsPath(worktreePath).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`${target}(?=$|[\\\\/"'\\s])`, "i").test(normalizedWindowsPath(command));
+function spawnSweepWorker(data, cwd, options) {
+  return (0, import_node_child_process.spawn)(process.execPath, [
+    import_node_path4.default.join(pluginRoot(), "hooks", "sweep-worktrees.js"),
+    "--cwd",
+    cwd,
+    "--session",
+    options.sessionId,
+    // SQ-220: the child decides from these whether this start is a host restart, the only
+    // start that may retire this session's unbound launches.
+    "--source",
+    stringField(data, "source"),
+    "--subagent",
+    isSubagent(data) ? "1" : "0"
+  ], { detached: true, stdio: "ignore", windowsHide: true, ...options.env ? { env: options.env } : {} });
 }
-function worktreeRemovalFailureNotice(failure, options = {}) {
-  const notice = `could not remove ${failure.path || "a git entry"}: ${failure.message}`;
-  if ((options.platform ?? process.platform) !== "win32" || !failure.path || !(options.existsSync || import_node_fs4.default.existsSync)(failure.path)) return notice;
-  const processes = (options.listProcesses || windowsProcesses)().filter((entry) => referencesWorktree(entry.command, failure.path));
-  if (!processes.length) return notice;
-  const details = processes.map((entry) => {
-    const started = entry.startTime ? `, started ${entry.startTime}` : "";
-    const cpu = entry.cpuSeconds === null ? "" : `, CPU ${entry.cpuSeconds}s`;
-    return `pid ${entry.pid} (${entry.imageName}${started}${cpu})`;
-  });
-  return `${notice}. Processes still using it: ${details.join("; ")}. End those PIDs and re-run the sweep.`;
+function carriedFile(cwd) {
+  return reportFile(cwd).replace(/\.json$/, ".carried.json");
 }
+function readNotices(file) {
+  try {
+    const parsed = JSON.parse(import_node_fs3.default.readFileSync(file, "utf8"));
+    const notices = parsed?.notices;
+    return Array.isArray(notices) ? notices.map((notice) => String(notice)).filter(Boolean) : [];
+  } catch (_) {
+    return [];
+  }
+}
+function carryPendingReport(cwd) {
+  const pending = drainReport(cwd);
+  if (!pending || !pending.length) return;
+  try {
+    import_node_fs3.default.mkdirSync(stateDirectory(), { recursive: true });
+    import_node_fs3.default.writeFileSync(carriedFile(cwd), JSON.stringify({ notices: [...readNotices(carriedFile(cwd)), ...pending] }));
+  } catch (_) {
+  }
+}
+function sweepInFlight(cwd) {
+  const staleAfterMs = 10 * 60 * 1e3;
+  let modified;
+  try {
+    modified = import_node_fs3.default.statSync(progressFile(cwd)).mtimeMs;
+  } catch (_) {
+    return false;
+  }
+  return Date.now() - modified < staleAfterMs && !import_node_fs3.default.existsSync(reportFile(cwd));
+}
+function detachSweep(data) {
+  const cwd = sweepCwd(data);
+  if (sweepInFlight(cwd)) return [];
+  carryPendingReport(cwd);
+  writeSweepProgress(cwd, EMPTY_SWEEP_PROGRESS);
+  const env = { ...process.env };
+  delete env.CLAUDE_CODE_SESSION_ID;
+  delete env.CLAUDE_SESSION_ID;
+  try {
+    const child = spawnSweepWorker(data, cwd, { sessionId: "", env });
+    child.once("error", () => {
+    });
+    child.unref();
+  } catch (_) {
+    clearSweepProgress(cwd);
+    return [HANDOFF_FAILED_NOTICE];
+  }
+  return [];
+}
+
+// src/hooks/shared/worktree-sweep.ts
+var import_node_child_process2 = require("node:child_process");
+var import_node_fs4 = __toESM(require("node:fs"));
+var import_promises = require("node:fs/promises");
+var import_node_path5 = __toESM(require("node:path"));
+var DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_HOURS = 7 * 24;
 function stateFile() {
   const home = resolveSidequestHome();
   return import_node_path5.default.join(home, "worktree-sweep-sessions.json");
@@ -244,32 +294,6 @@ function writeState(state) {
 function sessionId(data) {
   return stringField(data, "session_id", "sessionId") || process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || "";
 }
-function projectCommand(project) {
-  return `node "${pluginRoot()}/bin/sidequest.js" board-config --project "${project.path}" --integration-branch <branch>`;
-}
-function sessionWorktreePath(start) {
-  const resolved = import_node_path5.default.resolve(start);
-  let candidate = resolved;
-  for (; ; ) {
-    try {
-      if (import_node_fs4.default.existsSync(import_node_path5.default.join(candidate, ".git"))) return candidate;
-    } catch (_) {
-      return resolved;
-    }
-    const parent = import_node_path5.default.dirname(candidate);
-    if (parent === candidate) return resolved;
-    candidate = parent;
-  }
-}
-function currentProject(data, store) {
-  const start = stringField(data, "cwd", "project_dir", "projectDir") || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const currentPath = store.nearestRepoRoot(start);
-  const found = store.findProject(currentPath);
-  return {
-    project: found.ok && found.slug && found.meta?.path ? { slug: found.slug, path: found.meta.path } : null,
-    sessionPath: sessionWorktreePath(start)
-  };
-}
 function unregisterSweepSession(data) {
   const id = sessionId(data);
   if (!id) return;
@@ -278,145 +302,9 @@ function unregisterSweepSession(data) {
   if (state.reportedOrphans) delete state.reportedOrphans[id];
   writeState(state);
 }
-function liveSessionPaths() {
-  return Object.values(readState().sessions || {}).map((pathname) => String(pathname)).filter(Boolean);
-}
-function abbreviated(value) {
-  return value.length <= MAX_ORPHAN_SUBJECT_LENGTH ? value : `${value.slice(0, MAX_ORPHAN_SUBJECT_LENGTH - 1)}…`;
-}
-function orphanNotices(data, project, orphanBranches) {
-  const id = sessionId(data);
-  if (!id) return [];
-  const state = readState();
-  const reported = new Set(state.reportedOrphans?.[id] || []);
-  const kept = orphanBranches.filter((entry) => entry.action === "keep" && entry.reason === "not_integrated" && !reported.has(`${project.slug}:${entry.branch}`));
-  if (!kept.length) return [];
-  state.reportedOrphans = state.reportedOrphans || {};
-  state.reportedOrphans[id] = [...reported, ...kept.map((entry) => `${project.slug}:${entry.branch}`)];
-  writeState(state);
-  return kept.map((entry) => `sidequest: unintegrated orphan worktree branch ${entry.branch}: ${abbreviated(String(entry.subject || "no commit subject"))}.`);
-}
-function candidateCursor(store, slug) {
-  try {
-    return String(store.worktreeGcCandidateCursor(slug) || "");
-  } catch (_) {
-    return "";
-  }
-}
-function flushCandidateCursors(store, cursors) {
-  for (const [slug, cursor] of cursors) {
-    try {
-      store.recordWorktreeGcCandidateCursor(slug, cursor);
-    } catch (_) {
-    }
-  }
-}
-function sweepSummaryNotices(project, result, progress) {
-  if (result.skipped || !progress || progress.planned > 0 || progress.total < 1) return [];
-  const reasons = Object.entries(progress.keptByReason).map(([reason, count]) => `${reason} ${count}`).join(", ") || "none";
-  const remaining = Math.max(0, progress.total - progress.considered);
-  const rest = remaining ? ` ${remaining} not assessed this session; the window resumes after the last one it reached. Collect the rest now with ${sweepCommand(project)}.` : "";
-  return [`sidequest: worktree sweep for ${project.name || project.slug} assessed ${progress.considered} of ${progress.total} agent worktrees and found nothing to collect (kept: ${reasons}).${rest}`];
-}
-function sweepCommand(project) {
-  return `node "${pluginRoot()}/bin/sidequest.js" worktrees sweep --yes --project "${project.path}"`;
-}
-function salvageNotices(salvaged) {
-  return salvaged.map((entry) => `sidequest: salvaged unintegrated worktree ${entry.path} at ${entry.ref}. Recover with ${entry.recovery}.`);
-}
-function missingIntegrationTarget(error) {
-  return /Configured integration ref .+ does not exist\./.test(String(error?.message || error));
-}
-async function sweepWorktrees(data, includeKnownProjects) {
-  const store = require(runtimeModule("store"));
-  const { project: current, sessionPath } = currentProject(data, store);
-  if (!current) return [];
-  const projects = includeKnownProjects ? store.worktreeGcProjects(current.slug, MAX_PROJECTS_PER_START) : [current];
-  const notices = [];
-  const worktrees = require(runtimeModule("worktrees"));
-  const activePaths = liveSessionPaths();
-  const progressCwd = stringField(data, "cwd", "project_dir", "projectDir") || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const projectProgress = /* @__PURE__ */ new Map();
-  const updateProgress = (project, progress) => {
-    projectProgress.set(project.slug, progress);
-    const keptByReason = {};
-    let planned = 0;
-    let removed = 0;
-    let considered = 0;
-    let total = 0;
-    for (const currentProgress of projectProgress.values()) {
-      planned += currentProgress.planned;
-      removed += currentProgress.removed;
-      considered += currentProgress.considered;
-      total += currentProgress.total;
-      for (const [reason, count] of Object.entries(currentProgress.keptByReason)) {
-        keptByReason[reason] = (keptByReason[reason] || 0) + count;
-      }
-    }
-    writeSweepProgress(progressCwd, { planned, removed, keptByReason, considered, total });
-  };
-  const cursors = /* @__PURE__ */ new Map();
-  for (const project of projects) {
-    const isCurrentProject = project.slug === current.slug;
-    try {
-      await (0, import_promises.stat)(import_node_path5.default.join(project.path, ".git"));
-    } catch (_) {
-      continue;
-    }
-    let target;
-    try {
-      target = store.integrationTarget(project.slug);
-    } catch (error) {
-      if (isCurrentProject && missingIntegrationTarget(error)) {
-        notices.push(`sidequest: skipped worktree sweep for ${project.name || project.slug}: the configured integration branch is unavailable locally.`);
-      }
-      continue;
-    }
-    if (!target) {
-      if (isCurrentProject) {
-        notices.push(`sidequest: skipped worktree sweep for ${project.name || project.slug}: no integration target. Configure one with ${projectCommand(project)}.`);
-      }
-      continue;
-    }
-    try {
-      const config = store.boardConfig(project.slug);
-      const result = await worktrees.sweep(project.path, store.worktreeGcTickets(), {
-        execute: true,
-        currentPath: isCurrentProject ? sessionPath : "",
-        livePaths: activePaths,
-        integrationTarget: target,
-        maxCandidates: MAX_CANDIDATES_PER_PROJECT,
-        candidateCursor: candidateCursor(store, project.slug),
-        notIntegratedSalvageAgeMs: (config?.notIntegratedSalvageAgeHours || DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_HOURS) * 60 * 60 * 1e3,
-        recoveryRetentionAgeMs: (config?.worktreeRecoveryRetentionAgeHours || 14 * 24) * 60 * 60 * 1e3,
-        recoveryRetentionMaxPerAgent: config?.worktreeRecoveryRetentionMaxPerAgent || 3,
-        onProgress: (progress) => updateProgress(project, progress)
-      });
-      if (result.candidateCursor) cursors.set(project.slug, String(result.candidateCursor));
-      if (!isCurrentProject) continue;
-      notices.push(...sweepSummaryNotices(project, result, projectProgress.get(project.slug)));
-      if (result.skipped === "repository_busy") {
-        notices.push(`sidequest: skipped worktree sweep for ${project.name || project.slug}: the repository has an in-progress git operation.`);
-      }
-      for (const failure of result.failures || []) {
-        if (!failure.suppressed) {
-          notices.push(`sidequest: worktree sweep for ${project.name || project.slug} ${worktreeRemovalFailureNotice(failure)}`);
-        }
-      }
-      notices.push(...salvageNotices(result.salvaged || []));
-      notices.push(...orphanNotices(data, project, result.orphanBranches || []));
-    } catch (error) {
-      if (isCurrentProject) {
-        notices.push(`sidequest: worktree sweep failed for ${project.name || project.slug}: ${error && error.message || error}. Check the repository is available, then run ${projectCommand(project)}.`);
-      }
-    }
-  }
-  flushCandidateCursors(store, cursors);
-  return notices;
-}
 
 // src/hooks/session-end.ts
-async function main() {
+function main() {
   const data = readStdin();
   if (!data) return;
   const sessionId2 = stringField(data, "session_id", "sessionId") || process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || "";
@@ -432,14 +320,16 @@ async function main() {
   } catch (error) {
     notices.push(`sidequest: session-end reconciliation failed: ${error && error.message || error}`);
   }
+  unregisterSweepSession(data);
   try {
-    notices.push(...await sweepWorktrees(data, false));
+    notices.push(...detachSweep(data));
   } catch (error) {
     notices.push(`sidequest: session-end worktree sweep failed: ${error && error.message || error}`);
   }
-  unregisterSweepSession(data);
   if (notices.length) console.error(notices.join("\n"));
 }
-main().catch((error) => {
+try {
+  main();
+} catch (error) {
   console.error(`sidequest: session-end failed: ${error && error.message || error}`);
-});
+}

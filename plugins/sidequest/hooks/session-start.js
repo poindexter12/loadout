@@ -347,26 +347,51 @@ function drainReport(cwd) {
 function sweepCwd(data) {
   return stringField(data, "cwd", "project_dir", "projectDir") || process.env.CLAUDE_PROJECT_DIR || process.cwd();
 }
+function spawnSweepWorker(data, cwd, options) {
+  return (0, import_node_child_process.spawn)(process.execPath, [
+    import_node_path5.default.join(pluginRoot(), "hooks", "sweep-worktrees.js"),
+    "--cwd",
+    cwd,
+    "--session",
+    options.sessionId,
+    // SQ-220: the child decides from these whether this start is a host restart, the only
+    // start that may retire this session's unbound launches.
+    "--source",
+    stringField(data, "source"),
+    "--subagent",
+    isSubagent(data) ? "1" : "0"
+  ], { detached: true, stdio: "ignore", windowsHide: true, ...options.env ? { env: options.env } : {} });
+}
+function carriedFile(cwd) {
+  return reportFile(cwd).replace(/\.json$/, ".carried.json");
+}
+function readNotices(file) {
+  try {
+    const parsed = JSON.parse(import_node_fs4.default.readFileSync(file, "utf8"));
+    const notices = parsed?.notices;
+    return Array.isArray(notices) ? notices.map((notice) => String(notice)).filter(Boolean) : [];
+  } catch (_) {
+    return [];
+  }
+}
+function drainCarried(cwd) {
+  const file = carriedFile(cwd);
+  if (!import_node_fs4.default.existsSync(file)) return [];
+  const notices = readNotices(file);
+  try {
+    import_node_fs4.default.rmSync(file, { force: true });
+  } catch (_) {
+  }
+  return notices;
+}
 async function runSweep(data) {
   const cwd = sweepCwd(data);
-  const carried = drainReport(cwd) || [];
+  const carried = [...drainCarried(cwd), ...drainReport(cwd) || []];
   const budget = deadlineMs();
   writeSweepProgress(cwd, EMPTY_SWEEP_PROGRESS);
   let child;
   try {
-    child = (0, import_node_child_process.spawn)(process.execPath, [
-      import_node_path5.default.join(pluginRoot(), "hooks", "sweep-worktrees.js"),
-      "--cwd",
-      cwd,
-      "--session",
-      stringField(data, "session_id", "sessionId"),
-      // SQ-220: the child decides from these whether this start is a host restart, the only
-      // start that may retire this session's unbound launches.
-      "--source",
-      stringField(data, "source"),
-      "--subagent",
-      isSubagent(data) ? "1" : "0"
-    ], { detached: true, stdio: "ignore", windowsHide: true });
+    child = spawnSweepWorker(data, cwd, { sessionId: stringField(data, "session_id", "sessionId") });
   } catch (_) {
     clearSweepProgress(cwd);
     return [...carried, HANDOFF_FAILED_NOTICE];
