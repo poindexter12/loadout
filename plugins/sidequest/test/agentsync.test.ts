@@ -488,7 +488,12 @@ test('briefings include every byte of large descriptions, comments, and experime
   assert.equal(comments.length, 30);
   assert.ok(Buffer.byteLength(experiment.packet, 'utf8') > 20 * 1024);
   assert.ok(briefing.includes(description));
-  for (const comment of comments) assert.ok(briefing.includes(comment.body));
+  // SQ-350: comment bodies are held to a byte budget, newest first; every older body is
+  // still reachable through the retrieval call printed in its place.
+  for (const comment of comments) {
+    assert.ok(briefing.includes(comment.body) || briefing.includes(`### Comment ${comments.indexOf(comment) + 1}\n`), `comment ${comment.by} is inlined or listed`);
+  }
+  assert.ok(briefing.includes(comments.at(-1)!.body), 'the newest comment is always inlined');
   assert.ok(briefing.includes(experiment.packet));
   assert.doesNotMatch(briefing, /Aggregate budget|Omitted context|Comment packet truncated|Experiment log packet truncated|\[.*truncated.*\]/i);
 
@@ -503,6 +508,53 @@ test('briefings include every byte of large descriptions, comments, and experime
   // sees its briefing budget before paying for the Read.
   assert.match(transport, new RegExp(`Launch budget: this briefing is ${briefing.length} chars`));
   assert.match(transport, /Launch budget warning: this briefing alone exceeds 10% of usable context/);
+});
+
+// SQ-350: the comment section is the only briefing section that grows with every attempt.
+// A long history (muxification SQ-38 shape: many release and findings bodies) keeps the
+// newest bodies inline within the budget and replaces older ones with a context_page
+// retrieval call that resolves the live comment body byte for byte.
+test('SQ-350: a long comment history keeps the newest bodies within the budget and defers older ones to context_page', () => {
+  const store = require('../lib/store.js');
+  const { resolveContextPage } = require('../lib/mcp-shared.js');
+  const slug = store.ensureProject(tmpDir(), 'comment budget fixture').slug;
+  const created = store.createTicket(slug, { title: 'Comment budget fixture', files: ['fixture.ts'] });
+  for (let index = 1; index <= 12; index += 1) {
+    const added = store.addComment(slug, created.ref, { by: `worker-${index}`, body: `COMMENT-${index}-START-${'c'.repeat(4 * 1024)}-COMMENT-${index}-END` });
+    assert.notEqual(added.ok, false, JSON.stringify(added));
+  }
+  const ticket = Object.assign({}, store.getTicket(slug, created.ref), {
+    model: 'sonnet', effort: 'high', dispatchExecutor: 'sidequest-exec-high', category: {},
+  });
+  assert.equal(ticket.comments.length, 12);
+  const briefing = agentsync.renderTicketBriefing(ticket, 'comment-budget-token', slug);
+  const section = briefing.slice(briefing.indexOf('## Newest ticket evidence and comments'));
+  const inlined = ticket.comments.filter((comment: any) => section.includes(comment.body));
+  const deferred = ticket.comments.filter((comment: any) => !section.includes(comment.body));
+
+  assert.ok(inlined.length >= 1 && deferred.length >= 1, `inlined ${inlined.length}, deferred ${deferred.length}`);
+  assert.ok(inlined.reduce((sum: number, comment: any) => sum + Buffer.byteLength(comment.body), 0) <= 16 * 1024);
+  assert.deepEqual(inlined.map((comment: any) => comment.id), ticket.comments.slice(-inlined.length).map((comment: any) => comment.id), 'the newest comments are the ones inlined');
+  assert.match(section, new RegExp(`${deferred.length} older comment bodies are deferred to keep this section within 16384 bytes`));
+  assert.match(briefing, /use it only for an older comment body the comments section defers/);
+
+  const calls = [...section.matchAll(/Fetch it with context_page\((\{.*?\})\)\.\)/g)].map((match) => JSON.parse(match[1] ?? '{}'));
+  assert.equal(calls.length, deferred.length, 'every deferred body prints its own retrieval call');
+  const oldest = resolveContextPage(Object.assign({}, calls.at(-1), { limit: 64 * 1024 }));
+  assert.equal(oldest.body, ticket.comments[0].body, 'the oldest deferred handle resolves the live comment body');
+  assert.equal(oldest.complete, true);
+});
+
+test('SQ-350: a single oversized newest comment is still inlined whole', () => {
+  const body = `NEWEST-${'n'.repeat(40 * 1024)}-END`;
+  const briefing = agentsync.renderTicketBriefing({
+    ref: 'SQ-9350', title: 'Oversized newest comment', model: 'sonnet', effort: 'high',
+    dispatchExecutor: 'sidequest-exec-high', category: {},
+    comments: [{ id: 'c_old', by: 'older', body: 'older body' }, { id: 'c_new', by: 'newest', body }],
+  }, 'oversized-newest-token');
+  assert.ok(briefing.includes(body));
+  assert.match(briefing, /1 older comment body is deferred/);
+  assert.match(briefing, /Fetch it with comments\(\{"ref":"SQ-9350","full":true\}\)/, 'without a board slug the fallback names the comments tool');
 });
 
 test('SQ-349: an inline briefing ends with a measured launch budget naming its largest sections', () => {
@@ -1711,7 +1763,11 @@ test('executor briefings render complete deterministic sections', () => {
   assert.match(first, /## Story execution contract \(revision 9\)/);
   assert.ok(first.includes(oversizedContract));
   assert.ok(first.includes(ticket.description));
-  for (const comment of ticket.comments) assert.ok(first.includes(comment.body));
+  // SQ-350: comment bodies are budgeted newest first; every comment keeps its header, and
+  // without a board slug a deferred body points at the comments tool, not a ctx1 handle.
+  assert.ok(first.includes(ticket.comments[19]!.body), 'the newest comment is inlined');
+  for (const [index] of ticket.comments.entries()) assert.ok(first.includes(`### Comment ${index + 1}\n`));
+  assert.match(first, /older comment bodies are deferred to keep this section within 16384 bytes/);
   assert.doesNotMatch(first, /Aggregate budget|Omitted context|fetch the paged snapshot|"handle":"ctx1\./);
 
   const revised = agentsync.renderTicketBriefing({

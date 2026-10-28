@@ -99,7 +99,7 @@ const store = require('./store.js');
 const commitScope = require('./commit-scope.js');
 const { worktreeRoot } = require('./worktrees.js');
 const { spawnDescription } = store;
-const { compileContextProjection } = require('./context-packet.js');
+const { compileContextProjection, contextRetrieval, contextRevision } = require('./context-packet.js');
 const { canonicalPreparedDispatchExecutor } = require('./prepared-dispatch.js');
 const { verificationRequirement, classifyVerificationKind } = require('./kernel/verification.js');
 
@@ -1028,20 +1028,61 @@ function storyContractProjectionBody(snapshot?: any) {
   return `## Story execution contract (revision ${snapshot.revision})\n${snapshot.body}`;
 }
 
-function briefingCommentBody(comments?: any) {
+// SQ-350: comment bodies are the one briefing section that grows with every attempt on a
+// ticket (each release, handback, and finding lands here), so it is the only one held to a
+// byte budget. The newest bodies are inlined until the budget is spent; the newest is always
+// inlined whole, however large, because it is the freshest handoff. Older bodies are replaced
+// by a durable `comments` retrieval handle that context_page resolves against the live
+// comment, so nothing is lost, only deferred until the executor decides it needs it.
+const BRIEFING_COMMENT_BODY_BUDGET_BYTES = 16 * 1024;
+
+function briefingCommentRetrieval(comment?: any, slug?: string, ref?: string) {
+  const id = comment && comment.id ? String(comment.id) : '';
+  if (!slug || !ref || !id) return null;
+  const body = commentBody(comment);
+  return contextRetrieval({
+    tool: 'comments',
+    project: slug,
+    kind: 'body',
+    field: 'comments.body',
+    position: id,
+    revision: contextRevision(body),
+    reason: 'elided',
+    selector: { ref, comment: id },
+  });
+}
+
+function deferredCommentBody(comment?: any, bytes?: number, slug?: string, ref?: string) {
+  const retrieval = briefingCommentRetrieval(comment, slug, ref);
+  const lead = `(Body deferred by the ${BRIEFING_COMMENT_BODY_BUDGET_BYTES}-byte briefing comment budget: ${bytes} bytes.`;
+  if (retrieval) return `${lead} Fetch it with ${retrieval.tool}(${JSON.stringify(retrieval.arguments)}).)`;
+  return `${lead} Fetch it with comments(${JSON.stringify({ ref: ref || '<ticket ref>', full: true })}).)`;
+}
+
+function briefingCommentBody(comments?: any, slug?: string, ref?: string) {
   const entries = Array.isArray(comments) ? comments.slice().reverse() : [];
   if (!entries.length) return '(No ticket comments were recorded.)';
-  return [
-    '## Newest ticket evidence and comments (newest first)',
-    ...entries.map((comment: any, index: number) => [
+  let spent = 0;
+  let deferred = 0;
+  const rendered = entries.map((comment: any, index: number) => {
+    const body = commentBody(comment);
+    const bytes = Buffer.byteLength(body, 'utf8');
+    const inline = index === 0 || spent + bytes <= BRIEFING_COMMENT_BODY_BUDGET_BYTES;
+    if (inline) spent += bytes;
+    else deferred += 1;
+    return [
       `### Comment ${entries.length - index}`,
       `Author: ${comment.by || 'unknown'}`,
       `Kind: ${comment.kind || 'comment'}`,
       `Recorded: ${comment.at || '(timestamp unavailable)'}`,
       'Body:',
-      commentBody(comment),
-    ].join('\n')),
-  ].join('\n\n');
+      inline ? body : deferredCommentBody(comment, bytes, slug, ref),
+    ].join('\n');
+  });
+  const budgetNote = deferred
+    ? [`${deferred} older comment ${deferred === 1 ? 'body is' : 'bodies are'} deferred to keep this section within ${BRIEFING_COMMENT_BODY_BUDGET_BYTES} bytes; ${deferred === 1 ? 'its' : 'each'} retrieval call is printed in place. Fetch one only when the newer comments do not already answer what you need.`]
+    : [];
+  return ['## Newest ticket evidence and comments (newest first)', ...budgetNote, ...rendered].join('\n\n');
 }
 
 // SQ-223: an orchestrator can amend a live dispatch's verify after the executor has read
@@ -1150,7 +1191,7 @@ function executorSafetyBody(ticket?: any, nonce?: any, tokenFile?: any, project?
     'If Sidequest itself misbehaves, such as a refusal that contradicts observed state, a dead retrieval handle, a guard loop, or a reproducible tool error, report it to the user with the reproducing evidence and treat it as an upstream defect. Executors also put that evidence in a ticket comment so the orchestrator sees it. Do not encode a workaround in project rules, hooks, or memory; any unavoidable stopgap must be marked temporary and name the defect it awaits.',
     boundReview || '',
     closeout || '',
-    'Stay within declared scope. This briefing includes the complete task, scope, comments, and contract. Do not use context_page for briefing sections.',
+    'Stay within declared scope. This briefing includes the complete task, scope, and contract, and the newest comments within a byte budget. Do not use context_page for briefing sections; use it only for an older comment body the comments section defers, with the exact retrieval call printed there.',
   ].filter(Boolean).join('\n\n');
 }
 
@@ -1362,7 +1403,7 @@ function ticketBrief(ticket?: any, nonce?: any, marker?: any, slug?: any, projec
       ...(storyLog ? [{ id: 'story-decision-log', kind: 'evidence', priority: 475, order: 3, body: storyDecisionLogProjectionBody(storyLog) }] : []),
       ...(rejectionHistory ? [{ id: 'rejection-history', kind: 'evidence', priority: 450, order: 4, body: rejectionHistory }] : []),
       { id: 'task-and-scope', kind: 'task', priority: 300, order: 5, body: taskAndScope },
-      { id: 'newest-comments', kind: 'evidence', priority: 200, order: 6, body: briefingCommentBody(ticket.comments) },
+      { id: 'newest-comments', kind: 'evidence', priority: 200, order: 6, body: briefingCommentBody(ticket.comments, slug, ticket.ref) },
       { id: 'handles', kind: 'handle', priority: 100, order: 7, body: executorHandlesBody(ticket, slug) },
     ],
   });
