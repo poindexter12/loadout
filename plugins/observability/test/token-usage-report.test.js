@@ -347,7 +347,67 @@ test('token usage report help lists every option', () => {
   const help = spawnSync(process.execPath, [script, '--help'], { encoding: 'utf8' });
 
   assert.equal(help.status, 0, help.stderr);
-  for (const flag of ['--db', '--format', '--sidequest-home', '--project', '--since', '--until', '--compare-previous', '--ledger', '--help']) {
+  for (const flag of ['--db', '--format', '--sidequest-home', '--project', '--since', '--until', '--compare-previous', '--ledger', '--compaction', '--transcripts', '--help']) {
     assert.match(help.stdout, new RegExp(flag));
   }
+});
+
+const COMPACTION_FIXTURES = path.join(__dirname, 'fixtures', 'compaction-transcripts');
+
+test('compaction scan is opt-in: --compaction derives the transcript dir, --transcripts overrides it', () => {
+  const off = parseArgs([], { CLAUDE_CONFIG_DIR: '/cfg' }, '/work/repo');
+  assert.equal(off.compaction, false);
+  assert.equal(off.transcriptDir, undefined);
+
+  const derived = parseArgs(['--compaction', '--project', '/work/my.repo'], { CLAUDE_CONFIG_DIR: '/cfg' }, '/ignored');
+  assert.equal(derived.compaction, true);
+  assert.equal(derived.transcriptDir, path.join('/cfg', 'projects', '-work-my-repo'));
+
+  const explicit = parseArgs(['--transcripts', '/elsewhere/transcripts'], { CLAUDE_CONFIG_DIR: '/cfg' }, '/work/repo');
+  assert.equal(explicit.compaction, true);
+  assert.equal(explicit.transcriptDir, '/elsewhere/transcripts');
+});
+
+test('report carries labeled compaction outcomes only when a scan was supplied', (t) => {
+  const store = temporaryStore(t);
+  const absent = buildTokenUsageReport(store);
+  assert.equal(absent.compaction_outcomes.available, false);
+  assert.match(absent.compaction_outcomes.reason, /not requested/);
+  assert.match(formatTokenUsageReport(absent), /Compaction outcomes unavailable: not requested/);
+
+  const { readCompactionOutcomes } = require('../lib/observability/compaction.js');
+  const report = buildTokenUsageReport(store, { compaction: readCompactionOutcomes({ transcriptDir: COMPACTION_FIXTURES }) });
+  const outcomes = report.compaction_outcomes;
+  assert.equal(outcomes.available, true);
+  assert.deepEqual(outcomes.totals.jev.fallback_rate, { value: 0.5, quality: 'derived' });
+  assert.deepEqual(outcomes.totals.jev.replacements, { value: 2, quality: 'derived' });
+  const main = outcomes.transcripts.find((row) => row.agent_id === null);
+  assert.deepEqual(main.compactions.manual, { value: 1, quality: 'derived' });
+  assert.deepEqual(main.jev.reduction_percent_mean, { value: 73.5, quality: 'derived' });
+  const subagent = outcomes.transcripts.find((row) => row.agent_id !== null);
+  assert.deepEqual(subagent.jev.fallback_rate, { value: null, quality: 'unavailable' });
+
+  const text = formatTokenUsageReport(report);
+  assert.match(text, /Compaction outcomes \(2 transcripts\)/);
+  assert.match(text, /4 compactions \(3 auto, 1 manual, 0 other\)/);
+  assert.match(text, /jev 2 replacements, 2 fallbacks \(1 below minimum, 1 request failed, 0 other\), fallback rate 0\.5 \(derived\)/);
+  assert.match(text, /11111111-aaaa-4bbb-8ccc-000000000001 subagent a0000000000000001: 1 compactions/);
+});
+
+test('token usage report CLI scans the given transcript directory end to end', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'loadout-token-report-cli-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const sidequestHome = path.join(directory, 'sidequest');
+  fs.mkdirSync(sidequestHome);
+  const script = path.join(__dirname, '..', 'bin', 'token-usage-report.js');
+  const run = spawnSync(process.execPath, [
+    script, '--db', path.join(directory, 'ledger.db'), '--sidequest-home', sidequestHome, '--project', directory,
+    '--transcripts', COMPACTION_FIXTURES, '--since', '2026-09-01T11:30:00.000Z', '--format', 'json',
+  ], { encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  const outcomes = JSON.parse(run.stdout).compaction_outcomes;
+  assert.equal(outcomes.available, true);
+  assert.deepEqual(outcomes.totals.compactions.total, { value: 3, quality: 'derived' });
+  assert.deepEqual(outcomes.totals.jev.fallback_rate, { value: 1, quality: 'derived' });
+  assert.equal(run.stdout.includes('SENTINEL'), false);
 });
