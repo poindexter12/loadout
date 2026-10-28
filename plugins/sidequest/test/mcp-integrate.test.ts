@@ -441,7 +441,21 @@ test('comment reads stay chronological through the ten-comment threshold', async
   assert.ok(briefingPath, briefingOutput);
   const briefing = fs.readFileSync(briefingPath, 'utf8');
   assert.match(briefing, /## Executor briefing/);
-  for (const body of bodies) assert.ok(briefing.includes(body));
+  // SQ-387: eight 16000-byte bodies pass SQ-350's 16 KiB briefing comment budget. The newest
+  // stays inline; the seven older ones are deferred, each to a context_page call printed in
+  // place under its own numbered header. Recovering every handle, in briefing order, still
+  // yields every body: complete, and chronological once the newest-first order is reversed.
+  assert.ok(briefing.includes(bodies[7]), 'the newest comment body is inlined verbatim');
+  for (const body of bodies.slice(0, 7)) assert.ok(!briefing.includes(body), 'older bodies are deferred by the budget');
+  assert.match(briefing, /7 older comment bodies are deferred to keep this section within 16384 bytes/);
+  const commentSection = briefing.slice(briefing.indexOf('## Newest ticket evidence and comments (newest first)'));
+  const headers = [...commentSection.matchAll(/^### Comment (\d+)$/gm)].map((match) => Number(match[1]));
+  assert.deepEqual(headers, [8, 7, 6, 5, 4, 3, 2, 1], 'comments are numbered newest first');
+  const deferredCalls = [...commentSection.matchAll(/\(Body deferred by the 16384-byte briefing comment budget: 16000 bytes\. Fetch it with context_page\((\{.*?\})\)\.\)/g)]
+    .map((match) => JSON.parse(match[1] ?? '{}'));
+  assert.equal(deferredCalls.length, 7, 'every deferred body prints its own retrieval call');
+  const recoveredOlder = await Promise.all(deferredCalls.map((retrieval: any) => recoverBody({ arguments: retrieval })));
+  assert.deepEqual([...recoveredOlder].reverse(), bodies.slice(0, 7), 'deferred handles recover the older bodies in chronological order');
 
   for (const args of [{ cursor: 'bad' }, { cursor: '-1' }, { limit: 0 }, { limit: 101 }]) {
     const invalid = await callToolRaw('comments', { project, ref: ticket.ref, ...args });

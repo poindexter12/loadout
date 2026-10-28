@@ -1340,7 +1340,7 @@
   },
   {
     "name": "comment",
-    "description": "Handoff.",
+    "description": "Short handoff: summary plus pointers (paths, shas, ids), no reports or logs. Briefings defer bodies past 16 KiB.",
     "inputSchema": {
       "type": "object",
       "properties": {
