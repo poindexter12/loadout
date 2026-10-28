@@ -780,6 +780,11 @@ function createDispatch(dependencies) {
       message: `${ticket.ref} cannot close: its checkout is on ${observed} rather than the candidate ${candidate}, so this verdict is about a different tree. A review ENDS on its candidate. Run \`git -C ${worktree} checkout --detach ${candidate}\`, re-run the declared verify there, then close. Comparing against the integration branch never needs HEAD to move: use \`git diff ${candidate}...main\` or \`git show\`.`
     };
   }
+  const CONTEXT_EXHAUSTION_REASON = /\bcontext(?:\s+window)?\s+exhaust(?:ion|ed)\b/i;
+  function contextExhaustionRelease(release) {
+    if (!release || release.kind === "oracle") return false;
+    return CONTEXT_EXHAUSTION_REASON.test(String(release.reason || ""));
+  }
   function setDispatchTerminal(ticket, outcome, source, opts) {
     const state = dispatchState(ticket);
     if (!state) return;
@@ -792,7 +797,7 @@ function createDispatch(dependencies) {
     } : null;
     const attemptStart = state.claimedAt || state.boundAt || state.launchedAt || state.preparedAt || null;
     const hostSleep = opts?.hostSleep || defaultHostSleep();
-    const failureShape = opts?.failureShape || release?.kind || classifyDispatchFailure(opts?.error, {
+    const failureShape = contextExhaustionRelease(release) ? "context_exhaustion" : opts?.failureShape || release?.kind || classifyDispatchFailure(opts?.error, {
       hostSleptDuring: () => Boolean(attemptStart) && hostSleep.sleptDuring(attemptStart, at)
     });
     state.outcome = outcome;
@@ -973,6 +978,9 @@ function createDispatch(dependencies) {
     const worktreeFailures = attempts.every((attempt) => attempt.sharedTree === false && attempt.failureShape === "worktree_environment");
     if (worktreeFailures) {
       return `prepare dispatch: ${ticket.ref} has two isolated no-commit dispatches (${recordedAttempts}) that failed to find the app or service. Check for repository bind mounts or unavailable paths, then choose a shared-tree fallback with \`dispatch ${ticket.ref} --shared-tree\` (or MCP \`sharedTree:true\`): its spawn omits \`isolation\`, so the harness validator does not run. Run one shared-tree executor at a time. Pass allowRepeatFailure:true to override this block; the override is recorded.`;
+    }
+    if (attempts.some((attempt) => attempt.failureShape === "context_exhaustion")) {
+      return `prepare dispatch: ${ticket.ref} has two prior terminal no-commit dispatches (${recordedAttempts}), and at least one ran out of executor context. A redispatch on the same briefing and route will start just as full. Check the briefing's Launch budget line and the ticket's comment history first, split or narrow the ticket if it is genuinely too large for one executor, then dispatch with allowRepeatFailure:true when a repeat is intentional.`;
     }
     const repeatedContradictions = attempts.every((attempt) => attempt.release?.kind === "contradiction");
     if (repeatedContradictions) {

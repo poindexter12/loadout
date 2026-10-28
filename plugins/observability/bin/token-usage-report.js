@@ -5,6 +5,7 @@ const { defaultDatabaseFile } = require('./observer.js');
 const { openObservabilityStore } = require('../lib/observability/store.js');
 const { readSidequestBoard, defaultSidequestHome } = require('../lib/observability/board-cost.js');
 const { buildTokenUsageReport, formatTokenUsageReport } = require('../lib/observability/report.js');
+const { defaultTranscriptDir, readCompactionOutcomes } = require('../lib/observability/compaction.js');
 
 const HELP = `Usage: token-usage-report.js [options]
 
@@ -19,6 +20,13 @@ Options:
   --until <timestamp>      Include usage before this ISO-8601 timestamp.
   --compare-previous       Compare the selected window with the preceding window.
   --ledger                 Include the per-request ledger in text output.
+  --compaction             Scan this project's Claude Code transcripts for compaction
+                           outcomes: compact_boundary records and fast-jev-compaction
+                           replacements/fallbacks. Off by default. Reads system records
+                           only and reports numbers only, never transcript text.
+                           --since/--until apply. Transcripts are found under
+                           CLAUDE_CONFIG_DIR (or ~/.claude)/projects/<project path>.
+  --transcripts <dir>      Scan this transcript directory instead (implies --compaction).
   --help                   Show this help message.
 `;
 
@@ -30,6 +38,7 @@ function parseArgs(argv, env = process.env, cwd = process.cwd()) {
     projectPath: env.CLAUDE_PROJECT_DIR || cwd,
     includeLedger: false,
     comparePrevious: false,
+    compaction: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -43,8 +52,11 @@ function parseArgs(argv, env = process.env, cwd = process.cwd()) {
     if (argument === '--until' && next) { options.until = next; index += 1; continue; }
     if (argument === '--compare-previous') { options.comparePrevious = true; continue; }
     if (argument === '--ledger') { options.includeLedger = true; continue; }
+    if (argument === '--compaction') { options.compaction = true; continue; }
+    if (argument === '--transcripts' && next) { options.compaction = true; options.transcriptDir = next; index += 1; continue; }
     throw new Error(`Unknown or incomplete argument: ${argument}`);
   }
+  if (options.compaction && !options.transcriptDir) options.transcriptDir = defaultTranscriptDir(options.projectPath, env);
   return options;
 }
 
@@ -60,8 +72,13 @@ function main(argv = process.argv.slice(2)) {
       sidequestHome: options.sidequestHome,
       projectPath: options.projectPath,
     });
+    // Transcripts are read only on explicit request; see lib/observability/compaction.js.
+    const compaction = options.compaction
+      ? readCompactionOutcomes({ transcriptDir: options.transcriptDir, since: options.since, until: options.until })
+      : undefined;
     const report = buildTokenUsageReport(store, {
       board,
+      compaction,
       includeLedger: options.includeLedger || options.format === 'json',
       boardCost: {
         since: options.since,

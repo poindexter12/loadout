@@ -2940,7 +2940,7 @@ function commitReachedRef(repo, commit, ref) {
   }
 }
 function ticketIntegrationTarget(slug, ticket) {
-  return integrationTarget(slug, ticket?.dispatch?.integrationTarget || void 0);
+  return configLayer.resolveFrozenIntegrationTarget(slug, ticket?.dispatch?.integrationTarget || void 0);
 }
 function recordedDelivery(slug, ticket, commit, evidence) {
   const requestedCommit = String(commit || "").trim();
@@ -3120,7 +3120,17 @@ function completeTicketAsControlPlane(slug, idOrRef, opts) {
     try {
       target = ticketIntegrationTarget(slug, ticket);
     } catch (error) {
-      return { ok: false, reason: "integration_target_unavailable", ticket, message: String(error?.message || error) };
+      const frozen = ticket.dispatch?.integrationTarget;
+      const frozenBranch = String((frozen && typeof frozen === "object" ? frozen.branch : frozen) || "").trim();
+      if (opts.abandonSubmission !== true || !frozenBranch) {
+        return { ok: false, reason: "integration_target_unavailable", ticket, message: String(error?.message || error) };
+      }
+      target = {
+        branch: frozenBranch,
+        upstream: frozen && typeof frozen === "object" ? frozen.upstream : void 0,
+        mode: frozen && typeof frozen === "object" ? frozen.mode : void 0,
+        unavailable: String(error?.message || error)
+      };
     }
     if (opts.abandonSubmission === true) {
       const abandoned = recordAbandonedSubmission(slug, idOrRef, { target, reason });

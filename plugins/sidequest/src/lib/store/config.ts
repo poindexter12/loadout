@@ -359,6 +359,14 @@ function integrationBranchExists(absPath: any, ref: string) {
   }
 }
 
+class IntegrationRefMissingError extends Error {
+  missing: { mode: string; upstream: string; branch: string; ref: string };
+  constructor(missing: { mode: string; upstream: string; branch: string; ref: string }) {
+    super(`Configured integration ref "${missing.ref}" for branch "${missing.branch}" does not exist. Create or fetch it, or set integrationBranch with board-config --integration-branch <branch>.`);
+    this.missing = missing;
+  }
+}
+
 function integrationTarget(slug?: any, override?: any) {
   const meta = readMeta(slug);
   if (!meta) return null;
@@ -368,10 +376,30 @@ function integrationTarget(slug?: any, override?: any) {
   const branch = normalizeIntegrationBranch(requested.branch ?? (typeof override === 'string' ? override : meta.integrationBranch));
   const upstream = mode === 'local' ? branch : `origin/${branch}`;
   const ref = mode === 'local' ? `refs/heads/${branch}` : `refs/remotes/origin/${branch}`;
-  if (!integrationBranchExists(meta.path, ref)) {
-    throw new Error(`Configured integration ref "${ref}" for branch "${branch}" does not exist. Create or fetch it, or set integrationBranch with board-config --integration-branch <branch>.`);
-  }
+  if (!integrationBranchExists(meta.path, ref)) throw new IntegrationRefMissingError({ mode, upstream, branch, ref });
   return { mode, upstream, branch };
+}
+
+// SQ-383 (SQ-366 Case A): a prepared ticket keeps the integration target frozen at dispatch, and
+// that target is often a PR branch the forge deletes once it merges. Closing such a ticket must not
+// die on the missing ref, so a frozen target whose ref is GONE falls back to the board's current
+// target (where the PR merged), and the result names the frozen target it replaced. Only a missing
+// ref falls back: a malformed frozen target, or a board target that is itself missing, still throws.
+function resolveFrozenIntegrationTarget(slug?: any, frozen?: any) {
+  if (!frozen) return integrationTarget(slug);
+  try {
+    return integrationTarget(slug, frozen);
+  } catch (error: any) {
+    if (!(error instanceof IntegrationRefMissingError)) throw error;
+    const fallback: any = integrationTarget(slug);
+    if (!fallback) throw error;
+    const missing = error.missing;
+    if (fallback.mode === missing.mode && fallback.branch === missing.branch) throw error;
+    return Object.assign({}, fallback, {
+      frozenTarget: { mode: missing.mode, upstream: missing.upstream, branch: missing.branch },
+      fallback: { reason: 'frozen_integration_ref_missing', ref: missing.ref, detail: error.message },
+    });
+  }
 }
 
 function integrationTargetCommit(absPath: any, target: any) {
@@ -520,7 +548,7 @@ function effectiveScope(slug?: any, filesOrTicket?: any) {
 }
 
 
-  return { defaultProjectName, normalizeAlwaysInScope, normalizeReadOnlyDeniedTools, normalizeGeneratedPairPath, normalizeGeneratedPairs, generatedPathFor, trackedGeneratedPaths, derivedGeneratedPairs, defaultAlwaysInScope, normalizeDeliveryMode, normalizeDeliveryChannel, resolveDeliveryConfig, normalizeIssueMirror, normalizeIntegrationMode, normalizeIntegrationBranch, normalizeWorktreeIsolation, normalizeWorktreeBase, normalizeNotIntegratedSalvageAgeHours, normalizeWorktreeRecoveryRetentionAgeHours, normalizeWorktreeRecoveryRetentionMaxPerAgent, normalizeAutoApproveTestScope, normalizeAutoApproveScope, normalizeWorktreeSetup, normalizeWorktreeDependencyPaths, normalizeIntegrationVerifyTimeoutMs, hasOriginRemote, integrationBranchExists, integrationTarget, integrationTargetCommit, normalizeBoardName, boardConfig, setBoardConfig, effectiveScope };
+  return { defaultProjectName, normalizeAlwaysInScope, normalizeReadOnlyDeniedTools, normalizeGeneratedPairPath, normalizeGeneratedPairs, generatedPathFor, trackedGeneratedPaths, derivedGeneratedPairs, defaultAlwaysInScope, normalizeDeliveryMode, normalizeDeliveryChannel, resolveDeliveryConfig, normalizeIssueMirror, normalizeIntegrationMode, normalizeIntegrationBranch, normalizeWorktreeIsolation, normalizeWorktreeBase, normalizeNotIntegratedSalvageAgeHours, normalizeWorktreeRecoveryRetentionAgeHours, normalizeWorktreeRecoveryRetentionMaxPerAgent, normalizeAutoApproveTestScope, normalizeAutoApproveScope, normalizeWorktreeSetup, normalizeWorktreeDependencyPaths, normalizeIntegrationVerifyTimeoutMs, hasOriginRemote, integrationBranchExists, integrationTarget, resolveFrozenIntegrationTarget, integrationTargetCommit, normalizeBoardName, boardConfig, setBoardConfig, effectiveScope };
 }
 
 module.exports = { createConfig };

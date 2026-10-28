@@ -32,6 +32,18 @@ GPT-6 Astra uses the maintained OpenAI model and pricing authorities, including 
 
 To check setup or disable telemetry, run the same skill and describe what you want. Claude reports whether a project is sending data and tells you when a restart or more activity is needed.
 
+## Compaction outcomes
+
+The token usage report (`plugins/observability/bin/token-usage-report.js`) can also say how context compaction went in a project. Pass `--compaction` to scan that project's Claude Code transcripts, or `--transcripts <dir>` to scan a specific directory. `--since` and `--until` apply to the scan as well. The report adds a **Compaction outcomes** section with totals and one row per transcript (main session or subagent). Each row shows:
+
+- compaction boundaries, split into auto, manual, and other, plus the largest pre-compaction token count and the mean boundary reduction
+- fast-jev-compaction replacements and their mean reduction percentage
+- jev fallbacks by reason (below minimum, request failed, other) and the fallback rate across all jev attempts
+
+Text output lists the first rows. Use `--format json` to get every row.
+
+The scan is off by default and runs only when you ask for it. It reads system records only and reports numbers. Transcript text is never copied into the report. These figures come straight from the transcripts, not from the local observer or the dashboard, so they have no Grafana panel.
+
 ## Health and statusline signals
 
 The observer's `GET /health` endpoint returns `200` when it is healthy and `503` when it has a health failure. For an enabled outbox, `outbox_stalled` means records are pending but the sender's last attempt is older than its retry interval. `outbox_not_draining` means the oldest pending record has been waiting more than 120 seconds. The codes distinguish a sender that stopped attempting from a backlog that is aging while still pending.

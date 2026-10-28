@@ -1028,6 +1028,20 @@ function reviewCandidateTreeRefusal(slug?: any, ticket?: any) {
   };
 }
 
+// SQ-350: an executor that runs out of its own context releases with a reason, not a
+// recorded blocker. The briefing tells it to begin that reason with "context exhaustion:";
+// older runs wrote free text such as "executor context exhausted (96%)". Either is
+// classified as failureShape context_exhaustion so the attempt history and the repeat
+// dispatch guard can tell it apart from a real external blocker. This flags; it never
+// refuses the release, because refusing would leave a run that cannot continue dying with
+// its claim held. An oracle release is an ask, not an exhaustion, and is left alone.
+const CONTEXT_EXHAUSTION_REASON = /\bcontext(?:\s+window)?\s+exhaust(?:ion|ed)\b/i;
+
+function contextExhaustionRelease(release?: any) {
+  if (!release || release.kind === 'oracle') return false;
+  return CONTEXT_EXHAUSTION_REASON.test(String(release.reason || ''));
+}
+
 function setDispatchTerminal(ticket?: any, outcome?: any, source?: any, opts?: any) {
   const state = dispatchState(ticket);
   if (!state) return;
@@ -1043,9 +1057,11 @@ function setDispatchTerminal(ticket?: any, outcome?: any, source?: any, opts?: a
   // the host is only read when the error actually looks like a watchdog death.
   const attemptStart = state.claimedAt || state.boundAt || state.launchedAt || state.preparedAt || null;
   const hostSleep = opts?.hostSleep || defaultHostSleep();
-  const failureShape = opts?.failureShape || release?.kind || classifyDispatchFailure(opts?.error, {
-    hostSleptDuring: () => Boolean(attemptStart) && hostSleep.sleptDuring(attemptStart, at),
-  });
+  const failureShape = contextExhaustionRelease(release)
+    ? 'context_exhaustion'
+    : opts?.failureShape || release?.kind || classifyDispatchFailure(opts?.error, {
+      hostSleptDuring: () => Boolean(attemptStart) && hostSleep.sleptDuring(attemptStart, at),
+    });
   state.outcome = outcome;
   state.failureShape = failureShape;
   state.terminalAt = at;
@@ -1259,6 +1275,9 @@ function repeatNoCommitDispatchError(ticket?: any, state?: any) {
   const worktreeFailures = attempts.every((attempt?: any) => attempt.sharedTree === false && attempt.failureShape === 'worktree_environment');
   if (worktreeFailures) {
     return `prepare dispatch: ${ticket.ref} has two isolated no-commit dispatches (${recordedAttempts}) that failed to find the app or service. Check for repository bind mounts or unavailable paths, then choose a shared-tree fallback with \`dispatch ${ticket.ref} --shared-tree\` (or MCP \`sharedTree:true\`): its spawn omits \`isolation\`, so the harness validator does not run. Run one shared-tree executor at a time. Pass allowRepeatFailure:true to override this block; the override is recorded.`;
+  }
+  if (attempts.some((attempt?: any) => attempt.failureShape === 'context_exhaustion')) {
+    return `prepare dispatch: ${ticket.ref} has two prior terminal no-commit dispatches (${recordedAttempts}), and at least one ran out of executor context. A redispatch on the same briefing and route will start just as full. Check the briefing's Launch budget line and the ticket's comment history first, split or narrow the ticket if it is genuinely too large for one executor, then dispatch with allowRepeatFailure:true when a repeat is intentional.`;
   }
   const repeatedContradictions = attempts.every((attempt?: any) => attempt.release?.kind === 'contradiction');
   if (repeatedContradictions) {

@@ -1,0 +1,2 @@
+{"type":"user","sessionId":"22222222-aaaa-4bbb-8ccc-000000000002","isSidechain":false,"timestamp":"2026-09-03T08:00:00.000Z","uuid":"u-1","message":{"role":"user","content":"SENTINEL-UNCOMPACTED-SESSION"}}
+{"type":"assistant","sessionId":"22222222-aaaa-4bbb-8ccc-000000000002","isSidechain":false,"timestamp":"2026-09-03T08:00:10.000Z","uuid":"a-1","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}

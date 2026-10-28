@@ -3285,8 +3285,10 @@ function commitReachedRef(repo: string, commit: string, ref: string) {
   }
 }
 
+// SQ-383: a frozen dispatch target whose branch the forge deleted falls back to the board target
+// (configLayer.resolveFrozenIntegrationTarget), so closing a merged PR's tickets does not die on it.
 function ticketIntegrationTarget(slug?: any, ticket?: any) {
-  return integrationTarget(slug, ticket?.dispatch?.integrationTarget || undefined);
+  return configLayer.resolveFrozenIntegrationTarget(slug, ticket?.dispatch?.integrationTarget || undefined);
 }
 
 function recordedDelivery(slug?: any, ticket?: any, commit?: any, evidence?: any) {
@@ -3491,7 +3493,20 @@ function completeTicketAsControlPlane(slug?: any, idOrRef?: any, opts?: any) {
     try {
       target = ticketIntegrationTarget(slug, ticket);
     } catch (error: any) {
-      return { ok: false, reason: 'integration_target_unavailable', ticket, message: String(error?.message || error) };
+      // SQ-383: abandonment must not depend on a resolvable target. With neither the frozen nor
+      // the board target resolvable, nothing can show the candidate landed there, so record the
+      // abandonment against the frozen branch name and say why no reachability was measured.
+      const frozen = ticket.dispatch?.integrationTarget;
+      const frozenBranch = String((frozen && typeof frozen === 'object' ? frozen.branch : frozen) || '').trim();
+      if (opts.abandonSubmission !== true || !frozenBranch) {
+        return { ok: false, reason: 'integration_target_unavailable', ticket, message: String(error?.message || error) };
+      }
+      target = {
+        branch: frozenBranch,
+        upstream: frozen && typeof frozen === 'object' ? frozen.upstream : undefined,
+        mode: frozen && typeof frozen === 'object' ? frozen.mode : undefined,
+        unavailable: String(error?.message || error),
+      };
     }
     if (opts.abandonSubmission === true) {
       const abandoned = recordAbandonedSubmission(slug, idOrRef, { target, reason });
