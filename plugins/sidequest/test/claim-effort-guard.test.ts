@@ -642,11 +642,12 @@ test('serialized dispatch spawn and briefing preserve a huge packet', () => {
   // The newest body survives serialization whole (markdown, blank line, Unicode intact); the
   // older one is deferred to a retrieval call that resolves that comment, never silently dropped.
   const [olderComment, newestComment] = ticket(created.ref).comments;
+  assert.equal(olderComment.body, comments[0]);
   assert.equal(newestComment.body, comments[1]);
   assert.ok(briefing.includes(comments[1]), 'the newest comment body is inlined verbatim');
   assert.ok(!briefing.includes(comments[0]), 'the older comment body is deferred by the budget');
   assert.match(briefing, /1 older comment body is deferred to keep this section within 16384 bytes/);
-  const deferredLead = `(Body deferred by the 16384-byte briefing comment budget: ${Buffer.byteLength(comments[0], 'utf8')} bytes. Fetch it with context_page(`;
+  const deferredLead = `(Body deferred by the 16384-byte briefing comment budget: ${Buffer.byteLength(olderComment.body, 'utf8')} bytes. Fetch it with context_page(`;
   assert.ok(briefing.includes(deferredLead), 'the deferred body prints its budget lead and retrieval call');
   const calls = [...briefing.matchAll(/Fetch it with context_page\((\{.*?\})\)\.\)/g)].map((match) => JSON.parse(match[1] ?? '{}'));
   assert.equal(calls.length, 1, 'only the older body is deferred');
