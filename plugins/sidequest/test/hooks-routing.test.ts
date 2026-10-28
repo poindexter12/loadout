@@ -33,6 +33,7 @@ import {
   runHookOutput,
   runHookProcessForBudget,
   waitForPath,
+  sweepReportFile,
   publishStateLock,
   runHook,
   runHookOutputForBudget,
@@ -948,7 +949,7 @@ test('session-start sweep is fail-soft and releases only claims past the TTL', (
   assert.equal(store.getTicket(slug, fresh.ref).claim.by, 'fresh-session');
 });
 
-test('session-end reclaims an unbound old patch-equivalent worktree and stays fail-soft', () => {
+test('session-end reclaims an unbound old patch-equivalent worktree and stays fail-soft', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-session-end-project-'));
   const worktrees = path.join(project, '.claude', 'worktrees');
   const projectGit = (args: string[], cwd?: string) => execFileSync('git', args, { cwd: cwd || project, encoding: 'utf8', windowsHide: true }).trim();
@@ -971,8 +972,12 @@ test('session-end reclaims an unbound old patch-equivalent worktree and stays fa
   const old = new Date(Date.now() - 4 * 60 * 60 * 1000);
   fs.utimesSync(worktree, old, old);
   store.ensureProject(project);
+  const report = sweepReportFile(SIDEQUEST_HOME, project);
+  fs.rmSync(report, { force: true });
 
   assert.doesNotThrow(() => runHook(SESSION_END, { session_id: 'session-end-test', cwd: project }));
+  // SQ-386: SessionEnd hands the sweep to a detached worker, which reports when it is done.
+  await waitForPath(report);
   assert.equal(fs.existsSync(worktree), false);
   assert.equal(projectGit(['branch', '--list', branch]), '');
   assert.doesNotThrow(() => runHook(SESSION_END, { session_id: 'session-end-fail-soft' }, { CLAUDE_PLUGIN_ROOT: path.join(project, 'missing-plugin') }));
