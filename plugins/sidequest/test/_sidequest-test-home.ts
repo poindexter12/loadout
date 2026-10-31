@@ -1,6 +1,17 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 
+import { scrubInheritedSidequestEnvironment } from './_sidequest-test-env.js';
+
+// Ahead of every pin below, and ahead of anything that could read a knob: an operator's
+// SIDEQUEST_* tuning variables are inherited by the children these suites spawn, so a release
+// cut run with a widened phase budget made the SQ-225 detached-capture test read that budget
+// back instead of its own (SQ-389). This is the one choke point for both entry points, since
+// `npm run test:files` and the functional phase scripts/test-full.mjs spawns each load this
+// file with `--import`. The outer runner samples its own budget before spawning the phase, so
+// scrubbing here cannot widen or shrink what the suite is actually held to.
+scrubInheritedSidequestEnvironment(process.env);
+
 const { tmpFixture } = require('../../test-support/tmp-fixture.js') as { tmpFixture(prefix: string): string };
 const sidequestTestHome = tmpFixture('sq-test-home-');
 Object.assign(process.env, {

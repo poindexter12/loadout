@@ -371,34 +371,52 @@ async function runTests(phase, files, environment) {
   }
 }
 
-async function main() {
-  if (phaseCapacity.overrideNotice) console.error(phaseCapacity.overrideNotice);
-  const suiteTemporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'sidequest-full-suite-'));
-  const suiteHomeDirectory = path.join(suiteTemporaryDirectory, 'home');
-  const suiteClaudeDirectory = path.join(suiteHomeDirectory, '.claude');
-  const suiteSidequestDirectory = path.join(suiteClaudeDirectory, 'sidequest');
-  const suiteGatewayCatalogDirectory = path.join(suiteTemporaryDirectory, 'gateway-catalog');
-  await fs.mkdir(suiteSidequestDirectory, { recursive: true });
-  await fs.mkdir(path.join(suiteGatewayCatalogDirectory, 'model-gateway'), { recursive: true });
-  await fs.writeFile(
-    path.join(suiteGatewayCatalogDirectory, 'model-gateway', 'catalog.json'),
-    JSON.stringify(fullSuiteGatewayCatalog()),
-  );
-  const suiteTestEnvironment = {
-    ...suiteEnvironment(),
-    HOME: suiteHomeDirectory,
-    USERPROFILE: suiteHomeDirectory,
-    SIDEQUEST_HOME: suiteSidequestDirectory,
-    SIDEQUEST_CLAUDE_HOME: suiteClaudeDirectory,
+export function suiteDirectoryLayout(suiteTemporaryDirectory) {
+  const homeDirectory = path.join(suiteTemporaryDirectory, 'home');
+  const claudeDirectory = path.join(homeDirectory, '.claude');
+  return {
+    homeDirectory,
+    claudeDirectory,
+    sidequestDirectory: path.join(claudeDirectory, 'sidequest'),
+    gatewayCatalogDirectory: path.join(suiteTemporaryDirectory, 'gateway-catalog'),
+  };
+}
+
+// Exported so test-full.test.ts can check every SIDEQUEST_* name pinned here against the
+// test-home preload's sandbox allowlist (SQ-389). The preload deletes every other inherited
+// SIDEQUEST_* variable, so a pin added here and not added to that allowlist would be gone
+// before the first test ran and the phase would quietly escape its own sandbox. `base` is a
+// parameter so the test can build a deterministic environment.
+export function suiteTestEnvironment(suiteTemporaryDirectory, base = process.env) {
+  const layout = suiteDirectoryLayout(suiteTemporaryDirectory);
+  return {
+    ...suiteEnvironment(base),
+    HOME: layout.homeDirectory,
+    USERPROFILE: layout.homeDirectory,
+    SIDEQUEST_HOME: layout.sidequestDirectory,
+    SIDEQUEST_CLAUDE_HOME: layout.claudeDirectory,
     TMPDIR: suiteTemporaryDirectory,
     TMP: suiteTemporaryDirectory,
     TEMP: suiteTemporaryDirectory,
-    SIDEQUEST_DISCOVERY_DIRS: suiteGatewayCatalogDirectory,
+    SIDEQUEST_DISCOVERY_DIRS: layout.gatewayCatalogDirectory,
   };
+}
+
+async function main() {
+  if (phaseCapacity.overrideNotice) console.error(phaseCapacity.overrideNotice);
+  const suiteTemporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'sidequest-full-suite-'));
+  const layout = suiteDirectoryLayout(suiteTemporaryDirectory);
+  await fs.mkdir(layout.sidequestDirectory, { recursive: true });
+  await fs.mkdir(path.join(layout.gatewayCatalogDirectory, 'model-gateway'), { recursive: true });
+  await fs.writeFile(
+    path.join(layout.gatewayCatalogDirectory, 'model-gateway', 'catalog.json'),
+    JSON.stringify(fullSuiteGatewayCatalog()),
+  );
+  const phaseEnvironment = suiteTestEnvironment(suiteTemporaryDirectory);
 
   let suiteError = null;
   try {
-    await runTests('functional', testFiles, suiteTestEnvironment);
+    await runTests('functional', testFiles, phaseEnvironment);
   } catch (error) {
     suiteError = error;
   }
