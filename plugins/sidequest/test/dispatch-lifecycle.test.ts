@@ -39,7 +39,6 @@ const store = require('../lib/store.js');
 const worktrees = require('../lib/worktrees.js');
 const worktreeLease = require('../lib/kernel/worktree.js');
 const agentsync = require('../lib/agentsync.js');
-const lockTrace = require('../lib/lock-trace.js');
 const { claimRefusalMessage } = require('../lib/refusal-guidance.js');
 const { checkSidequestInstall } = require('../lib/dispatch-preflight.js');
 const { collectGitSubmissionFacts } = require('../lib/mcp-lifecycle.js');
@@ -2966,65 +2965,131 @@ test('dispatch briefing includes each pinned decision once and reports later del
  * which made this the hottest lock-holding path on the board. The plan now runs outside the lock and
  * the lock is taken only to re-validate cheaply and store.
  *
- * The assertion is a ratio against a MEASURED process spawn rather than a millisecond threshold, on
- * purpose. This machine's suites go red at load 26-34 and pass at ~10, so a stopwatch test would be
- * measuring the load and would have to be "fixed" by loosening it until it proved nothing. One `git
- * rev-parse` costs whatever a spawn costs here and now, and the hold inflates with load exactly as
- * that spawn does. So "no write-lock hold lasts as long as a single Git subprocess" is a structural
- * claim -- a lock spanning six or more spawns cannot satisfy it at any load -- while staying immune
- * to the load itself. Before this change the hold covered nearly the whole prepare and the first
- * assertion fails by an order of magnitude; it is not a threshold anyone can tune past.
+ * SQ-388. This used to be a ratio: the worst traced hold had to be shorter than one measured `git
+ * rev-parse`. Both sides of that are wall-clock samples, so a GC pause or scheduler stall inside a
+ * transaction failed it on CI (an 18ms hold against a 4.5ms spawn) with no Git work under the lock.
+ * It now counts instead of timing. A child process instruments `child_process` and `fs` before the
+ * store loads -- the board modules destructure those functions at load time, so patching them from
+ * this already-loaded test process would see nothing -- and tracks the write lock by the only
+ * statements that take and drop it, `BEGIN IMMEDIATE` and `COMMIT`/`ROLLBACK` on node:sqlite. Every
+ * subprocess spawn and fs call made while the lock is held is recorded. No machine load changes a count.
  *
- * Every hold recorded in the traced window counts, not only the one attributed to `prepareDispatch`,
- * which makes the claim stronger than attribution and independent of how a frame happens to be named.
+ * What must be zero under the lock: subprocess spawns of any kind (the Git work), directory
+ * enumeration, and any fs call on a path inside the project's working tree (the filesystem-snapshot
+ * read). What is allowed: the cheap re-validation the store does on purpose -- reading `.git/HEAD` and
+ * ref files directly instead of spawning `git rev-parse`, stat-ing the model catalog, realpath of the
+ * project root, renaming the dispatch token into place. A blanket "zero fs calls" would fail on that
+ * deliberate design, so the rules name the expensive shapes instead.
+ *
+ * The positive controls keep a zero from being vacuous: the lock must have been taken at least once
+ * (the prepare stores under it), and Git subprocesses and fs calls must have been seen OUTSIDE it, so
+ * the instrumentation demonstrably sees the plan's real work and the zero is about where it ran.
  */
 test('preparing a dispatch does not hold the board write lock across its Git and filesystem work', (t: any) => {
-  const traceFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sq-dispatch-lock-trace-')), 'trace.jsonl');
   const ticket = createFixture('write lock is not held across the dispatch plan');
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-dispatch-lock-scope-'));
+  const probeScript = path.join(scratch, 'lock-scope-probe.js');
+  fs.writeFileSync(probeScript, [
+    "'use strict';",
+    "const childProcess = require('node:child_process');",
+    "const fs = require('node:fs');",
+    "const { DatabaseSync } = require('node:sqlite');",
+    'const [storePath, slug, ref] = process.argv.slice(2);',
+    'let recording = false;',
+    'let lockHeld = false;',
+    'let lockTakes = 0;',
+    'const inside = [];',
+    'const outside = { spawns: [], fsCalls: 0 };',
+    "const label = (value) => (typeof value === 'string' ? value : Array.isArray(value) ? value.map(String).join(' ') : '');",
+    'const record = (kind, name, args) => {',
+    '  if (!recording) return;',
+    "  const call = { kind, name, target: label(args[0]), args: label(args[1]).slice(0, 160) };",
+    '  if (lockHeld) inside.push(call);',
+    "  else if (kind === 'spawn') outside.spawns.push(call);",
+    '  else outside.fsCalls += 1;',
+    '};',
+    'const wrap = (target, name, kind) => {',
+    '  const original = target[name];',
+    "  if (typeof original !== 'function' || !/^[a-z]/.test(name)) return;",
+    '  const wrapped = function (...args) { record(kind, name, args); return original.apply(this, args); };',
+    '  for (const key of Reflect.ownKeys(original)) {',
+    "    if (key === 'length' || key === 'name' || key === 'prototype') continue;",
+    '    const value = original[key];',
+    "    wrapped[key] = typeof value === 'function' ? function (...args) { record(kind, `${name}.${String(key)}`, args); return value.apply(this, args); } : value;",
+    '  }',
+    '  target[name] = wrapped;',
+    '};',
+    "for (const name of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) wrap(childProcess, name, 'spawn');",
+    "for (const name of Object.keys(fs)) wrap(fs, name, 'fs');",
+    // The lock is held from the moment BEGIN IMMEDIATE returns until COMMIT or ROLLBACK is issued. The
+    // flag clears before the release statement runs, so a throwing COMMIT cannot leave later work counted.
+    'const exec = DatabaseSync.prototype.exec;',
+    'DatabaseSync.prototype.exec = function (sql, ...rest) {',
+    '  const statement = String(sql).trim();',
+    '  if (/^(COMMIT|ROLLBACK|END)\\b/i.test(statement)) lockHeld = false;',
+    '  const result = exec.call(this, sql, ...rest);',
+    '  if (/^BEGIN\\s+IMMEDIATE\\b/i.test(statement)) { lockHeld = true; lockTakes += 1; }',
+    '  return result;',
+    '};',
+    'const store = require(storePath);',
+    'let prepared;',
+    'recording = true;',
+    'try {',
+    '  prepared = store.prepareDispatch(slug, ref);',
+    '} finally {',
+    '  recording = false;',
+    '}',
+    'process.stdout.write(JSON.stringify({',
+    '  ok: prepared && prepared.ok === true,',
+    "  baseCommit: prepared && prepared.ticket && prepared.ticket.dispatch ? prepared.ticket.dispatch.baseCommit : null,",
+    '  lockTakes, lockHeldAtEnd: lockHeld, inside, outside,',
+    '}));',
+  ].join('\n'));
 
-  // What one process spawn costs on this machine, under whatever load it is under right now.
-  const spawnCosts: number[] = [];
-  for (let probe = 0; probe < 3; probe += 1) {
-    const startedProbe = process.hrtime.bigint();
-    execFileSync('git', ['rev-parse', 'HEAD'], { cwd: PROJECT, encoding: 'utf8', windowsHide: true });
-    spawnCosts.push(Number(process.hrtime.bigint() - startedProbe) / 1e6);
-  }
-  const oneGitSpawnMs = spawnCosts.slice().sort((left, right) => left - right)[1] ?? 0;
-  assert.ok(oneGitSpawnMs > 0, 'the Git spawn probe produced no measurement, so there is nothing to compare a hold against');
-
-  let prepareMs = 0;
-  let records: any[] = [];
-  process.env[lockTrace.LOCK_TRACE_ENV] = traceFile;
-  lockTrace.resetLockTrace();
+  let report: any;
   try {
-    const started = process.hrtime.bigint();
-    const prepared = store.prepareDispatch(slug, ticket.ref);
-    prepareMs = Number(process.hrtime.bigint() - started) / 1e6;
-    assert.equal(prepared.ok, true, 'the two-phase prepare still returns a prepared dispatch');
-    assert.equal(typeof prepared.ticket.dispatch.baseCommit, 'string', 'the plan still records the commit its run starts from');
-    lockTrace.flushLockTrace();
-    // Tracing only creates the file once it has something to append, so an absent file has to read as
-    // "nothing was recorded" and fail the next assertion rather than crash here.
-    records = fs.existsSync(traceFile) ? lockTrace.readLockTraceRecords(traceFile).records : [];
+    const run = spawnSync(process.execPath, [probeScript, require.resolve('../lib/store.js'), slug, ticket.ref], {
+      env: process.env,
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    assert.equal(run.status, 0, `the lock-scope probe crashed: ${run.stderr}`);
+    report = JSON.parse(run.stdout);
   } finally {
-    delete process.env[lockTrace.LOCK_TRACE_ENV];
-    lockTrace.resetLockTrace();
+    fs.rmSync(scratch, { recursive: true, force: true });
   }
+  type ProbedCall = { kind: string; name: string; target: string; args: string };
+  const inside: ProbedCall[] = report.inside;
+  const gitSpawnsOutside = report.outside.spawns.filter((call: ProbedCall) => /(^|[\\/])git(\.exe)?$/.test(call.target));
+  // The project as both spellings the board may use for it: as created, and with symlinks resolved.
+  const projectRoots = [...new Set([PROJECT, fs.realpathSync(PROJECT)])];
+  const inWorkingTree = (target: string) => projectRoots.some((root) => {
+    const relative = path.relative(root, target);
+    if (!target || !path.isAbsolute(target) || relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) return false;
+    return relative.split(path.sep)[0] !== '.git';
+  });
+  t.diagnostic(`write lock taken ${report.lockTakes} time(s); ${inside.length} cheap call(s) under it (${[...new Set(inside.map((call) => call.name))].join(', ')}); outside it: ${gitSpawnsOutside.length} Git spawn(s), ${report.outside.spawns.length} spawn(s) in all, ${report.outside.fsCalls} fs call(s)`);
 
-  const holds = records.filter((record: any) => record.kind === 'hold');
-  assert.ok(holds.length > 0, 'tracing recorded no write-lock hold at all, so this test proved nothing about how long one is held');
-  const worstHoldMs = Math.max(...holds.map((record: any) => record.holdMs));
-  // Reported on a pass too: when this machine is loaded enough to fail the suite, the three numbers
-  // say whether the lock regressed or the machine is just busy, without a rerun to find out.
-  t.diagnostic(`worst write-lock hold ${worstHoldMs.toFixed(1)}ms across ${holds.length} hold(s); preparing took ${prepareMs.toFixed(1)}ms; one Git spawn costs ${oneGitSpawnMs.toFixed(1)}ms`);
-
-  assert.ok(
-    worstHoldMs < oneGitSpawnMs,
-    `preparing a dispatch held the board write lock for ${worstHoldMs}ms, longer than the ${oneGitSpawnMs}ms one Git subprocess costs here, so the lock still spans Git work`,
+  assert.equal(report.ok, true, 'the two-phase prepare still returns a prepared dispatch');
+  assert.equal(typeof report.baseCommit, 'string', 'the plan still records the commit its run starts from');
+  assert.ok(report.lockTakes > 0, 'the probe never saw BEGIN IMMEDIATE, so it observed no write-lock window and a zero below would prove nothing');
+  assert.equal(report.lockHeldAtEnd, false, 'the probe saw the write lock taken but never released, so its window tracking is wrong');
+  assert.ok(gitSpawnsOutside.length > 0, `the probe saw no Git subprocess at all, so it is not seeing the plan's work: ${JSON.stringify(report.outside.spawns)}`);
+  assert.ok(report.outside.fsCalls > 0, 'the probe saw no filesystem call at all, so it is not seeing the plan\'s work');
+  assert.deepEqual(
+    inside.filter((call) => call.kind === 'spawn'),
+    [],
+    'preparing a dispatch spawned a subprocess while holding the board write lock; the plan\'s Git work must run before BEGIN IMMEDIATE, not inside it',
   );
-  assert.ok(
-    worstHoldMs * 4 < prepareMs,
-    `preparing a dispatch took ${prepareMs}ms and held the board write lock for ${worstHoldMs}ms of it, so the lock still covers the bulk of the work`,
+  assert.deepEqual(
+    inside.filter((call) => call.kind === 'fs' && /^(readdir|opendir)/.test(call.name)),
+    [],
+    'preparing a dispatch enumerated a directory while holding the board write lock; a filesystem snapshot must be taken before BEGIN IMMEDIATE, not inside it',
+  );
+  assert.deepEqual(
+    inside.filter((call) => call.kind === 'fs' && inWorkingTree(call.target)),
+    [],
+    'preparing a dispatch touched files in the project working tree while holding the board write lock; reading the project belongs to the plan, before BEGIN IMMEDIATE',
   );
   assert.equal(store.releaseTicket(slug, ticket.ref, 'lock-hold-cleanup', { status: 'todo', source: 'test', force: true }).ok, true);
 });
