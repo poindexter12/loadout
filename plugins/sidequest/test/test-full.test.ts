@@ -6,6 +6,8 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 
+import { sandboxOwnedEnvironmentVariables } from './_sidequest-test-env.js';
+
 const runnerModuleUrl = pathToFileURL(path.join(__dirname, '..', 'scripts', 'test-full.mjs')).href;
 
 // SQ-62's measurement of this suite's functional phase, kept here because the budget model is
@@ -498,4 +500,39 @@ test('a clean full-suite root reports no leak and rethrows only the suite failur
   const suiteError = new Error('functional tests failed');
   await assert.rejects(runner.cleanupSuiteRoot(failedRoot, suiteError), (error: Error) => error === suiteError);
   assert.equal(fs.existsSync(failedRoot), false);
+});
+
+// SQ-389: the test-home preload deletes every inherited SIDEQUEST_* variable the sandbox does
+// not own, so a pin the functional phase adds here without an allowlist entry would vanish
+// before the first test ran and the phase would escape its own sandbox.
+test('SQ-389: every SIDEQUEST_* variable the functional phase pins is owned by the test-home sandbox', async () => {
+  const runner = await import(`${runnerModuleUrl}?suiteenv=${Date.now()}`) as {
+    suiteTestEnvironment: (
+      suiteTemporaryDirectory: string,
+      base?: Record<string, string | undefined>,
+    ) => Record<string, string | undefined>;
+    suiteDirectoryLayout: (suiteTemporaryDirectory: string) => {
+      homeDirectory: string;
+      claudeDirectory: string;
+      sidequestDirectory: string;
+      gatewayCatalogDirectory: string;
+    };
+  };
+  const suiteRoot = path.join(os.tmpdir(), 'sidequest-full-suite-env-fixture');
+  const layout = runner.suiteDirectoryLayout(suiteRoot);
+  const environment = runner.suiteTestEnvironment(suiteRoot, { PATH: '/usr/bin' });
+
+  const pinned = Object.keys(environment).filter((name) => name.startsWith('SIDEQUEST_')).sort();
+  assert.deepEqual(pinned, ['SIDEQUEST_CLAUDE_HOME', 'SIDEQUEST_DISCOVERY_DIRS', 'SIDEQUEST_HOME']);
+  for (const name of pinned) {
+    assert.ok(
+      sandboxOwnedEnvironmentVariables.includes(name),
+      `${name} is pinned for the functional phase but is not in the test-home sandbox allowlist, so the preload would scrub it`,
+    );
+  }
+  assert.equal(environment.SIDEQUEST_HOME, layout.sidequestDirectory);
+  assert.equal(environment.SIDEQUEST_CLAUDE_HOME, layout.claudeDirectory);
+  assert.equal(environment.SIDEQUEST_DISCOVERY_DIRS, layout.gatewayCatalogDirectory);
+  assert.equal(environment.HOME, layout.homeDirectory);
+  assert.equal(environment.TMPDIR, suiteRoot);
 });
