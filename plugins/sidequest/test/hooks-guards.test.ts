@@ -7,6 +7,7 @@ import {
   os,
   fs,
   path,
+  crypto,
   execFileSync,
   spawn,
   store,
@@ -334,26 +335,61 @@ test('pre-tool repeated-command hook ignores main-thread and unrelated subagent 
   assert.equal(runHookOutput(REPEATED_COMMAND_WARN, { tool_name: 'Bash', agent_type: 'explore', agent_id: 'other-agent', tool_input: { command: 'npm test' } }), null);
 });
 
+// SQ-390: the hook's counter lives in a host-global directory, `<os.tmpdir()>/sidequest-repeated-
+// command-warn/<encodeURIComponent(agent_id)>`, that nothing ever clears. Keying it by
+// `Date.now()` made these tests depend on no other process on the host having used the same
+// millisecond: a key that is neither unique nor private, so a counter that already held two hits
+// made the first call warn (main-push run 41333570717). Every repeated-command test now takes a
+// random identity AND its own tmpdir, so the hook's store starts empty however dirty the host is.
+function repeatedCommandFixture(prefix: string) {
+  const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-repeated-command-'));
+  return {
+    agentId: `${prefix}-${crypto.randomUUID()}`,
+    env: { TMPDIR: stateDirectory, TMP: stateDirectory, TEMP: stateDirectory },
+  };
+}
+
+// The host store that the hook falls back to when nothing redirects its tmpdir. Only the
+// regression test below writes here, to prove the redirect holds.
+const repeatedCommandHostStateDir = path.join(os.tmpdir(), 'sidequest-repeated-command-warn');
+
+test('pre-tool repeated-command hook counts per agent in its own state directory however dirty the host store is', () => {
+  const { agentId, env } = repeatedCommandFixture('repeated-command-contaminated');
+  const payload = { tool_name: 'Bash', agent_type: 'sidequest-exec-high', agent_id: agentId, tool_input: { command: 'npm run test' } };
+  // Exactly the state CI must have held: two prior hits for this key, no warning issued yet.
+  fs.mkdirSync(repeatedCommandHostStateDir, { recursive: true });
+  const contaminated = path.join(repeatedCommandHostStateDir, encodeURIComponent(agentId));
+  fs.writeFileSync(contaminated, JSON.stringify({ command: 'npm run test', count: 2, lastWarning: 0 }));
+  try {
+    // Without the redirect the hook reads that file, counts 3, and warns on the first call.
+    assert.equal(runHookOutput(REPEATED_COMMAND_WARN, payload, env), null);
+    assert.equal(runHookOutput(REPEATED_COMMAND_WARN, payload, env), null);
+    assert.match(runHook(REPEATED_COMMAND_WARN, payload, env), /you have run this exact command 3 times/);
+  } finally {
+    fs.rmSync(contaminated, { force: true });
+  }
+});
+
 test('pre-tool repeated-command hook warns on the third repeat and every fifth after', () => {
-  const agentId = `repeated-command-${Date.now()}`;
+  const { agentId, env } = repeatedCommandFixture('repeated-command');
   const payload = { tool_name: 'Bash', agent_type: 'sidequest-exec-high', agent_id: agentId, tool_input: { command: 'npm   run\n test' } };
-  assert.equal(runHookOutput(REPEATED_COMMAND_WARN, payload), null);
-  assert.equal(runHookOutput(REPEATED_COMMAND_WARN, { ...payload, tool_input: { command: 'npm run test' } }), null);
-  const third = runHook(REPEATED_COMMAND_WARN, payload);
+  assert.equal(runHookOutput(REPEATED_COMMAND_WARN, payload, env), null);
+  assert.equal(runHookOutput(REPEATED_COMMAND_WARN, { ...payload, tool_input: { command: 'npm run test' } }, env), null);
+  const third = runHook(REPEATED_COMMAND_WARN, payload, env);
   assert.equal(third, 'sidequest: you have run this exact command 3 times; if you are waiting on something, run it with run_in_background and let the completion notification wake you — polling burns ~14s and ~60k tokens per call');
-  for (let i = 0; i < 4; i += 1) assert.equal(runHookOutput(REPEATED_COMMAND_WARN, payload), null);
-  assert.match(runHook(REPEATED_COMMAND_WARN, payload), /you have run this exact command 3 times/);
-  assert.equal(runHookOutput(REPEATED_COMMAND_WARN, { ...payload, tool_input: { command: 'npm run typecheck' } }), null);
-  assert.equal(runHookOutput(REPEATED_COMMAND_WARN, { ...payload, tool_input: { command: 'npm run typecheck' } }), null);
-  assert.match(runHook(REPEATED_COMMAND_WARN, { ...payload, tool_input: { command: 'npm run typecheck' } }), /you have run this exact command 3 times/);
+  for (let i = 0; i < 4; i += 1) assert.equal(runHookOutput(REPEATED_COMMAND_WARN, payload, env), null);
+  assert.match(runHook(REPEATED_COMMAND_WARN, payload, env), /you have run this exact command 3 times/);
+  assert.equal(runHookOutput(REPEATED_COMMAND_WARN, { ...payload, tool_input: { command: 'npm run typecheck' } }, env), null);
+  assert.equal(runHookOutput(REPEATED_COMMAND_WARN, { ...payload, tool_input: { command: 'npm run typecheck' } }, env), null);
+  assert.match(runHook(REPEATED_COMMAND_WARN, { ...payload, tool_input: { command: 'npm run typecheck' } }, env), /you have run this exact command 3 times/);
 });
 
 test('pre-tool repeated-command hook warns for PowerShell commands', () => {
-  const agentId = `repeated-command-powershell-${Date.now()}`;
+  const { agentId, env } = repeatedCommandFixture('repeated-command-powershell');
   const payload = { tool_name: 'PowerShell', agent_type: 'sidequest-exec-high', agent_id: agentId, tool_input: { command: 'npm test' } };
-  assert.equal(runHookOutput(REPEATED_COMMAND_WARN, payload), null);
-  assert.equal(runHookOutput(REPEATED_COMMAND_WARN, payload), null);
-  assert.match(runHook(REPEATED_COMMAND_WARN, payload), /polling burns ~14s and ~60k tokens per call/);
+  assert.equal(runHookOutput(REPEATED_COMMAND_WARN, payload, env), null);
+  assert.equal(runHookOutput(REPEATED_COMMAND_WARN, payload, env), null);
+  assert.match(runHook(REPEATED_COMMAND_WARN, payload, env), /polling burns ~14s and ~60k tokens per call/);
 });
 
 test('pre-tool inline-work hook makes board dispatch the default for solo work', () => {
