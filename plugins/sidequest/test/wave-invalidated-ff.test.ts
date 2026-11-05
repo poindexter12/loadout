@@ -123,6 +123,65 @@ test('#16: sequential disjoint-file candidates integrate without wave_invalidate
   assert.equal(head(repo, 'origin/main'), originBefore, 'integrate never moves the remote-tracking ref');
 });
 
+// SQ-385: `scripts/release/cut.mjs --push` commits the release on local main,
+// and a failed cut resets main back. Tickets dispatched in that window recorded
+// the rolled-back commit as their baseline, so candidates rebased onto the
+// restored target were still refused baseline_moved and each needed a
+// code-unchanged redispatch (SQ-383, SQ-350, SQ-192, SQ-388).
+test('SQ-385: a candidate rebased onto the restored target integrates although its dispatch baseline was rolled back', () => {
+  const repo = makeRemoteRepo('release-cut');
+  const { slug } = store.ensureProject(repo);
+  const target = store.integrationTarget(slug);
+  const restored = head(repo, 'main');
+  assert.equal(head(repo, 'origin/main'), restored);
+
+  // The cut's release commit owns local main while the dispatch is prepared.
+  const releaseCommit = commitFile(repo, 'release.txt', 'v4.15.0\n');
+  assert.notEqual(releaseCommit, restored);
+  const worktree = path.join(repo, '.claude', 'worktrees', 'agent-release-cut');
+  git(['worktree', 'add', '-b', 'worktree-agent-release-cut', worktree, 'main'], repo);
+  const ticket = store.createTicket(slug, {
+    title: 'candidate dispatched during a release cut',
+    category: 'codebase-exploration',
+    description: 'Touches only cut.txt.',
+    files: ['cut.txt'],
+  });
+  const by = 'release-cut-worker';
+  assert.equal(store.claimTicket(slug, ticket.ref, by, { direct: true, reason: 'The SQ-385 regression fixture needs a direct claim.' }).ok, true);
+  assert.equal(store.getTicket(slug, ticket.ref).lifecycleAttempt.baseline.revision.value, releaseCommit);
+
+  // The cut fails its gate and rolls main back; nothing was published.
+  git(['reset', '--hard', restored], repo);
+  assert.equal(head(repo, 'main'), restored);
+
+  // The executor rebases onto the restored target and commits its work there.
+  git(['reset', '--hard', restored], worktree);
+  const commit = commitFile(worktree, 'cut.txt', 'release-cut executor work\n');
+  const gitRef = `refs/sidequest/${ticket.ref}`;
+  git(['update-ref', gitRef, commit], worktree);
+  const range = commitScope.submissionRange(worktree, { commit, gitRef, upstream: 'main', integrationBranch: 'main' });
+  assert.equal(range.ok, true, JSON.stringify(range));
+  const submitted = store.submitTicket(slug, ticket.ref, by, { commit, gitRef, range, worktree });
+  assert.equal(submitted.ok, true, JSON.stringify(submitted));
+
+  // The recorded baseline is the rolled-back release commit the target cannot
+  // reach, while the candidate's real base IS the restored target.
+  assert.equal(store.getTicket(slug, ticket.ref).submission.baseline.revision.value, releaseCommit);
+  assert.equal(git(['merge-base', commit, restored], repo), restored);
+  assert.throws(() => git(['merge-base', '--is-ancestor', releaseCommit, restored], repo));
+
+  const delivered = store.integrateSubmission(slug, ticket.ref, { mode: 'merge', target });
+  assertDelivered(delivered, restored);
+  assert.equal(fs.readFileSync(path.join(repo, 'cut.txt'), 'utf8'), 'release-cut executor work\n');
+
+  // Rebaselined in place, with provenance, so no redispatch is needed and a
+  // later assembly reads the real base.
+  const rebaselined = store.getTicket(slug, ticket.ref).submission.baseline;
+  assert.equal(rebaselined.revision.value, restored);
+  assert.equal(rebaselined.rebaselinedFrom.revision.value, releaseCommit);
+  assert.equal(rebaselined.rebaselinedFrom.reason, 'baseline_unreachable_from_target');
+});
+
 test('#16: a disjoint candidate dispatched before a sibling integrated still delivers after main moves', () => {
   const repo = makeRemoteRepo('moved-base');
   const { slug } = store.ensureProject(repo);

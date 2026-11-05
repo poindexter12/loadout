@@ -4340,6 +4340,10 @@ function submissionWaveCandidate(ticket: any) {
   return {
     ref: ticket.ref,
     baseline,
+    // SQ-385: the candidate's own pinned revision travels with the candidate so
+    // baseline admission can judge the history it actually sits on, not only
+    // the baseline its dispatch recorded.
+    revision,
     surfaces: Array.isArray(submission.changedPaths) ? submission.changedPaths : [],
     verification: submission.verificationResult,
   };
@@ -4378,30 +4382,78 @@ function waveTargetCommit(slug: any, projectPath: string, target: any) {
   }
 }
 
-function candidateBaselineIsCurrentOrAncestor(slug: any, candidate: any, waveBaseline: any) {
-  const candidateRevision = candidate?.baseline?.revision;
-  const waveRevision = waveBaseline?.revision;
-  if (!candidateRevision || !waveRevision || candidateRevision.source !== waveRevision.source) return false;
-  if (candidateRevision.value === waveRevision.value) return true;
-  if (candidateRevision.source !== 'git') return false;
+function gitQuiet(projectPath: string, args: string[]) {
+  if (!projectPath) return null;
   try {
-    execFileSync('git', ['merge-base', '--is-ancestor', candidateRevision.value, waveRevision.value], {
-      cwd: String(readMeta(slug)?.path || '').trim(),
-      encoding: 'utf8',
-      windowsHide: true,
-      stdio: 'pipe',
-    });
-    return true;
+    return execFileSync('git', args, { cwd: projectPath, encoding: 'utf8', windowsHide: true, stdio: 'pipe' }).trim();
   } catch (_: any) {
-    return false;
+    return null;
   }
 }
 
+function gitCommitExists(projectPath: string, value: string) {
+  return Boolean(value) && gitQuiet(projectPath, ['rev-parse', '--verify', '--quiet', `${value}^{commit}`]) !== null;
+}
+
+function gitContains(projectPath: string, ancestor: string, descendant: string) {
+  return gitQuiet(projectPath, ['merge-base', '--is-ancestor', ancestor, descendant]) !== null;
+}
+
+// SQ-385: a recorded dispatch baseline can name a commit the integration target
+// does not contain. A release cut commits on local main, fails its gate, and
+// resets main back, so every ticket dispatched in that window stays pinned to
+// the rolled-back commit; a rework reuses the first attempt's baseline, so the
+// record outlives the history it named either way. Judging that record alone
+// refused candidates whose commits already sat on the restored target and cost
+// four code-unchanged redispatches (SQ-383, SQ-350, SQ-192, SQ-388). When the
+// recorded baseline resolves to a real commit the target does not contain,
+// judge the candidate's REAL base: the candidate must no longer carry the
+// unreachable commit (its content was rebased off that history) and must share
+// history with the target, which is exactly the property the ancestor rule
+// accepts for a baseline the target does contain. A baseline that resolves to
+// no commit at all stays refused, because there is nothing to judge against.
+function candidateRealBaseOnTarget(projectPath: string, baselineValue: string, candidateCommit: string, targetValue: string) {
+  if (!gitCommitExists(projectPath, baselineValue) || !gitCommitExists(projectPath, candidateCommit)) return null;
+  if (gitContains(projectPath, baselineValue, candidateCommit)) return null;
+  const realBase = gitQuiet(projectPath, ['merge-base', candidateCommit, targetValue]);
+  if (!realBase || !gitContains(projectPath, realBase, targetValue)) return null;
+  return realBase;
+}
+
+function candidateBaselineAdmission(slug: any, candidate: any, waveBaseline: any): { compatible: boolean; rebaseline?: any } {
+  const candidateRevision = candidate?.baseline?.revision;
+  const waveRevision = waveBaseline?.revision;
+  if (!candidateRevision || !waveRevision || candidateRevision.source !== waveRevision.source) return { compatible: false };
+  if (candidateRevision.value === waveRevision.value) return { compatible: true };
+  if (candidateRevision.source !== 'git') return { compatible: false };
+  const projectPath = String(readMeta(slug)?.path || '').trim();
+  if (gitContains(projectPath, candidateRevision.value, waveRevision.value)) return { compatible: true };
+  const candidateCommit = candidate?.revision?.source === 'git' ? String(candidate.revision.value || '').trim() : '';
+  const realBase = candidateRealBaseOnTarget(projectPath, candidateRevision.value, candidateCommit, waveRevision.value);
+  if (!realBase) return { compatible: false };
+  const at = new Date().toISOString();
+  // The repair is persisted onto the submission when the wave assembles, so the
+  // orchestrator rebaselines a provably-on-target candidate without any
+  // redispatch, and a later re-assembly reads the corrected base.
+  return {
+    compatible: true,
+    rebaseline: Object.freeze({
+      revision: Object.freeze({ source: 'git', value: realBase, observedAt: at }),
+      purpose: 'dispatch' as const,
+      rebaselinedFrom: Object.freeze({ revision: Object.freeze({ ...candidateRevision }), reason: 'baseline_unreachable_from_target', at }),
+    }),
+  };
+}
+
 function waveCandidatesForBaseline(slug: any, candidates: any[], waveBaseline: any) {
-  return candidates.map((candidate) => Object.freeze({
-    ...candidate,
-    baselineCompatible: candidateBaselineIsCurrentOrAncestor(slug, candidate, waveBaseline),
-  }));
+  return candidates.map((candidate) => {
+    const admission = candidateBaselineAdmission(slug, candidate, waveBaseline);
+    return Object.freeze({
+      ...candidate,
+      baselineCompatible: admission.compatible,
+      ...(admission.rebaseline ? { baselineRebaseline: admission.rebaseline } : {}),
+    });
+  });
 }
 
 function assembleSubmissionWave(slug?: any, refs?: any, opts?: any) {
@@ -4440,7 +4492,8 @@ function assembleSubmissionWave(slug?: any, refs?: any, opts?: any) {
     })),
   });
   if ('code' in opened) return { ok: false, reason: opened.code, message: opened.message };
-  const decision = assembleWave(opened, waveCandidatesForBaseline(slug, waveCandidates, opened.baseline));
+  const admittedCandidates = waveCandidatesForBaseline(slug, waveCandidates, opened.baseline);
+  const decision = assembleWave(opened, admittedCandidates);
   if (!decision.ok) {
     // The MCP ack keeps only reason and message, so the per-candidate cause must
     // travel in the message or the caller cannot tell a moved baseline from an
@@ -4461,6 +4514,11 @@ function assembleSubmissionWave(slug?: any, refs?: any, opts?: any) {
     for (const ticket of tickets) {
       const current = getTicket(slug, ticket.id);
       if (!current?.submission) continue;
+      // SQ-385: a candidate admitted on its real base keeps a baseline record the
+      // target cannot reach, which would refuse it again on the next assembly.
+      // Rebaseline the submission in place, with provenance, instead.
+      const rebaseline = admittedCandidates.find((entry: any) => entry.ref === current.ref)?.baselineRebaseline;
+      if (rebaseline) current.submission.baseline = rebaseline;
       current.submission.wave = {
         id: waveId,
         baseline: opened.baseline,

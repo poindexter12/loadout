@@ -1173,6 +1173,10 @@ test('SQ-2463: a wave invalidation preserves submitted candidate status', () => 
     assert.strictEqual(refused.reason, 'wave_invalidated');
     // SQ-59: the MCP ack forwards only reason and message, so the message must name the cause.
     assert.match(refused.message, new RegExp(`${invalid.ref} baseline_moved: `));
+    // SQ-385: a baseline that resolves to no commit at all cannot be judged
+    // against the target, so the real-base fallback must not admit it, and the
+    // refusal names the rebase-and-resubmit recovery rather than a redispatch.
+    assert.match(refused.message, /rebase the candidate onto the current target and resubmit/);
     // createCandidateCommit switches HEAD to a fresh branch, so the pinned target is
     // the configured integration branch's tip, not HEAD.
     assert.match(refused.message, new RegExp(`integration target git:${git(['rev-parse', `refs/heads/${integrationBranch}`])}\\. `));
