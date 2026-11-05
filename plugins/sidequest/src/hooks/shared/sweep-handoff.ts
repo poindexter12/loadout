@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -140,25 +140,107 @@ function sweepCwd(data: HookInput): string {
   return stringField(data, 'cwd', 'project_dir', 'projectDir') || process.env.CLAUDE_PROJECT_DIR || process.cwd();
 }
 
+type WorkerOptions = Readonly<{ sessionId: string; env?: NodeJS.ProcessEnv }>;
+
+function spawnSweepWorker(data: HookInput, cwd: string, options: WorkerOptions): ChildProcess {
+  return spawn(process.execPath, [
+    path.join(pluginRoot(), 'hooks', 'sweep-worktrees.js'),
+    '--cwd', cwd,
+    '--session', options.sessionId,
+    // SQ-220: the child decides from these whether this start is a host restart, the only
+    // start that may retire this session's unbound launches.
+    '--source', stringField(data, 'source'),
+    '--subagent', isSubagent(data) ? '1' : '0',
+  ], { detached: true, stdio: 'ignore', windowsHide: true, ...(options.env ? { env: options.env } : {}) });
+}
+
+// Notices a finished background sweep left for the next session start, moved aside so a
+// newer worker's report cannot overwrite them before anyone has read them (SQ-386).
+function carriedFile(cwd: string): string {
+  return reportFile(cwd).replace(/\.json$/, '.carried.json');
+}
+
+function readNotices(file: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const notices = (parsed as { notices?: unknown } | null)?.notices;
+    return Array.isArray(notices) ? notices.map((notice) => String(notice)).filter(Boolean) : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+export function drainCarried(cwd: string): string[] {
+  const file = carriedFile(cwd);
+  if (!fs.existsSync(file)) return [];
+  const notices = readNotices(file);
+  try {
+    fs.rmSync(file, { force: true });
+  } catch (_) {}
+  return notices;
+}
+
+function carryPendingReport(cwd: string): void {
+  const pending = drainReport(cwd);
+  if (!pending || !pending.length) return;
+  try {
+    fs.mkdirSync(stateDirectory(), { recursive: true });
+    fs.writeFileSync(carriedFile(cwd), JSON.stringify({ notices: [...readNotices(carriedFile(cwd)), ...pending] }));
+  } catch (_) {
+    // Losing a carried report is not worth failing session shutdown over.
+  }
+}
+
+// A progress file with no report means a worker for this checkout is still running, and a
+// second worker would race it over the same worktrees. The worker refreshes the file as it
+// classifies candidates, so a progress file this old belongs to a worker that died.
+function sweepInFlight(cwd: string): boolean {
+  const staleAfterMs = 10 * 60 * 1000;
+  let modified: number;
+  try {
+    modified = fs.statSync(progressFile(cwd)).mtimeMs;
+  } catch (_) {
+    return false;
+  }
+  return Date.now() - modified < staleAfterMs &&!fs.existsSync(reportFile(cwd));
+}
+
+// SQ-386: Claude Code gives SessionEnd a shutdown window far shorter than its declared
+// timeout and cancels a hook still running when it closes. The inline sweep took seconds,
+// so SessionEnd hands it to the same detached worker SessionStart uses and returns without
+// waiting. The worker's report is drained by the next session start.
+export function detachSweep(data: HookInput): string[] {
+  const cwd = sweepCwd(data);
+  if (sweepInFlight(cwd)) return [];
+  carryPendingReport(cwd);
+  writeSweepProgress(cwd, EMPTY_SWEEP_PROGRESS);
+  // The ending session's id stays out of the worker: SessionEnd drops that session's
+  // orphan-report state, and the next session start reports any orphan afresh.
+  const env = { ...process.env };
+  delete env.CLAUDE_CODE_SESSION_ID;
+  delete env.CLAUDE_SESSION_ID;
+  try {
+    const child = spawnSweepWorker(data, cwd, { sessionId: '', env });
+    child.once('error', () => {});
+    child.unref();
+  } catch (_) {
+    clearSweepProgress(cwd);
+    return [HANDOFF_FAILED_NOTICE];
+  }
+  return [];
+}
+
 // Always runs the sweep in a detached child and waits only up to the deadline. The
 // child owns the mutating work, so a slow sweep costs the session its deadline
 // rather than its entire injected context.
 export async function runSweep(data: HookInput): Promise<string[]> {
   const cwd = sweepCwd(data);
-  const carried = drainReport(cwd) || [];
+  const carried = [...drainCarried(cwd), ...(drainReport(cwd) || [])];
   const budget = deadlineMs();
   writeSweepProgress(cwd, EMPTY_SWEEP_PROGRESS);
-  let child;
+  let child: ChildProcess;
   try {
-    child = spawn(process.execPath, [
-      path.join(pluginRoot(), 'hooks', 'sweep-worktrees.js'),
-      '--cwd', cwd,
-      '--session', stringField(data, 'session_id', 'sessionId'),
-      // SQ-220: the child decides from these whether this start is a host restart, the only
-      // start that may retire this session's unbound launches.
-      '--source', stringField(data, 'source'),
-      '--subagent', isSubagent(data) ? '1' : '0',
-    ], { detached: true, stdio: 'ignore', windowsHide: true });
+    child = spawnSweepWorker(data, cwd, { sessionId: stringField(data, 'session_id', 'sessionId') });
   } catch (_) {
     clearSweepProgress(cwd);
     return [...carried, HANDOFF_FAILED_NOTICE];
