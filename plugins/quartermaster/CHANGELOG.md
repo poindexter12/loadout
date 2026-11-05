@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.1 (2026-11-05)
+
+Released in v4.15.0, up from 0.11.0.
+
+### Fixes
+
+- The permission auto-allowlist no longer learns a rule from the first word of a chained or multi-line command (SQ-360)
+  The allowlist keyed every Bash rule on the first word of the command after collapsing whitespace, so `echo hi && git push` learned `Bash(echo hi:*)`, which then granted `echo hi && git push --force`. Every veto ran against that derived prefix, so a `git push` anywhere but first was never seen.
+
+  The rule key now comes from the same tokenizer the destructive check already uses. A command with more than one statement (a chain, pipe, newline, `$(...)`, backticks, subshell or brace group) earns no rule at all, and neither does one that starts with shell syntax (`for`, `while`, `if`, `(`, `{`), a wrapper (`command`, `eval`, `env`, `exec`), a redirect writer (`cat >`), a flag, a leading operator, or an unterminated quote. Leading `VAR=value` assignments are still stripped, but a substitution's tail is never promoted into the key. The never-learn git check now runs over every statement and substitution, so a ref-mutating `git` subcommand anywhere in the command condemns its fingerprint, including behind a wrapper such as `timeout 30 git push`.
+
+  Rules already written by earlier versions are not removed by this change; retraction is tracked separately.
+
 ## 0.11.0 (2026-10-24)
 
 Released in v4.14.0, up from 0.10.1.
