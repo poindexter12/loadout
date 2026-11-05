@@ -131,7 +131,12 @@ export function assembleWave(wave: Wave, candidates: readonly WaveCandidate[]): 
       continue;
     }
     if (!sameBaseline(wave.baseline, candidate.baseline) && !candidate.baselineCompatible) {
-      invalidated.push(invalidation(candidate.ref, 'baseline_moved', `${candidate.ref} was verified against ${candidate.baseline.revision.source}:${candidate.baseline.revision.value}, but this wave is pinned to ${wave.baseline.revision.source}:${wave.baseline.revision.value}.`));
+      // SQ-385: a candidate whose own commits sit on the current target is
+      // admitted on its real base, so reaching here means the recorded baseline
+      // resolves to nothing the target can judge, or the candidate still carries
+      // history the target does not contain. Name that recovery: redispatching
+      // unchanged code does not move a baseline, and four tickets paid for it.
+      invalidated.push(invalidation(candidate.ref, 'baseline_moved', `${candidate.ref} was verified against ${candidate.baseline.revision.source}:${candidate.baseline.revision.value}, but this wave is pinned to ${wave.baseline.revision.source}:${wave.baseline.revision.value}. A candidate whose commits already sit on the current target is admitted on its real base and rebaselined in place, so this refusal means ${candidate.ref}'s recorded baseline names no resolvable commit, or its commits still carry history the target does not contain: rebase the candidate onto the current target and resubmit it rather than redispatching unchanged code.`));
       continue;
     }
     if (!verificationAccepted(candidate.verification)) {
