@@ -87,7 +87,7 @@ function assembleWave(wave, candidates) {
       continue;
     }
     if (!sameBaseline(wave.baseline, candidate.baseline) && !candidate.baselineCompatible) {
-      invalidated.push(invalidation(candidate.ref, "baseline_moved", `${candidate.ref} was verified against ${candidate.baseline.revision.source}:${candidate.baseline.revision.value}, but this wave is pinned to ${wave.baseline.revision.source}:${wave.baseline.revision.value}.`));
+      invalidated.push(invalidation(candidate.ref, "baseline_moved", `${candidate.ref} was verified against ${candidate.baseline.revision.source}:${candidate.baseline.revision.value}, but this wave is pinned to ${wave.baseline.revision.source}:${wave.baseline.revision.value}. A candidate whose commits already sit on the current target is admitted on its real base and rebaselined in place, so this refusal means ${candidate.ref}'s recorded baseline names no resolvable commit, or its commits still carry history the target does not contain: rebase the candidate onto the current target and resubmit it rather than redispatching unchanged code.`));
       continue;
     }
     if (!(0, import_verification.verificationAccepted)(candidate.verification)) {
