@@ -60,6 +60,7 @@ const {
 } = require('./mcp-shared');
 const { sourceRevisionBaseline } = require('./source-revision-capability');
 const backupRefs = require('./backup-refs');
+const { prDeliveryGuidance } = require('./refusal-guidance');
 
 // Backups under refs/sidequest-backup/<REF>/ exist only to protect live work,
 // so every board closure prunes those of any done ticket (SQ-178). Board-wide,
@@ -278,6 +279,8 @@ function prDeliveryRefusalFields(delivery: any) {
   for (const key of PR_DELIVERY_REFUSAL_KEYS) {
     if (delivery?.[key] !== undefined) fields[key] = delivery[key];
   }
+  const guidance = prDeliveryGuidance(String(delivery?.reason || ''));
+  if (guidance) fields.guidance = guidance;
   return fields;
 }
 
@@ -293,6 +296,7 @@ function awaitingMergeAck(slug: string, delivery: any) {
     ...(delivery.existing ? { existing: true } : {}),
     ...(delivery.checks ? { checks: delivery.checks } : {}),
     message: delivery.message,
+    guidance: prDeliveryGuidance(delivery.state),
   });
 }
 
@@ -1129,7 +1133,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: 'integrate',
-    description: 'Deliver one ref or a comma-separated ref group. wave assembles and gates only as an options object at the current integration-target head; a refusal keeps submitted candidates parked. Review-rejected candidates stay parked for later supersession without blocking overlap checks; active and accepted pending candidates still block an incomplete participant set. Call again without wave to deliver. Terminal isolated worktrees are reclaimed best-effort after durable delivery. Delivery runs the pinned verifier twice, on the candidate and on the merged tree, and reports MCP progress as each gate starts and finishes, so a long integrate is not silence: read the phase name rather than probing the process table, and never retry a delivery that is still reporting phases, which would stack a second writer and a third concurrent suite behind the live one.',
+    description: 'Deliver one ref or a comma-separated ref group. wave assembles and gates only as an options object at the current integration-target head; a refusal keeps submitted candidates parked. Review-rejected candidates stay parked for later supersession without blocking overlap checks; active and accepted pending candidates still block an incomplete participant set. Call again without wave to deliver. Terminal isolated worktrees are reclaimed best-effort after durable delivery. In local delivery (the default) it runs the pinned verifier twice, on the candidate and on the merged tree, and reports MCP progress as each gate starts and finishes, so a long integrate is not silence: read the phase name rather than probing the process table, and never retry a delivery that is still reporting phases, which would stack a second writer and a third concurrent suite behind the live one. Board deliveryChannel mode pr runs no local suite or publish lock: it pushes the wave branch, opens one auto-merge PR, and returns awaiting-merge (tickets stay doing; CI gates). Re-call without wave to reconcile: merged closes the tickets, pending stays awaiting-merge, red CI refuses wave_ci_failed.',
     inputSchema: {
       type: 'object',
       properties: {

@@ -1221,7 +1221,7 @@
   },
   {
     "name": "integrate",
-    "description": "Comma-ref group; wave=options, refs in ref; pinned deliveryMethod; reviewed interaction.",
+    "description": "Comma refs in ref; wave=options; pinned deliveryMethod; reviewed interaction. pr mode: awaiting-merge, re-call reconciles.",
     "inputSchema": {
       "type": "object",
       "properties": {

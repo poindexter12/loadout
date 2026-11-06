@@ -972,6 +972,21 @@ test('the build budget report itemizes the served MCP descriptors', () => {
   assert.ok(report.tools.every((tool: any, index: number) => index === 0 || report.tools[index - 1].bytes >= tool.bytes));
 });
 
+test('served integrate description tells an agent how pr delivery mode behaves (SQ-110)', () => {
+  const integrate: any = mcp.toolDescriptors().find((tool: any) => tool.name === 'integrate');
+  assert.match(integrate.description, /pr mode: awaiting-merge/);
+  assert.match(integrate.description, /re-call reconciles/);
+  // The served text must not tell an agent integrate delivered in pr mode, and the fuller pr flow
+  // lives in the long description, which tools/list does not serve.
+  const long: any = mcp.TOOLS.find((tool: any) => tool.name === 'integrate');
+  assert.match(long.description, /deliveryChannel mode pr/);
+  assert.match(long.description, /no local suite or publish lock/);
+  assert.match(long.description, /Re-call without wave to reconcile/);
+  // Local-mode contract strings stay served unchanged.
+  assert.match(integrate.description, /pinned deliveryMethod/);
+  assert.match(integrate.description, /reviewed interaction/);
+});
+
 test('tools/list preserves MCP contracts within the payload budget', async (context: { diagnostic(message: string): void }) => {
   const tools = mcp.toolDescriptors();
   const report = mcp.toolDescriptorByteReport();
