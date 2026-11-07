@@ -100,6 +100,20 @@ push withdraws the branch and the PR it opened. A wave that adds no commits over
 `<remote>/<target>` refuses too — if its candidates already landed, record that with
 `integrate --delivery-commit`.
 
+CI on the PR is the wave gate in `pr` mode, so the orchestrator flow changes in three places: run no
+local full suite on the combined wave (each ticket's scoped verify still gates its submission), take
+no publish lock, and never `git push origin HEAD:main` — `main` moves only when GitHub merges the PR.
+The publish transaction below is the local-mode flow. To reconcile, re-run `integrate` on the same
+refs without `wave` once CI settles. Merged: every participant closes through the integration close
+path with the PR merge commit (reachable from `<remote>/<target>` after fetch) as its delivery and the
+PR url as evidence; no `groomClose` is needed. Still pending: `awaiting-merge` again. The refusals
+each carry a `guidance` field with the next step: `wave_ci_failed` (names `failingChecks` and the PR;
+re-run a flaky check and integrate again, or rework the participants into a new wave and PR),
+`wave_pr_closed_unmerged` (nothing landed; reopen the PR or assemble a new wave),
+`wave_merge_unreachable` (merged on GitHub but not yet fetched; retry), and `pr_delivery_unavailable`
+(gh missing or unauthenticated, no remote, or a bad channel, with `cause`; nothing was pushed).
+Local mode is unchanged by all of this.
+
 If a repair ticket deliberately delivers an earlier parked submission, do not replay the obsolete range. Use MCP `supersede_submission` with the earlier ref, the later integrated repair ref, concise closure evidence, and `reviewedReplacements` for every original path whose delivered content intentionally differs. The control plane requires the repair's recorded delivery to include every original changed path, preserves the earlier submission and its lineage under `supersededBy`, marks it done, and removes its pending-submission warning. A missing path, an unintegrated repair, or unreviewed divergent content leaves the original submission parked.
 
 ### Filing a repair for a review-rejected candidate
@@ -133,7 +147,7 @@ transaction below unchanged; an existing but broken upstream still rejects the s
 
 ## The publish transaction
 
-Run every step in order. Local delivery through `sidequest integrate` records the delivery and
+This is the local-delivery flow; a `pr` channel board skips it (see above). Run every step in order. Local delivery through `sidequest integrate` records the delivery and
 completes each ticket in the control plane after its local delivery verification. That closure happens
 before the merged-tree gate, version assignment, or push. A later failure can therefore leave a done
 ticket with an unpushed commit: finish the push when safe, or record the failure and unpushed state on

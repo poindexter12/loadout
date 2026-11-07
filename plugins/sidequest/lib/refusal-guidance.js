@@ -19,9 +19,11 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var refusal_guidance_exports = {};
 __export(refusal_guidance_exports, {
   CLAIM_REFUSAL_MESSAGES: () => CLAIM_REFUSAL_MESSAGES,
+  PR_DELIVERY_GUIDANCE: () => PR_DELIVERY_GUIDANCE,
   claimRefusalMessage: () => claimRefusalMessage,
   forcedClaimReleaseGuidance: () => forcedClaimReleaseGuidance,
   negativeControlRecoveryGuidance: () => negativeControlRecoveryGuidance,
+  prDeliveryGuidance: () => prDeliveryGuidance,
   routingDisabledMessage: () => routingDisabledMessage,
   verificationTimeoutGuidance: () => verificationTimeoutGuidance
 });
@@ -79,6 +81,16 @@ function claimRefusalMessage(reason, ref, claim = {}, projectPath) {
   const message = CLAIM_REFUSAL_MESSAGES[reason];
   return message ? message(ref, claim, projectPath) : `${ref} could not be claimed because ${reason}. Run \`sidequest pulse ${ref}\` and follow its current status.`;
 }
+const PR_DELIVERY_GUIDANCE = Object.freeze({
+  "awaiting-merge": "The wave PR is open with auto-merge and CI on it is the wave gate; the tickets stay doing until it merges. Re-call integrate on the same refs, without wave, to reconcile: merged closes every participant with the PR merge commit as delivery, still pending returns awaiting-merge again. Do not run the local full suite, take the publish lock, or push HEAD:main for this wave.",
+  wave_ci_failed: "A required check failed on the wave PR; failingChecks names them and pr carries the url. Read the failing check logs on the PR. A flaky check can be re-run on GitHub and integrate re-called, which restores awaiting-merge while it is pending. A real defect goes back through rework or a superseding candidate, and the repaired wave opens a new PR under a new wave id.",
+  wave_pr_closed_unmerged: "The wave PR was closed without merging, so nothing reached the target branch and no ticket closed. Reopen the PR on GitHub and re-call integrate, or rework the participants and assemble a new wave, which opens a new PR.",
+  pr_delivery_unavailable: 'PR delivery cannot reach GitHub; cause says why (gh missing or unauthenticated, no such remote, or an unresolvable deliveryChannel). Nothing was pushed or recorded. Fix the cause and re-call integrate. To deliver locally instead, set board_config deliveryChannel mode "local" (or none) first; do not push HEAD:main by hand.',
+  wave_merge_unreachable: "GitHub reports the PR merged but its merge commit is not yet reachable from the remote target after fetch. Nothing was recorded. Re-call integrate once the remote has caught up."
+});
+function prDeliveryGuidance(state) {
+  return PR_DELIVERY_GUIDANCE[state] || "";
+}
 function routingDisabledMessage(ref) {
   return `Routing is disabled on this board, so ${ref} cannot be dispatched. Run \`sidequest routing enabled\` then \`sidequest dispatch ${ref}\`; direct work is limited to the inline-safe allowlist: \`sidequest claim ${ref} --direct --reason "why this is inline-safe"\`.`;
 }
@@ -105,9 +117,11 @@ function verificationTimeoutGuidance(verify, maxMs) {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   CLAIM_REFUSAL_MESSAGES,
+  PR_DELIVERY_GUIDANCE,
   claimRefusalMessage,
   forcedClaimReleaseGuidance,
   negativeControlRecoveryGuidance,
+  prDeliveryGuidance,
   routingDisabledMessage,
   verificationTimeoutGuidance
 });

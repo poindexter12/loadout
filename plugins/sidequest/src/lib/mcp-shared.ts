@@ -259,7 +259,13 @@ const TOOL_DESCRIPTION_OVERRIDES: Record<string, string | undefined> = {
   rework: 'repair unbound; bound needs oracle.',
   supersede_submission: 'candidate rejection permits supersession.',
   submit: 'Submit verified work; clear/force need owner.',
-  integrate: 'Comma-ref group; wave=options, refs in ref; pinned deliveryMethod; reviewed interaction.',
+  // SQ-110: the pr-mode fact an agent cannot afford to miss is that integrate did NOT deliver, so
+  // the served text buys "awaiting-merge; re-call to reconcile" by compacting the ref/wave clause
+  // (which said "comma-ref group" and "refs in ref" twice). tools/list had 34 bytes of slack over
+  // its reserve, so the rest of the pr flow — no local suite, no publish lock, no HEAD:main push —
+  // rides the runtime `guidance` field on every awaiting-merge ack and pr refusal, which costs
+  // tools/list nothing, plus the long description below, the CLI help, and publishing.md.
+  integrate: 'Comma refs in ref; wave=options; pinned deliveryMethod; reviewed interaction. pr mode: awaiting-merge, re-call reconciles.',
   // SQ-387: the served text for `comment`. Briefings defer comment bodies past a 16 KiB budget
   // (agentsync BRIEFING_COMMENT_BODY_BUDGET_BYTES), so the tool says to keep them short.
   comment: 'Short handoff: summary plus pointers (paths, shas, ids), no reports or logs. Briefings defer bodies past 16 KiB.',
