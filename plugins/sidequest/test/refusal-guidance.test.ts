@@ -103,3 +103,21 @@ test('routing-disabled guidance names the enabled and direct paths', () => {
   assert.match(message, /sidequest routing enabled/i);
   assert.match(message, /sidequest claim SQ-42 --direct/i);
 });
+
+test('PR delivery guidance covers awaiting-merge and every pr-mode refusal without local-mode moves (SQ-110)', () => {
+  const { PR_DELIVERY_GUIDANCE, prDeliveryGuidance } = require('../lib/refusal-guidance.js') as {
+    PR_DELIVERY_GUIDANCE: Record<string, string>;
+    prDeliveryGuidance(state: string): string;
+  };
+  const states = ['awaiting-merge', 'wave_ci_failed', 'wave_pr_closed_unmerged', 'pr_delivery_unavailable', 'wave_merge_unreachable'];
+  assert.deepEqual(Object.keys(PR_DELIVERY_GUIDANCE).sort(), [...states].sort());
+  for (const state of states) {
+    const text = prDeliveryGuidance(state);
+    assert.match(text, /integrate/, state);
+    // pr mode never suggests pushing main by hand or a local merged-tree suite as the gate.
+    assert.doesNotMatch(text, /git push|sidequest publish lock/i, state);
+  }
+  assert.match(prDeliveryGuidance('wave_ci_failed'), /failingChecks/);
+  assert.match(prDeliveryGuidance('pr_delivery_unavailable'), /cause/);
+  assert.equal(prDeliveryGuidance('verification_failed_suite'), '');
+});

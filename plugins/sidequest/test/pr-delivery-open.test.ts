@@ -386,6 +386,9 @@ test('MCP integrate acknowledges awaiting merge and stays idempotent', async () 
     assert.equal(opened.pr.number, 31);
     assert.deepEqual(opened.participantRefs, [candidate.ref]);
     assert.deepEqual(opened.tickets, [{ ref: candidate.ref, status: 'doing' }]);
+    // SQ-110: the ack tells the caller how to reconcile and what not to do in pr mode.
+    assert.match(opened.guidance, /Re-call integrate on the same refs, without wave, to reconcile/);
+    assert.match(opened.guidance, /Do not run the local full suite, take the publish lock, or push HEAD:main/);
 
     const again: any = await withPort(port, () => callTool('integrate', { project: board.slug, ref: candidate.ref, by: 'pr-integrator' }));
     assert.equal(again.ok, true, again.message || again.reason);
@@ -393,6 +396,26 @@ test('MCP integrate acknowledges awaiting merge and stays idempotent', async () 
     assert.equal(again.pr.number, 31);
     assert.equal(port.creates().length, 1);
     assert.equal(store.getTicket(board.slug, candidate.ref).status, 'doing');
+  } finally {
+    if (previousDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = previousDir;
+  }
+});
+
+test('MCP pr_delivery_unavailable refusal keeps its cause and carries next-step guidance (SQ-110)', async () => {
+  const noRemote = makeBoard('mcp-no-remote', { remote: false });
+  const lonely = submitCandidate(noRemote, 'xi.txt');
+  const port = fakePort();
+  const previousDir = process.env.CLAUDE_PROJECT_DIR;
+  process.env.CLAUDE_PROJECT_DIR = noRemote.repo;
+  try {
+    const refused: any = await withPort(port, () => callTool('integrate', { project: noRemote.slug, ref: lonely.ref, by: 'pr-integrator' }));
+    assert.equal(refused.ok, false);
+    assert.equal(refused.reason, 'pr_delivery_unavailable');
+    assert.match(refused.cause, /remote origin is not configured/);
+    assert.match(refused.guidance, /Fix the cause and re-call integrate/);
+    assert.match(refused.guidance, /do not push HEAD:main by hand/);
+    assert.equal(port.creates().length, 0);
   } finally {
     if (previousDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
     else process.env.CLAUDE_PROJECT_DIR = previousDir;

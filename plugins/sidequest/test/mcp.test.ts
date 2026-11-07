@@ -146,8 +146,9 @@ test('tools/list advertises the board tools with input schemas', async () => {
   assert.match(release.inputSchema.properties.outputTail.description, /Required blocker\/contradiction output/);
   assert.equal(release.inputSchema.required.includes('reason'), false, 'release accepts an oracle ask in place of a reason');
   const integrate = resp.result.tools.find((tool: any) => tool.name === 'integrate');
-  assert.match(integrate.description, /Comma-ref group/);
-  assert.match(integrate.description, /wave=options, refs in ref/);
+  assert.match(integrate.description, /Comma refs in ref/);
+  assert.match(integrate.description, /wave=options/);
+  assert.match(integrate.description, /pr mode: awaiting-merge, re-call reconciles/);
   const verdict = resp.result.tools.find((tool: any) => tool.name === 'verdict');
   assert.deepEqual(verdict.inputSchema.required, ['ref', 'text', 'outcome']);
   assert.deepEqual(verdict.inputSchema.properties.outcome.enum, ['accepted', 'rejected', 'inconclusive']);
@@ -970,6 +971,21 @@ test('the build budget report itemizes the served MCP descriptors', () => {
   assert.equal(report.reserveBytes, mcp.MCP_TOOLS_LIST_HEADROOM_BYTES);
   assert.equal(report.tools[0].name, 'update');
   assert.ok(report.tools.every((tool: any, index: number) => index === 0 || report.tools[index - 1].bytes >= tool.bytes));
+});
+
+test('served integrate description tells an agent how pr delivery mode behaves (SQ-110)', () => {
+  const integrate: any = mcp.toolDescriptors().find((tool: any) => tool.name === 'integrate');
+  assert.match(integrate.description, /pr mode: awaiting-merge/);
+  assert.match(integrate.description, /re-call reconciles/);
+  // The served text must not tell an agent integrate delivered in pr mode, and the fuller pr flow
+  // lives in the long description, which tools/list does not serve.
+  const long: any = mcp.TOOLS.find((tool: any) => tool.name === 'integrate');
+  assert.match(long.description, /deliveryChannel mode pr/);
+  assert.match(long.description, /no local suite or publish lock/);
+  assert.match(long.description, /Re-call without wave to reconcile/);
+  // Local-mode contract strings stay served unchanged.
+  assert.match(integrate.description, /pinned deliveryMethod/);
+  assert.match(integrate.description, /reviewed interaction/);
 });
 
 test('tools/list preserves MCP contracts within the payload budget', async (context: { diagnostic(message: string): void }) => {

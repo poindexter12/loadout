@@ -159,7 +159,9 @@ atomic: each subagent claims a different ticket, and any race just sends the los
   they'd edit the same files before parallelizing them.
 - **Integrate and verify by wave.** Each executor runs its scoped verification before submission.
   When the quiet wave lands, read each submit report, run each ticket's exact verify command, then run the
-  full suite once for the combined wave. On green, integrate. The oracle is the review: never open source
+  full suite once for the combined wave. On green, integrate. On a `deliveryChannel` `pr` board, skip
+  that local suite: `integrate` opens the wave PR and returns `awaiting-merge`, CI on the PR is the gate,
+  and a later `integrate` on the same refs reconciles it (see publishing.md). The oracle is the review: never open source
   or inspect diffs to re-review executor work. When the stakes need human-grade review, dispatch a
   `review-audit` for the affected files; do not turn the orchestrator into the reviewer.
 - **A verification `timeout` is not a failure.** `integrate` and `groomClose` stop a verify at the board's
@@ -290,7 +292,7 @@ atomic: each subagent claims a different ticket, and any race just sends the los
 
 After dispatch, leave a ticket alone until it submits: no pulse, comment read, worktree peek, or proxy
 waiting. At integration, read the submit report, run the ticket's verify command and the wave seam check
-(full suite once per wave), then integrate on green. The executable oracle is the review, so do not open
+(full suite once per wave; a `pr` channel board gates on PR CI instead), then integrate on green. The executable oracle is the review, so do not open
 source or inspect diffs to re-review executor work. File a separately routed `review-audit` only when the
 stakes need human-grade review.
 
