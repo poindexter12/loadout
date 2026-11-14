@@ -13,6 +13,37 @@ const { isInScope, scopedPaths } = require("../scope-match");
 const { parseWorktreeList } = require("../worktrees.js");
 const backupRefs = require("../backup-refs");
 const os = require("node:os");
+const PR_CONVENTIONAL_TYPES = ["feat", "fix", "perf", "refactor", "revert", "docs", "test", "build", "ci", "style", "chore"];
+const PR_CONVENTIONAL_TITLE_RE = /^(feat|fix|perf|refactor|revert|docs|test|build|ci|style|chore)(?:\([^)]*\))?!?:\s*/i;
+const PR_BOARD_REF_RE = /\b(?:SQ|US)-\d+\b/g;
+const PR_LOCAL_PATH_RE = /(?<![\w.~/\\])(?:~|[A-Za-z]:)?[\\/](?:[^\s\\/]+[\\/])+[^\s]*/g;
+const PR_SUMMARY_MAX = 100;
+const PR_BODY_TITLE_MAX = 200;
+function githubText(value, repo) {
+  let text = String(value || "").replace(/[\u0000-\u001f\u007f]+/g, " ");
+  if (repo) text = text.split(repo).join("[path]");
+  return text.replace(/\[path\][\\/][^\s]*/g, "[path]").replace(PR_BOARD_REF_RE, "").replace(PR_LOCAL_PATH_RE, "[path]").replace(/\(\s*[,;:]*\s*\)|\[\s*[,;:]*\s*\]/g, "").replace(/\s+([,;:.)\]])/g, "$1").replace(/\s{2,}/g, " ").replace(/^[\s,;:.\-–—]+|[\s,;:\-–—]+$/g, "").trim();
+}
+function clipText(value, max) {
+  return value.length <= max ? value : `${value.slice(0, max - 1).trimEnd()}…`;
+}
+function wavePullRequestText(repo, tickets) {
+  const titles = tickets.map((ticket) => githubText(ticket.title, repo) || "Untitled change");
+  const types = new Set(titles.map((title2) => PR_CONVENTIONAL_TITLE_RE.exec(title2)?.[1]?.toLowerCase()).filter(Boolean));
+  const type = PR_CONVENTIONAL_TYPES.find((candidate) => types.has(candidate)) || "chore";
+  const summaries = titles.map((title2) => title2.replace(PR_CONVENTIONAL_TITLE_RE, "").trim() || "Untitled change");
+  const more = summaries.length > 1 ? ` (+${summaries.length - 1} more)` : "";
+  const title = `${type}: ${clipText(summaries[0], PR_SUMMARY_MAX - more.length)}${more}`;
+  const body = [
+    `Wave delivery of ${titles.length} change${titles.length === 1 ? "" : "s"}:`,
+    "",
+    ...titles.map((entry) => `- ${clipText(entry, PR_BODY_TITLE_MAX)}`),
+    "",
+    "Auto-merge is enabled; the required checks gate the merge.",
+    ""
+  ].join("\n");
+  return { title, body };
+}
 function createSubmissions(dependencies) {
   const { EXECUTOR_VERIFY_MAX, INTEGRATION_VERIFY_OUTPUT_TAIL_BYTES, MANUAL_VERIFY_PREFIX, acquireLock, addComment, appendReworkEvent, artifactWorkingState, autoReleasedClaimMessage, attestationErrors, boardConfig, boundedExcerptForSubmission, commitScope, completionTreeCheck, coerceStatus, createComment, crypto, dirtyPathKey, dispatchState, executionScope, ensureDir, execFileSync, fs, getTicket, integrationTarget, integrationTargetCommit, listTickets, manualVerify, normalizeDeliveryMode, normalizeIntegrationBranch, normalizeIntegrationVerifyTimeoutMs, nullableText, path, prepareComment, projectDir, putTicket, queueEventNotification, readMeta, recordedReviewPass, recordLifecycleAttempt, releaseLock, resolveDeliveryConfig, setDispatchTerminal, spawnSync, stampDispatchEvent, ticketLockPath, transaction, unregisterClaim, verifyCommandErrors, verifyCommandError, withTicketLock, transitionAttempt, attemptDiagnostic } = dependencies;
   const boundedExcerpt = boundedExcerptForSubmission;
@@ -2013,37 +2044,6 @@ ${verify.outputTail}` : null
       stdio: ["ignore", "pipe", "pipe"]
     }).trim();
   }
-  const PR_CONVENTIONAL_TYPES = ["feat", "fix", "perf", "refactor", "revert", "docs", "test", "build", "ci", "style", "chore"];
-  const PR_CONVENTIONAL_TITLE_RE = /^(feat|fix|perf|refactor|revert|docs|test|build|ci|style|chore)(?:\([^)]*\))?!?:\s*/i;
-  const PR_BOARD_REF_RE = /\b(?:SQ|US)-\d+\b/g;
-  const PR_LOCAL_PATH_RE = /(^|[\s("'`])(?:~|[A-Za-z]:)?[\\/](?:[^\s\\/]+[\\/])+[^\s]*/g;
-  const PR_SUMMARY_MAX = 100;
-  const PR_BODY_TITLE_MAX = 200;
-  function githubText(value, repo) {
-    let text = String(value || "").replace(/[\u0000-\u001f\u007f]+/g, " ");
-    if (repo) text = text.split(repo).join("[path]");
-    return text.replace(/\[path\][\\/][^\s]*/g, "[path]").replace(PR_BOARD_REF_RE, "").replace(PR_LOCAL_PATH_RE, "$1[path]").replace(/\(\s*[,;:]*\s*\)|\[\s*[,;:]*\s*\]/g, "").replace(/\s+([,;:.)\]])/g, "$1").replace(/\s{2,}/g, " ").replace(/^[\s,;:.\-–—]+|[\s,;:\-–—]+$/g, "").trim();
-  }
-  function clipText(value, max) {
-    return value.length <= max ? value : `${value.slice(0, max - 1).trimEnd()}…`;
-  }
-  function wavePullRequestText(repo, tickets) {
-    const titles = tickets.map((ticket) => githubText(ticket.title, repo) || "Untitled change");
-    const types = new Set(titles.map((title2) => PR_CONVENTIONAL_TITLE_RE.exec(title2)?.[1]?.toLowerCase()).filter(Boolean));
-    const type = PR_CONVENTIONAL_TYPES.find((candidate) => types.has(candidate)) || "chore";
-    const summaries = titles.map((title2) => title2.replace(PR_CONVENTIONAL_TITLE_RE, "").trim() || "Untitled change");
-    const more = summaries.length > 1 ? ` (+${summaries.length - 1} more)` : "";
-    const title = `${type}: ${clipText(summaries[0], PR_SUMMARY_MAX - more.length)}${more}`;
-    const body = [
-      `Wave delivery of ${titles.length} change${titles.length === 1 ? "" : "s"}:`,
-      "",
-      ...titles.map((entry) => `- ${clipText(entry, PR_BODY_TITLE_MAX)}`),
-      "",
-      "Auto-merge is enabled; the required checks gate the merge.",
-      ""
-    ].join("\n");
-    return { title, body };
-  }
   const PR_RECONCILE_FAILURES = /* @__PURE__ */ new Set(["wave_ci_failed", "wave_pr_closed_unmerged"]);
   const PR_MERGED_STATE = "merged";
   function holdsWavePr(ticket) {
@@ -4009,4 +4009,4 @@ ${verify.outputTail}` : null
   }
   return { DEFAULT_CHECKPOINT_TTL_MIN, MAX_CHECKPOINT_TTL_MIN, checkpointTtlMs, checkpointProjection, oracleProjection, checkpointTicket, submissionReadiness, submissionProjection, pendingSubmission, submissionUsesGit, workingTreeVerification, verifyIntegration, validateIntegrationSubmission, recordDeliveredSubmission, recordAbandonedSubmission, integrateSubmission, integrateSubmissionWave, closeSubmissionAsSuperseded, submissionOwnershipFailure, submitTicket, recordVerificationCapture, recordSubmissionRejection, reconcileSubmissionRejections, reworkSubmission, clearSubmission, assembleSubmissionWave, recordSubmissionWaveDelivery, markWaveAwaitingMerge, findAwaitingMergeWaves, readWavePr, setGitHubPrPort, submissionsPayload };
 }
-module.exports = { createSubmissions };
+module.exports = { createSubmissions, githubText, wavePullRequestText };
