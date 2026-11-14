@@ -12,28 +12,20 @@ const { runOwnedPhase } = require('./owned-process-tree.js');
 
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const testDirectory = path.join(pluginRoot, 'test');
-const minimumTestConcurrency = 2;
-const maximumTestConcurrency = 8;
-// SQ-62 measured what this constant is. Multiplying a phase's duration by the workers it
-// really had gives a work constant: 1742s * 2.15 = 3749 s*workers on a contended 10-core
-// macOS box, 302.9s * 4 = 1212 s*workers on a 4-core ubuntu-latest runner. 480_000 * 8 is
-// 3840 s*workers, which sits 1.02x above the macOS measurement and 3.17x above CI's. It was
-// never a budget on this platform; it is the EXPECTED duration of eight effective workers,
-// and using an expectation as a deadline is why the gate had no margin at all off CI.
-const baselineTestPhaseDurationMilliseconds = 480_000;
-// A deadline has to exceed an expectation or it is a coin toss. The expectation predicted
-// the measured 29-minute run to within 2.4%, which is a good model and a terrible budget.
-const testPhaseBudgetSafetyFactor = 1.5;
-// The ceiling exists to end a phase that is stuck rather than slow, and most tests here
-// carry no per-test timeout, so it is the only backstop. 2_400_000 keeps the model intact
-// across the 22-38 load band this shared machine actually runs at (it begins truncating
-// above load ~27 on 10 cores) while still ending a wedged phase inside 40 minutes. Anything
-// beyond it is the override's job, loudly and on purpose.
-const maximumTestPhaseTimeoutMilliseconds = 2_400_000;
-// A machine cannot give a phase less than a sliver of a core for as long as it is running,
-// and an unbounded scale would let one absurd load reading swallow the cap calculation.
-const minimumEffectiveTestWorkers = 0.5;
-export const phaseBudgetOverrideVariable = 'SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS';
+// SQ-68: the capacity model lives in one place, ../lib/test-phase-capacity.js, because the capture
+// wrapper that gates this suite has to derive its own outer deadline from the very phase budget
+// computed here. The constants and the effective-worker formula used to be declared here AND in
+// src/lib/verify-capture.ts, which is how the gate ended up able to be tighter than the phase it
+// gates. These are re-exported because the suite's own tests and callers read them from this module.
+const {
+  calculateTestConcurrency,
+  calculateEffectiveTestWorkers,
+  calculateExpectedTestPhaseDurationMilliseconds,
+  calculateTestPhaseTimeoutMilliseconds,
+  resolvePhaseBudgetOverride,
+  phaseBudgetOverrideVariable: sharedPhaseBudgetOverrideVariable,
+} = require('../lib/test-phase-capacity.js');
+export const phaseBudgetOverrideVariable = sharedPhaseBudgetOverrideVariable;
 
 // SQ-208: the tests inside one file run in sequence, so each of these files is a serial chain
 // no amount of concurrency shortens. v4.0.0's passing run measured them at 750, 713, 635, 595,
@@ -97,97 +89,16 @@ export function fullSuiteGatewayCatalog() {
   };
 }
 
-export function calculateTestConcurrency(availableParallelism) {
-  return Math.min(maximumTestConcurrency, Math.max(minimumTestConcurrency, availableParallelism));
-}
-
-/**
- * How much of the machine this phase's workers are actually going to get.
- *
- * `os.availableParallelism()` answers how many cores EXIST, never how many are free, so a
- * budget derived from it alone is only honest on an otherwise idle machine. Under fair
- * scheduling, N phase workers competing with L other runnable threads receive
- * cores * N / (N + L) of the machine, and that share — not the core count — is what a
- * wall-clock budget has to be derived from. An idle machine reports L = 0, where the share
- * collapses back to the worker count, so this reduces exactly to the core-count model it
- * replaces everywhere that model was ever valid: an idle 8-core box, an idle 4-core CI
- * runner, and Windows, whose os.loadavg() is always [0, 0, 0].
- */
-export function calculateEffectiveTestWorkers(testConcurrency, availableParallelism, loadAverage) {
-  const otherRunnableThreads = Number.isFinite(loadAverage) && loadAverage > 0 ? loadAverage : 0;
-  const contendedCoreShare = (availableParallelism * testConcurrency) / (testConcurrency + otherRunnableThreads);
-  return Math.min(testConcurrency, Math.max(minimumEffectiveTestWorkers, contendedCoreShare));
-}
-
-/**
- * The budget scales with the capacity the phase will really have, never with the core count
- * the machine happens to own.
- *
- * SQ-62: the previous form scaled by `maximumTestConcurrency / testConcurrency`, so wall
- * clock SHRANK as cores grew — every machine with 8 or more nominal cores landed on the
- * tightest budget in the curve, which is also the only branch no CI runner can reach (a
- * 4-core ubuntu-latest picks concurrency 4 and a 960000ms budget). A 10-core developer box
- * at load 27 therefore got 480000ms to do work that its ~2.3 effective workers cannot
- * finish, and got it BECAUSE it had more hardware. Keying the same 480000ms baseline off
- * effective workers leaves every validated configuration untouched and widens only where
- * the machine is measurably contended.
- */
-export function calculateExpectedTestPhaseDurationMilliseconds(
-  testConcurrency,
-  availableParallelism = testConcurrency,
-  loadAverage = 0,
-) {
-  const effectiveTestWorkers = calculateEffectiveTestWorkers(testConcurrency, availableParallelism, loadAverage);
-  const capacityScale = maximumTestConcurrency / effectiveTestWorkers;
-  // Rounded, not ceilinged: a fractional capacity scale makes the product land a float's
-  // hair either side of a whole millisecond, and ceiling that turns 624000 into 624001 for
-  // no reason anybody could read. Every whole-worker case is unaffected.
-  return Math.round(baselineTestPhaseDurationMilliseconds * capacityScale);
-}
-
-export function calculateTestPhaseTimeoutMilliseconds(
-  testConcurrency,
-  availableParallelism = testConcurrency,
-  loadAverage = 0,
-) {
-  const expectedDurationMilliseconds = calculateExpectedTestPhaseDurationMilliseconds(
-    testConcurrency,
-    availableParallelism,
-    loadAverage,
-  );
-  return Math.min(
-    maximumTestPhaseTimeoutMilliseconds,
-    Math.round(expectedDurationMilliseconds * testPhaseBudgetSafetyFactor),
-  );
-}
-
-/**
- * The override is widen-only on purpose. A developer on a machine busier than the model's
- * cap still needs a supported way to run the gate, but a knob that could shorten the
- * deadline or take it away would be a way to pass the gate without running it. Raising the
- * budget cannot hide a failing test; it only ever buys wall clock, and it says so loudly.
- */
-export function resolvePhaseBudgetOverride(measuredTimeoutMilliseconds, rawOverride) {
-  const requestedText = typeof rawOverride === 'string' ? rawOverride.trim() : '';
-  if (requestedText === '') return { timeoutMilliseconds: measuredTimeoutMilliseconds, notice: null };
-  const requested = Number(requestedText);
-  if (!Number.isInteger(requested) || requested <= 0) {
-    return {
-      timeoutMilliseconds: measuredTimeoutMilliseconds,
-      notice: `NOTICE: ${phaseBudgetOverrideVariable}=${requestedText} is not a positive whole number of milliseconds, so the measured ${measuredTimeoutMilliseconds}ms phase budget stands.`,
-    };
-  }
-  if (requested <= measuredTimeoutMilliseconds) {
-    return {
-      timeoutMilliseconds: measuredTimeoutMilliseconds,
-      notice: `NOTICE: ${phaseBudgetOverrideVariable}=${requested} cannot shorten the measured ${measuredTimeoutMilliseconds}ms phase budget, so the measured budget stands. The override only ever grants more wall clock.`,
-    };
-  }
-  return {
-    timeoutMilliseconds: requested,
-    notice: `NOTICE: ${phaseBudgetOverrideVariable} raised the phase budget from a measured ${measuredTimeoutMilliseconds}ms to ${requested}ms. Every test still has to pass inside it: this grants wall clock, it does not skip the gate.`,
-  };
-}
+// The model itself is ../lib/test-phase-capacity.js. These re-exports exist because the suite's
+// callers and tests have always read the capacity functions from this module; re-exporting keeps
+// that surface while leaving exactly one definition behind it. Do not reimplement any of them here.
+export {
+  calculateTestConcurrency,
+  calculateEffectiveTestWorkers,
+  calculateExpectedTestPhaseDurationMilliseconds,
+  calculateTestPhaseTimeoutMilliseconds,
+  resolvePhaseBudgetOverride,
+};
 
 export function describeTestPhaseCapacity(availableParallelism, loadAverage, rawOverride) {
   const testConcurrency = calculateTestConcurrency(availableParallelism);
@@ -211,7 +122,9 @@ export function describeTestPhaseCapacity(availableParallelism, loadAverage, raw
     expectedDurationMilliseconds,
     measuredTimeoutMilliseconds,
     timeoutMilliseconds: override.timeoutMilliseconds,
-    overrideNotice: override.notice,
+    // The shared parser returns the sentence; the `NOTICE: ` prefix is this suite's own console
+    // convention, so it is applied here rather than baked into the model the capture wrapper shares.
+    overrideNotice: override.notice === null ? null : `NOTICE: ${override.notice}`,
   };
 }
 

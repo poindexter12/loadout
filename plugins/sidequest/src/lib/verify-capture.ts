@@ -34,20 +34,24 @@ const captureSlotStaleMilliseconds = 30 * 60 * 1_000;
 const captureSlotRetryMilliseconds = 50;
 const captureSlotOperationRetryLimit = 20;
 const captureSlotContentionErrorCodes = new Set(['EEXIST', 'EPERM', 'EBUSY', 'ENOTEMPTY']);
-// Keep the outer capture deadline in lockstep with test-full's capacity model. The suite has
-// its own phase deadline; the ordinary verification timeout is a setup allowance before it.
-const minimumTestConcurrency = 2;
-const maximumTestConcurrency = 8;
-const baselineTestPhaseDurationMilliseconds = 480_000;
-const testPhaseBudgetSafetyFactor = 1.5;
-const maximumTestPhaseTimeoutMilliseconds = 2_400_000;
-const minimumEffectiveTestWorkers = 0.5;
-const phaseBudgetOverrideVariable = 'SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS';
+// The outer capture deadline IS test-full's capacity model plus a setup allowance, so it reads that
+// model rather than restating it. SQ-68: this used to be a copied set of constants and a copied
+// formula under a comment asking the two to stay "in lockstep", which is the one implementation that
+// cannot. They had already drifted at the override parser, where this file's `/^\d+$/` rejected
+// spellings the suite accepted and left the gate tighter than the phase it gates.
+const {
+  calculateTestConcurrency,
+  calculateEffectiveTestWorkers,
+  calculateTestPhaseTimeoutMilliseconds,
+  calculateCaptureDeadlineMilliseconds,
+  resolvePhaseBudgetOverride,
+  phaseBudgetOverrideVariable,
+} = require('./test-phase-capacity.js') as typeof import('./test-phase-capacity.js');
 // SQ-169: the override is widen-only, so without a ceiling one huge value let a hung run hold
-// the project's capture slot (and the executor waiting on it) indefinitely. Two hours is four
-// times the slowest full suite measured on a contended host (SQ-62: 29 minutes) and well above
-// the 3_000_000ms the capacity model itself can reach, so it bounds a wedged run without
-// constraining any real one.
+// the project's capture slot (and the executor waiting on it) indefinitely. Two hours is 2.3 times
+// the slowest full suite measured on a contended host (SQ-68: 1907973ms at a load average of 55.72
+// on 10 cores) and well above the 4_200_000ms the capacity model itself can reach, so it bounds a
+// wedged run without constraining any real one.
 const captureHardMaximumMilliseconds = 2 * 60 * 60 * 1_000;
 // SQ-332: the Claude Code Bash tool's own ceilings, which an attached capture has to live inside.
 // A foreground call stops at 600000ms; a longer call is moved to the background under a 1800000ms
@@ -123,16 +127,12 @@ function otherRunnableThreads(loadAverage: number): number {
 }
 
 // SQ-74: the one effective-worker model. The full-suite capture budget below, test-full's phase
-// budget (scripts/test-full.mjs calculateEffectiveTestWorkers, same formula) and the in-test
-// waits all read capacity through it, so both sides of a pinned gate degrade together under
-// load the gate did not start. `testConcurrency` workers share `availableParallelism` cores with
-// `loadAverage` other runnable threads; the result is the share of the machine they really get.
-function effectiveTestWorkers(testConcurrency: number, availableParallelism: number, loadAverage: number): number {
-  return Math.min(
-    testConcurrency,
-    Math.max(minimumEffectiveTestWorkers, (availableParallelism * testConcurrency) / (testConcurrency + otherRunnableThreads(loadAverage))),
-  );
-}
+// budget and the in-test waits all read capacity through it, so both sides of a pinned gate degrade
+// together under load the gate did not start. `testConcurrency` workers share `availableParallelism`
+// cores with `loadAverage` other runnable threads; the result is the share of the machine they really
+// get. SQ-68: one function now, in ./test-phase-capacity, not the same formula written twice — this
+// name stays because it is exported and has callers.
+const effectiveTestWorkers = calculateEffectiveTestWorkers;
 
 // SQ-74: SQ-58's per-worker in-test deadline (`perTestWorkerMilliseconds * testWorkers`) scaled
 // by the same capacity factor the capture budget uses. Before this the capture widened under a
@@ -150,32 +150,27 @@ function capacityScaledDeadlineMilliseconds(perTestWorkerMilliseconds: number, t
 
 function captureBudget(command: string, availableParallelism = os.availableParallelism(), loadAverage = os.loadavg()[0] || 0, rawOverride = process.env[phaseBudgetOverrideVariable]): CaptureBudget {
   const budgetClass = captureBudgetClass(command);
-  const testConcurrency = Math.min(maximumTestConcurrency, Math.max(minimumTestConcurrency, availableParallelism));
+  const testConcurrency = calculateTestConcurrency(availableParallelism);
   const effectiveWorkers = effectiveTestWorkers(testConcurrency, availableParallelism, loadAverage);
-  const capacityPhaseBudgetMilliseconds = Math.min(
-    maximumTestPhaseTimeoutMilliseconds,
-    Math.round((baselineTestPhaseDurationMilliseconds * maximumTestConcurrency / effectiveWorkers) * testPhaseBudgetSafetyFactor),
-  );
+  // The suite's own phase deadline, from the suite's own function. Deriving it rather than
+  // recomputing it is what holds the invariant this wrapper depends on: the gate can never be
+  // tighter than the phase it gates, because it is that phase plus a positive setup allowance.
+  const capacityPhaseBudgetMilliseconds = calculateTestPhaseTimeoutMilliseconds(testConcurrency, availableParallelism, loadAverage);
   // A command that is not a test runner keeps the ordinary setup allowance alone: it has no
   // suite phase to scale, and the override is its one lever.
   const measuredPhaseBudgetMilliseconds = budgetClass === 'command' ? 0 : capacityPhaseBudgetMilliseconds;
-  const requestedText = typeof rawOverride === 'string' ? rawOverride.trim() : '';
-  const requested = /^\d+$/.test(requestedText) ? Number(requestedText) : 0;
-  const widened = requested > measuredPhaseBudgetMilliseconds;
-  const phaseBudgetMilliseconds = widened ? requested : measuredPhaseBudgetMilliseconds;
-  const uncappedMilliseconds = defaultVerificationTimeoutMilliseconds + phaseBudgetMilliseconds;
+  const override = resolvePhaseBudgetOverride(measuredPhaseBudgetMilliseconds, rawOverride);
+  const widened = override.widened;
+  const phaseBudgetMilliseconds = override.timeoutMilliseconds;
+  const uncappedMilliseconds = calculateCaptureDeadlineMilliseconds(phaseBudgetMilliseconds, defaultVerificationTimeoutMilliseconds);
   const clampedToHardMaximum = uncappedMilliseconds > captureHardMaximumMilliseconds;
   const timeoutMilliseconds = clampedToHardMaximum ? captureHardMaximumMilliseconds : uncappedMilliseconds;
-  let notice: string | null = null;
-  if (requestedText && requested <= 0) {
-    notice = `${phaseBudgetOverrideVariable}=${requestedText} is not a positive whole number of milliseconds, so the measured ${measuredPhaseBudgetMilliseconds}ms phase budget stands.`;
-  } else if (requested > 0 && !widened) {
-    notice = `${phaseBudgetOverrideVariable}=${requested} cannot shorten the measured ${measuredPhaseBudgetMilliseconds}ms phase budget, so the measured budget stands. The override only ever grants more wall clock.`;
-  } else if (clampedToHardMaximum) {
-    notice = `${phaseBudgetOverrideVariable}=${requested} asked for a ${uncappedMilliseconds}ms capture budget, above the ${captureHardMaximumMilliseconds}ms hard maximum, so the capture stops at ${captureHardMaximumMilliseconds}ms.`;
-  } else if (widened) {
-    notice = `${phaseBudgetOverrideVariable} raised the phase budget from a measured ${measuredPhaseBudgetMilliseconds}ms to ${requested}ms. Every test still has to pass inside it: this grants wall clock, it does not skip the gate.`;
-  }
+  // The clamp notice wins over the shared parser's widened notice: the operator who passed the
+  // override needs to hear that it was cut back before hearing that it applied. Every other case
+  // keeps the parser's wording, so both consumers say the same thing about the same input.
+  const notice: string | null = clampedToHardMaximum && widened
+    ? `${phaseBudgetOverrideVariable}=${override.requestedMilliseconds} asked for a ${uncappedMilliseconds}ms capture budget, above the ${captureHardMaximumMilliseconds}ms hard maximum, so the capture stops at ${captureHardMaximumMilliseconds}ms.`
+    : override.notice;
   return Object.freeze({
     budgetClass,
     timeoutMilliseconds,
@@ -187,7 +182,7 @@ function captureBudget(command: string, availableParallelism = os.availableParal
     loadAverage: otherRunnableThreads(loadAverage),
     effectiveTestWorkers: effectiveWorkers,
     overrideVariable: phaseBudgetOverrideVariable,
-    overrideMilliseconds: widened ? requested : null,
+    overrideMilliseconds: widened ? override.requestedMilliseconds : null,
     clampedToHardMaximum,
     notice,
   });

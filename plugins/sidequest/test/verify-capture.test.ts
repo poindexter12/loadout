@@ -11,6 +11,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
+const { pathToFileURL } = require('node:url');
 
 const { runVerifyCapture, runCapturedVerification, recordCapture, shellCommand, captureSlotDirectory, acquireCaptureSlot, fullSuiteCaptureTimeoutMilliseconds, captureBudget, captureBudgetClass, captureHardMaximumMilliseconds, captureHarnessTimeoutMilliseconds, captureHarnessGuidance, runBudgetedCapture, effectiveTestWorkers, capacityScaledDeadlineMilliseconds } = require('../lib/verify-capture.js');
 const { waitForCapacity, capacityWaitTimeoutMessage, capacityWaitDeadlineMilliseconds, testWorkerConcurrency } = require('./_capacity-deadline.js');
@@ -175,14 +176,95 @@ test('SQ-74: an ad-hoc full-suite run does not acquire the verification capture 
   }
 });
 
+test('SQ-68: capture deadline is the suite phase budget from test-full.mjs plus setup allowance, and always exceeds it', () => {
+  const capacity = require('../lib/test-phase-capacity.js');
+
+  // Identity, not value. Two copies of this model agreed on every number for weeks and the gate
+  // was still able to come out tighter than the phase it gates; only sameness of the function
+  // object rules that out. The wrapper's own exported name is kept as an alias of the shared one.
+  assert.equal(effectiveTestWorkers, capacity.calculateEffectiveTestWorkers);
+
+  // The suite's phase budget, read out of the real scripts/test-full.mjs in a child process,
+  // because that file is ESM and is the other consumer this must not diverge from.
+  const cores = [2, 4, 8, 10, 16];
+  const loads = [0, 1, 3.94, 5, 27.42, 55.72, 64];
+  const script = `
+    import { calculateTestConcurrency, calculateTestPhaseTimeoutMilliseconds } from ${JSON.stringify(
+      pathToFileURL(path.join(SIDEQUEST_DIR, 'scripts', 'test-full.mjs')).href,
+    )};
+    const cores = ${JSON.stringify(cores)};
+    const loads = ${JSON.stringify(loads)};
+    const suitePhase = {};
+    for (const core of cores) {
+      for (const load of loads) {
+        suitePhase[core + '@' + load] = calculateTestPhaseTimeoutMilliseconds(calculateTestConcurrency(core), core, load);
+      }
+    }
+    console.log(JSON.stringify(suitePhase));
+  `;
+  const suitePhase = JSON.parse(
+    execFileSync(process.execPath, ['--input-type=module', '--eval', script], { encoding: 'utf8' }),
+  );
+
+  for (const core of cores) {
+    for (const load of loads) {
+      const key = `${core}@${load}`;
+      const budget = captureBudget('npm run test:full', core, load, '');
+      assert.equal(
+        budget.phaseBudgetMilliseconds,
+        suitePhase[key],
+        `at ${core} cores and load ${load} the capture must use the suite's own phase budget`,
+      );
+      assert.equal(
+        budget.timeoutMilliseconds,
+        capacity.calculateCaptureDeadlineMilliseconds(budget.phaseBudgetMilliseconds, budget.setupAllowanceMilliseconds),
+        `at ${core} cores and load ${load} the deadline must come from the shared derivation`,
+      );
+      assert.ok(
+        budget.timeoutMilliseconds > suitePhase[key],
+        `at ${core} cores and load ${load} the gate (${budget.timeoutMilliseconds}ms) must never be tighter than the suite it gates (${suitePhase[key]}ms)`,
+      );
+    }
+  }
+
+  // The drift that had already happened: the wrapper parsed the override with /^\d+$/ and the
+  // suite with Number.isInteger(Number(text)), so each of these spellings widened the phase and
+  // left the gate at its narrower measured deadline. One parser now, so they cannot disagree.
+  for (const raw of ['1e6', '+2500000', '2500000.0', '2500000', 'nonsense', '0', '1']) {
+    const budget = captureBudget('npm run test:full', 8, 0, raw);
+    const suite = capacity.resolvePhaseBudgetOverride(
+      capacity.calculateTestPhaseTimeoutMilliseconds(capacity.calculateTestConcurrency(8), 8, 0),
+      raw,
+    );
+    assert.equal(budget.phaseBudgetMilliseconds, suite.timeoutMilliseconds, `override ${raw}: capture phase must equal the suite phase`);
+    assert.ok(budget.timeoutMilliseconds > budget.phaseBudgetMilliseconds, `override ${raw}: the gate must still outlive the phase`);
+  }
+
+  // And no local copy of the constants has grown back in the wrapper's source.
+  const source = fs.readFileSync(path.join(SIDEQUEST_DIR, 'src', 'lib', 'verify-capture.ts'), 'utf8');
+  for (const constant of [
+    'maximumTestConcurrency',
+    'baselineTestPhaseDurationMilliseconds',
+    'testPhaseBudgetSafetyFactor',
+    'maximumTestPhaseTimeoutMilliseconds',
+    'minimumEffectiveTestWorkers',
+  ]) {
+    assert.doesNotMatch(
+      source,
+      new RegExp(`^\\s*(?:export\\s+)?const\\s+${constant}\\s*=`, 'm'),
+      `src/lib/verify-capture.ts must not declare its own ${constant}`,
+    );
+  }
+});
+
 test('full-suite capture uses the capacity phase budget plus ordinary setup allowance', () => {
   const originalOverride = process.env.SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS;
   process.env.SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS = '5000000';
   try {
-    assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0, ''), 1_320_000);
-    assert.equal(fullSuiteCaptureTimeoutMilliseconds(10, 27, ''), 3_000_000);
+    assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0, ''), 2_040_000);
+    assert.equal(fullSuiteCaptureTimeoutMilliseconds(10, 27, ''), 4_200_000);
     assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0, '5000000'), 5_600_000);
-    assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0, '1'), 1_320_000);
+    assert.equal(fullSuiteCaptureTimeoutMilliseconds(8, 0, '1'), 2_040_000);
   } finally {
     if (originalOverride === undefined) delete process.env.SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS;
     else process.env.SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS = originalOverride;
@@ -290,11 +372,11 @@ test('SQ-334: the slot-wait refusal names the slot per-project and says other pr
 test('SQ-169: a test-suite capture gets the capacity budget; other commands keep the setup allowance', () => {
   const quiet = captureBudget('node --test scripts/release/test', 8, 0, '');
   assert.equal(quiet.budgetClass, 'test-suite');
-  assert.equal(quiet.timeoutMilliseconds, 1_320_000);
+  assert.equal(quiet.timeoutMilliseconds, 2_040_000);
   assert.equal(quiet.setupAllowanceMilliseconds, 600_000);
-  assert.equal(quiet.phaseBudgetMilliseconds, 720_000);
+  assert.equal(quiet.phaseBudgetMilliseconds, 1_440_000);
   const loaded = captureBudget('node --test scripts/release/test', 10, 27, '');
-  assert.equal(loaded.timeoutMilliseconds, 3_000_000);
+  assert.equal(loaded.timeoutMilliseconds, 4_200_000);
   assert.ok(loaded.timeoutMilliseconds > 1_047_000, 'the loaded budget covers the 1047s scoped run SQ-128 measured');
   assert.equal(loaded.loadAverage, 27);
   assert.equal(loaded.availableParallelism, 10);
@@ -305,8 +387,8 @@ test('SQ-169: a test-suite capture gets the capacity budget; other commands keep
   assert.equal(widened.overrideMilliseconds, 1_200_000);
   assert.match(widened.notice, /SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS raised the phase budget from a measured 0ms to 1200000ms/);
   assert.match(captureBudget('node --test x', 8, 0, 'abc').notice, /is not a positive whole number of milliseconds/);
-  assert.match(captureBudget('node --test x', 8, 0, '1').notice, /cannot shorten the measured 720000ms phase budget/);
-  assert.equal(captureBudget('node --test x', 8, 0, '1').timeoutMilliseconds, 1_320_000);
+  assert.match(captureBudget('node --test x', 8, 0, '1').notice, /cannot shorten the measured 1440000ms phase budget/);
+  assert.equal(captureBudget('node --test x', 8, 0, '1').timeoutMilliseconds, 2_040_000);
 });
 
 test('SQ-169: the widen-only override is bounded by a hard maximum so a hung run cannot hold the slot forever', () => {
@@ -327,7 +409,7 @@ test('SQ-169: a capture budget timeout reports elapsed time, the budget, the loa
   const measured = captureBudget('node --test scripts/release/test', 8, 0, '');
   const atMaximum = captureBudget('npm run test:full', 8, 0, '999999999');
   const cases = [
-    { budget: Object.freeze({ ...measured, timeoutMilliseconds: 1500 }), lever: /rerun the same wrapper with SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS=<milliseconds> above 720000 in its environment/ },
+    { budget: Object.freeze({ ...measured, timeoutMilliseconds: 1500 }), lever: /rerun the same wrapper with SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS=<milliseconds> above 1440000 in its environment/ },
     { budget: Object.freeze({ ...atMaximum, timeoutMilliseconds: 1500 }), lever: /already at the 7200000ms hard maximum, so no override can raise it: ask the orchestrator to re-pin a narrower verify command/ },
   ];
   for (const { budget, lever } of cases) {
@@ -422,14 +504,14 @@ test('SQ-169: the wrapper announces the budget before the run and reports it aft
 });
 
 test('SQ-332: a budget past the 1800000ms background default names that default and the timeout that outlives it', () => {
-  // The capacity model's own ceiling under heavy load: 600000ms setup + 2400000ms phase.
+  // The capacity model's own ceiling under heavy load: 600000ms setup + 3600000ms phase.
   const loaded = captureBudget('npm run test:full', 8, 64, '');
-  assert.equal(loaded.timeoutMilliseconds, 3_000_000);
-  assert.equal(captureHarnessTimeoutMilliseconds(loaded), 3_600_000);
+  assert.equal(loaded.timeoutMilliseconds, 4_200_000);
+  assert.equal(captureHarnessTimeoutMilliseconds(loaded), 4_800_000);
   const guidance = captureHarnessGuidance(loaded);
-  assert.match(guidance, /^verify-capture: Bash timeout: this capture may run up to 3000000ms\. The Bash tool stops a foreground call at 600000ms and moves a longer one to the background under its 1800000ms default, discarding the timeout you set, and a wrapper killed there records no verdict at all\./);
+  assert.match(guidance, /^verify-capture: Bash timeout: this capture may run up to 4200000ms\. The Bash tool stops a foreground call at 600000ms and moves a longer one to the background under its 1800000ms default, discarding the timeout you set, and a wrapper killed there records no verdict at all\./);
   assert.match(guidance, /This budget is at or above that 1800000ms default, so a backgrounded call without an explicit timeout is killed before this capture can record pass, fail, or capture_budget_exceeded\./);
-  assert.match(guidance, /If you background this call, pass timeout=3600000 /);
+  assert.match(guidance, /If you background this call, pass timeout=4800000 /);
 
   // SQ-277's geometry: a 6000000ms phase override gives 6600000ms, which still fits the margin.
   const widened = captureBudget('npm run test:full', 8, 0, '6000000');
