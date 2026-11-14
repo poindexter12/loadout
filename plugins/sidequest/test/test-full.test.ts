@@ -10,8 +10,21 @@ import { sandboxOwnedEnvironmentVariables } from './_sidequest-test-env.js';
 
 const runnerModuleUrl = pathToFileURL(path.join(__dirname, '..', 'scripts', 'test-full.mjs')).href;
 
-// SQ-62's measurement of this suite's functional phase, kept here because the budget model is
-// calibrated to it and a future change to either number should have to argue with the other.
+// Measurements of this suite's functional phase, kept here because the budget model is calibrated
+// to them and a future change to either number should have to argue with the other.
+//
+// SQ-68 recalibrated the baseline against the 2026-11 pair, because the suite SQ-62 measured no
+// longer exists: SQ-137 sharded hooks, mcp, submission and integration-advance, and the suite grew
+// to ~2019 tests. One work constant cannot predict two differently sized suites, so the low-load
+// measurement is what the baseline is derived from and the slowest one is what the ceiling is
+// checked against.
+const measuredLowLoadPhaseDurationMilliseconds = 1131971;
+const measuredLowLoadAverage = 3.94;
+const measuredSlowestPhaseDurationMilliseconds = 1907973;
+const measuredSlowestLoadAverage = 55.72;
+// SQ-62's original measurement, retained deliberately. The recalibrated model no longer PREDICTS
+// it, because it measured a smaller suite; what still has to hold is that the budget its machine
+// would get today clears it.
 const measuredContendedPhaseDurationMilliseconds = 1742623;
 const measuredContendedLoadAverage = 29.17;
 const measuredContendedCores = 10;
@@ -26,6 +39,8 @@ type CapacityKey =
   | 'tenCoreLoadFive'
   | 'tenCoreLoadTwentySeven'
   | 'tenCoreAtMeasuredLoad'
+  | 'tenCoreAtLowLoad'
+  | 'tenCoreAtSlowestLoad'
   | 'windowsReportsNoLoad';
 
 type BudgetHelpers = {
@@ -90,6 +105,8 @@ function loadBudgetHelpers(): BudgetHelpers {
       tenCoreLoadFive: [8, 10, 5],
       tenCoreLoadTwentySeven: [8, 10, 27.42],
       tenCoreAtMeasuredLoad: [8, ${measuredContendedCores}, ${measuredContendedLoadAverage}],
+      tenCoreAtLowLoad: [8, ${measuredContendedCores}, ${measuredLowLoadAverage}],
+      tenCoreAtSlowestLoad: [8, ${measuredContendedCores}, ${measuredSlowestLoadAverage}],
       windowsReportsNoLoad: [8, 10, 0],
     };
     const budgets = {};
@@ -115,7 +132,7 @@ function loadBudgetHelpers(): BudgetHelpers {
       overrides: {
         absent: override(undefined),
         blank: override('   '),
-        widens: override('900000'),
+        widens: override('1800000'),
         widensPastTheCap: override('5000000'),
         cannotShorten: override('1000'),
         cannotZero: override('0'),
@@ -123,7 +140,7 @@ function loadBudgetHelpers(): BudgetHelpers {
       },
       timeoutError: formatTestPhaseTimeoutError('functional', fourCoreIdle),
       contendedTimeoutError: formatTestPhaseTimeoutError('functional', tenCoreContended),
-      warning: formatTestPhaseWarning('functional', fourCoreIdle, 1000000),
+      warning: formatTestPhaseWarning('functional', fourCoreIdle, 2000000),
       gatewayCatalog: fullSuiteGatewayCatalog(),
       phaseFailures: {
         timedOutWithStatusZero: describe({ timedOut: true, status: 0, signal: null, cleanupError: null }),
@@ -139,27 +156,78 @@ function loadBudgetHelpers(): BudgetHelpers {
   return JSON.parse(execFileSync(process.execPath, ['--input-type=module', '--eval', script], { encoding: 'utf8' })) as BudgetHelpers;
 }
 
+test('SQ-68: test-full.mjs consumes the shared capacity model and keeps no local copy', () => {
+  // The invariant, asserted as identity rather than as two numbers that happen to agree today.
+  // Comparing values is what the forked model already passed: both copies computed 480000 * 1.5
+  // and the tests were green while the gate could still be tighter than the phase it gates. The
+  // only assertion that cannot be satisfied by a copy is that these ARE the same function objects.
+  const script = `
+    import { createRequire } from 'node:module';
+    import * as suite from ${JSON.stringify(runnerModuleUrl)};
+    const require = createRequire(${JSON.stringify(runnerModuleUrl)});
+    const shared = require('../lib/test-phase-capacity.js');
+    const names = [
+      'calculateTestConcurrency',
+      'calculateEffectiveTestWorkers',
+      'calculateExpectedTestPhaseDurationMilliseconds',
+      'calculateTestPhaseTimeoutMilliseconds',
+      'resolvePhaseBudgetOverride',
+    ];
+    console.log(JSON.stringify({
+      identical: Object.fromEntries(names.map((name) => [name, suite[name] === shared[name]])),
+      overrideVariable: suite.phaseBudgetOverrideVariable === shared.phaseBudgetOverrideVariable,
+    }));
+  `;
+  const shared = JSON.parse(
+    execFileSync(process.execPath, ['--input-type=module', '--eval', script], { encoding: 'utf8' }),
+  ) as { identical: Record<string, boolean>; overrideVariable: boolean };
+
+  for (const [name, isIdentical] of Object.entries(shared.identical)) {
+    assert.equal(isIdentical, true, `test-full.mjs ${name} must be the shared test-phase-capacity export, not a copy of it`);
+  }
+  assert.equal(shared.overrideVariable, true);
+
+  // And the file must not have grown its own copy back. Each of these is a constant that was
+  // declared here and in src/lib/verify-capture.ts before SQ-68.
+  const source = fs.readFileSync(runnerScriptPath, 'utf8');
+  for (const constant of [
+    'maximumTestConcurrency',
+    'minimumTestConcurrency',
+    'baselineTestPhaseDurationMilliseconds',
+    'testPhaseBudgetSafetyFactor',
+    'maximumTestPhaseTimeoutMilliseconds',
+    'minimumEffectiveTestWorkers',
+  ]) {
+    assert.doesNotMatch(
+      source,
+      new RegExp(`^\\s*(?:export\\s+)?const\\s+${constant}\\s*=`, 'm'),
+      `scripts/test-full.mjs must not declare its own ${constant}`,
+    );
+  }
+});
+
 test('full-suite concurrency clamps to the runner range', () => {
   const helpers = loadBudgetHelpers();
 
   assert.deepEqual(helpers.concurrency, [2, 4, 8]);
   // Reading the budget helpers with the old single-argument arity still answers for an
   // otherwise idle machine, which is the only machine the core-count model ever described.
-  assert.deepEqual(helpers.defaultArityBudgets, [720000, 1440000, 2400000]);
+  assert.deepEqual(helpers.defaultArityBudgets, [1440000, 2880000, 3600000]);
 });
 
-test('the 480000ms constant is an expected duration, and the deadline sits above it', () => {
+test('the 960000ms constant is an expected duration, and the deadline sits above it', () => {
   const { budgets, expectations } = loadBudgetHelpers();
 
-  // SQ-62: duration times effective workers is a work constant — 1742s * 2.15 = 3749
-  // s*workers measured locally, 302.9s * 4 = 1212 s*workers on CI. 480_000 * 8 is 3840
-  // s*workers, i.e. 1.02x the local measurement. The old code used that as the deadline, so
-  // off CI the gate had no margin whatsoever and three runs in a row died on it. The
-  // expectation keeps the measured constant; the deadline is 1.5x it.
-  assert.equal(expectations.idleEightCore, 480000);
-  assert.equal(expectations.idleFourCore, 960000);
-  assert.equal(budgets.idleEightCore, 720000);
-  assert.equal(budgets.idleFourCore, 1440000);
+  // SQ-62 established the shape: duration times effective workers is a work constant, so one
+  // number predicts the suite on any machine once its real capacity is known. SQ-68 recalibrated
+  // the magnitude — 960_000 * 8 is 7680 s*workers, against 1131971 * 6.70 = 7584 s*workers
+  // measured on this host in 2026-11. The old 480000 figure was 1.02x a 1618-test suite and only
+  // ever worked as an expectation; used as a deadline it killed healthy runs. The expectation
+  // keeps the measured constant; the deadline is 1.5x it.
+  assert.equal(expectations.idleEightCore, 960000);
+  assert.equal(expectations.idleFourCore, 1920000);
+  assert.equal(budgets.idleEightCore, 1440000);
+  assert.equal(budgets.idleFourCore, 2880000);
   assert.ok(
     budgets.idleEightCore > expectations.idleEightCore,
     'a deadline equal to the expected duration is a coin toss, not a budget',
@@ -167,12 +235,12 @@ test('the 480000ms constant is an expected duration, and the deadline sits above
 
   // An idle machine with more cores than the concurrency ceiling is still an 8-worker
   // machine, so it is held to the 8-worker expectation rather than handed wall clock for free.
-  assert.equal(expectations.idleTenCore, 480000);
-  assert.equal(expectations.idleSixteenCore, 480000);
+  assert.equal(expectations.idleTenCore, 960000);
+  assert.equal(expectations.idleSixteenCore, 960000);
   // Windows reports os.loadavg() as [0, 0, 0] and lands on exactly this branch.
-  assert.equal(expectations.windowsReportsNoLoad, 480000);
+  assert.equal(expectations.windowsReportsNoLoad, 960000);
   // Load a 10-core box absorbs without losing a worker changes nothing either.
-  assert.equal(expectations.tenCoreLoadTwo, 480000);
+  assert.equal(expectations.tenCoreLoadTwo, 960000);
 });
 
 test('a contended machine gets MORE wall clock, not the tightest budget in the curve', () => {
@@ -184,8 +252,9 @@ test('a contended machine gets MORE wall clock, not the tightest budget in the c
   // can reach, so nothing had ever validated it. At load 27.42 those 8 workers hold about
   // 2.26 workers of real capacity.
   assert.equal(effectiveWorkers.tenCoreLoadTwentySeven, 2.2586);
-  assert.equal(expectations.tenCoreLoadTwentySeven, 1700160);
-  assert.equal(budgets.tenCoreLoadTwentySeven, 2400000);
+  assert.equal(expectations.tenCoreLoadTwentySeven, 3400320);
+  // The ceiling, not the formula, is what answers here: 3400320 * 1.5 is 5100480.
+  assert.equal(budgets.tenCoreLoadTwentySeven, 3600000);
   assert.ok(
     budgets.tenCoreLoadTwentySeven > budgets.idleTenCore,
     'a contended 10-core box must not be held to the budget an idle one gets',
@@ -194,8 +263,8 @@ test('a contended machine gets MORE wall clock, not the tightest budget in the c
   // The widening is proportional to lost capacity rather than a step: load 5 on 10 cores
   // leaves 6.15 effective workers, which is 1.3x the expectation and 1.3x the deadline.
   assert.equal(effectiveWorkers.tenCoreLoadFive, 6.1538);
-  assert.equal(expectations.tenCoreLoadFive, 624000);
-  assert.equal(budgets.tenCoreLoadFive, 936000);
+  assert.equal(expectations.tenCoreLoadFive, 1248000);
+  assert.equal(budgets.tenCoreLoadFive, 1872000);
 
   // Idle machines still resolve to their worker count, which is what keeps this a
   // generalization of the old model rather than a blanket inflation of it.
@@ -208,37 +277,57 @@ test('a contended machine gets MORE wall clock, not the tightest budget in the c
   assert.equal(effectiveWorkers.nonFiniteLoadIsIgnored, 8);
 });
 
-test('the measured 29-minute phase fits inside the budget its own machine would now get', () => {
+test('every measured functional phase fits inside the budget its own machine would now get', () => {
   const { budgets, expectations } = loadBudgetHelpers();
 
-  // The run SQ-62 measured: 1742623ms of functional phase at concurrency 8 on 10 cores with
-  // a 1-minute load average of 29.17, 1618 tests, 0 cancelled. Under the old formula it got
-  // 480000ms, which is where the ticket's three reproductions died. Two claims are asserted
-  // here: the capacity model PREDICTS that duration (within 5%, and it measured 2.4%), and
-  // the deadline derived from it CLEARS that duration by a real margin rather than a hair.
-  const expected = expectations.tenCoreAtMeasuredLoad;
-  const budget = budgets.tenCoreAtMeasuredLoad;
+  // The run the SQ-68 baseline is calibrated from: 1131971ms of functional phase at concurrency 8
+  // on 10 cores with a 1-minute load average of 3.94, ~2019 tests. Two claims are asserted, the
+  // same pair SQ-62 asserted against its own measurement: the capacity model PREDICTS that
+  // duration (within 5%; it measures 1.3%), and the deadline derived from it CLEARS that duration
+  // by a real margin rather than a hair. This is the measurement that matters, because it is a
+  // healthy low-load run — the exact case assembled-wave gate wave-689a126004dfdf1a killed at the
+  // old baseline's 859641ms budget with zero test failures.
+  const lowLoadExpected = expectations.tenCoreAtLowLoad;
+  const lowLoadBudget = budgets.tenCoreAtLowLoad;
 
-  assert.equal(expected, 1784160);
+  assert.equal(lowLoadExpected, 1146240);
   assert.ok(
-    Math.abs(expected - measuredContendedPhaseDurationMilliseconds) / measuredContendedPhaseDurationMilliseconds < 0.05,
-    `the capacity model predicted ${expected}ms against a measured ${measuredContendedPhaseDurationMilliseconds}ms`,
+    Math.abs(lowLoadExpected - measuredLowLoadPhaseDurationMilliseconds) / measuredLowLoadPhaseDurationMilliseconds < 0.05,
+    `the capacity model predicted ${lowLoadExpected}ms against a measured ${measuredLowLoadPhaseDurationMilliseconds}ms`,
   );
-  assert.equal(budget, 2400000);
+  assert.equal(lowLoadBudget, 1719360);
   assert.ok(
-    budget > measuredContendedPhaseDurationMilliseconds * 1.25,
-    `a ${budget}ms deadline must clear the measured ${measuredContendedPhaseDurationMilliseconds}ms by more than a rounding error`,
+    lowLoadBudget > measuredLowLoadPhaseDurationMilliseconds * 1.25,
+    `a ${lowLoadBudget}ms deadline must clear the measured ${measuredLowLoadPhaseDurationMilliseconds}ms by more than a rounding error`,
   );
+
+  // The slowest functional phase ever measured on this host, which is what the ceiling has to
+  // clear: the formula would hand this machine 9174960ms, so the 3600000ms ceiling is the number
+  // actually enforced and the one that has to be shown clearing a real run.
+  assert.equal(budgets.tenCoreAtSlowestLoad, 3600000);
+  assert.ok(
+    budgets.tenCoreAtSlowestLoad > measuredSlowestPhaseDurationMilliseconds * 1.25,
+    `the ceiling must clear the slowest measured ${measuredSlowestPhaseDurationMilliseconds}ms phase, not truncate it`,
+  );
+
+  // SQ-62's 1618-test run is no longer PREDICTED by a baseline calibrated to a ~2019-test suite,
+  // and pretending otherwise is how a stale work constant survives a suite that grew. What must
+  // still hold is that its machine's budget clears it.
+  assert.ok(
+    budgets.tenCoreAtMeasuredLoad > measuredContendedPhaseDurationMilliseconds * 1.25,
+    `a ${budgets.tenCoreAtMeasuredLoad}ms deadline must still clear SQ-62's measured ${measuredContendedPhaseDurationMilliseconds}ms`,
+  );
+  assert.equal(measuredContendedLoadAverage > measuredLowLoadAverage, true);
 });
 
 test('the phase budget override only ever widens, and says so out loud', () => {
   const { overrides } = loadBudgetHelpers();
 
-  assert.deepEqual(overrides.absent, { timeoutMilliseconds: 720000, notice: null });
-  assert.deepEqual(overrides.blank, { timeoutMilliseconds: 720000, notice: null });
+  assert.deepEqual(overrides.absent, { timeoutMilliseconds: 1440000, notice: null });
+  assert.deepEqual(overrides.blank, { timeoutMilliseconds: 1440000, notice: null });
   assert.deepEqual(overrides.widens, {
-    timeoutMilliseconds: 900000,
-    notice: 'NOTICE: SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS raised the phase budget from a measured 720000ms to 900000ms. Every test still has to pass inside it: this grants wall clock, it does not skip the gate.',
+    timeoutMilliseconds: 1800000,
+    notice: 'NOTICE: SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS raised the phase budget from a measured 1440000ms to 1800000ms. Every test still has to pass inside it: this grants wall clock, it does not skip the gate.',
   });
   // The model's own ceiling cannot be the last word, or a machine busier than the model
   // allows for still has no supported way to run the gate at all. That was the state SQ-62
@@ -248,16 +337,16 @@ test('the phase budget override only ever widens, and says so out loud', () => {
   // An override that could shorten the deadline, zero it, or switch it off would be a way to
   // pass the gate without running it. Each is refused and the measured budget stands.
   assert.deepEqual(overrides.cannotShorten, {
-    timeoutMilliseconds: 720000,
-    notice: 'NOTICE: SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS=1000 cannot shorten the measured 720000ms phase budget, so the measured budget stands. The override only ever grants more wall clock.',
+    timeoutMilliseconds: 1440000,
+    notice: 'NOTICE: SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS=1000 cannot shorten the measured 1440000ms phase budget, so the measured budget stands. The override only ever grants more wall clock.',
   });
   assert.deepEqual(overrides.cannotZero, {
-    timeoutMilliseconds: 720000,
-    notice: 'NOTICE: SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS=0 is not a positive whole number of milliseconds, so the measured 720000ms phase budget stands.',
+    timeoutMilliseconds: 1440000,
+    notice: 'NOTICE: SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS=0 is not a positive whole number of milliseconds, so the measured 1440000ms phase budget stands.',
   });
   assert.deepEqual(overrides.cannotDisable, {
-    timeoutMilliseconds: 720000,
-    notice: 'NOTICE: SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS=off is not a positive whole number of milliseconds, so the measured 720000ms phase budget stands.',
+    timeoutMilliseconds: 1440000,
+    notice: 'NOTICE: SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS=off is not a positive whole number of milliseconds, so the measured 1440000ms phase budget stands.',
   });
 });
 
@@ -299,13 +388,13 @@ test('full-suite budget keeps actionable timeout and warning copy', () => {
 
   assert.equal(
     helpers.timeoutError,
-    'Sidequest functional tests exceeded their 1440000ms phase budget at concurrency 4 on 4 available cores, whose 1-minute load average of 0.00 left an effective 4.00 workers of capacity, after waiting behind 0 sibling full-suite captures. The runner was killed at the deadline, so every in-flight file reporting a still-pending promise resolution was cancelled, not failed. Set SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS above 1440000 to give this run more wall clock; it can only widen the budget, never shorten the deadline or skip a test.',
+    'Sidequest functional tests exceeded their 2880000ms phase budget at concurrency 4 on 4 available cores, whose 1-minute load average of 0.00 left an effective 4.00 workers of capacity, after waiting behind 0 sibling full-suite captures. The runner was killed at the deadline, so every in-flight file reporting a still-pending promise resolution was cancelled, not failed. Set SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS above 2880000 to give this run more wall clock; it can only widen the budget, never shorten the deadline or skip a test.',
   );
   // The warning fires against the expected duration, not a fraction of the budget, so a
   // duration regression still surfaces on a machine whose budget the ceiling has truncated.
   assert.equal(
     helpers.warning,
-    'WARNING: Sidequest functional tests completed in 1000000ms, over the 960000ms expected of their capacity though inside their 1440000ms budget, at concurrency 4 on 4 available cores, whose 1-minute load average of 0.00 left an effective 4.00 workers of capacity.',
+    'WARNING: Sidequest functional tests completed in 2000000ms, over the 1920000ms expected of their capacity though inside their 2880000ms budget, at concurrency 4 on 4 available cores, whose 1-minute load average of 0.00 left an effective 4.00 workers of capacity.',
   );
 });
 
@@ -318,7 +407,7 @@ test('a contended timeout reports the load and the capacity it left, not just th
   // the deadline's cancellations as failing tests.
   assert.equal(
     contendedTimeoutError,
-    'Sidequest functional tests exceeded their 2400000ms phase budget at concurrency 8 on 10 available cores, whose 1-minute load average of 27.42 left an effective 2.26 workers of capacity, after waiting behind 0 sibling full-suite captures. The runner was killed at the deadline, so every in-flight file reporting a still-pending promise resolution was cancelled, not failed. Set SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS above 2400000 to give this run more wall clock; it can only widen the budget, never shorten the deadline or skip a test.',
+    'Sidequest functional tests exceeded their 3600000ms phase budget at concurrency 8 on 10 available cores, whose 1-minute load average of 27.42 left an effective 2.26 workers of capacity, after waiting behind 0 sibling full-suite captures. The runner was killed at the deadline, so every in-flight file reporting a still-pending promise resolution was cancelled, not failed. Set SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS above 3600000 to give this run more wall clock; it can only widen the budget, never shorten the deadline or skip a test.',
   );
 });
 
