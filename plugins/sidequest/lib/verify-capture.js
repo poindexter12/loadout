@@ -22,13 +22,14 @@ const captureSlotStaleMilliseconds = 30 * 60 * 1e3;
 const captureSlotRetryMilliseconds = 50;
 const captureSlotOperationRetryLimit = 20;
 const captureSlotContentionErrorCodes = /* @__PURE__ */ new Set(["EEXIST", "EPERM", "EBUSY", "ENOTEMPTY"]);
-const minimumTestConcurrency = 2;
-const maximumTestConcurrency = 8;
-const baselineTestPhaseDurationMilliseconds = 48e4;
-const testPhaseBudgetSafetyFactor = 1.5;
-const maximumTestPhaseTimeoutMilliseconds = 24e5;
-const minimumEffectiveTestWorkers = 0.5;
-const phaseBudgetOverrideVariable = "SIDEQUEST_FULL_SUITE_PHASE_BUDGET_MS";
+const {
+  calculateTestConcurrency,
+  calculateEffectiveTestWorkers,
+  calculateTestPhaseTimeoutMilliseconds,
+  calculateCaptureDeadlineMilliseconds,
+  resolvePhaseBudgetOverride,
+  phaseBudgetOverrideVariable
+} = require("./test-phase-capacity.js");
 const captureHardMaximumMilliseconds = 2 * 60 * 60 * 1e3;
 const harnessForegroundMaximumMilliseconds = 6e5;
 const harnessBackgroundDefaultMilliseconds = 18e5;
@@ -51,12 +52,7 @@ function captureBudgetClass(command) {
 function otherRunnableThreads(loadAverage) {
   return typeof loadAverage === "number" && Number.isFinite(loadAverage) && loadAverage > 0 ? loadAverage : 0;
 }
-function effectiveTestWorkers(testConcurrency, availableParallelism, loadAverage) {
-  return Math.min(
-    testConcurrency,
-    Math.max(minimumEffectiveTestWorkers, availableParallelism * testConcurrency / (testConcurrency + otherRunnableThreads(loadAverage)))
-  );
-}
+const effectiveTestWorkers = calculateEffectiveTestWorkers;
 function capacityScaledDeadlineMilliseconds(perTestWorkerMilliseconds, testWorkers, availableParallelism = os.availableParallelism(), loadAverage = os.loadavg()[0] || 0) {
   const workers = Number.isFinite(testWorkers) && testWorkers > 0 ? testWorkers : 1;
   const capacityScale = workers / effectiveTestWorkers(workers, availableParallelism, loadAverage);
@@ -64,30 +60,17 @@ function capacityScaledDeadlineMilliseconds(perTestWorkerMilliseconds, testWorke
 }
 function captureBudget(command, availableParallelism = os.availableParallelism(), loadAverage = os.loadavg()[0] || 0, rawOverride = process.env[phaseBudgetOverrideVariable]) {
   const budgetClass = captureBudgetClass(command);
-  const testConcurrency = Math.min(maximumTestConcurrency, Math.max(minimumTestConcurrency, availableParallelism));
+  const testConcurrency = calculateTestConcurrency(availableParallelism);
   const effectiveWorkers = effectiveTestWorkers(testConcurrency, availableParallelism, loadAverage);
-  const capacityPhaseBudgetMilliseconds = Math.min(
-    maximumTestPhaseTimeoutMilliseconds,
-    Math.round(baselineTestPhaseDurationMilliseconds * maximumTestConcurrency / effectiveWorkers * testPhaseBudgetSafetyFactor)
-  );
+  const capacityPhaseBudgetMilliseconds = calculateTestPhaseTimeoutMilliseconds(testConcurrency, availableParallelism, loadAverage);
   const measuredPhaseBudgetMilliseconds = budgetClass === "command" ? 0 : capacityPhaseBudgetMilliseconds;
-  const requestedText = typeof rawOverride === "string" ? rawOverride.trim() : "";
-  const requested = /^\d+$/.test(requestedText) ? Number(requestedText) : 0;
-  const widened = requested > measuredPhaseBudgetMilliseconds;
-  const phaseBudgetMilliseconds = widened ? requested : measuredPhaseBudgetMilliseconds;
-  const uncappedMilliseconds = defaultVerificationTimeoutMilliseconds + phaseBudgetMilliseconds;
+  const override = resolvePhaseBudgetOverride(measuredPhaseBudgetMilliseconds, rawOverride);
+  const widened = override.widened;
+  const phaseBudgetMilliseconds = override.timeoutMilliseconds;
+  const uncappedMilliseconds = calculateCaptureDeadlineMilliseconds(phaseBudgetMilliseconds, defaultVerificationTimeoutMilliseconds);
   const clampedToHardMaximum = uncappedMilliseconds > captureHardMaximumMilliseconds;
   const timeoutMilliseconds = clampedToHardMaximum ? captureHardMaximumMilliseconds : uncappedMilliseconds;
-  let notice = null;
-  if (requestedText && requested <= 0) {
-    notice = `${phaseBudgetOverrideVariable}=${requestedText} is not a positive whole number of milliseconds, so the measured ${measuredPhaseBudgetMilliseconds}ms phase budget stands.`;
-  } else if (requested > 0 && !widened) {
-    notice = `${phaseBudgetOverrideVariable}=${requested} cannot shorten the measured ${measuredPhaseBudgetMilliseconds}ms phase budget, so the measured budget stands. The override only ever grants more wall clock.`;
-  } else if (clampedToHardMaximum) {
-    notice = `${phaseBudgetOverrideVariable}=${requested} asked for a ${uncappedMilliseconds}ms capture budget, above the ${captureHardMaximumMilliseconds}ms hard maximum, so the capture stops at ${captureHardMaximumMilliseconds}ms.`;
-  } else if (widened) {
-    notice = `${phaseBudgetOverrideVariable} raised the phase budget from a measured ${measuredPhaseBudgetMilliseconds}ms to ${requested}ms. Every test still has to pass inside it: this grants wall clock, it does not skip the gate.`;
-  }
+  const notice = clampedToHardMaximum && widened ? `${phaseBudgetOverrideVariable}=${override.requestedMilliseconds} asked for a ${uncappedMilliseconds}ms capture budget, above the ${captureHardMaximumMilliseconds}ms hard maximum, so the capture stops at ${captureHardMaximumMilliseconds}ms.` : override.notice;
   return Object.freeze({
     budgetClass,
     timeoutMilliseconds,
@@ -99,7 +82,7 @@ function captureBudget(command, availableParallelism = os.availableParallelism()
     loadAverage: otherRunnableThreads(loadAverage),
     effectiveTestWorkers: effectiveWorkers,
     overrideVariable: phaseBudgetOverrideVariable,
-    overrideMilliseconds: widened ? requested : null,
+    overrideMilliseconds: widened ? override.requestedMilliseconds : null,
     clampedToHardMaximum,
     notice
   });
