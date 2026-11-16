@@ -29,8 +29,55 @@ function assistantToolUse(name, input, extra = {}) {
   };
 }
 
-async function collect(records) {
-  const collector = createSignalCollector();
+/**
+ * A config dir whose installed plugins register the given hooks, so attribution is read from real
+ * manifests on disk without touching the host's own install. `plugins` maps a plugin id to its
+ * hooks.json `hooks` object, or to `{ manifestHooks }` for hooks named by plugin.json instead.
+ */
+function pluginHome(plugins = {}) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'quartermaster-plugins-'));
+  fs.mkdirSync(path.join(home, 'plugins'), { recursive: true });
+  const registry = { version: 2, plugins: {} };
+  for (const [id, hooks] of Object.entries(plugins)) {
+    const installPath = path.join(home, 'plugins', 'cache', id.replace('@', '-'));
+    fs.mkdirSync(path.join(installPath, 'hooks'), { recursive: true });
+    fs.mkdirSync(path.join(installPath, '.claude-plugin'), { recursive: true });
+    if (hooks.manifestHooks) {
+      fs.writeFileSync(path.join(installPath, 'extra-hooks.json'), JSON.stringify({ hooks: hooks.manifestHooks }));
+      fs.writeFileSync(path.join(installPath, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: id, hooks: './extra-hooks.json' }));
+    } else {
+      fs.writeFileSync(path.join(installPath, 'hooks', 'hooks.json'), JSON.stringify({ hooks }));
+    }
+    registry.plugins[id] = [{ scope: 'user', installPath, version: '1.0.0' }];
+  }
+  fs.writeFileSync(path.join(home, 'plugins', 'installed_plugins.json'), JSON.stringify(registry));
+  return { CLAUDE_CONFIG_DIR: home, home };
+}
+
+function commandHook(command, timeout, matcher) {
+  return { ...(matcher ? { matcher } : {}), hooks: [{ type: 'command', command, ...(timeout ? { timeout } : {}) }] };
+}
+
+function hookTimedOut(hookName, command, durationMs, timeoutMs, extra = {}) {
+  return {
+    type: 'attachment',
+    attachment: {
+      type: 'hook_cancelled',
+      hookName,
+      hookEvent: hookName.split(':')[0],
+      toolUseID: `hook-${Math.random()}`,
+      ...(command === undefined ? {} : { command }),
+      ...(durationMs === undefined ? {} : { durationMs }),
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      timedOut: true,
+      ...extra,
+    },
+    timestamp: '2026-08-01T10:00:00Z',
+  };
+}
+
+async function collect(records, env = pluginHome()) {
+  const collector = createSignalCollector({ env });
   const file = writeTranscript(records);
   await streamTranscript({ scope: 'main', file, sessionId: 'session-1' }, collector);
   return collector.finish();
@@ -95,10 +142,138 @@ test('separates hook errors and timeouts from successful context attachments', a
     assistantToolUse('WebFetch', { url: 'https://docs.python.org/3/library/json.html' }),
   ]);
   assert.deepEqual(signals.friction.hookErrors, { 'SessionStart:startup': 1 });
-  assert.deepEqual(signals.friction.hookTimeouts, { 'Stop:sidequest': 1 });
+  assert.equal(signals.friction.hookTimeouts.total, 1);
+  assert.deepEqual(signals.friction.hookTimeouts.hooks.map((hook) => [hook.attribution, hook.hookNames]), [
+    ['unrecorded', { 'Stop:sidequest': 1 }],
+  ]);
   const gitPush = signals.habits.commandsTop.find((entry) => entry.name === 'git push');
   assert.equal(gitPush.count, 2);
   assert.equal(signals.habits.webFetchDomainsTop[0].name, 'docs.python.org');
+});
+
+const ENSURE = 'node --no-warnings "${CLAUDE_PLUGIN_ROOT}/lib/observability/ensure.js" --launch';
+const FRESHNESS = 'node --no-warnings "${CLAUDE_PLUGIN_ROOT}/hooks/session-start-freshness.js"';
+const REGISTRY_WRITER = 'node "${CLAUDE_PLUGIN_ROOT}/hooks/registry-writer.js"';
+const GSD_MONITOR = 'node "/Users/someone/.claude/hooks/gsd-context-monitor.js"';
+
+test('hook timeouts keep command, duration and budget, attributed to the plugin whose manifest registers them', async () => {
+  const env = pluginHome({
+    'observability@loadout': { SessionStart: [commandHook(ENSURE, 1)] },
+    'quartermaster@loadout': { SessionStart: [commandHook(FRESHNESS, 5)] },
+  });
+  const signals = await collect([
+    hookTimedOut('SessionStart:startup', ENSURE, 1189, 1000),
+    hookTimedOut('SessionStart:startup', ENSURE, 1025, 1000),
+    hookTimedOut('SessionStart:resume', ENSURE, 1100, 1000),
+    hookTimedOut('SessionStart:startup', FRESHNESS, 5025, 5000),
+  ], env);
+
+  const { total, hooks } = signals.friction.hookTimeouts;
+  assert.equal(total, 4);
+  assert.equal(hooks.length, 2);
+  assert.deepEqual(hooks[0], {
+    plugin: 'observability@loadout',
+    attribution: 'plugin',
+    command: ENSURE,
+    hookNames: { 'SessionStart:startup': 2, 'SessionStart:resume': 1 },
+    count: 3,
+    sessions: 1,
+    budgetsMs: [1000],
+    maxDurationMs: 1189,
+    medianDurationMs: 1100,
+    maxOverBudgetMs: 189,
+  });
+  assert.equal(hooks[1].plugin, 'quartermaster@loadout');
+  assert.equal(hooks[1].medianDurationMs, 5025);
+  assert.equal(hooks[1].maxOverBudgetMs, 25);
+});
+
+test('a hook command two installed plugins both register is reported ambiguous, never assigned to one', async () => {
+  const env = pluginHome({
+    'model-gateway@loadout': { SessionStart: [commandHook(REGISTRY_WRITER, 10)] },
+    'sidequest@loadout': { SessionStart: [commandHook(REGISTRY_WRITER, 10)] },
+    'observability@loadout': { SessionStart: [commandHook(ENSURE, 1)] },
+  });
+  const signals = await collect([
+    hookTimedOut('SessionStart:startup', REGISTRY_WRITER, 10400, 10000),
+    hookTimedOut('SessionStart:startup', REGISTRY_WRITER, 10200, 10000),
+    hookTimedOut('SessionStart:startup', ENSURE, 1189, 1000),
+  ], env);
+
+  const [shared, ensure] = signals.friction.hookTimeouts.hooks;
+  assert.equal(shared.attribution, 'ambiguous');
+  assert.equal(shared.plugin, null);
+  assert.deepEqual(shared.candidates, ['model-gateway@loadout', 'sidequest@loadout']);
+  assert.equal(shared.count, 2);
+  assert.equal(shared.medianDurationMs, 10300);
+  assert.equal(ensure.plugin, 'observability@loadout');
+  assert.equal(ensure.candidates, undefined);
+});
+
+test('a shared hook name resolves to one plugin when the event, matcher or recorded budget rules the other out', async () => {
+  const env = pluginHome({
+    'model-gateway@loadout': {
+      SessionStart: [commandHook(REGISTRY_WRITER, 5)],
+      PreToolUse: [commandHook(REGISTRY_WRITER, 10, 'Bash|PowerShell')],
+    },
+    'sidequest@loadout': {
+      SessionStart: [commandHook(REGISTRY_WRITER, 10)],
+      PreToolUse: [commandHook(REGISTRY_WRITER, 10, 'Read')],
+      Stop: [commandHook(REGISTRY_WRITER, 10)],
+    },
+  });
+  const signals = await collect([
+    // Both register it at SessionStart; only model-gateway's 5s budget matches the recorded one.
+    hookTimedOut('SessionStart:startup', REGISTRY_WRITER, 5100, 5000),
+    // Both register it at PreToolUse; only model-gateway's matcher admits Bash.
+    hookTimedOut('PreToolUse:Bash', REGISTRY_WRITER, 10100, 10000),
+    // Only sidequest registers it at Stop.
+    hookTimedOut('Stop', REGISTRY_WRITER, 10050, 10000),
+  ], env);
+
+  const byPlugin = Object.fromEntries(signals.friction.hookTimeouts.hooks.map((hook) => [hook.plugin, hook]));
+  assert.deepEqual(Object.keys(byPlugin).sort(), ['model-gateway@loadout', 'sidequest@loadout']);
+  assert.deepEqual(byPlugin['model-gateway@loadout'].hookNames, { 'SessionStart:startup': 1, 'PreToolUse:Bash': 1 });
+  assert.deepEqual(byPlugin['model-gateway@loadout'].budgetsMs, [5000, 10000]);
+  assert.deepEqual(byPlugin['sidequest@loadout'].hookNames, { Stop: 1 });
+});
+
+test('hooks named by plugin.json, or recorded with the plugin root expanded, resolve to their plugin', async () => {
+  const env = pluginHome({ 'quartermaster@loadout': { manifestHooks: { SessionStart: [commandHook(FRESHNESS, 5)] } } });
+  const installPath = path.join(env.home, 'plugins', 'cache', 'quartermaster-loadout');
+  const expanded = FRESHNESS.replace('${CLAUDE_PLUGIN_ROOT}', installPath);
+  const signals = await collect([
+    hookTimedOut('SessionStart:startup', FRESHNESS, 5025, 5000),
+    hookTimedOut('SessionStart:startup', expanded, 5030, 5000),
+  ], env);
+
+  const hooks = signals.friction.hookTimeouts.hooks;
+  assert.deepEqual(hooks.map((hook) => [hook.plugin, hook.attribution]), [
+    ['quartermaster@loadout', 'plugin'],
+    ['quartermaster@loadout', 'plugin'],
+  ]);
+});
+
+test('hooks no installed plugin registers stay apart by command, and records without a command by name', async () => {
+  const env = pluginHome({ 'observability@loadout': { SessionStart: [commandHook(ENSURE, 1)] } });
+  const other = 'node "/Users/someone/.claude/hooks/gsd-path-export.js"';
+  const signals = await collect([
+    hookTimedOut('SessionStart:startup', GSD_MONITOR, 5109, 5000),
+    hookTimedOut('SessionStart:startup', GSD_MONITOR, 5260, 5000),
+    hookTimedOut('SessionStart:startup', other, 5154, 5000),
+    hookTimedOut('Stop', undefined, undefined, undefined),
+  ], env);
+
+  const { total, hooks } = signals.friction.hookTimeouts;
+  assert.equal(total, 4);
+  assert.deepEqual(hooks.map((hook) => [hook.attribution, hook.plugin, hook.command, hook.count]), [
+    ['unattributed', null, GSD_MONITOR, 2],
+    ['unattributed', null, other, 1],
+    ['unrecorded', null, null, 1],
+  ]);
+  assert.equal(hooks[0].maxOverBudgetMs, 260);
+  assert.deepEqual(hooks[2].budgetsMs, []);
+  assert.equal(hooks[2].maxDurationMs, null);
 });
 
 test('normalizeCommand reduces to recognizable headlines', () => {

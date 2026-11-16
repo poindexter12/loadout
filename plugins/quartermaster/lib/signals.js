@@ -1,5 +1,9 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
+
+const { pluginsDir } = require('./paths.js');
 const { fingerprintFor } = require('./permission-fingerprint.js');
 
 const MAX_SAMPLES = 12;
@@ -147,6 +151,135 @@ function countsOf(map) {
   return result;
 }
 
+function readJsonFile(file) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function squash(command) {
+  return String(command ?? '').replace(/\s+/g, ' ').trim();
+}
+
+/** The hook configs one installed plugin declares: `hooks/hooks.json` plus any its manifest names. */
+function hookConfigsOf(installPath) {
+  const configs = [readJsonFile(path.join(installPath, 'hooks', 'hooks.json'))];
+  const declared = readJsonFile(path.join(installPath, '.claude-plugin', 'plugin.json'))?.hooks;
+  for (const entry of Array.isArray(declared) ? declared : [declared]) {
+    if (typeof entry === 'string') configs.push(readJsonFile(path.resolve(installPath, entry)));
+    else if (entry && typeof entry === 'object') configs.push(entry);
+  }
+  return configs
+    .filter(Boolean)
+    .map((config) => (config.hooks && typeof config.hooks === 'object' && !Array.isArray(config.hooks) ? config.hooks : config));
+}
+
+/**
+ * Every command hook the installed plugins register, read from their manifests on disk. The
+ * transcript keeps `${CLAUDE_PLUGIN_ROOT}` unexpanded, so the owning plugin cannot be read off the
+ * command string, and the same script name is registered by more than one plugin
+ * (`hooks/registry-writer.js` by both model-gateway and sidequest). Matching the whole recorded
+ * command against what each plugin actually registers is the only attribution that does not guess.
+ */
+function readHookRegistrations(env = process.env) {
+  const installed = readJsonFile(path.join(pluginsDir(env), 'installed_plugins.json'));
+  const registrations = [];
+  for (const [plugin, records] of Object.entries(installed?.plugins ?? {})) {
+    const installPaths = new Set((Array.isArray(records) ? records : [])
+      .map((record) => record?.installPath)
+      .filter((installPath) => typeof installPath === 'string' && installPath));
+    for (const installPath of installPaths) {
+      for (const config of hookConfigsOf(installPath)) {
+        for (const [event, groups] of Object.entries(config)) {
+          if (!Array.isArray(groups)) continue;
+          for (const group of groups) {
+            for (const hook of Array.isArray(group?.hooks) ? group.hooks : []) {
+              if (typeof hook?.command !== 'string' || !hook.command.trim()) continue;
+              const command = squash(hook.command);
+              // Claude Code may record the command before or after expanding the plugin root.
+              const expanded = squash(command.split('${CLAUDE_PLUGIN_ROOT}').join(installPath));
+              registrations.push({
+                plugin,
+                event,
+                matcher: typeof group.matcher === 'string' ? group.matcher : null,
+                commands: new Set([command, expanded]),
+                timeoutMs: Number.isFinite(hook.timeout) ? hook.timeout * 1000 : null,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+  return registrations;
+}
+
+/** True unless the registration's matcher provably excludes the recorded hook name's subject. */
+function matcherAdmits(matcher, hookName) {
+  if (!matcher || matcher === '*') return true;
+  const separator = String(hookName ?? '').indexOf(':');
+  if (separator < 0) return true;
+  try {
+    return new RegExp(`^(?:${matcher})$`).test(hookName.slice(separator + 1));
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Names the plugin that owns a timed-out hook, or says plainly why it cannot. `plugin` is set only
+ * when exactly one installed plugin registers that command for that event; two or more is
+ * `ambiguous` with every candidate listed, never a pick.
+ */
+function attributeHook(registrations, event) {
+  if (!event.command) return { attribution: 'unrecorded', plugin: null, candidates: [] };
+  const command = squash(event.command);
+  let matches = registrations.filter((registration) => registration.commands.has(command)
+    && (!event.hookEvent || registration.event === event.hookEvent)
+    && matcherAdmits(registration.matcher, event.hookName));
+  // A recorded budget that contradicts a registration's explicit timeout rules that registration
+  // out, but only as a tie-break: a lone owner whose budget changed between versions is still it.
+  if (new Set(matches.map((registration) => registration.plugin)).size > 1 && Number.isFinite(event.timeoutMs)) {
+    const consistent = matches.filter((registration) => registration.timeoutMs === null || registration.timeoutMs === event.timeoutMs);
+    if (consistent.length) matches = consistent;
+  }
+  const candidates = [...new Set(matches.map((registration) => registration.plugin))].sort();
+  if (candidates.length === 1) return { attribution: 'plugin', plugin: candidates[0], candidates };
+  if (candidates.length > 1) return { attribution: 'ambiguous', plugin: null, candidates };
+  // Registered by user or project settings, or by a plugin no longer installed.
+  return { attribution: 'unattributed', plugin: null, candidates };
+}
+
+function medianOf(values) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : Math.round((sorted[middle - 1] + sorted[middle]) / 2);
+}
+
+function hookTimeoutsOf(groups, total) {
+  const hooks = [...groups.values()]
+    .map((group) => ({
+      plugin: group.plugin,
+      attribution: group.attribution,
+      ...(group.attribution === 'ambiguous' ? { candidates: group.candidates } : {}),
+      command: group.command === null ? null : clip(group.command),
+      hookNames: countsOf(group.hookNames),
+      count: group.count,
+      sessions: group.sessions.size,
+      budgetsMs: [...group.budgets].sort((a, b) => a - b),
+      maxDurationMs: group.maxDurationMs,
+      medianDurationMs: medianOf(group.durations),
+      maxOverBudgetMs: group.maxOverBudgetMs,
+    }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, TOP_LIMIT);
+  return { total, hooks };
+}
+
 function emptyTally() {
   return {
     prompts: 0,
@@ -165,9 +298,19 @@ function emptyTally() {
 /**
  * Single-pass aggregator over every streamed event. Everything it keeps is bounded: counters,
  * top-N maps, and a fixed number of clipped quotes, so the output stays safe to load into context
- * no matter how many transcripts were scanned.
+ * no matter how many transcripts were scanned. The one list that grows is each timed-out hook's
+ * durations, one number per timeout, kept so the median is exact; only its summary is output.
+ *
+ * `options.env` locates the installed plugin manifests that hook timeouts are attributed against.
  */
-function createSignalCollector() {
+function createSignalCollector(options = {}) {
+  const env = options.env ?? process.env;
+  // Read on the first timeout, not up front: most transcripts have none, and the SessionEnd hook
+  // runs this collector on one transcript inside its own budget.
+  let hookRegistrations = null;
+  const hookAttributions = new Map();
+  const hookTimeoutGroups = new Map();
+  let hookTimeoutTotal = 0;
   const perSession = new Map();
   const corrections = [];
   const denialTargets = [];
@@ -176,7 +319,6 @@ function createSignalCollector() {
   const notApplicableByGate = new Map();
   const errorsByTool = new Map();
   const hookErrorsByHook = new Map();
-  const hookTimeoutsByHook = new Map();
   const attributionPlugins = new Map();
   const attributionSkills = new Map();
   const attributionMcpServers = new Map();
@@ -228,9 +370,46 @@ function createSignalCollector() {
         case 'hook_error':
           bump(hookErrorsByHook, event.hookName, event.sessionId);
           return;
-        case 'hook_timeout':
-          bump(hookTimeoutsByHook, event.hookName, event.sessionId);
+        case 'hook_timeout': {
+          hookTimeoutTotal += 1;
+          const lookup = [event.hookEvent, event.hookName, event.command, event.timeoutMs].join('\u0000');
+          let owner = hookAttributions.get(lookup);
+          if (!owner) {
+            if (event.command && hookRegistrations === null) hookRegistrations = readHookRegistrations(env);
+            owner = attributeHook(hookRegistrations ?? [], event);
+            hookAttributions.set(lookup, owner);
+          }
+          // Keyed on owner plus command, so one plugin's slow hook is one row however many events
+          // it runs at, and two plugins' identically named scripts are never merged into one.
+          const key = event.command
+            ? `${owner.attribution}\u0000${owner.plugin ?? owner.candidates.join(',')}\u0000${squash(event.command)}`
+            : `unrecorded\u0000${event.hookName}`;
+          const group = hookTimeoutGroups.get(key) ?? {
+            ...owner,
+            command: event.command ? squash(event.command) : null,
+            hookNames: new Map(),
+            count: 0,
+            sessions: new Set(),
+            budgets: new Set(),
+            durations: [],
+            maxDurationMs: null,
+            maxOverBudgetMs: null,
+          };
+          hookTimeoutGroups.set(key, group);
+          group.count += 1;
+          if (event.sessionId) group.sessions.add(event.sessionId);
+          bump(group.hookNames, event.hookName, event.sessionId);
+          if (Number.isFinite(event.timeoutMs)) group.budgets.add(event.timeoutMs);
+          if (Number.isFinite(event.durationMs)) {
+            group.durations.push(event.durationMs);
+            group.maxDurationMs = Math.max(group.maxDurationMs ?? event.durationMs, event.durationMs);
+            if (Number.isFinite(event.timeoutMs)) {
+              const over = event.durationMs - event.timeoutMs;
+              group.maxOverBudgetMs = Math.max(group.maxOverBudgetMs ?? over, over);
+            }
+          }
           return;
+        }
         case 'tool_use': {
           tally.toolCalls += 1;
           lastAction = { name: event.name, target: event.input?.file_path ?? event.input?.command ?? null };
@@ -375,7 +554,9 @@ function createSignalCollector() {
           },
           toolErrors: { total: totals.toolErrors, byTool: topOf(errorsByTool, 10) },
           hookErrors: countsOf(hookErrorsByHook),
-          hookTimeouts: countsOf(hookTimeoutsByHook),
+          // Grouped by owning plugin and command, with how far over budget each ran, so a count of
+          // timeouts says which hook to look at and whether its budget or its work is the problem.
+          hookTimeouts: hookTimeoutsOf(hookTimeoutGroups, hookTimeoutTotal),
         },
         attribution: {
           plugins: countsOf(attributionPlugins),
@@ -414,4 +595,13 @@ function tallyFromSignals(signals) {
   return tally;
 }
 
-module.exports = { clip, createSignalCollector, emptyTally, normalizeCommand, tallyFromSignals, themeOf };
+module.exports = {
+  attributeHook,
+  clip,
+  createSignalCollector,
+  emptyTally,
+  normalizeCommand,
+  readHookRegistrations,
+  tallyFromSignals,
+  themeOf,
+};
