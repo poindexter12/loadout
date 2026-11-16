@@ -599,14 +599,19 @@ async function classifyWorktree(repo, tickets, entry, currentPath, minAgeMs, ups
         lease,
         leaseDecision: cleanup.reason
       };
-      const legacyCleanup = worktreeLease.legacyWorktreeCleanupDecision({
+      const legacyFacts = {
         registered: registeredWorktrees.some((registered) => canonicalPath(registered) === worktreePath2),
         clean: facts.clean,
         oldEnough: facts.oldEnough,
         settled: facts.reachable || facts.patchEquivalent
-      });
+      };
+      const legacyCleanup = worktreeLease.legacyWorktreeCleanupDecision(legacyFacts);
+      const backupCleanup = !legacyCleanup.allowed && facts.statusKnown && !facts.clean ? worktreeLease.legacyWorktreeCleanupDecision({ ...legacyFacts, clean: true }) : null;
+      const reason2 = legacyCleanup.allowed ? "legacy_no_lease" : backupCleanup?.allowed ? "legacy_backup" : "legacy_unreclaimed";
+      const owner = reason2 === "legacy_unreclaimed" && !ticket ? await ticketForBranch(repo, tickets, entry.branch, path.basename(entry.worktree), upstream) : null;
       return {
-        ...classifiedWorktreeEntry(entry, ticket, facts, legacyCleanup.allowed ? "remove" : "keep", legacyCleanup.allowed ? "legacy_no_lease" : "legacy_unreclaimed", false),
+        ...classifiedWorktreeEntry(entry, ticket || owner, facts, reason2 === "legacy_unreclaimed" ? "keep" : "remove", reason2, false),
+        ...reason2 === "legacy_unreclaimed" ? branchTrace(repo, upstream, localBranchName(entry.branch)) : {},
         lease,
         leaseDecision: cleanup.reason
       };
@@ -712,7 +717,7 @@ async function backupDirtyWorktree(repo, entry, upstream, options) {
   await fs.mkdir(destination, { recursive: true });
   const staged = await git(entry.path, ["add", "-A"]);
   if (!staged.ok) throw new Error(staged.stderr || "git add -A failed");
-  const diff = await git(entry.path, ["diff", "--cached", "HEAD"]);
+  const diff = await git(entry.path, ["diff", "--cached", "--binary", "HEAD"]);
   if (!diff.ok) throw new Error(diff.stderr || "git diff --cached HEAD failed");
   const branch = localBranchName(entry.branch);
   const commits = branch ? await git(repo, ["format-patch", "--stdout", `${upstream}..${branch}`]) : { ok: true, stdout: "", stderr: "" };
@@ -748,7 +753,30 @@ async function backupDirtyOrphanDirectory(entry, options) {
   }, null, 2) + "\n", "utf8");
   return destination;
 }
-async function findOrphanBranches(repo, checkedOutBranches, upstream, maxCandidates) {
+async function ticketForBranch(repo, tickets, branch, worktreeName, upstream, scanCommits = true) {
+  const name = localBranchName(branch) || String(branch || "");
+  const agentId = /^worktree-agent-(.+)$/.exec(name)?.[1] || (worktreeName ? worktreeName.replace(/^agent-/, "") : "");
+  if (agentId) {
+    const owners = tickets.filter((ticket) => ticket?.ref && (ticket.dispatch?.agentId === agentId || [ticket.dispatch?.worktree, ticket.submission?.worktree].some((worktree) => worktree && path.basename(String(worktree)) === `agent-${agentId}`)));
+    if (owners.length === 1) return owners[0];
+  }
+  if (!name || !scanCommits) return null;
+  const subjects = await git(repo, ["log", "--format=%s", `${upstream}..${name}`]);
+  if (!subjects.ok) return null;
+  const known = new Set(tickets.map((ticket) => String(ticket?.ref || "")).filter(Boolean));
+  for (const ref of subjects.stdout.match(/\b[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*-\d+\b/g) || []) {
+    if (known.has(ref)) return { ref };
+  }
+  return null;
+}
+function branchTrace(repo, upstream, branch) {
+  if (!branch) return { trace: null, discard: null };
+  return {
+    trace: `git -C ${quoted(repo)} cherry -v ${quoted(upstream)} ${quoted(branch)}`,
+    discard: `git -C ${quoted(repo)} branch -D -- ${quoted(branch)}`
+  };
+}
+async function findOrphanBranches(repo, tickets, checkedOutBranches, upstream, maxCandidates) {
   const result = await git(repo, ["for-each-ref", "--format=%(refname:short)", "refs/heads/worktree-agent-*"]);
   if (!result.ok) throw new Error(result.stderr || "could not list worktree branches");
   const branches = result.stdout ? result.stdout.split(/\r?\n/).filter(Boolean) : [];
@@ -758,16 +786,20 @@ async function findOrphanBranches(repo, checkedOutBranches, upstream, maxCandida
       reachableFrom(repo, branch, upstream),
       git(repo, ["log", "-1", "--format=%s", branch])
     ]);
+    const settled = reachable || patch.equivalent;
+    const owner = await ticketForBranch(repo, tickets, branch, null, upstream, !settled);
     return {
       branch,
       subject: subject.ok ? subject.stdout : "",
+      ticket: owner ? owner.ref : null,
       ahead: patch.ahead,
       reachable,
       patchEquivalent: patch.equivalent,
       equivalentCommits: patch.equivalentCommits,
       unmatchedCommits: patch.unmatchedCommits,
-      action: reachable || patch.equivalent ? "prune" : "keep",
-      reason: reachable ? "reachable_orphan" : patch.equivalent ? "patch_equivalent_orphan" : "not_integrated"
+      action: settled ? "prune" : "keep",
+      reason: reachable ? "reachable_orphan" : patch.equivalent ? "patch_equivalent_orphan" : "not_integrated",
+      ...settled ? {} : branchTrace(repo, upstream, branch)
     };
   }));
 }
@@ -1571,7 +1603,8 @@ async function sweep(repo, tickets, options = {}) {
   if (!remainingList.ok) throw new Error(remainingList.stderr || "could not list git worktrees");
   const remainingWorktrees = parseWorktreeList(remainingList.stdout);
   const checkedOutBranches = new Set(remainingWorktrees.map((entry) => localBranchName(entry.branch)).filter((branch) => !!branch));
-  const orphanBranches = options.ticketRef ? [] : await findOrphanBranches(repo, checkedOutBranches, upstream, maxCandidates);
+  const orphanBranchLimit = Number(options.maxCandidates) > 0 ? maxCandidates : Number.POSITIVE_INFINITY;
+  const orphanBranches = options.ticketRef ? [] : await findOrphanBranches(repo, tickets, checkedOutBranches, upstream, orphanBranchLimit);
   if (execute) {
     for (const entry of orphanBranches.filter((candidate) => candidate.action === "prune")) {
       const deleted = await git(repo, ["branch", "-D", "--", entry.branch]);

@@ -88,7 +88,7 @@ test('sweep reclaims clean legacy worktrees and reports facts for retained legac
   fs.writeFileSync(path.join(dirtyLegacyWorktree, 'unfinished.txt'), 'keep this work\n');
   fs.utimesSync(dirtyLegacyWorktree, oldTimestamp, oldTimestamp);
   try {
-    const result = await worktrees.sweep(repository, [boundTicket], { execute: true, minAgeMs: 3 * 60 * 60 * 1000, integrationTarget });
+    const result = await worktrees.sweep(repository, [boundTicket], { execute: true, minAgeMs: 3 * 60 * 60 * 1000, integrationTarget, backupDir: path.join(repository, '.backups') });
     const entryFor = (worktree: string) => result.entries.find((candidate: any) => worktrees.canonicalPath(candidate.path) === worktrees.canonicalPath(worktree));
     const cleanLegacy = entryFor(cleanLegacyWorktree);
     const dirtyLegacy = entryFor(dirtyLegacyWorktree);
@@ -99,18 +99,80 @@ test('sweep reclaims clean legacy worktrees and reports facts for retained legac
     assert.equal(cleanLegacy.clean, true);
     assert.equal(cleanLegacy.ahead, 0);
     assert.equal(cleanLegacy.ageMs >= 3 * 60 * 60 * 1000, true);
-    assert.equal(dirtyLegacy.action, 'keep');
-    assert.equal(dirtyLegacy.reason, 'legacy_unreclaimed');
+    // SQ-363: a dirty legacy tree whose branch is settled is backed up, then reclaimed.
+    assert.equal(dirtyLegacy.action, 'remove');
+    assert.equal(dirtyLegacy.reason, 'legacy_backup');
     assert.equal(dirtyLegacy.clean, false);
     assert.equal(dirtyLegacy.ahead, 0);
     assert.equal(dirtyLegacy.ageMs >= 3 * 60 * 60 * 1000, true);
+    assert.equal(result.backups.length, 1);
+    assert.match(fs.readFileSync(path.join(dirtyLegacy.backup, 'working-tree.patch'), 'utf8'), /keep this work/);
     assert.equal(fs.existsSync(boundWorktree), false);
     assert.equal(fs.existsSync(cleanLegacyWorktree), false);
-    assert.equal(fs.existsSync(dirtyLegacyWorktree), true);
+    assert.equal(fs.existsSync(dirtyLegacyWorktree), false);
   } finally {
     for (const worktree of [boundWorktree, cleanLegacyWorktree, dirtyLegacyWorktree]) {
       if (fs.existsSync(worktree)) git(repository, ['worktree', 'remove', '--force', worktree]);
     }
+    fs.rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test('SQ-363: sweep reclaims a merged legacy worktree and branch-only orphan, and names the ticket of an unmerged one', async () => {
+  const { repository, worktreeRoot } = repositoryFixture();
+  const mergedLegacy = createAgentWorktree(repository, worktreeRoot, 'merged-legacy', false);
+  const unmergedLegacy = createAgentWorktree(repository, worktreeRoot, 'unmerged-legacy', false);
+  git(repository, ['branch', 'worktree-agent-merged-orphan', 'HEAD']);
+  git(repository, ['checkout', '-q', '-b', 'worktree-agent-unmerged-orphan']);
+  fs.writeFileSync(path.join(repository, 'orphan.txt'), 'orphan\n');
+  git(repository, ['add', 'orphan.txt']);
+  git(repository, ['commit', '-q', '-m', 'SQ-ORPHAN-1: unfinished orphan work']);
+  git(repository, ['checkout', '-q', 'main']);
+  fs.writeFileSync(path.join(unmergedLegacy, 'legacy.txt'), 'legacy\n');
+  git(unmergedLegacy, ['add', 'legacy.txt']);
+  git(unmergedLegacy, ['commit', '-q', '-m', 'unfinished legacy work']);
+  fs.writeFileSync(path.join(mergedLegacy, 'scratch.txt'), 'dirty\n');
+  const oldTimestamp = new Date(Date.now() - 4 * 60 * 60 * 1000);
+  for (const worktree of [mergedLegacy, unmergedLegacy]) fs.utimesSync(worktree, oldTimestamp, oldTimestamp);
+  const tickets = [
+    { ref: 'SQ-LEGACY-1', status: 'done', dispatch: { agentId: 'unmerged-legacy' } },
+    { ref: 'SQ-ORPHAN-1', status: 'done' },
+  ];
+  try {
+    const result = await worktrees.sweep(repository, tickets, { execute: true, minAgeMs: 3 * 60 * 60 * 1000, integrationTarget: { upstream: 'main', branch: 'main' }, backupDir: path.join(repository, '.backups') });
+    const entryFor = (worktree: string) => result.entries.find((candidate: any) => worktrees.canonicalPath(candidate.path) === worktrees.canonicalPath(worktree));
+    assert.equal(entryFor(mergedLegacy).reason, 'legacy_backup');
+    assert.equal(fs.existsSync(mergedLegacy), false);
+    assert.equal(result.backups.length, 1);
+    assert.deepEqual(result.prunedOrphanBranches, ['worktree-agent-merged-orphan']);
+
+    const legacy = entryFor(unmergedLegacy);
+    assert.equal(legacy.action, 'keep');
+    assert.equal(legacy.reason, 'legacy_unreclaimed');
+    assert.equal(legacy.ticket, 'SQ-LEGACY-1');
+    assert.match(legacy.trace, /cherry -v "main" "worktree-agent-unmerged-legacy"/);
+    assert.equal(fs.existsSync(unmergedLegacy), true);
+
+    const orphan = result.orphanBranches.find((entry: any) => entry.branch === 'worktree-agent-unmerged-orphan');
+    assert.equal(orphan.action, 'keep');
+    assert.equal(orphan.reason, 'not_integrated');
+    assert.equal(orphan.ticket, 'SQ-ORPHAN-1');
+    assert.match(orphan.trace, /cherry -v "main" "worktree-agent-unmerged-orphan"/);
+    assert.match(git(repository, ['branch', '--list', 'worktree-agent-*']), /worktree-agent-unmerged-orphan/);
+  } finally {
+    if (fs.existsSync(unmergedLegacy)) git(repository, ['worktree', 'remove', '--force', unmergedLegacy]);
+    fs.rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test('SQ-363: branch-only orphans are assessed when no agent worktree is registered', async () => {
+  const { repository } = repositoryFixture();
+  git(repository, ['branch', 'worktree-agent-lonely', 'HEAD']);
+  try {
+    const result = await worktrees.sweep(repository, [], { execute: true, integrationTarget: { upstream: 'main', branch: 'main' }, backupDir: path.join(repository, '.backups') });
+    assert.equal(result.candidatesTotal, 0);
+    assert.deepEqual(result.prunedOrphanBranches, ['worktree-agent-lonely']);
+  } finally {
     fs.rmSync(repository, { recursive: true, force: true });
   }
 });
