@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.0 (2026-11-16)
+
+Released in v4.16.0, up from 0.11.1.
+
+### Features
+
+- Attribute mined hook timeouts to the plugin and command that overran (SQ-393)
+  Mined `friction.hookTimeouts` is now `{ total, hooks }` instead of a count per hook event name. Each entry names the timed-out command, the plugin that registers it (resolved from installed plugin manifests, since the transcript keeps `${CLAUDE_PLUGIN_ROOT}` unexpanded), the event names it ran at, and its budget, maximum and median duration, and worst overrun. A command that more than one installed plugin registers for the same event, such as `hooks/registry-writer.js` from model-gateway and sidequest, is reported `ambiguous` with every candidate rather than assigned to one; hooks from user or project settings are `unattributed`, and older records without a command are `unrecorded`. No hook budget changed.
+
 ## 0.11.1 (2026-11-05)
 
 Released in v4.15.0, up from 0.11.0.
