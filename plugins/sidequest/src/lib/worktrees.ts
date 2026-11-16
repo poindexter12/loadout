@@ -761,14 +761,25 @@ async function classifyWorktree(repo: string, tickets: any[], entry: any, curren
         lease,
         leaseDecision: cleanup.reason,
       };
-      const legacyCleanup = worktreeLease.legacyWorktreeCleanupDecision({
+      const legacyFacts = {
         registered: registeredWorktrees.some((registered) => canonicalPath(registered) === worktreePath),
         clean: facts.clean,
         oldEnough: facts.oldEnough,
         settled: facts.reachable || facts.patchEquivalent,
-      });
+      };
+      const legacyCleanup = worktreeLease.legacyWorktreeCleanupDecision(legacyFacts);
+      // SQ-363: a dirty legacy tree whose commits are already on the integration branch
+      // was kept forever, because "refuses uncommitted changes" had no terminal route.
+      // When everything else qualifies, the dirty edits go to the worktree-backups store
+      // (the remove path backs up any tree that is not clean) and the tree is reclaimed.
+      const backupCleanup = !legacyCleanup.allowed && facts.statusKnown && !facts.clean
+        ? worktreeLease.legacyWorktreeCleanupDecision({ ...legacyFacts, clean: true })
+        : null;
+      const reason = legacyCleanup.allowed ? 'legacy_no_lease' : backupCleanup?.allowed ? 'legacy_backup' : 'legacy_unreclaimed';
+      const owner = reason === 'legacy_unreclaimed' && !ticket ? await ticketForBranch(repo, tickets, entry.branch, path.basename(entry.worktree), upstream) : null;
       return {
-        ...classifiedWorktreeEntry(entry, ticket, facts, legacyCleanup.allowed ? 'remove' : 'keep', legacyCleanup.allowed ? 'legacy_no_lease' : 'legacy_unreclaimed', false),
+        ...classifiedWorktreeEntry(entry, ticket || owner, facts, reason === 'legacy_unreclaimed' ? 'keep' : 'remove', reason, false),
+        ...(reason === 'legacy_unreclaimed' ? branchTrace(repo, upstream, localBranchName(entry.branch)) : {}),
         lease,
         leaseDecision: cleanup.reason,
       };
@@ -893,7 +904,7 @@ async function backupDirtyWorktree(repo: string, entry: any, upstream: string, o
 
   const staged = await git(entry.path, ['add', '-A']);
   if (!staged.ok) throw new Error(staged.stderr || 'git add -A failed');
-  const diff = await git(entry.path, ['diff', '--cached', 'HEAD']);
+  const diff = await git(entry.path, ['diff', '--cached', '--binary', 'HEAD']);
   if (!diff.ok) throw new Error(diff.stderr || 'git diff --cached HEAD failed');
   const branch = localBranchName(entry.branch);
   const commits = branch ? await git(repo, ['format-patch', '--stdout', `${upstream}..${branch}`]) : { ok: true, stdout: '', stderr: '' };
@@ -930,7 +941,38 @@ async function backupDirtyOrphanDirectory(entry: any, options: any): Promise<str
   return destination;
 }
 
-async function findOrphanBranches(repo: string, checkedOutBranches: Set<string>, upstream: string, maxCandidates: number): Promise<any[]> {
+// SQ-363: a kept branch is only actionable when the report says whose work it was.
+// The board knows the owner by dispatch agent id; trees from before that binding are
+// found by the ticket ref an executor's commit subject carries.
+// scanCommits=false keeps the lookup in memory: a branch being pruned anyway is not worth a
+// git spawn on the SessionStart path.
+async function ticketForBranch(repo: string, tickets: any[], branch: unknown, worktreeName: string | null, upstream: string, scanCommits = true): Promise<{ ref: string } | null> {
+  const name = localBranchName(branch) || String(branch || '');
+  const agentId = (/^worktree-agent-(.+)$/.exec(name)?.[1]) || (worktreeName ? worktreeName.replace(/^agent-/, '') : '');
+  if (agentId) {
+    const owners = tickets.filter((ticket) => ticket?.ref && (ticket.dispatch?.agentId === agentId
+      || [ticket.dispatch?.worktree, ticket.submission?.worktree].some((worktree) => worktree && path.basename(String(worktree)) === `agent-${agentId}`)));
+    if (owners.length === 1) return owners[0];
+  }
+  if (!name || !scanCommits) return null;
+  const subjects = await git(repo, ['log', '--format=%s', `${upstream}..${name}`]);
+  if (!subjects.ok) return null;
+  const known = new Set(tickets.map((ticket) => String(ticket?.ref || '')).filter(Boolean));
+  for (const ref of subjects.stdout.match(/\b[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*-\d+\b/g) || []) {
+    if (known.has(ref)) return { ref };
+  }
+  return null;
+}
+
+function branchTrace(repo: string, upstream: string, branch: string | null): { trace: string | null; discard: string | null } {
+  if (!branch) return { trace: null, discard: null };
+  return {
+    trace: `git -C ${quoted(repo)} cherry -v ${quoted(upstream)} ${quoted(branch)}`,
+    discard: `git -C ${quoted(repo)} branch -D -- ${quoted(branch)}`,
+  };
+}
+
+async function findOrphanBranches(repo: string, tickets: any[], checkedOutBranches: Set<string>, upstream: string, maxCandidates: number): Promise<any[]> {
   const result = await git(repo, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/worktree-agent-*']);
   if (!result.ok) throw new Error(result.stderr || 'could not list worktree branches');
   const branches = result.stdout ? result.stdout.split(/\r?\n/).filter(Boolean) : [];
@@ -943,16 +985,20 @@ async function findOrphanBranches(repo: string, checkedOutBranches: Set<string>,
         reachableFrom(repo, branch, upstream),
         git(repo, ['log', '-1', '--format=%s', branch]),
       ]);
+      const settled = reachable || patch.equivalent;
+      const owner = await ticketForBranch(repo, tickets, branch, null, upstream, !settled);
       return {
         branch,
         subject: subject.ok ? subject.stdout : '',
+        ticket: owner ? owner.ref : null,
         ahead: patch.ahead,
         reachable,
         patchEquivalent: patch.equivalent,
         equivalentCommits: patch.equivalentCommits,
         unmatchedCommits: patch.unmatchedCommits,
-        action: reachable || patch.equivalent ? 'prune' : 'keep',
+        action: settled ? 'prune' : 'keep',
         reason: reachable ? 'reachable_orphan' : patch.equivalent ? 'patch_equivalent_orphan' : 'not_integrated',
+        ...(settled ? {} : branchTrace(repo, upstream, branch)),
       };
     }));
 }
@@ -1924,7 +1970,11 @@ async function sweep(repo: string, tickets: any[], options: any = {}): Promise<a
   const checkedOutBranches = new Set<string>(remainingWorktrees
     .map((entry) => localBranchName(entry.branch))
     .filter((branch): branch is string => !!branch));
-  const orphanBranches = options.ticketRef ? [] : await findOrphanBranches(repo, checkedOutBranches, upstream, maxCandidates);
+  // SQ-363: the branch window was capped by the registered-worktree count, so a repo
+  // whose agent trees were all gone assessed zero branch-only orphans. Only an explicit
+  // candidate bound limits branch assessment.
+  const orphanBranchLimit = Number(options.maxCandidates) > 0 ? maxCandidates : Number.POSITIVE_INFINITY;
+  const orphanBranches = options.ticketRef ? [] : await findOrphanBranches(repo, tickets, checkedOutBranches, upstream, orphanBranchLimit);
   if (execute) {
     for (const entry of orphanBranches.filter((candidate) => candidate.action === 'prune')) {
       const deleted = await git(repo, ['branch', '-D', '--', entry.branch]);
