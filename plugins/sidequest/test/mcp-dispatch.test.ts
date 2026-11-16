@@ -1210,7 +1210,7 @@ test('claim with a mismatched effort is refused (drift guard mirrors the CLI)', 
 });
 
 test('MCP board reads omit taxonomy and default ready rows stay summary-sized', async () => {
-  const added = await callTool('add', { title: 'trimmed taxonomy response', category: 'coding.easy' });
+  const added = await callTool('add', { title: 'trimmed taxonomy response', category: 'coding.easy', files: ['trimmed.js'] }); // SQ-394: scoped, so ready lists it
   const list = await callTool('list', {});
   const ready = await callTool('ready', {});
   const changes = await callTool('changes', {});

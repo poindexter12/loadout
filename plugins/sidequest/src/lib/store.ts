@@ -503,6 +503,7 @@ const {
   syncLiveDispatchVerification,
   dispatchPriorityBypass,
   priorityBypassNotice,
+  storedDispatchRefusal,
   retirePreparedCompatibilityStaleAttempt,
   preparedCompatibilityHasProvenMismatch,
   supersedeUnboundAttempt,
@@ -1445,6 +1446,7 @@ const {
   oracleProjection: oracleProjectionForRead,
   pendingSubmission: pendingSubmissionForTickets,
   queryTickets,
+  readyNotDispatchable,
   readyTickets,
   readyWaveDependencies,
   readyWaves,
@@ -3756,7 +3758,11 @@ function modelMatches(ticketModel?: any, want?: any) {
 // actively claimed, and not blocked by an unfinished ticket. This is the set to
 // fan subagents out over (each still claims before working). Priority-ordered.
 // opts.model restricts to that tier's work (exact-tier matches only).
-function readyTickets(slug?: any, opts?: any) {
+// SQ-394: a ticket `dispatch` would refuse from its own stored state (no declared scope for write
+// work, repeated no-commit failures, a rejected or stale review binding) is not ready, so it is held
+// out of this set, its waves, and the higherPriorityReady notice built from it. readyNotDispatchable
+// lists those tickets separately with the refusal and the next step.
+function readyCandidates(slug?: any, opts?: any) {
   opts = opts || {};
   const want = opts.model ? classifyModelFilter(opts.model) : 'any';
   if (want === 'unknown') throw new Error(`Unknown model: ${opts.model}`);
@@ -3774,6 +3780,31 @@ function readyTickets(slug?: any, opts?: any) {
       if (pr !== 0) return pr;
       return String(a.createdAt).localeCompare(String(b.createdAt));
     });
+}
+
+function readyTickets(slug?: any, opts?: any) {
+  return readyCandidates(slug, opts).filter((t?: any) => !storedDispatchRefusal(slug, t));
+}
+
+// Unclaimed, unblocked tickets that dispatch would still refuse, priority-ordered, each with the
+// refusal dispatch raises (`reason`), a stable `code`, the `next` step, and the dispatch `override`
+// flag when one exists.
+function readyNotDispatchable(slug?: any, opts?: any) {
+  const rows: any[] = [];
+  for (const t of readyCandidates(slug, opts)) {
+    const refusal = storedDispatchRefusal(slug, t);
+    if (!refusal) continue;
+    rows.push({
+      ref: t.ref,
+      title: t.title,
+      priority: t.priority,
+      code: refusal.code,
+      reason: refusal.reason,
+      next: refusal.next,
+      ...(refusal.override ? { override: refusal.override } : {}),
+    });
+  }
+  return rows;
 }
 
 // Atomically claim the best available ticket in a project: highest priority
@@ -3799,6 +3830,10 @@ function claimNext(slug?: any, by?: any, opts?: any) {
       if (pr !== 0) return pr;
       return String(a.createdAt).localeCompare(String(b.createdAt));
     });
+  // SQ-394: deliberately NOT filtered by storedDispatchRefusal. On a routed board a non-direct claim
+  // refuses dispatch_required (skipped below), so this hands out only direct inline claims, which
+  // never pass through dispatch; dispatch's stored-state refusals do not apply to them, and a bound
+  // candidate is still refused by claimTicket itself (candidate_review_locked).
   for (const cand of candidates) {
     const res = claimTicket(slug, cand.id, by, { direct: !!opts.direct, reason: opts.reason, source: opts.source, sessionId: opts.sessionId });
     if (res.ok || res.reason === 'direct_not_allowed' || res.reason === 'direct_reason_required') return res;
@@ -4261,6 +4296,7 @@ module.exports = {
   claimNext,
   assignTicket,
   readyTickets,
+  readyNotDispatchable,
   readyWaves,
   readyWaveDependencies,
   scopesOverlap,
