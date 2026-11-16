@@ -382,8 +382,20 @@ async function cmdReady(opts) {
   const tickets = store.readyTickets(slug, { model: opts.model, category: opts.category });
   const waves = store.readyWaves(slug, { model: opts.model, category: opts.category });
   const waveDependencies = store.readyWaveDependencies(slug, { model: opts.model, category: opts.category });
+  const notDispatchable = store.readyNotDispatchable(slug, { model: opts.model, category: opts.category });
+  const printNotDispatchable = () => {
+    if (!notDispatchable.length) return;
+    console.log(`
+  Not dispatchable (${notDispatchable.length}) — dispatch would refuse these; fix them first:`);
+    for (const row of notDispatchable) {
+      const pr = PRIORITY_MARK[row.priority] ? ` ${PRIORITY_MARK[row.priority]}` : "";
+      console.log(`    ${row.ref}${pr}  ${row.title}  [${row.code}]`);
+      console.log(`      next: ${row.next}`);
+    }
+  };
   if (!tickets.length) {
     console.log(`Nothing ready to work in ${meta.name}.`);
+    printNotDispatchable();
     return;
   }
   console.log(`${meta.name} — ${tickets.length} ready to work (unclaimed, unblocked):`);
@@ -405,6 +417,7 @@ async function cmdReady(opts) {
   } else {
     for (const t of tickets) printTicket(t);
   }
+  printNotDispatchable();
   if (tickets.length > 1) {
     if (waves.length > 1) {
       console.log("\nFan out within a wave: one subagent per ticket — each claim --by <id> → do → done. Wait for a wave to clear before starting the next.");

@@ -15,6 +15,7 @@ function createReads(dependencies: any) {
     oracleProjection,
     pendingSubmission,
     queryTickets,
+    readyNotDispatchable,
     readyTickets,
     readyWaveDependencies,
     readyWaves,
@@ -184,7 +185,17 @@ function readyPayload(slug?: any, opts?: any) {
   const waves = readyWaves(slug, { model: opts.model, category: opts.category }).map((wave?: any) => wave.map((t?: any) => t.ref));
   const waveDependencies = readyWaveDependencies(slug, { model: opts.model, category: opts.category });
   if (opts.brief) tickets = tickets.map((t?: any) => briefTicket(slug, t, { blockedBy: [], includeScope: true }));
-  return { tickets, waves, waveDependencies, claimIdleMs: claimIdleMs(), categories: classifierCategories({ project: slug }) };
+  // SQ-394: unclaimed, unblocked tickets dispatch would refuse from their own stored state. They are
+  // not in `tickets` or `waves`; each row names the refusal and the next step instead.
+  const notDispatchable = readyNotDispatchable(slug, { model: opts.model, category: opts.category });
+  return {
+    tickets,
+    waves,
+    waveDependencies,
+    ...(notDispatchable.length ? { notDispatchable } : {}),
+    claimIdleMs: claimIdleMs(),
+    categories: classifierCategories({ project: slug }),
+  };
 }
 
 

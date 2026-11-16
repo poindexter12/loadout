@@ -14,6 +14,7 @@ function createReads(dependencies) {
     oracleProjection,
     pendingSubmission,
     queryTickets,
+    readyNotDispatchable,
     readyTickets,
     readyWaveDependencies,
     readyWaves,
@@ -132,7 +133,15 @@ function createReads(dependencies) {
     const waves = readyWaves(slug, { model: opts.model, category: opts.category }).map((wave) => wave.map((t) => t.ref));
     const waveDependencies = readyWaveDependencies(slug, { model: opts.model, category: opts.category });
     if (opts.brief) tickets = tickets.map((t) => briefTicket(slug, t, { blockedBy: [], includeScope: true }));
-    return { tickets, waves, waveDependencies, claimIdleMs: claimIdleMs(), categories: classifierCategories({ project: slug }) };
+    const notDispatchable = readyNotDispatchable(slug, { model: opts.model, category: opts.category });
+    return {
+      tickets,
+      waves,
+      waveDependencies,
+      ...notDispatchable.length ? { notDispatchable } : {},
+      claimIdleMs: claimIdleMs(),
+      categories: classifierCategories({ project: slug })
+    };
   }
   return {
     briefTicket,

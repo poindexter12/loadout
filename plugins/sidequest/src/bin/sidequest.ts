@@ -316,7 +316,7 @@ Usage:
     everywhere, while a heredoc that carries a git invocation is refused inside an isolated worktree.
 
 Working the board safely (multi-agent):
-  sidequest ready [--model <model>] [--category <id>] [--json] [--brief]   the ready set (unclaimed, unblocked) — fan subagents over it
+  sidequest ready [--model <model>] [--category <id>] [--json] [--brief]   the ready set (unclaimed, unblocked, dispatchable) — fan subagents over it; tickets dispatch would refuse from stored state (no file scope, repeated no-commit failures, a rejected or stale review) print under "Not dispatchable" with the next step
   sidequest claim <id|SQ-n> [--by who] [--force] [--token-file path] [--effort level] [--direct --reason "why this is inline-safe"]   atomically take a ticket (category-routed executor claims require a prepared token file and exact executor; direct is an inline-safe exception)
   sidequest checkpoint <id|SQ-n> --by who (--commit <hash> | --worktree <absolute-path>) --verify "<command: result>" [--ttl-minutes N]   record a live review candidate while the claim and dispatch stay active
   sidequest next [--by who] [-p priority] [--model <model>] [--category <id>] [--direct --reason "why this is inline-safe"]   claim the best available ticket (routed tickets need --direct here because next has no dispatch token)

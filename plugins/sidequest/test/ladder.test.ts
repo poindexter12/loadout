@@ -38,8 +38,8 @@ test('invalid legacy complexity has no routing category', () => {
 test('category filters select stable policy while model filters select resolved runtime', () => {
   const project = store.ensureProject(path.join(store.homeRoot(), 'project'));
   store.setCategory('coding.hard', { fallback: { model: 'opus', effort: 'high' } });
-  store.createTicket(project.slug, { title: 'easy', category: 'coding.easy' });
-  store.createTicket(project.slug, { title: 'hard', category: 'coding.hard' });
+  store.createTicket(project.slug, { title: 'easy', category: 'coding.easy', files: ['easy.js'] }); // SQ-394: an unscoped write ticket is not ready
+  store.createTicket(project.slug, { title: 'hard', category: 'coding.hard', files: ['hard.js'] });
   assert.deepEqual(store.readyTickets(project.slug, { category: 'coding.easy' }).map((ticket?: any) => ticket.title), ['easy']);
   const easyModel = store.getTicket(project.slug, 'SQ-1').model;
   assert.deepEqual(store.readyTickets(project.slug, { model: easyModel }).map((ticket?: any) => ticket.title), ['easy']);

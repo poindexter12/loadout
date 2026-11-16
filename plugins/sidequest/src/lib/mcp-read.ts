@@ -93,6 +93,9 @@ function readySummary(payload?: any) {
     tickets,
     waves: payload.waves,
     waveDependencies: payload.waveDependencies,
+    // SQ-394: held out of tickets and waves because dispatch would refuse them; each row carries
+    // the refusal and the next step, never a reason to dispatch.
+    ...(payload.notDispatchable?.length ? { notDispatchable: payload.notDispatchable } : {}),
   };
 }
 
@@ -338,7 +341,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: 'ready',
-    description: 'Ready tickets in safe waves, rows in priority order. Default: count plus ref/title/priority rows; full:true returns ticket records. Waves group by file overlap, not priority: dispatch the highest band first.',
+    description: 'Ready tickets in safe waves, rows in priority order. Default: count plus ref/title/priority rows; full:true returns ticket records. Waves group by file overlap, not priority: dispatch the highest band first. Tickets dispatch would refuse from stored state (no file scope for write work, repeated no-commit failures, a rejected or stale review binding) are left out and listed in notDispatchable with code, reason, and next step.',
     inputSchema: {
       type: 'object',
       properties: {
