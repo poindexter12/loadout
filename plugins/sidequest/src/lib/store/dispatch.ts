@@ -16,6 +16,11 @@ function unscopedWriteCannotAutoApprove(ticket?: any, options?: any) {
     && (!Array.isArray(autoApproveScope) || !autoApproveScope.length);
 }
 
+// One string for the refusal and for the `ready` row that predicts it (SQ-394).
+function unscopedWriteRefusal(ref?: any) {
+  return `prepare dispatch: ${ref} has no declared file scope for write work. Add files, or pass allowUnscoped:true to explicitly accept that the executor can block on its first write and end without a submission.`;
+}
+
 function namedSuiteForTicket(ticket: any, projectPath: string) {
   const directories = new Set(
     (Array.isArray(ticket?.files) ? ticket.files : [])
@@ -279,21 +284,32 @@ function dispatchState(ticket?: any) {
 // Revalidated at every dispatch, never trusted from the stored binding alone:
 // the review only launches against the exact candidate that is still bound,
 // still terminal, and still resolvable as one immutable commit.
-function reviewDispatchTarget(slug?: any, ticket?: any) {
+// SQ-394: every reviewTarget check that reads only stored board state, split out of the dispatch
+// refusal so `ready`, `claimNext`, and the higherPriorityReady notice apply the exact refusal
+// `dispatch` raises instead of advertising a review that dispatch then refuses. It returns the
+// resolved binding, or `{ refusal }` naming the code, the dispatch refusal text, and the next step.
+// The candidate-commit check stays in reviewDispatchTarget: it spawns Git against the checkout,
+// which is repository state, not ticket state, and a ready read must not pay for it per ticket.
+function reviewTargetStoredState(slug?: any, ticket?: any): any {
   const target = ticket?.reviewTarget;
   if (!target) return null;
+  const refuse = (code: string, message: string, next: string) => ({
+    refusal: { code, reason: `prepare dispatch: ${ticket.ref} ${message}`, next },
+  });
+  const rebind = `Rebind or remove ${ticket.ref}'s reviewTarget through update, or close it if the review is no longer wanted.`;
   if (String(ticketCategory(ticket) || '').trim().toLowerCase() !== 'review-audit') {
-    throw new Error(`prepare dispatch: ${ticket.ref} carries a reviewTarget outside category review-audit.`);
+    return refuse('review_target_category', 'carries a reviewTarget outside category review-audit.', rebind);
   }
   if (!target.ticketId || !target.ref || !target.candidate?.source || !target.candidate.value) {
-    throw new Error(`prepare dispatch: ${ticket.ref} has an incomplete reviewTarget; rebind it through add or update.`);
+    return refuse('review_target_incomplete', 'has an incomplete reviewTarget; rebind it through add or update.', rebind);
   }
   const sourceTicket = getTicket(slug, target.ticketId);
   if (!sourceTicket || sourceTicket.ref !== target.ref) {
-    throw new Error(`prepare dispatch: ${ticket.ref} reviewTarget ${target.ref} no longer resolves to its source ticket.`);
+    return refuse('review_target_unresolved', `reviewTarget ${target.ref} no longer resolves to its source ticket.`, rebind);
   }
   if (sourceTicket.claim?.by) {
-    throw new Error(`prepare dispatch: ${ticket.ref} reviewTarget ${sourceTicket.ref} is live-claimed by ${sourceTicket.claim.by}.`);
+    return refuse('review_source_claimed', `reviewTarget ${sourceTicket.ref} is live-claimed by ${sourceTicket.claim.by}.`,
+      `Wait for ${sourceTicket.ref}'s claim to end with a terminal submission, then dispatch this review.`);
   }
   const submission = sourceTicket.submission;
   const sourceDispatch = dispatchState(sourceTicket);
@@ -302,19 +318,31 @@ function reviewDispatchTarget(slug?: any, ticket?: any) {
     || sourceTicket.lifecycleAttempt?.state === 'submitted',
   );
   if (!terminal || !submission || submission.integratedAt) {
-    throw new Error(`prepare dispatch: ${ticket.ref} reviewTarget ${sourceTicket.ref} is not a pending terminal submission.`);
+    return refuse('review_source_not_pending', `reviewTarget ${sourceTicket.ref} is not a pending terminal submission.`,
+      `${sourceTicket.ref} has no pending candidate for this review to judge; close ${ticket.ref}, or bind a fresh review to ${sourceTicket.ref}'s next submission.`);
   }
   const candidate = reviewCandidateFromSubmission(submission);
   if (!sameReviewCandidate(candidate, target.candidate)) {
-    throw new Error(`prepare dispatch: ${ticket.ref} reviewTarget ${sourceTicket.ref} no longer matches its exact submitted candidate.`);
+    return refuse('review_candidate_mismatch', `reviewTarget ${sourceTicket.ref} no longer matches its exact submitted candidate.`,
+      `Close ${ticket.ref} and bind a fresh review to ${sourceTicket.ref}'s current candidate.`);
   }
   const relation = reviewRelationFor(sourceTicket, listTickets(slug), (idOrRef: string) => getTicket(slug, idOrRef));
   if (!relation || relation.conflict || relation.reviewTicket?.id !== ticket.id) {
-    throw new Error(`prepare dispatch: ${ticket.ref} is not the sole authoritative review bound to ${sourceTicket.ref}.`);
+    return refuse('review_not_authoritative', `is not the sole authoritative review bound to ${sourceTicket.ref}.`,
+      `Dispatch the authoritative review bound to ${sourceTicket.ref} instead, and close ${ticket.ref}.`);
   }
   if (reviewRelationOutcome(relation) === 'rejected') {
-    throw new Error(`prepare dispatch: ${ticket.ref} candidate was permanently rejected; repair needs fresh ticket, attempt, candidate, and review identities.`);
+    return refuse('candidate_rejected', 'candidate was permanently rejected; repair needs fresh ticket, attempt, candidate, and review identities.',
+      `This review cannot run again. File a fresh repair ticket for ${sourceTicket.ref}'s defect, then bind a fresh review to that repair's candidate; close ${ticket.ref}.`);
   }
+  return { sourceTicket, submission, candidate };
+}
+
+function reviewDispatchTarget(slug?: any, ticket?: any) {
+  const stored = reviewTargetStoredState(slug, ticket);
+  if (!stored) return null;
+  if (stored.refusal) throw new Error(stored.refusal.reason);
+  const { sourceTicket, submission, candidate } = stored;
   if (candidate.source === 'git') {
     let resolved = '';
     try {
@@ -1185,6 +1213,46 @@ function expiredPreparedDispatch(state?: any, now?: any) {
 // is not actually waiting is filtered here: the ticket being dispatched, a ticket awaiting an oracle
 // verdict, and a ticket whose own dispatch is already in flight (prepared and not expired, launched,
 // or bound), which is how the rest of the same wave looks while it is being dispatched in order.
+// SQ-394: the refusal `dispatch` would raise for this ticket from its own stored state, or null.
+// `ready` excluded only what it could see (done, archived, parked, claimed, blocked), so it listed a
+// write ticket with no declared scope, or a review whose candidate was permanently rejected, as
+// "ready to work"; the orchestrator spent a dispatch on each, and the refused ticket then named
+// itself in every lower-priority dispatch's higherPriorityReady notice. `ready`, `claimNext`, and
+// that notice all read this one predicate so they cannot drift from `dispatch` again.
+//
+// Covered, in the order prepareDispatch raises them: no declared file scope for write work
+// (overridable with allowUnscoped), two prior terminal no-commit attempts (overridable with
+// allowRepeatFailure), and every stored-state reviewTarget refusal (rejected candidate, stale or
+// non-authoritative binding). Deliberately NOT covered, because they depend on transient or
+// repository state rather than the ticket: route availability and gateway readiness, a live
+// dispatch attempt still winding down, the session caller's own claim, the verify command's
+// resolution against the checkout, the review candidate commit resolving in Git, and worktree
+// recovery facts. A board with routing disabled never dispatches, so nothing is refused there.
+function storedDispatchRefusal(slug?: any, ticket?: any) {
+  if (!ticket || !slug || !projectRoutingEnabled(slug)) return null;
+  const ref = ticket.ref;
+  if (unscopedWriteCannotAutoApprove(ticket, { dispatchReadOnly, normalizeFiles, autoApproveScope: boardConfig(slug)?.autoApproveScope })) {
+    return {
+      code: 'no_declared_scope',
+      reason: unscopedWriteRefusal(ref),
+      next: `Declare the files ${ref} writes (update ${ref} files), or dispatch with allowUnscoped:true to accept an unscoped run.`,
+      override: 'allowUnscoped',
+    };
+  }
+  const repeatFailure = repeatNoCommitDispatchError(ticket, dispatchState(ticket));
+  if (repeatFailure) {
+    return {
+      code: 'repeat_no_commit_failure',
+      reason: repeatFailure,
+      next: `Read ${ref}'s recorded release reasons and correct or split the ticket, then dispatch with allowRepeatFailure:true when a repeat is intentional.`,
+      override: 'allowRepeatFailure',
+    };
+  }
+  const review = reviewTargetStoredState(slug, ticket);
+  if (review?.refusal) return review.refusal;
+  return null;
+}
+
 const DISPATCH_PRIORITY_RANK: Record<string, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
 
 function dispatchPriorityRank(priority?: any) {
@@ -1828,7 +1896,7 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
     autoApproveScope: boardConfig(slug)?.autoApproveScope,
   });
   if (initialNoDeclaredFileScope && opts.allowUnscoped !== true) {
-    throw new Error(`prepare dispatch: ${found.ref} has no declared file scope for write work. Add files, or pass allowUnscoped:true to explicitly accept that the executor can block on its first write and end without a submission.`);
+    throw new Error(unscopedWriteRefusal(found.ref));
   }
   const verifyError = dispatchVerifyCommandError(found, projectPath);
   if (verifyError) throw new Error(verifyError);
@@ -1981,7 +2049,7 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
       autoApproveScope: boardConfig(slug)?.autoApproveScope,
     });
     if (noDeclaredFileScope && opts.allowUnscoped !== true) {
-      throw new Error(`prepare dispatch: ${t.ref} has no declared file scope for write work. Add files, or pass allowUnscoped:true to explicitly accept that the executor can block on its first write and end without a submission.`);
+      throw new Error(unscopedWriteRefusal(t.ref));
     }
     // A substitution has to name ITSELF AND its cause. resolveCategoryRoute records why
     // each rejected candidate was unusable in `warnings`, but prepareDispatch was the end
@@ -3736,6 +3804,8 @@ function reconcileLaunchedDispatches(sessionId?: any, opts?: any) {
     syncLiveDispatchVerification,
     // SQ-348: store.dispatchWarnings and the dispatch result read these with the board's ready list.
     higherPriorityReadyWork,
+    // SQ-394: ready, claimNext, and higherPriorityReady share dispatch's stored-state refusal.
+    storedDispatchRefusal,
     dispatchPriorityBypass,
     priorityBypassNotice,
     readDispatchBriefing,

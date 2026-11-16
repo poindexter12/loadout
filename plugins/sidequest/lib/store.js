@@ -598,6 +598,7 @@ const {
   syncLiveDispatchVerification,
   dispatchPriorityBypass,
   priorityBypassNotice,
+  storedDispatchRefusal,
   retirePreparedCompatibilityStaleAttempt,
   preparedCompatibilityHasProvenMismatch,
   supersedeUnboundAttempt,
@@ -1404,6 +1405,7 @@ const {
   oracleProjection: oracleProjectionForRead,
   pendingSubmission: pendingSubmissionForTickets,
   queryTickets,
+  readyNotDispatchable,
   readyTickets,
   readyWaveDependencies,
   readyWaves,
@@ -3334,7 +3336,7 @@ function sweepStaleClaims(opts) {
 function modelMatches(ticketModel, want) {
   return !want || ticketModel === want;
 }
-function readyTickets(slug, opts) {
+function readyCandidates(slug, opts) {
   opts = opts || {};
   const want = opts.model ? classifyModelFilter(opts.model) : "any";
   if (want === "unknown") throw new Error(`Unknown model: ${opts.model}`);
@@ -3344,6 +3346,26 @@ function readyTickets(slug, opts) {
     if (pr !== 0) return pr;
     return String(a.createdAt).localeCompare(String(b.createdAt));
   });
+}
+function readyTickets(slug, opts) {
+  return readyCandidates(slug, opts).filter((t) => !storedDispatchRefusal(slug, t));
+}
+function readyNotDispatchable(slug, opts) {
+  const rows = [];
+  for (const t of readyCandidates(slug, opts)) {
+    const refusal = storedDispatchRefusal(slug, t);
+    if (!refusal) continue;
+    rows.push({
+      ref: t.ref,
+      title: t.title,
+      priority: t.priority,
+      code: refusal.code,
+      reason: refusal.reason,
+      next: refusal.next,
+      ...refusal.override ? { override: refusal.override } : {}
+    });
+  }
+  return rows;
 }
 function claimNext(slug, by, opts) {
   opts = opts || {};
@@ -3792,6 +3814,7 @@ module.exports = {
   claimNext,
   assignTicket,
   readyTickets,
+  readyNotDispatchable,
   readyWaves,
   readyWaveDependencies,
   scopesOverlap,
