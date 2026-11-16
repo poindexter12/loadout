@@ -1671,14 +1671,17 @@ ${verify.outputTail}` : null
     const landedRemote = landedRemoteFromTarget(target);
     if (landedRemote) {
       const proof = proveLandedOnRemote({ repo, remote: landedRemote.remote, branch: landedRemote.branch, commit });
-      if (proof.ok) return { landed: proof.landed, head: proof.tip, source: proof.source, observedAt: proof.observedAt };
+      if (!proof.ok) return { unavailable: true, remote: proof.remote, branch: proof.branch, detail: proof.detail };
+      return { unavailable: false, landed: proof.landed, head: proof.tip, source: proof.source, observedAt: proof.observedAt };
     }
-    const ref = landedRemote ? `refs/remotes/${landedRemote.remote}/${landedRemote.branch}` : `refs/heads/${target.branch}`;
-    const head = resolveCommitOrNull(repo, ref);
-    const source = landedRemote ? `git-tracking:${landedRemote.remote}/${landedRemote.branch}` : `git:${target.upstream || target.branch}`;
+    const head = resolveCommitOrNull(repo, `refs/heads/${target.branch}`);
+    const source = `git:${target.upstream || target.branch}`;
     const observedAt = (/* @__PURE__ */ new Date()).toISOString();
-    if (!head) return { landed: false, head: null, source, observedAt };
-    return { landed: isAncestorCommit(repo, commit, head), head: head.toLowerCase(), source, observedAt };
+    if (!head) return { unavailable: false, landed: false, head: null, source, observedAt };
+    return { unavailable: false, landed: isAncestorCommit(repo, commit, head), head: head.toLowerCase(), source, observedAt };
+  }
+  function abandonRemoteUnavailableMessage(ref, remote, branch, detail) {
+    return `${ref} abandonment refused: remote ${remote} could not be contacted to read the live refs/heads/${branch} tip (${detail}), so whether the candidate landed is unknown. Landedness is decided only by the remote's live advertisement; there is no local fallback, so refs/remotes/${remote}/${branch}, the checkout's HEAD, and local branches are never consulted, and nothing was recorded. Restore network access to ${remote} and abandon the submission again.`;
   }
   function recordAlreadyLandedSubmission(slug, found, target, candidate, reason, repo, landed) {
     const resultingHead = landed?.head || integrationGit(repo, ["rev-parse", `refs/heads/${target.branch}`]).toLowerCase();
@@ -1742,6 +1745,7 @@ ${verify.outputTail}` : null
     let candidateStateSource = null;
     let landedCandidate = null;
     let landed = null;
+    let remoteUnavailable = null;
     if (submissionUsesGit(found) && candidate) {
       let resolved = null;
       try {
@@ -1753,14 +1757,29 @@ ${verify.outputTail}` : null
         candidateState = "unmeasured";
       } else if (resolved) {
         try {
-          landed = candidateLandedOnTarget(repo, target, resolved);
-          candidateStateSource = landed.source;
-          if (landed.landed && landed.head) landedCandidate = resolved;
-          else candidateState = "unreachable";
+          const measured = candidateLandedOnTarget(repo, target, resolved);
+          if (measured.unavailable) {
+            remoteUnavailable = { remote: measured.remote, branch: measured.branch, detail: measured.detail };
+          } else {
+            landed = measured;
+            candidateStateSource = measured.source;
+            if (measured.landed && measured.head) landedCandidate = resolved;
+            else candidateState = "unreachable";
+          }
         } catch (_) {
           candidateState = "unresolvable";
         }
       }
+    }
+    if (remoteUnavailable) {
+      return {
+        ok: false,
+        reason: "landed_remote_unavailable",
+        ticket: found,
+        remote: remoteUnavailable.remote,
+        branch: remoteUnavailable.branch,
+        message: abandonRemoteUnavailableMessage(found.ref, remoteUnavailable.remote, remoteUnavailable.branch, remoteUnavailable.detail)
+      };
     }
     if (landedCandidate) {
       try {
