@@ -115,7 +115,18 @@ async function streamTranscript(source, collector) {
       if (attachment.hookEvent) {
         const hookName = attachment.hookName ?? attachment.hookEvent;
         if (attachment.timedOut === true) {
-          collector.onEvent({ ...base, kind: 'hook_timeout', hookName });
+          // Claude Code records which command ran, how long it took and the budget it was cancelled
+          // at. Without them a timeout can only be counted against its event name, which never says
+          // which plugin overran or by how much.
+          collector.onEvent({
+            ...base,
+            kind: 'hook_timeout',
+            hookName,
+            hookEvent: attachment.hookEvent,
+            command: typeof attachment.command === 'string' && attachment.command.trim() ? attachment.command : null,
+            durationMs: Number.isFinite(attachment.durationMs) ? attachment.durationMs : null,
+            timeoutMs: Number.isFinite(attachment.timeoutMs) ? attachment.timeoutMs : null,
+          });
         } else if (Number.isFinite(attachment.exitCode) && attachment.exitCode !== 0) {
           collector.onEvent({ ...base, kind: 'hook_error', hookName });
         }

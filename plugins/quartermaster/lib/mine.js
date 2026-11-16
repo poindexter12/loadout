@@ -9,7 +9,7 @@ const { streamTranscript } = require('./stream.js');
 async function mine(options = {}) {
   const env = options.env ?? process.env;
   const window = resolveWindow(options);
-  const collector = createSignalCollector();
+  const collector = createSignalCollector({ env });
 
   for (const file of window.files) {
     try {
