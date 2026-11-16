@@ -17,6 +17,10 @@ import {
   registerProject,
   sweepReportFile,
   waitForPath,
+  waitForCapacity,
+  capacityWaitTimeoutMessage,
+  WAIT_FOR_PATH_PER_TEST_WORKER_MS,
+  WAIT_FOR_PATH_FLOOR_MS,
   runHook,
 } from './_hooks-fixture.js';
 import { spawnSync } from 'node:child_process';
@@ -73,6 +77,32 @@ function progressFile(home: string, cwd: string): string {
   return sweepReportFile(home, cwd).replace(/\.json$/, '.progress.json');
 }
 
+interface SweepReport {
+  notices: string[];
+  finishedAt: string;
+}
+
+// A sweep worker writes its report with a plain writeFileSync, so the path can exist a moment
+// before its bytes do. Wait for a complete report, not just the path.
+function readReport(file: string): SweepReport | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return Array.isArray(parsed?.notices) && typeof parsed?.finishedAt === 'string' ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function waitForReport(file: string): Promise<SweepReport> {
+  const result = await waitForCapacity(() => readReport(file) !== null, {
+    perTestWorkerMilliseconds: WAIT_FOR_PATH_PER_TEST_WORKER_MS,
+    floorMilliseconds: WAIT_FOR_PATH_FLOOR_MS,
+    pollMilliseconds: 5,
+  });
+  if (!result.ready) throw new Error(capacityWaitTimeoutMessage(file, result));
+  return readReport(file) as SweepReport;
+}
+
 function sweepSessionState(home: string): { sessions?: Record<string, string> } {
   try {
     return JSON.parse(fs.readFileSync(path.join(home, 'worktree-sweep-sessions.json'), 'utf8'));
@@ -102,19 +132,28 @@ test('session-end exits inside the shutdown window and a detached worker reclaim
     assert.equal(sweepSessionState(home).sessions?.[sessionId], undefined, 'session-end must still unregister the ending session');
 
     // The sweep keeps running after the hook exits and leaves its report for the next start.
-    await waitForPath(report);
+    const sessionEndReport = await waitForReport(report);
     for (const { worktree, branch } of stale) {
       assert.equal(fs.existsSync(worktree), false, `the detached sweep must reclaim ${worktree}`);
       assert.equal(gitFixture(['branch', '--list', branch], repo), '');
     }
-    assert.ok(Array.isArray(JSON.parse(fs.readFileSync(report, 'utf8')).notices));
 
-    runHook(SESSION, { session_id: 'session-end-next', source: 'startup', cwd: repo }, {
+    const context = runHook(SESSION, { session_id: 'session-end-next', source: 'startup', cwd: repo }, {
       SIDEQUEST_HOME: home,
       SIDEQUEST_SWEEP_DEADLINE_MS: '0',
       CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT,
     });
-    assert.equal(fs.existsSync(report), false, 'the next session start must drain the session-end sweep report');
+    for (const notice of sessionEndReport.notices) {
+      assert.ok(context.includes(notice), `the next session start must report the session-end sweep notice: ${notice}`);
+    }
+    // SQ-401: SessionStart always hands its own sweep to a detached worker, and a zero deadline
+    // defers it at once. That worker writes its report to the same path the session-end report
+    // was drained from, by design, for the start after this one. Whether it has landed when the
+    // hook exits is a race, so "the file is absent" flaked. Wait for that worker to settle and
+    // check that the report now on disk is the new sweep's, never the drained one left behind.
+    assert.match(context, /worktree sweep exceeded its SessionStart budget/);
+    const sessionStartReport = await waitForReport(report);
+    assert.notDeepEqual(sessionStartReport, sessionEndReport, 'the next session start must drain the session-end sweep report');
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }
