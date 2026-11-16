@@ -2059,21 +2059,31 @@ function frozenTargetEvidence(target: any) {
 }
 
 // SQ-383 (SQ-366 side defect): whether `commit` is on the integration target, measured where the
-// target lives. A remote-mode target is answered by the remote's live advertisement (SQ-275); if
-// the remote cannot be reached, the last-fetched remote-tracking ref stands in and the source says
-// so. A local-mode target is its local branch. `head` is null when no such ref exists.
-function candidateLandedOnTarget(repo: string, target: any, commit: string) {
+// target lives. A remote-mode target is answered only by the remote's live advertisement (SQ-275).
+// SQ-400: when that remote cannot be reached the answer is `unavailable`, never the last-fetched
+// remote-tracking ref, which can still hold a candidate the remote has since lost and would record
+// undelivered work as delivered. A local-mode target is its local branch. `head` is null when no
+// such ref exists.
+type CandidateLanded =
+  | { unavailable: false; landed: boolean; head: string | null; source: string; observedAt: string }
+  | { unavailable: true; remote: string; branch: string; detail: string };
+
+function candidateLandedOnTarget(repo: string, target: any, commit: string): CandidateLanded {
   const landedRemote = landedRemoteFromTarget(target);
   if (landedRemote) {
     const proof = proveLandedOnRemote({ repo, remote: landedRemote.remote, branch: landedRemote.branch, commit });
-    if (proof.ok) return { landed: proof.landed, head: proof.tip, source: proof.source, observedAt: proof.observedAt };
+    if (!proof.ok) return { unavailable: true, remote: proof.remote, branch: proof.branch, detail: proof.detail };
+    return { unavailable: false, landed: proof.landed, head: proof.tip, source: proof.source, observedAt: proof.observedAt };
   }
-  const ref = landedRemote ? `refs/remotes/${landedRemote.remote}/${landedRemote.branch}` : `refs/heads/${target.branch}`;
-  const head = resolveCommitOrNull(repo, ref);
-  const source = landedRemote ? `git-tracking:${landedRemote.remote}/${landedRemote.branch}` : `git:${target.upstream || target.branch}`;
+  const head = resolveCommitOrNull(repo, `refs/heads/${target.branch}`);
+  const source = `git:${target.upstream || target.branch}`;
   const observedAt = new Date().toISOString();
-  if (!head) return { landed: false, head: null, source, observedAt };
-  return { landed: isAncestorCommit(repo, commit, head), head: head.toLowerCase(), source, observedAt };
+  if (!head) return { unavailable: false, landed: false, head: null, source, observedAt };
+  return { unavailable: false, landed: isAncestorCommit(repo, commit, head), head: head.toLowerCase(), source, observedAt };
+}
+
+function abandonRemoteUnavailableMessage(ref: string, remote: string, branch: string, detail: string): string {
+  return `${ref} abandonment refused: remote ${remote} could not be contacted to read the live refs/heads/${branch} tip (${detail}), so whether the candidate landed is unknown. Landedness is decided only by the remote's live advertisement; there is no local fallback, so refs/remotes/${remote}/${branch}, the checkout's HEAD, and local branches are never consulted, and nothing was recorded. Restore network access to ${remote} and abandon the submission again.`;
 }
 
 function recordAlreadyLandedSubmission(slug: any, found: any, target: any, candidate: string, reason: string, repo: string, landed?: any) {
@@ -2144,6 +2154,7 @@ function recordAbandonedSubmission(slug?: any, idOrRef?: any, opts?: any) {
   let candidateStateSource: string | null = null;
   let landedCandidate: string | null = null;
   let landed: any = null;
+  let remoteUnavailable: { remote: string; branch: string; detail: string } | null = null;
   if (submissionUsesGit(found) && candidate) {
     let resolved: string | null = null;
     try {
@@ -2161,14 +2172,32 @@ function recordAbandonedSubmission(slug?: any, idOrRef?: any, opts?: any) {
       try {
         // SQ-383 (SQ-366 side defect): measured where the target lives, not refs/heads/<branch>,
         // which a remote-mode board may never have fetched or may hold stale.
-        landed = candidateLandedOnTarget(repo, target, resolved);
-        candidateStateSource = landed.source;
-        if (landed.landed && landed.head) landedCandidate = resolved;
-        else candidateState = 'unreachable';
+        const measured = candidateLandedOnTarget(repo, target, resolved);
+        if (measured.unavailable) {
+          remoteUnavailable = { remote: measured.remote, branch: measured.branch, detail: measured.detail };
+        } else {
+          landed = measured;
+          candidateStateSource = measured.source;
+          if (measured.landed && measured.head) landedCandidate = resolved;
+          else candidateState = 'unreachable';
+        }
       } catch (_) {
         candidateState = 'unresolvable';
       }
     }
+  }
+  // SQ-400: an unanswerable remote leaves landedness unknown. Recording either outcome would be a
+  // guess (a stale tracking ref once turned an undelivered candidate into a delivery), so refuse
+  // and write nothing, exactly as recordDeliveredSubmission does for the same proof.
+  if (remoteUnavailable) {
+    return {
+      ok: false,
+      reason: 'landed_remote_unavailable',
+      ticket: found,
+      remote: remoteUnavailable.remote,
+      branch: remoteUnavailable.branch,
+      message: abandonRemoteUnavailableMessage(found.ref, remoteUnavailable.remote, remoteUnavailable.branch, remoteUnavailable.detail),
+    };
   }
   if (landedCandidate) {
     try {
