@@ -1,12 +1,14 @@
 "use strict";
 const http = require("http");
+const fs = require("fs");
 const fsp = require("fs/promises");
 const os = require("os");
 const path = require("path");
 const url = require("url");
 const { spawn } = require("child_process");
 const store = require("./store");
-const { resolveClaudeHome } = require("./claude-home");
+const { resolveClaudeHome, resolveSidequestHome } = require("./claude-home");
+const questionLog = require("./store/question-log.js");
 const DASHBOARD_DIST = path.join(__dirname, "..", "dashboard", "dist");
 let PLUGIN_VERSION = null;
 try {
@@ -300,6 +302,274 @@ function annotateReminders(tickets) {
     if (t.claim?.by) t.claim = { ...t.claim, ...store.claimPulse(t, now) };
   }
   return tickets;
+}
+const QUESTION_LIST_DEFAULT_LIMIT = 100;
+const QUESTION_LIST_MAX_LIMIT = 500;
+const QUESTION_LIST_STATES = ["open", "answered", "declined", "withdrawn", "all"];
+const ARCHIVED_QUESTION_CACHE_MAX = 256;
+const questionFolds = /* @__PURE__ */ new Map();
+const questionSegmentIndexes = /* @__PURE__ */ new Map();
+const archivedQuestionStates = /* @__PURE__ */ new Map();
+class QuestionRequestError extends Error {
+  status;
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+function questionProjectSlugs() {
+  const root = path.join(resolveSidequestHome(), "projects");
+  let entries;
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch (error) {
+    if (error && error.code === "ENOENT") return [];
+    throw error;
+  }
+  return entries.filter((entry) => entry.isDirectory() && fs.existsSync(path.join(root, entry.name, "questions"))).map((entry) => entry.name).sort();
+}
+function questionProjects(project) {
+  const slug = project == null ? "" : String(project).trim();
+  if (!slug || slug === "all") return { project: "all", slugs: questionProjectSlugs() };
+  try {
+    questionLog.questionLogDir(slug);
+  } catch (_) {
+    throw new QuestionRequestError(400, "invalid project");
+  }
+  if (!store.readMeta(slug)) throw new QuestionRequestError(404, "unknown project");
+  return { project: slug, slugs: [slug] };
+}
+function activeQuestionFold(dir) {
+  const fold = questionLog.advanceFold(dir, questionFolds.get(dir) || null, { recentLimit: Infinity });
+  questionFolds.set(dir, fold);
+  return fold;
+}
+function archivedQuestionSummaries(dir) {
+  let cache = questionSegmentIndexes.get(dir);
+  if (!cache) {
+    cache = /* @__PURE__ */ new Map();
+    questionSegmentIndexes.set(dir, cache);
+  }
+  const segments = questionLog.listArchivedSegments(dir);
+  for (const cached of [...cache.keys()]) if (!segments.includes(cached)) cache.delete(cached);
+  const indexes = [];
+  for (const segment of segments) {
+    if (!cache.has(segment)) {
+      const index = questionLog.readSegmentIndex(dir, segment);
+      if (!index) continue;
+      cache.set(segment, index);
+    }
+    indexes.push(cache.get(segment));
+  }
+  return indexes;
+}
+function timeToAnswerMs(askedAt, answeredAt) {
+  if (!askedAt || !answeredAt) return null;
+  const elapsed = Date.parse(answeredAt) - Date.parse(askedAt);
+  return Number.isFinite(elapsed) ? Math.max(0, elapsed) : null;
+}
+function questionListRow(slug, summary) {
+  return {
+    qid: summary.qid,
+    project: slug,
+    ref: summary.ref,
+    ticketId: summary.ticketId ?? null,
+    seq: summary.seq,
+    header: summary.header ?? null,
+    text: summary.text,
+    asker: summary.asker ?? null,
+    state: summary.state,
+    blocking: summary.blocking !== false,
+    askedAt: summary.askedAt,
+    answeredAt: summary.answeredAt ?? null,
+    closedAt: summary.closedAt ?? null,
+    timeToAnswerMs: timeToAnswerMs(summary.askedAt, summary.answeredAt),
+    via: summary.via ?? null,
+    declined: summary.declined === true
+  };
+}
+function projectQuestionRows(slug) {
+  const dir = questionLog.questionLogDir(slug);
+  const rows = /* @__PURE__ */ new Map();
+  for (const state of questionLog.foldQuestions(activeQuestionFold(dir))) {
+    rows.set(state.qid, questionListRow(slug, questionLog.summarizeQuestion(state)));
+  }
+  const indexes = archivedQuestionSummaries(dir);
+  for (let position = indexes.length - 1; position >= 0; position -= 1) {
+    for (const summary of indexes[position].questions || []) {
+      if (!rows.has(summary.qid)) rows.set(summary.qid, questionListRow(slug, summary));
+    }
+  }
+  return [...rows.values()];
+}
+function questionListLimit(raw) {
+  if (raw == null || raw === "") return QUESTION_LIST_DEFAULT_LIMIT;
+  const limit = Number(raw);
+  if (!Number.isInteger(limit) || limit < 1) throw new QuestionRequestError(400, `limit must be a whole number from 1 to ${QUESTION_LIST_MAX_LIMIT}`);
+  return Math.min(limit, QUESTION_LIST_MAX_LIMIT);
+}
+function newestAskedFirst(left, right) {
+  return String(right.askedAt).localeCompare(String(left.askedAt)) || String(right.qid).localeCompare(String(left.qid));
+}
+function questionList(q) {
+  const scope = questionProjects(q.project);
+  const state = q.state == null || q.state === "" ? "all" : String(q.state);
+  if (!QUESTION_LIST_STATES.includes(state)) throw new QuestionRequestError(400, `state must be one of ${QUESTION_LIST_STATES.join(", ")}`);
+  const ref = q.ref ? String(q.ref).trim().toUpperCase() : "";
+  const limit = questionListLimit(q.limit);
+  let rows = scope.slugs.flatMap((slug) => projectQuestionRows(slug));
+  if (state !== "all") rows = rows.filter((row) => row.state === state);
+  if (ref) rows = rows.filter((row) => String(row.ref).toUpperCase() === ref);
+  rows.sort(newestAskedFirst);
+  const before = q.before == null ? "" : String(q.before).trim();
+  if (before) {
+    if (questionLog.isQuestionId(before)) {
+      const position = rows.findIndex((row) => row.qid === before);
+      if (position < 0) throw new QuestionRequestError(400, "before names a question this list does not hold");
+      rows = rows.slice(position + 1);
+    } else if (Number.isFinite(Date.parse(before))) {
+      const cutoff = Date.parse(before);
+      rows = rows.filter((row) => Date.parse(row.askedAt) < cutoff);
+    } else {
+      throw new QuestionRequestError(400, "before must be a qid or an ISO time");
+    }
+  }
+  const page = rows.slice(0, limit);
+  return {
+    project: scope.project,
+    state,
+    ref: ref || null,
+    questions: page,
+    nextBefore: rows.length > limit ? page[page.length - 1].qid : null
+  };
+}
+function rememberArchivedQuestion(key, state) {
+  archivedQuestionStates.delete(key);
+  archivedQuestionStates.set(key, state);
+  while (archivedQuestionStates.size > ARCHIVED_QUESTION_CACHE_MAX) {
+    archivedQuestionStates.delete(archivedQuestionStates.keys().next().value);
+  }
+}
+function projectQuestionState(slug, qid) {
+  const dir = questionLog.questionLogDir(slug);
+  const fold = activeQuestionFold(dir);
+  const active = fold.open[qid] || fold.recent[qid];
+  if (active) return { slug, dir, state: active, archived: false };
+  const key = `${dir}\0${qid}`;
+  if (archivedQuestionStates.has(key)) return { slug, dir, state: archivedQuestionStates.get(key), archived: true };
+  const named = archivedQuestionSummaries(dir).some((index) => (index.questions || []).some((summary) => summary.qid === qid));
+  if (!named) return null;
+  const state = questionLog.findQuestion(dir, qid);
+  if (!state) return null;
+  rememberArchivedQuestion(key, state);
+  return { slug, dir, state, archived: true };
+}
+function locateQuestion(q, qid) {
+  if (!questionLog.isQuestionId(qid)) throw new QuestionRequestError(400, "not a question id");
+  const scope = questionProjects(q.project);
+  for (const slug of scope.slugs) {
+    const found = projectQuestionState(slug, qid);
+    if (found) return found;
+  }
+  throw new QuestionRequestError(404, "question not found");
+}
+function answerMetadata(answer) {
+  if (!answer) return null;
+  const inline = typeof answer.text === "string";
+  return {
+    aid: answer.aid,
+    at: answer.at,
+    via: answer.via,
+    // via:"orchestrator" answers are the orchestrating session's, not the user's (plan.md §2.3).
+    userAuthored: answer.via !== "orchestrator",
+    declined: answer.declined === true,
+    supersedes: answer.supersedes ?? null,
+    stored: answer.declined === true ? "none" : answer.bodyRef ? "body" : "inline",
+    bytes: inline ? Buffer.byteLength(answer.text, "utf8") : Number.isInteger(answer.bytes) ? answer.bytes : null,
+    sha256: answer.sha256 ?? null
+  };
+}
+function questionEvents(state) {
+  const events = [{ type: "asked", at: state.asked.at, session: state.asked.session ?? null, agent: state.asked.agent ?? null, origin: state.asked.origin }];
+  for (const sent of state.sent || []) events.push({ type: "sent", at: sent.at, to: sent.to ?? null, aid: sent.aid ?? null, session: sent.session ?? null });
+  for (const answer of [...state.superseded || [], state.answered].filter(Boolean)) {
+    events.push({ type: "answered", at: answer.at, aid: answer.aid, via: answer.via, declined: answer.declined === true, supersedes: answer.supersedes ?? null, session: answer.session ?? null });
+  }
+  for (const delivered of state.delivered || []) events.push({ type: "delivered", at: delivered.at, aid: delivered.aid, session: delivered.session ?? null });
+  if (state.withdrawn) events.push({ type: "withdrawn", at: state.withdrawn.at, reason: state.withdrawn.reason, session: state.withdrawn.session ?? null });
+  return events.sort((left, right) => String(left.at).localeCompare(String(right.at)));
+}
+function answerUrl(slug, qid, aid) {
+  const query = `project=${encodeURIComponent(slug)}${aid ? `&aid=${encodeURIComponent(aid)}` : ""}`;
+  return `/api/questions/${encodeURIComponent(qid)}/answer?${query}`;
+}
+function questionDetail(q, qid) {
+  const { slug, state, archived } = locateQuestion(q, qid);
+  const asked = state.asked;
+  return {
+    question: {
+      qid: state.qid,
+      project: slug,
+      ref: state.ref,
+      ticketId: state.ticketId ?? null,
+      seq: state.seq,
+      state: state.state,
+      header: asked.header ?? null,
+      text: asked.text,
+      options: Array.isArray(asked.options) ? asked.options.map((option) => ({ label: option.label, description: option.description || "" })) : null,
+      multiSelect: asked.multiSelect === true,
+      blocking: asked.blocking !== false,
+      default: asked.default ?? null,
+      origin: asked.origin,
+      asker: asked.agent || (asked.origin === "filing" ? "filing" : null),
+      ownerSession: asked.ownerSession ?? null,
+      askedAt: asked.at,
+      answeredAt: state.answered?.at ?? null,
+      closedAt: state.closedAt ?? null,
+      timeToAnswerMs: timeToAnswerMs(asked.at, state.answered?.at),
+      answer: answerMetadata(state.answered),
+      answerUrl: state.answered && state.answered.declined !== true ? answerUrl(slug, state.qid) : null,
+      // Oldest first: each entry was replaced by the next, and the last by `answer`.
+      superseded: (state.superseded || []).map(answerMetadata),
+      withdrawn: state.withdrawn ? { reason: state.withdrawn.reason, at: state.withdrawn.at } : null,
+      events: questionEvents(state),
+      archived
+    }
+  };
+}
+function questionAnswer(q, qid) {
+  const { slug, dir, state } = locateQuestion(q, qid);
+  const requested = q.aid ? String(q.aid) : "";
+  const answers = [state.answered, ...state.superseded || []].filter(Boolean);
+  const answer = requested ? answers.find((candidate) => candidate.aid === requested) : state.answered;
+  if (!answer) throw new QuestionRequestError(404, requested ? "no such answer on this question" : "question has no answer");
+  let text = null;
+  if (answer.declined === true) text = null;
+  else if (typeof answer.text === "string") text = answer.text;
+  else if (answer.bodyRef) {
+    text = questionLog.readAnswerBody(dir, answer.aid);
+    if (text == null) throw new QuestionRequestError(404, `answer body ${answer.aid} is missing from the question log`);
+  }
+  return {
+    project: slug,
+    qid: state.qid,
+    ref: state.ref,
+    seq: state.seq,
+    current: answer === state.answered,
+    ...answerMetadata(answer),
+    text
+  };
+}
+function sendQuestionResponse(res, build) {
+  try {
+    sendJson(res, 200, build());
+  } catch (error) {
+    if (error instanceof QuestionRequestError) {
+      sendJson(res, error.status, { error: error.message });
+      return;
+    }
+    throw error;
+  }
 }
 async function handle(req, res) {
   const parsed = url.parse(req.url, true);
@@ -787,6 +1057,20 @@ async function handle(req, res) {
     const payload = store.modelsPayload(project ? { project } : void 0);
     payload.categoryDraftAvailable = categoryDraftAvailable;
     sendJson(res, 200, payload);
+    return;
+  }
+  if (req.method === "GET" && pathname === "/api/questions") {
+    sendQuestionResponse(res, () => questionList(q));
+    return;
+  }
+  const questionAnswerMatch = /^\/api\/questions\/([^/]+)\/answer$/.exec(pathname);
+  if (req.method === "GET" && questionAnswerMatch) {
+    sendQuestionResponse(res, () => questionAnswer(q, questionAnswerMatch[1]));
+    return;
+  }
+  const questionMatch = /^\/api\/questions\/([^/]+)$/.exec(pathname);
+  if (req.method === "GET" && questionMatch) {
+    sendQuestionResponse(res, () => questionDetail(q, questionMatch[1]));
     return;
   }
   if (req.method === "GET" && pathname === "/api/tickets") {
