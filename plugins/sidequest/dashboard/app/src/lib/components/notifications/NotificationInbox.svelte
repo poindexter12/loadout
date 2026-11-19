@@ -47,6 +47,14 @@
   }
 
   async function openNotification(notification: Notification) {
+    const question = notification.question as { qid: string; project?: string } | undefined;
+    if (question) {
+      if (question.project) state.selectProject(question.project);
+      state.view = 'questions';
+      globalThis.location.hash = `/questions/${question.qid}`;
+      state.popover = null;
+      return;
+    }
     if (!isRead(notification)) await state.markNotificationsRead({ id: notification.id });
     const project = typeof notification.projectSlug === 'string' ? notification.projectSlug : undefined;
     if (project) state.selectProject(project);

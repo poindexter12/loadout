@@ -29,7 +29,7 @@ export class BoardState {
   notifyPreferences = $state.raw<JsonRecord>({});
 
   selectedProject = $state<Scope>('all');
-  view = $state<'board' | 'archive'>('board');
+  view = $state<'board' | 'archive' | 'questions'>('board');
   priority = $state<'all' | 'urgent' | 'high' | 'normal' | 'low'>('all');
   assignee = $state<AssigneeFilter>('all');
   story = $state<string>('all');
@@ -60,9 +60,17 @@ export class BoardState {
   counts = $derived.by(() => ({ todo: this.columns.todo.length, doing: this.columns.doing.length, done: this.columns.done.length }));
   unreadBuckets = $derived.by(() => {
     const notifications = this.raw?.notifications.notifications ?? [];
+    const openQuestions = (this.raw?.notifications.openQuestions ?? []).map((question) => ({
+      id: `question:${question.qid}`,
+      kind: 'question',
+      title: `${question.ref} ${question.seq}`,
+      body: question.header ?? 'Question needs a decision',
+      createdAt: question.askedAt,
+      question,
+    }));
     return {
       all: notifications,
-      needs: notifications.filter((notification) => notification.kind === 'reminder'),
+      needs: [...openQuestions, ...notifications.filter((notification) => notification.kind === 'reminder')],
       activity: notifications.filter((notification) => notification.kind !== 'reminder')
     };
   });
