@@ -218,7 +218,8 @@ hand-pick either. Legacy complexity maps to bands at read time (1–3/4–6/7–
    every spawn field unchanged (including `isolation`). **Claude routes**: `model: exec.model` +
    `mode: "bypassPermissions"` + a unique `name` (omitting `model` inherits the pricey session
    model). This includes Haiku: use the stable executor and model the dispatch returned, never a
-   plain generic Agent. **Codex routes** (`exec.model` null): `model` OMITTED — the definition
+   plain generic Agent (the gate runs a non-executor Agent in the background as an ordinary agent,
+   and one carrying a dispatch briefing or `[sidequest-...]` marker is denied). **Codex routes** (`exec.model` null): `model` OMITTED — the definition
    pins model and effort in frontmatter, and a prompt marker is denied; any `model` value
    silently runs Anthropic. Effort rides **verbatim** — a mismatched claim is
    refused. Fallbacks: `references/routing-details.md`.

@@ -89,9 +89,9 @@ function refuseWhenBoardBusy(error) {
 
 // src/hooks/force-exec-bypass.ts
 var import_node_child_process = require("node:child_process");
-var import_node_fs4 = __toESM(require("node:fs"));
+var import_node_fs5 = __toESM(require("node:fs"));
 var import_node_os2 = __toESM(require("node:os"));
-var import_node_path5 = __toESM(require("node:path"));
+var import_node_path6 = __toESM(require("node:path"));
 
 // src/hooks/shared/input.ts
 var import_node_fs2 = __toESM(require("node:fs"));
@@ -324,6 +324,9 @@ var import_node_path4 = __toESM(require("node:path"));
 // src/lib/claude-home.ts
 var import_node_os = __toESM(require("node:os"));
 var import_node_path3 = __toESM(require("node:path"));
+function resolveClaudeHome(explicit) {
+  return explicit || process.env.SIDEQUEST_CLAUDE_HOME || process.env.CLAUDE_CONFIG_DIR || import_node_path3.default.join(import_node_os.default.homedir(), ".claude");
+}
 function resolveSidequestHome(env = process.env) {
   const explicit = String(env.SIDEQUEST_HOME || "").trim();
   if (explicit) return import_node_path3.default.resolve(explicit);
@@ -349,11 +352,52 @@ function writeSessionState(file, state) {
   import_node_fs3.default.writeFileSync(file, JSON.stringify(state));
 }
 
+// src/lib/agent-foreground.ts
+var import_node_fs4 = __toESM(require("node:fs"));
+var import_node_path5 = __toESM(require("node:path"));
+var BUILTIN_FOREGROUND_AGENT_TYPES = Object.freeze(["Explore", "claude-code-guide", "statusline-setup"]);
+var FOREGROUND_SETTINGS_NAMESPACE = "sidequest";
+var FOREGROUND_SETTINGS_FIELD = "foregroundAgents";
+function readForegroundAgents(settingsPath) {
+  let parsed;
+  try {
+    parsed = JSON.parse(import_node_fs4.default.readFileSync(settingsPath, "utf8"));
+  } catch (_) {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const namespace = parsed[FOREGROUND_SETTINGS_NAMESPACE];
+  if (!namespace || typeof namespace !== "object" || Array.isArray(namespace)) return null;
+  const list = namespace[FOREGROUND_SETTINGS_FIELD];
+  if (!Array.isArray(list)) return null;
+  return [...new Set(list.filter((entry) => typeof entry === "string").map((entry) => entry.trim()).filter(Boolean))];
+}
+function foregroundSettingsCandidates(options = {}) {
+  const candidates = [];
+  const projectDir = String(options.projectDir || "").trim();
+  if (projectDir) {
+    candidates.push({ source: "project-local", path: import_node_path5.default.join(projectDir, ".claude", "settings.local.json") });
+    candidates.push({ source: "project", path: import_node_path5.default.join(projectDir, ".claude", "settings.json") });
+  }
+  candidates.push({ source: "user", path: import_node_path5.default.join(resolveClaudeHome(options.claudeHome), "settings.json") });
+  return candidates;
+}
+function resolveForegroundAgents(options = {}) {
+  for (const candidate of foregroundSettingsCandidates(options)) {
+    const types = readForegroundAgents(candidate.path);
+    if (types) return { types, source: candidate.source, path: candidate.path };
+  }
+  return { types: [], source: "none", path: null };
+}
+function isForegroundAgentType(type, resolution) {
+  return BUILTIN_FOREGROUND_AGENT_TYPES.includes(type) || resolution.types.includes(type);
+}
+
 // src/hooks/force-exec-bypass.ts
 failClosedOnBoardBusy();
-var { canonicalPath } = require(import_node_path5.default.join(__dirname, "..", "lib", "worktrees.js"));
-var { isInScope: scopeMatch } = require(import_node_path5.default.join(__dirname, "..", "lib", "scope-match.js"));
-var PASS_THROUGH_AGENT_TYPES = /* @__PURE__ */ new Set(["Explore", "claude-code-guide", "statusline-setup"]);
+var { canonicalPath } = require(import_node_path6.default.join(__dirname, "..", "lib", "worktrees.js"));
+var { isInScope: scopeMatch } = require(import_node_path6.default.join(__dirname, "..", "lib", "scope-match.js"));
+var PASS_THROUGH_AGENT_TYPES = new Set(BUILTIN_FOREGROUND_AGENT_TYPES);
 var EXECUTOR_HELPER_TYPES = /* @__PURE__ */ new Set(["Explore", "claude-code-guide", "web-researcher", "general-purpose"]);
 var HELPER_REVIEW_WORK_RE = /\b(?:audits?|auditors?|auditing|audited|reviews?|reviewers?|reviewing|reviewed|review-audit)\b/i;
 var WRITE_TOOLS = /* @__PURE__ */ new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
@@ -409,7 +453,7 @@ function helperModelDenyReason(type) {
 }
 function helperEvidenceRule(input) {
   const transcriptPath = stringField(input, "transcript_path", "transcriptPath").trim();
-  const sessionPaths = transcriptPath ? [transcriptPath, import_node_path5.default.join(import_node_path5.default.dirname(transcriptPath), "subagents")] : [];
+  const sessionPaths = transcriptPath ? [transcriptPath, import_node_path6.default.join(import_node_path6.default.dirname(transcriptPath), "subagents")] : [];
   const knownLocations = sessionPaths.length ? ` Current session self-reference locations: ${sessionPaths.join(", ")}.` : "";
   return "\n\nEvidence rule: quoted ticket strings appear in this session’s context and generated transcripts. A match in the parent or helper session transcript, subagent transcript, or task-output files is self-reference, not evidence: report it as such. Do not search session, transcript, or task-output directories for evidence. Cite only the directly reachable artifact under investigation; if it is outside the parent worktree or otherwise unavailable, report a visibility block rather than a finding." + knownLocations;
 }
@@ -443,63 +487,46 @@ function diagnosticProbeDenyReason() {
   return `sidequest: ${DIAGNOSTIC_PROBE_NAME} is reserved for a foreground dispatch self-test. Use description "Sidequest dispatch self-test." and prompt "Diagnose Sidequest dispatch machinery. Read package.json, then report whether the Agent spawn can use a read-only tool." Omit model, ticket refs, isolation, and background mode. Ordinary work needs a ticket.`;
 }
 function agentDenyReason(type, classification) {
-  if (type.startsWith("sidequest-")) {
-    if (classification.kind === "ticket" || classification.kind === "legacy_ticket") {
-      return `sidequest: ${type} looks like a Sidequest executor name but is invalid or retired. Re-run dispatch and spawn the returned executor.`;
-    }
-    return `sidequest: ${type} is an unknown Sidequest agent type. Use the executor returned by dispatch.`;
+  if (classification.kind === "ticket" || classification.kind === "legacy_ticket") {
+    return `sidequest: ${type} looks like a Sidequest executor name but is invalid or retired. Re-run dispatch and spawn the returned executor.`;
   }
-  return `sidequest: ${type || "custom"} is a generic Agent, not a Sidequest ticket executor. For a tiny lookup, use Read, Glob, Grep, or WebFetch inline, not WebSearch. A usable route needs a fresh Board MCP dispatch and its exact returned executor. Board MCP is the lifecycle authority: reload or reconnect Sidequest, then re-dispatch. Do not use a raw Agent or Sidequest CLI fallback. Any delegated work, including a quick investigation, needs a ticket: file a spike (usually codebase-exploration), route it, dispatch it, then spawn the returned executor. The blocked work still gates any dependent action: do not proceed to a PR, merge, publish, or ship until its ticket is filed, dispatched, and closed; rerouting around this block is a violation.`;
+  return `sidequest: ${type || "unnamed"} is an unknown Sidequest agent type. Use the executor returned by dispatch.`;
 }
-function unroutedGenericDenyReason(status) {
-  if (status === "no-project") {
-    return "sidequest: this project is not registered on a Sidequest board, so there is no executor route. Continue bounded inline work with direct tools; do not create a fake Sidequest or raw Agent lifecycle fallback. Nothing here gates a PR, merge, publish, or ship - no ticket is required for this work. The first Board MCP call registers the project if you want one.";
+function isSidequestNamedType(type) {
+  const lastSegment = type.slice(type.lastIndexOf(":") + 1);
+  return type.startsWith("sidequest-") || type.startsWith("sidequest:") || lastSegment.startsWith("sidequest-");
+}
+var SIDEQUEST_MARKER_LINE_RE = /^\s*\[sidequest-[a-z][a-z0-9-]*(?:\s[^\]\n]*)?\]\s*$/m;
+function carriesDispatchPayload(toolInput) {
+  const prompt = typeof toolInput.prompt === "string" ? toolInput.prompt : "";
+  return Boolean(prompt) && (dispatchLaunches(prompt).length > 0 || SIDEQUEST_MARKER_LINE_RE.test(prompt));
+}
+function dispatchPayloadDenyReason(type) {
+  return `sidequest: ${type || "unnamed"} is not a Sidequest executor but carries a dispatch briefing or [sidequest-...] marker. Ticket work runs only in the exact executor dispatch returned: re-run dispatch and pass its spawn unchanged. Other work needs no marker.`;
+}
+function foregroundProjectDir(input) {
+  return String(process.env.CLAUDE_PROJECT_DIR || "").trim() || stringField(input, "cwd").trim();
+}
+function backgroundOrdinaryAgent(input, toolInput, type) {
+  if (carriesDispatchPayload(toolInput)) {
+    writeDeny("PreToolUse", dispatchPayloadDenyReason(type));
+    return;
   }
-  return "sidequest: this project has no usable executor route. Continue bounded inline work with direct tools; do not create a fake Sidequest or raw Agent lifecycle fallback.";
+  if (isForegroundAgentType(type, resolveForegroundAgents({ projectDir: foregroundProjectDir(input) }))) return;
+  writeToolUpdate(
+    { ...toolInput, run_in_background: true },
+    `sidequest: ${type || "this agent"} is not a Sidequest executor, so it runs in the background with its own definition and permission mode. To keep a type in the foreground, list it in Claude Code settings under "sidequest": {"foregroundAgents": [...]}; a project list replaces the user list.`
+  );
 }
 var EXPLORE_FREE_SPAWNS = 2;
-var DENIED_WORK_PROMPT_PREFIX_CHARS = 160;
-var DENIED_WORK_MAX_RECORDS = 20;
 function guardSessionId(input) {
   return (stringField(input, "session_id", "sessionId") || process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || "").trim();
 }
-function normalizedWork(value) {
-  return String(value ?? "").toLowerCase().replace(/\s+/g, " ").trim();
-}
-function deniedWorkPromptPrefix(toolInput) {
-  return normalizedWork(toolInput.prompt).slice(0, DENIED_WORK_PROMPT_PREFIX_CHARS);
-}
-function deniedWorkRecords(state) {
-  if (!Array.isArray(state.deniedWork)) return [];
-  return state.deniedWork.filter((record) => isRecord(record) && typeof record.description === "string" && typeof record.promptPrefix === "string");
-}
-function recordDeniedGenericWork(input, toolInput) {
-  const sessionId = guardSessionId(input);
-  if (!sessionId) return;
-  try {
-    const file = sessionStateFile("explore-fanout", sessionId);
-    const state = readSessionState(file);
-    const records = deniedWorkRecords(state);
-    records.push({ description: normalizedWork(toolInput.description), promptPrefix: deniedWorkPromptPrefix(toolInput) });
-    state.deniedWork = records.slice(-DENIED_WORK_MAX_RECORDS);
-    writeSessionState(file, state);
-  } catch (_) {
-  }
-}
-function matchesDeniedWork(records, toolInput) {
-  const description = normalizedWork(toolInput.description);
-  const promptPrefix = deniedWorkPromptPrefix(toolInput);
-  return records.some((record) => record.description !== "" && record.description === description || record.promptPrefix !== "" && record.promptPrefix === promptPrefix);
-}
-function guardMainSessionExplore(input, toolInput) {
+function guardMainSessionExplore(input) {
   const sessionId = guardSessionId(input);
   if (!sessionId || dispatchAdmission(input).status !== "routed") return;
   const file = sessionStateFile("explore-fanout", sessionId);
   const state = readSessionState(file);
-  if (matchesDeniedWork(deniedWorkRecords(state), toolInput)) {
-    writeDeny("PreToolUse", "sidequest: this Explore spawn matches work a generic Agent was already denied for. The block applied to the work, not the agent type. File a spike ticket (usually codebase-exploration), route it, dispatch it, then spawn the returned executor; rerouting denied work through Explore is a violation.");
-    return;
-  }
   const priorPasses = Number(state.explorePasses) || 0;
   const boardInteraction = Boolean(readSessionState(sessionStateFile("inline-work", sessionId)).boardInteraction);
   if (priorPasses >= EXPLORE_FREE_SPAWNS && !boardInteraction) {
@@ -910,7 +937,7 @@ function writeTarget(input) {
   const raw = writeTargetValue(input);
   if (!raw) return "";
   const cwd = stringField(input, "cwd") || process.cwd();
-  return import_node_path5.default.resolve(cwd, raw);
+  return import_node_path6.default.resolve(cwd, raw);
 }
 function restoresCommittedContent(input, target) {
   try {
@@ -920,7 +947,7 @@ function restoresCommittedContent(input, target) {
     if (toolName === "Write" && typeof toolInput?.content === "string") {
       restored = toolInput.content;
     } else if (toolName === "Edit" && typeof toolInput?.old_string === "string" && typeof toolInput.new_string === "string") {
-      const current = import_node_fs4.default.readFileSync(target, "utf8");
+      const current = import_node_fs5.default.readFileSync(target, "utf8");
       const first = current.indexOf(toolInput.old_string);
       if (first < 0 || !toolInput.replace_all && current.indexOf(toolInput.old_string, first + toolInput.old_string.length) >= 0) return false;
       restored = toolInput.replace_all ? current.split(toolInput.old_string).join(toolInput.new_string) : `${current.slice(0, first)}${toolInput.new_string}${current.slice(first + toolInput.old_string.length)}`;
@@ -928,12 +955,12 @@ function restoresCommittedContent(input, target) {
       return false;
     }
     const repository = canonicalPath((0, import_node_child_process.execFileSync)("git", ["rev-parse", "--show-toplevel"], {
-      cwd: import_node_path5.default.dirname(target),
+      cwd: import_node_path6.default.dirname(target),
       encoding: "utf8",
       windowsHide: true
     }).trim());
-    const relative = import_node_path5.default.relative(repository, canonicalPath(target)).replace(/\\/g, "/");
-    if (!relative || relative === ".." || relative.startsWith("../") || import_node_path5.default.isAbsolute(relative)) return false;
+    const relative = import_node_path6.default.relative(repository, canonicalPath(target)).replace(/\\/g, "/");
+    if (!relative || relative === ".." || relative.startsWith("../") || import_node_path6.default.isAbsolute(relative)) return false;
     const committed = (0, import_node_child_process.execFileSync)("git", ["show", `HEAD:${relative}`], {
       cwd: repository,
       windowsHide: true
@@ -944,13 +971,13 @@ function restoresCommittedContent(input, target) {
   }
 }
 function relativeInside(root, target) {
-  const relative = import_node_path5.default.relative(root, target).replace(/\\/g, "/");
-  return relative && relative !== ".." && !relative.startsWith("../") && !import_node_path5.default.isAbsolute(relative) ? relative : null;
+  const relative = import_node_path6.default.relative(root, target).replace(/\\/g, "/");
+  return relative && relative !== ".." && !relative.startsWith("../") && !import_node_path6.default.isAbsolute(relative) ? relative : null;
 }
 function linkedWorktreeRelative(target, projectPath) {
-  let existing = import_node_path5.default.dirname(target);
-  while (!import_node_fs4.default.existsSync(existing)) {
-    const parent = import_node_path5.default.dirname(existing);
+  let existing = import_node_path6.default.dirname(target);
+  while (!import_node_fs5.default.existsSync(existing)) {
+    const parent = import_node_path6.default.dirname(existing);
     if (parent === existing) return null;
     existing = parent;
   }
@@ -965,8 +992,8 @@ function linkedWorktreeRelative(target, projectPath) {
       encoding: "utf8",
       windowsHide: true
     }).trim();
-    const common = canonicalPath(import_node_path5.default.isAbsolute(commonOutput) ? commonOutput : import_node_path5.default.resolve(checkout, commonOutput));
-    if (common !== canonicalPath(import_node_path5.default.join(projectPath, ".git"))) return null;
+    const common = canonicalPath(import_node_path6.default.isAbsolute(commonOutput) ? commonOutput : import_node_path6.default.resolve(checkout, commonOutput));
+    if (common !== canonicalPath(import_node_path6.default.join(projectPath, ".git"))) return null;
     return relativeInside(checkout, target);
   } catch (_) {
     return null;
@@ -995,8 +1022,8 @@ function evidenceTraversalAttempt(input, scope) {
   const rawTarget = writeTargetValue(input);
   if (!rawTarget) return false;
   const cwd = stringField(input, "cwd") || process.cwd();
-  const candidate = (import_node_path5.default.isAbsolute(rawTarget) ? rawTarget : import_node_path5.default.join(cwd, rawTarget)).replace(/\\/g, "/");
-  const evidenceDirectory = import_node_path5.default.resolve(scope.evidenceDirectory).replace(/\\/g, "/").replace(/\/+$/, "");
+  const candidate = (import_node_path6.default.isAbsolute(rawTarget) ? rawTarget : import_node_path6.default.join(cwd, rawTarget)).replace(/\\/g, "/");
+  const evidenceDirectory = import_node_path6.default.resolve(scope.evidenceDirectory).replace(/\\/g, "/").replace(/\/+$/, "");
   const comparableCandidate = process.platform === "win32" ? candidate.toLowerCase() : candidate;
   const comparableDirectory = process.platform === "win32" ? evidenceDirectory.toLowerCase() : evidenceDirectory;
   if (!comparableCandidate.startsWith(`${comparableDirectory}/`)) return false;
@@ -1010,10 +1037,10 @@ function denyEvidenceWrite(target) {
 }
 function isScratchpadPath(target) {
   const configuredRoot = process.env.CLAUDE_SCRATCHPAD_DIR || process.env.CLAUDE_CODE_SCRATCHPAD_DIR;
-  const roots = [configuredRoot, import_node_path5.default.join(import_node_os2.default.tmpdir(), "claude")].filter((root) => Boolean(root));
+  const roots = [configuredRoot, import_node_path6.default.join(import_node_os2.default.tmpdir(), "claude")].filter((root) => Boolean(root));
   return roots.some((root) => {
-    const relative = import_node_path5.default.relative(import_node_path5.default.resolve(root), target);
-    return Boolean(relative) && relative !== ".." && !relative.startsWith(`..${import_node_path5.default.sep}`) && !import_node_path5.default.isAbsolute(relative);
+    const relative = import_node_path6.default.relative(import_node_path6.default.resolve(root), target);
+    return Boolean(relative) && relative !== ".." && !relative.startsWith(`..${import_node_path6.default.sep}`) && !import_node_path6.default.isAbsolute(relative);
   });
 }
 function guardHelperWrite(input) {
@@ -1104,7 +1131,7 @@ function main() {
     return;
   }
   if (PASS_THROUGH_AGENT_TYPES.has(type)) {
-    if (type === "Explore") guardMainSessionExplore(input, toolInput);
+    if (type === "Explore") guardMainSessionExplore(input);
     return;
   }
   if (classification.kind === "diagnostic") {
@@ -1115,14 +1142,14 @@ function main() {
     writeToolUpdate({ ...toolInput, mode: "bypassPermissions", run_in_background: false });
     return;
   }
+  if (!isCurrentExecutor(classification) && !isSidequestNamedType(type)) {
+    backgroundOrdinaryAgent(input, toolInput, type);
+    return;
+  }
   const isDispatchExecutor = classification.kind === "codex_dispatch" || classification.kind === "read_only_codex_dispatch";
   const admission = dispatchAdmission(input);
   if (isCurrentExecutor(classification) && (admission.status === "routing-disabled" || admission.status === "no-usable-route")) {
     writeDeny("PreToolUse", "sidequest: this project has no usable executor route. Continue only bounded inline work, or restore routing and an available category route before a fresh Board MCP dispatch.");
-    return;
-  }
-  if (!isCurrentExecutor(classification) && !type.startsWith("sidequest-") && admission.status !== "routed") {
-    writeDeny("PreToolUse", unroutedGenericDenyReason(admission.status));
     return;
   }
   const dispatchValidation = preparedDispatchValidation(input);
@@ -1155,7 +1182,6 @@ function main() {
     }
   }
   if (!isCurrentExecutor(classification)) {
-    if (!type.startsWith("sidequest-") && admission.status === "routed") recordDeniedGenericWork(input, toolInput);
     writeDeny("PreToolUse", agentDenyReason(type, classification));
     return;
   }

@@ -321,28 +321,24 @@ test('pre-tool hook: board interaction lifts the Explore fan-out cap', () => {
   }
 });
 
-test('pre-tool hook: denied generic work cannot relaunch as Explore', () => {
+test('pre-tool hook: a backgrounded generic agent leaves later Explore spawns to the fan-out guard alone', () => {
+  // SQ-402 retired the generic-Agent refusal, and with it the per-session record that refused the
+  // same work when it came back as Explore: there is no denied work left to reroute.
   const session_id = `explore-reroute-${Date.now()}`;
   const prompt = 'Deep dive: map every hook injection surface and report the guidance gaps.';
-  const denied = runHookOutput(FORCE_BYPASS, {
+  const backgrounded = runHookOutput(FORCE_BYPASS, {
     session_id, cwd: BOARD_PATH, tool_name: 'Agent',
     tool_input: { subagent_type: 'general-purpose', description: 'Hook surface deep dive', prompt },
   });
-  assert.equal(denied.hookSpecificOutput.permissionDecision, 'deny');
+  assert.equal(backgrounded.hookSpecificOutput.permissionDecision, undefined);
+  assert.equal(backgrounded.hookSpecificOutput.updatedInput.run_in_background, true);
 
   const sameDescription = runHookOutput(FORCE_BYPASS, {
     session_id, cwd: BOARD_PATH, tool_name: 'Agent',
     tool_input: { subagent_type: 'Explore', description: 'Hook surface deep dive', prompt: 'Different text entirely.' },
   });
-  assert.equal(sameDescription.hookSpecificOutput.permissionDecision, 'deny');
-  assert.match(sameDescription.hookSpecificOutput.permissionDecisionReason, /the work, not the agent type/);
-  assert.match(sameDescription.hookSpecificOutput.permissionDecisionReason, /rerouting denied work through Explore is a violation/);
-
-  const samePrompt = runHookOutput(FORCE_BYPASS, {
-    session_id, cwd: BOARD_PATH, tool_name: 'Agent',
-    tool_input: { subagent_type: 'Explore', prompt: `  ${prompt.toUpperCase()}  ` },
-  });
-  assert.equal(samePrompt.hookSpecificOutput.permissionDecision, 'deny', 'prompt matching survives case and whitespace changes');
+  assert.equal(sameDescription.hookSpecificOutput.permissionDecision, undefined);
+  assert.match(sameDescription.hookSpecificOutput.additionalContext, /quick evidence sweeps/);
 
   const helper = runHookOutput(FORCE_BYPASS, {
     session_id, cwd: BOARD_PATH, agent_id: 'exec-helper', agent_type: 'sidequest-exec-dispatch',
@@ -390,29 +386,17 @@ test('pre-tool hook: a bounded read-only diagnostic probe may self-test dispatch
   }
 });
 
-test('pre-tool hook: arbitrary implementation agents are denied and directed to ticketed routes', () => {
+test('pre-tool hook: arbitrary agents run in the background with their own definition, not denied', () => {
   for (const [subagent_type, prompt] of [
     ['web-researcher', 'Research the latest routing guidance.'],
     ['implementation-agent', 'Implement the new flow.'],
   ]) {
-    const out = runHookOutput(FORCE_BYPASS, {
-      cwd: BOARD_PATH, tool_name: 'Agent',
-      tool_input: { subagent_type, isolation: 'worktree', prompt },
-    });
-    const reason = out.hookSpecificOutput.permissionDecisionReason;
-    assert.equal(out.hookSpecificOutput.permissionDecision, 'deny', subagent_type);
-    assert.match(reason, /generic Agent, not a Sidequest ticket executor/);
-    assert.match(reason, /Read, Glob, Grep, or WebFetch inline, not WebSearch/);
-    assert.match(reason, /A usable route needs a fresh Board MCP dispatch and its exact returned executor/);
-    assert.match(reason, /Board MCP is the lifecycle authority: reload or reconnect Sidequest, then re-dispatch/);
-    assert.match(reason, /Do not use a raw Agent or Sidequest CLI fallback/);
-    assert.match(reason, /quick investigation, needs a ticket: file a spike/);
-    assert.match(reason, /codebase-exploration/);
-    assert.match(reason, /route it, dispatch it, then spawn the returned executor/);
-    assert.match(reason, /blocked work still gates any dependent action/);
-    assert.match(reason, /do not proceed to a PR, merge, publish, or ship until its ticket is filed, dispatched, and closed/);
-    assert.match(reason, /rerouting around this block is a violation/);
-    assert.doesNotMatch(reason, /sidequest-diagnostic-probe only|WebSearch is executor-only/);
+    const tool_input = { subagent_type, isolation: 'worktree', prompt };
+    const out = runHookOutput(FORCE_BYPASS, { cwd: BOARD_PATH, tool_name: 'Agent', tool_input });
+    assert.equal(out.hookSpecificOutput.permissionDecision, undefined, subagent_type);
+    assert.deepEqual(out.hookSpecificOutput.updatedInput, { ...tool_input, run_in_background: true }, subagent_type);
+    assert.match(out.systemMessage, /not a Sidequest executor, so it runs in the background/);
+    assert.match(out.systemMessage, /"sidequest": \{"foregroundAgents"/);
   }
   const mismatch = runHookOutput(FORCE_BYPASS, {
     tool_name: 'Agent',
@@ -544,8 +528,8 @@ test('pre-tool hook: executor helpers reject review work and model defaults', ()
     tool_name: 'Agent',
     tool_input: { subagent_type: 'general-purpose', prompt: 'Quick lookup.' },
   });
-  assert.equal(mainThread.hookSpecificOutput.permissionDecision, 'deny');
-  assert.match(mainThread.hookSpecificOutput.permissionDecisionReason, /generic Agent, not a Sidequest ticket executor/);
+  assert.equal(mainThread.hookSpecificOutput.permissionDecision, undefined, 'a main-thread spawn is not an executor helper');
+  assert.deepEqual(mainThread.hookSpecificOutput.updatedInput, { subagent_type: 'general-purpose', prompt: 'Quick lookup.', run_in_background: true });
 });
 
 test('pre-tool hook: a generated per-ticket executor definition owns its ticket by name', () => {

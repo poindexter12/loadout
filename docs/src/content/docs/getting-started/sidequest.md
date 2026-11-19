@@ -40,11 +40,17 @@ The board keeps the work visible while Claude and its executors handle the ticke
 
 ### Delegation with Sidequest
 
-Installing Sidequest unconditionally denies generic `Agent` delegation in that session, whether or not a board ticket is in progress. This includes general-purpose, exploration, code-review, and GSD agents. The only agents that remain available are the Sidequest executors returned by dispatch for a ticket.
+Sidequest does not refuse other agents. When the main session spawns an `Agent` that is not a Sidequest executor, such as `general-purpose`, a GSD agent, or a third-party plugin agent like `sg:spec-interviewer`, Sidequest runs it in the background and changes nothing else: the agent keeps its own definition, permission mode, model, and isolation. This applies whether or not the project has a board. `Explore`, `claude-code-guide`, and `statusline-setup` still run in the foreground as before.
 
-For a one-off investigation that needs delegated work, file and dispatch a spike ticket, usually in the `codebase-exploration` category. For a small lookup, use inline `Read`, `Glob`, `Grep`, or `WebFetch` instead of delegation.
+A background agent is not a ticket executor. It has no claim and no briefing, so board work still goes through a ticket and the executor that dispatch returns, and an ordinary agent whose prompt carries a dispatch briefing or a `[sidequest-...]` marker is refused. For a one-off investigation you want on the board, file and dispatch a spike ticket, usually in the `codebase-exploration` category.
 
-The refusal may say not to proceed to a PR, merge, publish, or ship until the ticket is filed, dispatched, and closed. That gate applies to the work you tried to delegate: it must have its own ticket and lifecycle. It does not by itself block unrelated release work already outside that delegation.
+Some agents need the foreground, for example an interviewer that asks you questions as it goes. List those types under a `sidequest` key in Claude Code's own settings:
+
+```json
+{ "sidequest": { "foregroundAgents": ["sg:spec-interviewer"] } }
+```
+
+Put it in your user `settings.json` (under `CLAUDE_CONFIG_DIR`, default `~/.claude`) for every project, or in a project's `.claude/settings.json` or `.claude/settings.local.json` for that project. Claude Code loads a settings file carrying this extra key without complaint. The most specific file that defines the key wins outright: a project list replaces your user list instead of adding to it, and `"foregroundAgents": []` in a project clears it there.
 
 ## Use the dashboard
 
