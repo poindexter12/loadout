@@ -10,7 +10,7 @@ const test = require('node:test');
 const { hooks } = require('../hooks/hooks.json');
 const { recordSessionTally } = require('../lib/state.js');
 
-test('keeps startup-only and startup-or-resume hooks separate with their existing timeouts', () => {
+test('keeps startup-only and startup-or-resume hooks separate with SessionStart headroom', () => {
   assert.deepEqual(hooks, {
     SessionStart: [
       {
@@ -34,7 +34,7 @@ test('keeps startup-only and startup-or-resume hooks separate with their existin
           {
             type: 'command',
             command: 'node --no-warnings "${CLAUDE_PLUGIN_ROOT}/hooks/session-start-freshness.js"',
-            timeout: 5,
+            timeout: 7,
           },
           {
             type: 'command',
@@ -44,7 +44,7 @@ test('keeps startup-only and startup-or-resume hooks separate with their existin
           {
             type: 'command',
             command: 'node --no-warnings "${CLAUDE_PLUGIN_ROOT}/hooks/marketplace-freshness-cache.js"',
-            timeout: 2,
+            timeout: 3,
           },
         ],
       },

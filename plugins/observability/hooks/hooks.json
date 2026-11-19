@@ -8,7 +8,7 @@
           {
             "type": "command",
             "command": "node --no-warnings \"${CLAUDE_PLUGIN_ROOT}/lib/observability/ensure.js\" --launch",
-            "timeout": 1
+            "timeout": 2
           }
         ]
       },
