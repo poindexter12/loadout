@@ -34,7 +34,7 @@ function ciRunner({ commit, conclusion = 'success', runId = 7021, steps = [], jo
   return (command, args) => {
     assert.equal(command, 'gh');
     if (args[0] === 'run') {
-      const run = runId === null ? { headSha: commit, conclusion } : { headSha: commit, conclusion, databaseId: runId };
+      const run = runId === null ? { headSha: commit, status: 'completed', conclusion } : { headSha: commit, status: 'completed', conclusion, databaseId: runId };
       assert.ok(args.includes('databaseId') || args.some((arg) => String(arg).includes('databaseId')), 'the run id is requested');
       return { status: 0, stdout: JSON.stringify([run]), stderr: '' };
     }
@@ -1394,7 +1394,7 @@ test('a failed Test workflow refuses before suites or release mutations', async 
   let suiteRuns = 0;
   const failedTestRun = () => ({
     status: 0,
-    stdout: JSON.stringify([{ headSha: localParent, conclusion: 'failure' }]),
+    stdout: JSON.stringify([{ headSha: localParent, status: 'completed', conclusion: 'failure' }]),
     stderr: '',
   });
 
@@ -1559,7 +1559,7 @@ test('a CI override records its reason for a local cut', async (t) => {
     log: (message) => logs.push(message),
     assertParentCiPassed: (repoRoot, commit) => assertParentCiPassed(repoRoot, commit, () => ({
       status: 0,
-      stdout: JSON.stringify([{ headSha: pinned, conclusion: 'failure' }]),
+      stdout: JSON.stringify([{ headSha: pinned, status: 'completed', conclusion: 'failure' }]),
       stderr: '',
     })),
   });
@@ -1919,7 +1919,7 @@ test('a missing Test workflow run offers a committed container baseline and ever
   let failure;
 
   assert.throws(
-    () => assertParentCiPassed(context.root, parent, () => ({ status: 0, stdout: '[]', stderr: '' }), suites),
+    () => assertParentCiPassed(context.root, parent, () => ({ status: 0, stdout: '[]', stderr: '' }), suites, { sleep: () => {} }),
     (error) => {
       failure = error;
       return /no completed Test workflow run found/.test(error.message);
@@ -1931,6 +1931,108 @@ test('a missing Test workflow run offers a committed container baseline and ever
   const suitesStart = failure.message.indexOf('(cd "plugins/sidequest"; npm ci; npm run test:full)');
   assert.ok(initialized < baseline && baseline < suitesStart);
   assert.match(failure.message, /\(cd "plugins\/toolbelt"; npm ci; npm test\)/);
+});
+
+// A gh stand-in that answers `gh run list` the way GitHub did on the v4.17.0 cut: the
+// status-filtered query omits a run the unfiltered listing reports as completed.
+function laggingFilterRunner(runs, calls = []) {
+  return (command, args) => {
+    assert.equal(command, 'gh');
+    assert.equal(args[0], 'run');
+    calls.push(args);
+    const filtered = args.includes('--status');
+    return { status: 0, stdout: JSON.stringify(filtered ? [] : runs), stderr: '' };
+  };
+}
+
+test('a completed Test run the status-filtered search omits still passes, judged on its own status', () => {
+  const commit = 'a'.repeat(40);
+  const calls = [];
+  const runner = laggingFilterRunner([
+    { headSha: 'b'.repeat(40), status: 'completed', conclusion: 'failure', databaseId: 1 },
+    { headSha: commit, status: 'completed', conclusion: 'success', databaseId: 44472002882 },
+  ], calls);
+  let slept = 0;
+
+  const result = assertParentCiPassed('/repo', commit, runner, [], { sleep: () => { slept += 1; } });
+
+  assert.deepEqual(result, { commit, conclusion: 'success', runId: 44472002882, coverage: new Map() });
+  assert.equal(calls.length, 1, 'a listed run is judged on the first lookup');
+  assert.equal(slept, 0);
+  assert.ok(!calls[0].includes('--status'), 'the lookup does not depend on the lagging status filter');
+  assert.ok(calls[0].includes('status,conclusion,databaseId,headSha'), 'each run reports its own status');
+});
+
+test('the newest completed Test run is the verdict when a newer run is still going', () => {
+  const commit = 'a'.repeat(40);
+  const runner = laggingFilterRunner([
+    { headSha: commit, status: 'in_progress', conclusion: '', databaseId: 9 },
+    { headSha: commit, status: 'completed', conclusion: 'failure', databaseId: 8 },
+    { headSha: commit, status: 'completed', conclusion: 'success', databaseId: 7 },
+  ]);
+
+  assert.throws(
+    () => assertParentCiPassed('/repo', commit, runner, [], { sleep: () => {} }),
+    /^Error: Test workflow for a{40} concluded failure; refusing to publish/,
+  );
+});
+
+test('a Test run that has not completed is not treated as passed', () => {
+  const commit = 'a'.repeat(40);
+  for (const status of ['in_progress', 'queued', 'waiting', undefined]) {
+    // An in-progress run already carries the conclusion field gh reports, empty; a stale or
+    // misleading `success` there is still no verdict while the run has not completed.
+    const runner = laggingFilterRunner([{ headSha: commit, status, conclusion: 'success', databaseId: 44 }]);
+    let slept = 0;
+    assert.throws(
+      () => assertParentCiPassed('/repo', commit, runner, [], { sleep: () => { slept += 1; } }),
+      (error) => {
+        assert.match(error.message, new RegExp(`^Test workflow run 44 for ${commit} has not completed \\(status ${status ?? 'unknown'}\\); refusing to publish`));
+        assert.doesNotMatch(error.message, /no completed Test workflow run found/);
+        return true;
+      },
+    );
+    assert.equal(slept, 0, `a listed ${status} run is refused without waiting`);
+  }
+});
+
+test('a commit with no Test run is looked up again before refusing with the missing-run message', () => {
+  const commit = 'a'.repeat(40);
+  const calls = [];
+  const waits = [];
+  const runner = laggingFilterRunner([{ headSha: 'b'.repeat(40), status: 'completed', conclusion: 'success', databaseId: 1 }], calls);
+
+  assert.throws(
+    () => assertParentCiPassed('/repo', commit, runner, [], { sleep: (ms) => waits.push(ms), attempts: 3, intervalMs: 1234 }),
+    /^Error: no completed Test workflow run found for a{40}; refusing to publish\. If Docker is available, run /,
+  );
+  assert.equal(calls.length, 3, 'every attempt queries GitHub');
+  assert.deepEqual(waits, [1234, 1234], 'it waits between attempts, not after the last');
+
+  // The default schedule is bounded: a few attempts over about two minutes.
+  const defaultWaits = [];
+  assert.throws(
+    () => assertParentCiPassed('/repo', commit, laggingFilterRunner([]), [], { sleep: (ms) => defaultWaits.push(ms) }),
+    /no completed Test workflow run found/,
+  );
+  assert.ok(defaultWaits.length >= 2 && defaultWaits.length <= 6, `default attempts are bounded (${defaultWaits.length} waits)`);
+  const total = defaultWaits.reduce((sum, ms) => sum + ms, 0);
+  assert.ok(total >= 60_000 && total <= 5 * 60_000, `default wait totals ${total} ms`);
+});
+
+test('a Test run that appears on a later lookup is judged once it is listed', () => {
+  const commit = 'a'.repeat(40);
+  let lookups = 0;
+  const runner = (command, args) => {
+    assert.equal(args[0], 'run');
+    lookups += 1;
+    const runs = lookups < 3 ? [] : [{ headSha: commit, status: 'completed', conclusion: 'success', databaseId: 5 }];
+    return { status: 0, stdout: JSON.stringify(runs), stderr: '' };
+  };
+
+  const result = assertParentCiPassed('/repo', commit, runner, [], { sleep: () => {}, attempts: 5 });
+  assert.equal(result.runId, 5);
+  assert.equal(lookups, 3, 'lookups stop as soon as a run is listed');
 });
 
 test('a failing default suite writes its output and names the log', async (t) => {
