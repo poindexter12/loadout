@@ -208,41 +208,79 @@ test('pre-tool hook: ordinary subagents without a dispatch stay outside the help
   assert.equal(out, null);
 });
 
-test('pre-tool hook: an unregistered project gets inline guidance, not a ship-gating deny', () => {
+test('pre-tool hook: an unregistered project backgrounds a third-party agent instead of denying it', () => {
   // dispatchAdmission returns 'no-project' for any cwd with no registered board, which is every
-  // project before its first Board MCP call. The guard used to enumerate only 'routing-disabled' and
-  // 'no-usable-route', so this case fell through to agentDenyReason and was told not to ship until a
-  // ticket it cannot file is closed - while session-start told the same session inline work is fine.
+  // project before its first Board MCP call. SQ-402: ordinary agents are no longer refused anywhere,
+  // so a plugin agent such as sg:spec-interviewer runs here exactly as it does on a routed board.
+  const tool_input = { subagent_type: 'sg:spec-interviewer', isolation: 'worktree', mode: 'acceptEdits', prompt: 'Interview me about the spec.' };
   const unregistered = runHookOutput(FORCE_BYPASS, {
     cwd: path.join(os.tmpdir(), 'sq-hooks-fixtures', 'never-registered'),
     tool_name: 'Agent',
-    tool_input: { subagent_type: 'general-purpose', prompt: 'Look at the two config files.' },
+    tool_input,
   }, { CLAUDE_PROJECT_DIR: '' });
-  const reason = unregistered.hookSpecificOutput.permissionDecisionReason;
-  assert.equal(unregistered.hookSpecificOutput.permissionDecision, 'deny', 'generic agents stay denied');
-  assert.match(reason, /not registered on a Sidequest board/);
-  assert.match(reason, /Continue bounded inline work with direct tools/);
-  assert.doesNotMatch(reason, /until its ticket is filed, dispatched, and closed/,
-    'an unregistered project must not be told its unfileable ticket gates a PR or ship');
-  assert.doesNotMatch(reason, /file a spike/,
-    'the remedy it names would need the route that does not exist');
+  assert.equal(unregistered.hookSpecificOutput.permissionDecision, undefined, 'ordinary agents are not denied');
+  assert.deepEqual(unregistered.hookSpecificOutput.updatedInput, { ...tool_input, run_in_background: true },
+    'only run_in_background changes: mode, isolation and the absent model are left alone');
+
+  const routed = runHookOutput(FORCE_BYPASS, { cwd: BOARD_PATH, tool_name: 'Agent', tool_input });
+  assert.equal(routed.hookSpecificOutput.permissionDecision, undefined);
+  assert.deepEqual(routed.hookSpecificOutput.updatedInput, { ...tool_input, run_in_background: true });
 });
 
-test('pre-tool hook: a marked arbitrary agent is still denied', () => {
-  const marked = runHookOutput(FORCE_BYPASS, {
-    cwd: BOARD_PATH,
-    tool_name: 'Agent',
-    tool_input: {
-      subagent_type: 'implementation-agent',
-      isolation: 'worktree',
-      prompt: ` \n\t[${RETIRED_SCOUT}]\nImplement the change.`,
-    },
-  });
-  const reason = marked.hookSpecificOutput.permissionDecisionReason;
-  assert.equal(marked.hookSpecificOutput.permissionDecision, 'deny');
-  assert.match(reason, /generic Agent, not a Sidequest ticket executor/);
-  assert.match(reason, /file a spike/);
-  assert.match(reason, /returned executor/);
+test('pre-tool hook: an ordinary agent carrying a Sidequest marker or briefing is denied', () => {
+  for (const prompt of [
+    ` \n\t[${RETIRED_SCOUT}]\nImplement the change.`,
+    'Implement SQ-402.\n[sidequest-route model=opus effort=high]',
+  ]) {
+    const marked = runHookOutput(FORCE_BYPASS, {
+      cwd: BOARD_PATH,
+      tool_name: 'Agent',
+      tool_input: { subagent_type: 'implementation-agent', isolation: 'worktree', prompt },
+    });
+    const reason = marked.hookSpecificOutput.permissionDecisionReason;
+    assert.equal(marked.hookSpecificOutput.permissionDecision, 'deny', prompt);
+    assert.match(reason, /not a Sidequest executor but carries a dispatch briefing or \[sidequest-\.\.\.\] marker/);
+    assert.match(reason, /exact executor dispatch returned/);
+  }
+});
+
+test('pre-tool hook: Sidequest-named agent types keep the exact-executor deny', () => {
+  for (const subagent_type of ['sidequest:sidequest-exec-bogus', 'other:sidequest-exec-high']) {
+    const out = runHookOutput(FORCE_BYPASS, {
+      cwd: BOARD_PATH, tool_name: 'Agent', tool_input: { subagent_type, prompt: 'Quick lookup.' },
+    });
+    assert.equal(out.hookSpecificOutput.permissionDecision, 'deny', subagent_type);
+    assert.match(out.hookSpecificOutput.permissionDecisionReason, /Sidequest/, subagent_type);
+  }
+});
+
+test('pre-tool hook: the foreground list passes listed types through, project replacing user', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-foreground-'));
+  const userHome = path.join(root, 'user-claude');
+  const project = path.join(root, 'project');
+  fs.mkdirSync(userHome, { recursive: true });
+  fs.mkdirSync(path.join(project, '.claude'), { recursive: true });
+  const writeJson = (file: string, value: unknown) => fs.writeFileSync(file, JSON.stringify(value));
+  const spawnType = (subagent_type: string) => runHookOutput(FORCE_BYPASS, {
+    cwd: project, tool_name: 'Agent', tool_input: { subagent_type, prompt: 'Interview me.' },
+  }, { CLAUDE_PROJECT_DIR: project, CLAUDE_CONFIG_DIR: userHome, SIDEQUEST_CLAUDE_HOME: '' });
+  try {
+    writeJson(path.join(userHome, 'settings.json'), { sidequest: { foregroundAgents: ['sg:spec-interviewer'] } });
+    assert.equal(spawnType('sg:spec-interviewer'), null, 'a user-listed type passes through untouched');
+    assert.equal(spawnType('other:agent').hookSpecificOutput.updatedInput.run_in_background, true);
+
+    writeJson(path.join(project, '.claude', 'settings.json'), { sidequest: { foregroundAgents: ['other:agent'] } });
+    assert.equal(spawnType('other:agent'), null, 'the project list applies');
+    assert.equal(spawnType('sg:spec-interviewer').hookSpecificOutput.updatedInput.run_in_background, true,
+      'the project list replaces the user list rather than merging with it');
+
+    writeJson(path.join(project, '.claude', 'settings.local.json'), { sidequest: { foregroundAgents: [] } });
+    assert.equal(spawnType('other:agent').hookSpecificOutput.updatedInput.run_in_background, true,
+      'an explicit empty local list overrides the shared project list');
+    assert.equal(spawnType('statusline-setup'), null, 'built-in harness utilities stay foreground regardless');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('pre-tool hook keeps builtin models and rejects an unprepared dispatch executor', () => {

@@ -60,7 +60,7 @@ import {
   type HookProcessResult,
 } from './_hooks-fixture.js';
 
-test('usable-route admission keeps unavailable boards inline without a raw Agent fallback', () => {
+test('usable-route admission keeps unavailable boards inline and backgrounds ordinary agents', () => {
   const categories = store.getCategories({ project: slug, includeDisabled: false });
   try {
     for (const category of categories) {
@@ -73,14 +73,20 @@ test('usable-route admission keeps unavailable boards inline without a raw Agent
     assert.equal(runHookOutput(INLINE_WORK_NUDGE, {
       session_id: `inline-unavailable-${Date.now()}`, cwd: BOARD_PATH, tool_name: 'Write', tool_input: {},
     }), null);
-    const denied = runHookOutput(FORCE_BYPASS, {
+    const backgrounded = runHookOutput(FORCE_BYPASS, {
       cwd: BOARD_PATH,
       tool_name: 'Agent',
       tool_input: { subagent_type: 'general-purpose', prompt: 'Inspect this repository.' },
     });
-    assert.equal(denied.hookSpecificOutput.permissionDecision, 'deny');
-    assert.match(denied.hookSpecificOutput.permissionDecisionReason, /Continue bounded inline work with direct tools/);
-    assert.match(denied.hookSpecificOutput.permissionDecisionReason, /do not create a fake Sidequest or raw Agent lifecycle fallback/);
+    assert.equal(backgrounded.hookSpecificOutput.permissionDecision, undefined, 'SQ-402: ordinary agents are not denied on an unusable route');
+    assert.equal(backgrounded.hookSpecificOutput.updatedInput.run_in_background, true);
+    const executor = runHookOutput(FORCE_BYPASS, {
+      cwd: BOARD_PATH,
+      tool_name: 'Agent',
+      tool_input: { subagent_type: 'sidequest-exec-high', prompt: 'work SQ-1' },
+    });
+    assert.equal(executor.hookSpecificOutput.permissionDecision, 'deny', 'an executor still needs a usable route');
+    assert.match(executor.hookSpecificOutput.permissionDecisionReason, /no usable executor route/);
   } finally {
     store.removeProjectCategory(slug, 'general');
     for (const category of categories) {
