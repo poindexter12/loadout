@@ -1,10 +1,14 @@
 #!/usr/bin/env node
-// SessionStart waits only for this worker's handoff deadline, so store maintenance
-// cannot make Claude discard the briefing with the hook's entire stdout.
+// SessionStart and SessionEnd spawn this worker detached and do not wait for it (SQ-386,
+// SQ-405), so store maintenance cannot make Claude discard a hook's briefing. Its notices
+// go to a report the next session start drains.
 import { isSubagent, stringField, type HookInput } from './shared/input.js';
 import { runtimeModule } from './shared/paths.js';
 import { sweepWorktrees } from './shared/worktree-sweep.js';
-import { writeReport } from './shared/sweep-handoff.js';
+import { installSweepWorkerBudget, writeReport } from './shared/sweep-handoff.js';
+
+// Before anything opens the board: a bounded lock budget instead of the server's 15s x 3.
+installSweepWorkerBudget();
 
 interface Store {
   sweepStaleClaims: (options: { source: string }) => unknown;
