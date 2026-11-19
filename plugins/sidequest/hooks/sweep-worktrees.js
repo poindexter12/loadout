@@ -423,10 +423,26 @@ function lostLaunchNotices(data) {
     return [];
   }
 }
+function questionLogRetentionNotices() {
+  try {
+    const store = require(runtimeModule("store"));
+    const questionLog = require(runtimeModule("store/question-log"));
+    const removed = store.listProjects({ all: true }).flatMap(({ slug }) => {
+      const result = questionLog.pruneQuestionLog(questionLog.questionLogDir(slug));
+      if (!result.ok) return [`sidequest: question log retention for ${slug} skipped: ${result.message}`];
+      const count = result.removedSegments.length + result.removedIndexes.length + result.removedBodies.length;
+      return count ? [`sidequest: question log retention for ${slug} removed ${count} expired file${count === 1 ? "" : "s"}.`] : [];
+    });
+    return removed;
+  } catch (_) {
+    return [];
+  }
+}
 async function sessionStartMaintenance(data) {
   const notices = [
     ...migrateLegacyExecAgentNotices(),
-    ...lostLaunchNotices(data)
+    ...lostLaunchNotices(data),
+    ...questionLogRetentionNotices()
   ];
   try {
     notices.push(...await sweepWorktrees(data, true));
