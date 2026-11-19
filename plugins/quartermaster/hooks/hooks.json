@@ -23,7 +23,7 @@
           {
             "type": "command",
             "command": "node --no-warnings \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start-freshness.js\"",
-            "timeout": 5
+            "timeout": 7
           },
           {
             "type": "command",
@@ -33,7 +33,7 @@
           {
             "type": "command",
             "command": "node --no-warnings \"${CLAUDE_PLUGIN_ROOT}/hooks/marketplace-freshness-cache.js\"",
-            "timeout": 2
+            "timeout": 3
           }
         ]
       }
