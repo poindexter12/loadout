@@ -13,6 +13,7 @@ installSweepWorkerBudget();
 interface Store {
   sweepStaleClaims: (options: { source: string }) => unknown;
   reconcileLaunchedDispatches: (sessionId: string, options: { source: string }) => unknown;
+  listProjects: (options: { all: boolean }) => Array<{ slug: string }>;
 }
 
 interface SyncResult {
@@ -81,10 +82,27 @@ function lostLaunchNotices(data: HookInput): string[] {
   }
 }
 
+function questionLogRetentionNotices(): string[] {
+  try {
+    const store = require(runtimeModule('store')) as Store;
+    const questionLog = require(runtimeModule('store/question-log')) as typeof import('../lib/store/question-log.js');
+    const removed = store.listProjects({ all: true }).flatMap(({ slug }) => {
+      const result = questionLog.pruneQuestionLog(questionLog.questionLogDir(slug));
+      if (!result.ok) return [`sidequest: question log retention for ${slug} skipped: ${result.message}`];
+      const count = result.removedSegments.length + result.removedIndexes.length + result.removedBodies.length;
+      return count ? [`sidequest: question log retention for ${slug} removed ${count} expired file${count === 1 ? '' : 's'}.`] : [];
+    });
+    return removed;
+  } catch (_) {
+    return [];
+  }
+}
+
 async function sessionStartMaintenance(data: HookInput): Promise<string[]> {
   const notices = [
     ...migrateLegacyExecAgentNotices(),
     ...lostLaunchNotices(data),
+    ...questionLogRetentionNotices(),
   ];
   try {
     notices.push(...await sweepWorktrees(data, true));
