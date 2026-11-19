@@ -63,6 +63,12 @@ const GITHUB_RELEASE_DEFERRED_MESSAGE = 'GitHub Release deferred by the daily ca
 const GITHUB_RELEASE_POLL_INTERVAL_MS = 2_000;
 const GITHUB_RELEASE_TIMEOUT_MS = 10 * 60 * 1_000;
 const RELEASE_AUDIT_TIMEOUT_MS = 60 * 1_000;
+// How long assertParentCiPassed waits for a Test run to appear for a commit that has none listed
+// yet (a push GitHub has not turned into a run). A run that is listed is judged at once.
+const TEST_RUN_LOOKUP_ATTEMPTS = 5;
+const TEST_RUN_LOOKUP_INTERVAL_MS = 30_000;
+// Enough to cover the Test runs one commit can collect (pushes to several branches, dispatches).
+const TEST_RUN_LIST_LIMIT = 20;
 
 const SUITE_CREDENTIAL_DENYLIST = [
   'GITHUB_TOKEN', 'GH_TOKEN', 'GH_ENTERPRISE_TOKEN', 'RELEASE_TOKEN', 'GITHUB_ACTIONS_TOKEN',
@@ -697,9 +703,20 @@ export function readSuiteCoverage(repoRoot, runId, runner = spawnSync) {
   return coverage;
 }
 
-export function assertParentCiPassed(repoRoot, commit, runner = spawnSync, suites = []) {
+// assertParentCiPassed is synchronous (cut() calls it without awaiting), so its wait between
+// lookups blocks the thread rather than yielding.
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+// Every Test run GitHub lists for a commit, newest first. Deliberately unfiltered by status: the
+// runs endpoint's `status=completed` filter has been seen to omit a single completed run
+// indefinitely (Test run 44472002882, v4.17.0 cut) while the unfiltered listing and the run record
+// both said completed/success, so completion is judged here from each run's own `status` field.
+function listTestRuns(repoRoot, commit, runner) {
   const result = runner('gh', [
-    'run', 'list', '--workflow', 'Test', '--commit', commit, '--status', 'completed', '--limit', '1', '--json', 'conclusion,databaseId,headSha',
+    'run', 'list', '--workflow', 'Test', '--commit', commit, '--limit', String(TEST_RUN_LIST_LIMIT),
+    '--json', 'status,conclusion,databaseId,headSha',
   ], {
     cwd: repoRoot,
     encoding: 'utf8',
@@ -716,11 +733,42 @@ export function assertParentCiPassed(repoRoot, commit, runner = spawnSync, suite
   } catch (_) {
     throw new Error(`cannot read Test workflow status for ${commit}: gh returned invalid JSON`);
   }
-  const run = Array.isArray(runs) && runs.find((candidate) => candidate?.headSha === commit);
-  if (!run) {
+  return Array.isArray(runs) ? runs.filter((candidate) => candidate?.headSha === commit) : [];
+}
+
+export function assertParentCiPassed(
+  repoRoot,
+  commit,
+  runner = spawnSync,
+  suites = [],
+  {
+    sleep = sleepSync,
+    attempts = TEST_RUN_LOOKUP_ATTEMPTS,
+    intervalMs = TEST_RUN_LOOKUP_INTERVAL_MS,
+  } = {},
+) {
+  // Only a commit with no Test run listed at all is retried: GitHub may not have created the run
+  // yet. A listed run is judged on the first lookup, whatever its state.
+  let runs = listTestRuns(repoRoot, commit, runner);
+  for (let attempt = 1; runs.length === 0 && attempt < attempts; attempt += 1) {
+    sleep(intervalMs);
+    runs = listTestRuns(repoRoot, commit, runner);
+  }
+  if (runs.length === 0) {
     throw new Error(
       `no completed Test workflow run found for ${commit}; refusing to publish. ` +
       `If Docker is available, run ${containerTestCommand(commit, suites)} before retrying with --ci-override "<reason>".`,
+    );
+  }
+  // The newest completed run is the verdict, as the status-filtered query used to return. A run
+  // without status `completed` (queued, in_progress, waiting, or no status reported) is no verdict.
+  const run = runs.find((candidate) => candidate.status === 'completed');
+  if (!run) {
+    const pending = runs[0];
+    const label = pending.databaseId ? `Test workflow run ${pending.databaseId}` : 'The Test workflow run';
+    throw new Error(
+      `${label} for ${commit} has not completed (status ${pending.status || 'unknown'}); refusing to publish. ` +
+      'Wait for it to finish and retry, or retry with --ci-override "<reason>" when you have other evidence.',
     );
   }
   if (run.conclusion !== 'success') {
