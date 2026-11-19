@@ -277,7 +277,9 @@ const TOOL_DESCRIPTION_OVERRIDES: Record<string, string | undefined> = {
   dispatch: 'Dispatch; token and spawn spec. Flags skipped higher-priority ready work.',
   done: 'Finish; declared external needs current capture.',
   release: 'Release; reason required. oracle handoff needs ask until verdict. force takes a foreign claim under your own by and needs that reason: reasonless force refuses not_owner; a forced take stamps kind forced and takenFrom.',
-  groomClose: 'Frozen ticket target; abandonSubmission:true; reset/working-tree/manual; reviewed interaction.',
+  // SQ-407: work that landed by rebase, fold, or later edits is proven equivalent through
+  // landingCommits (attested as the last resort), so the served text names that route before abandon.
+  groomClose: 'Frozen ticket target; landed by rebase/fold/edits: landingCommits, attested last; abandonSubmission:true if never landed; reset/working-tree/manual; reviewed interaction.',
   native_agent: 'Get native Agent spawn spec.',
   archive: 'Archive.',
   assign: 'Assignee.',

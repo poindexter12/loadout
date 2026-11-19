@@ -131,8 +131,8 @@ sidequest link SQ-50 depends-on SQ-31
 
 ### Closing a ticket that still holds a pending submission
 
-A ticket in (a), (b) or (d) may still hold a submitted candidate that was never integrated. Two
-different closures apply, and picking the wrong one gets refused rather than guessed at:
+A ticket in (a), (b) or (d) may still hold a submitted candidate that was never integrated. Several
+closures apply, and picking the wrong one gets refused rather than guessed at:
 
 ```bash
 # the candidate DID land (its commit is reachable from the integration target recorded for this ticket)
@@ -144,6 +144,26 @@ sidequest groom-close SQ-15 --abandon-submission \
   --reason "Candidate f00dfeed forked 61 commits back, no longer merges, and main already fixed this in
 9bd41f2; see the evidence comment."
 ```
+
+When the candidate's own commit is not on the target but its work is, close it as delivered, not
+abandoned. A refusal lists the target commits that touch the candidate's paths; check those first.
+These routes take MCP `groomClose` arguments (`landingCommits`, `deliveryMethod`), which the CLI does
+not expose:
+
+- **Rebased or cherry-picked.** Plain `groomClose` with a reason. When every candidate commit's
+  patch is on the target's landed history, the board finds the landing itself and records
+  `patch_equivalent`. A landing that was later reverted is refused.
+- **Folded into a larger commit, or landed and then edited.** Name the commits that carried it:
+  `landingCommits: ["9bd41f2"]`. The board accepts them when the candidate's diff is present in
+  them and absent just before them, and records `landed_diff_equivalent`.
+- **Landed in a form the board cannot prove** (reworded, rewritten by hand). Last resort:
+  `deliveryMethod: "attested"` with those `landingCommits` and a reason saying how you checked the
+  match. It is recorded as attested, never as verified and never as abandoned.
+
+All three routes still refuse landing commits that are not on the target's live tip (a commit that
+exists only on this machine does not count on a remote-mode board), commits that touch none of the
+candidate's paths, and live claims or open dispatches. Merged-tree verification still runs at the
+landing commit.
 
 `--abandon-submission` is refused while the candidate is still reachable from the integration target
 recorded for that ticket. A later board-target or checkout change does not retarget it, so never merge work

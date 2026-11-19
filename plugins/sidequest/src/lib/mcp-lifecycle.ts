@@ -704,7 +704,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: 'groomClose',
-    description: 'Close with evidence. Delivery uses the ticket\'s prepared integration target when recorded, even if the board target or checkout changed later. A pending candidate requires verified delivery, which reconciles the delivered commit against the candidate without checking sibling declared scope; abandonSubmission: true records discard. An unlaunched prepared dispatch is recorded abandoned.',
+    description: 'Close with evidence. Delivery uses the ticket\'s prepared integration target when recorded, even if the board target or checkout changed later. A pending candidate requires verified delivery, which reconciles the delivered commit against the candidate without checking sibling declared scope. Work that landed by rebase, cherry-pick, fold, or with later edits is accepted as proven equivalent: patch_equivalent when every candidate patch is on the target, or landed_diff_equivalent when the candidate diff is present in the named landingCommits. When neither proves it, deliveryMethod "attested" with landingCommits reachable from the target that touch a candidate path records an attested, not verified, delivery. Only then, for work that never landed, abandonSubmission: true records discard. An unlaunched prepared dispatch is recorded abandoned.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -715,7 +715,8 @@ const tools: ToolDefinition[] = [
         integration: { type: 'boolean' },
         deliveryCommit: { type: 'string', pattern: '^[0-9a-fA-F]{7,64}$', description: 'Delivered source commit reachable from this ticket\'s prepared integration target, or pinned working-tree candidate.' },
         deliveryInteractionCommit: { type: 'string', pattern: '^[0-9a-fA-F]{7,64}$', description: 'A reviewed merged-tree interaction after deliveryCommit, limited to submitted candidate paths.' },
-        deliveryMethod: { type: 'string', enum: ['reset', 'working-tree', 'manual'], description: 'For a non-reachable pinned candidate.' },
+        deliveryMethod: { type: 'string', enum: ['reset', 'working-tree', 'manual', 'attested'], description: 'reset, working-tree, or manual for a non-reachable pinned candidate; attested (orchestrator only, last resort) records landingCommits on the target as an attested delivery.' },
+        landingCommits: { type: 'array', items: { type: 'string' }, description: 'Commits on this ticket\'s prepared integration target that carried the candidate\'s work (rebase, cherry-pick, fold, or landing then later edits). Each must be reachable from the target, on a remote-mode board from the remote\'s live tip, and they must touch a candidate path.' },
         abandonSubmission: { type: 'boolean', description: 'Retire a candidate that never landed; refused while it is reachable from this ticket\'s prepared integration target.' },
         recoveryEvidence: { type: 'string', description: 'Terminal-agent evidence to recover an unclaimed prepared, launched, or bound dispatch; recorded but not applied after a terminal dispatch.' },
       },
@@ -743,6 +744,7 @@ const tools: ToolDefinition[] = [
         deliveryCommit: args.deliveryCommit,
         deliveryInteractionCommit: args.deliveryInteractionCommit,
         deliveryMethod: args.deliveryMethod,
+        landingCommits: args.landingCommits,
       });
       if (res.ok) closeDispatchExecutor(ticket);
       if (res.ok && args.integration) {

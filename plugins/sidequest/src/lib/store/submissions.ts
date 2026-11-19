@@ -1791,6 +1791,232 @@ function verifyInScratchWorktree(repo: string, commit: string, run: (cwd: string
   }
 }
 
+// SQ-407: deliveries proven by equivalence rather than exact content. A rebased or cherry-picked
+// candidate keeps its patches but not its commits; a folded landing carries the candidate's diff
+// inside a larger commit; a candidate landed and then edited by later target commits no longer
+// matches its tip anywhere. Every route names the target commits carrying the work, and each must
+// be reachable from the landed head, which on a remote-mode board is the remote's live tip
+// (SQ-275), so a commit present only on this machine never counts as a landing.
+const ATTESTED_DELIVERY_METHOD = 'attested';
+const EQUIVALENCE_DIFF_MAX_BUFFER = 64 * 1024 * 1024;
+
+function normalizeLandingCommits(value: any) {
+  const list = Array.isArray(value) ? value : value == null || value === '' ? [] : [value];
+  return Array.from(new Set(list.map((entry: any) => String(entry || '').trim()).filter(Boolean)));
+}
+
+function candidateCommitList(submission: any) {
+  const candidate = String(submission.commit || '').toLowerCase();
+  return (Array.isArray(submission.commits) && submission.commits.length ? submission.commits : [candidate])
+    .map((commit: any) => String(commit).toLowerCase());
+}
+
+function equivalenceDiff(repo: string, args: string[]) {
+  return execFileSync('git', ['diff', '--no-ext-diff', '--no-color', '--binary', '--full-index', ...args], {
+    cwd: repo,
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: EQUIVALENCE_DIFF_MAX_BUFFER,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+// Unlike patchIdForDiff (`--stable`, whitespace-blind), equivalence is verbatim: a landing that
+// differs from the candidate only in whitespace is a different change, not the same one.
+function verbatimPatchId(repo: string, from: string, to: string) {
+  const patch = equivalenceDiff(repo, ['--unified=0', from, to]);
+  if (!patch.trim()) return null;
+  const result = spawnSync('git', ['patch-id', '--verbatim'], {
+    cwd: repo,
+    encoding: 'utf8',
+    input: patch,
+    windowsHide: true,
+    maxBuffer: EQUIVALENCE_DIFF_MAX_BUFFER,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  if (result?.status !== 0) throw new Error(String(result?.stderr || result?.error?.message || 'could not calculate patch identity'));
+  const patchId = String(result.stdout || '').trim().split(/\s+/)[0] || '';
+  return /^[0-9a-f]{40}$/i.test(patchId) ? patchId.toLowerCase() : null;
+}
+
+function commitVerbatimPatchId(repo: string, commit: string) {
+  return verbatimPatchId(repo, `${commit}^`, commit);
+}
+
+function landedCommitsTouching(repo: string, from: string, head: string, paths: string[], max = 0) {
+  const args = ['rev-list', '--no-merges', ...(max > 0 ? [`--max-count=${max}`] : []), `${from}..${head}`, '--', ...paths];
+  return integrationGit(repo, args).split(/\r?\n/).filter(Boolean).map((commit: string) => commit.toLowerCase());
+}
+
+// Commits on the landed head since the candidate's fork point that touch its paths: the evidence a
+// refusal cites so grooming tries the equivalence routes before abandoning a landed candidate.
+function landedPathHistory(repo: string, submission: any, landedHead: string) {
+  try {
+    const candidate = resolveCommitOrNull(repo, String(submission.commit || ''));
+    const paths = changedIntegrationPaths(repo, submission);
+    if (!candidate || !paths.length) return [];
+    const base = integrationGit(repo, ['merge-base', candidate, landedHead]);
+    return landedCommitsTouching(repo, base, landedHead, paths, 5);
+  } catch (_) {
+    return [];
+  }
+}
+
+function equivalentDeliveryHint(landed: string[], where: string) {
+  if (!landed.length) {
+    return ` No commit on ${where} since the candidate's fork point touches its changed paths, so nothing shows this work landed; abandon the submission only once that is confirmed.`;
+  }
+  return ` Commits ${landed.join(', ')} on ${where} touch the candidate's changed paths. If the work landed there by rebase, cherry-pick, or fold, name the commits carrying it as landingCommits: the board accepts them when every candidate patch is on the target (patch_equivalent, found without naming) or the candidate's diff reverse-applies on the newest named commit and not on the oldest one's parent (landed_diff_equivalent). When neither proves it, deliveryMethod "attested" with those landingCommits and a reason records an attested, not verified, delivery. Abandon the submission only when the work never landed.`;
+}
+
+function newestLandingCommit(repo: string, landing: string[]) {
+  return landing.find((commit: string) => landing.every((other: string) => other === commit || isAncestorCommit(repo, other, commit))) || null;
+}
+
+function oldestLandingCommit(repo: string, landing: string[]) {
+  return landing.find((commit: string) => landing.every((other: string) => other === commit || isAncestorCommit(repo, commit, other))) || null;
+}
+
+// Every candidate commit's verbatim patch is on the landed head's history since the fork point.
+function patchEquivalentLanding(repo: string, submission: any, candidate: string, landedHead: string, paths: string[]) {
+  let base: string;
+  try {
+    base = integrationGit(repo, ['merge-base', candidate, landedHead]);
+  } catch (error: any) {
+    if (error?.status === 1) return null;
+    throw error;
+  }
+  const byPatch = new Map<string, string>();
+  for (const commit of landedCommitsTouching(repo, base, landedHead, paths)) {
+    const patchId = commitVerbatimPatchId(repo, commit);
+    if (patchId && !byPatch.has(patchId)) byPatch.set(patchId, commit);
+  }
+  const matches: any[] = [];
+  for (const commit of candidateCommitList(submission)) {
+    const patchId = commitVerbatimPatchId(repo, commit);
+    if (!patchId) continue;
+    const landed = byPatch.get(patchId);
+    if (!landed) return null;
+    matches.push({ candidate: commit, landed });
+  }
+  return matches.length ? matches : null;
+}
+
+// An exact revert of a landing commit later on the landed head undoes the delivery it proves.
+function revertedLanding(repo: string, landing: string[], landedHead: string, paths: string[]) {
+  for (const commit of landing) {
+    const reversePatchId = verbatimPatchId(repo, commit, `${commit}^`);
+    if (!reversePatchId) continue;
+    const revert = landedCommitsTouching(repo, commit, landedHead, paths)
+      .find((later: string) => commitVerbatimPatchId(repo, later) === reversePatchId);
+    if (revert) return { landing: commit, revert };
+  }
+  return null;
+}
+
+function reverseAppliesAt(repo: string, commit: string, patch: string) {
+  const indexPath = path.resolve(repo, integrationGit(repo, ['rev-parse', '--git-path', `sidequest-landed-diff-${crypto.randomBytes(6).toString('hex')}.index`]));
+  const env = { ...process.env, GIT_INDEX_FILE: indexPath };
+  try {
+    execFileSync('git', ['read-tree', commit], { cwd: repo, env, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const result = spawnSync('git', ['apply', '--cached', '--check', '--reverse', '-'], {
+      cwd: repo,
+      env,
+      encoding: 'utf8',
+      input: patch,
+      windowsHide: true,
+      maxBuffer: EQUIVALENCE_DIFF_MAX_BUFFER,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    return result?.status === 0;
+  } finally {
+    try { fs.rmSync(indexPath, { force: true }); } catch (_) { /* best effort */ }
+  }
+}
+
+function newestFirstLandingCommits(repo: string, landing: string[]) {
+  return landing.slice().sort((left: string, right: string) => {
+    if (left === right) return 0;
+    if (isAncestorCommit(repo, left, right)) return 1;
+    if (isAncestorCommit(repo, right, left)) return -1;
+    return 0;
+  });
+}
+
+// The candidate's own diff is present in the named landing: it reverse-applies on the tree of one
+// named landing commit (newest first, so a fold carries it whole and a later edit of other lines
+// still does), and does not on the oldest one's parent, so the work arrived with those commits.
+function landedDiffEquivalent(repo: string, submission: any, candidate: string, landing: string[], paths: string[]) {
+  const oldest = oldestLandingCommit(repo, landing);
+  if (!oldest) return null;
+  const base = resolveCommitOrNull(repo, String(submission.base || '')) || resolveCommitOrNull(repo, `${candidateCommitList(submission)[0]}^`);
+  if (!base) return null;
+  const oldestParent = resolveCommitOrNull(repo, `${oldest}^`);
+  const ordered = newestFirstLandingCommits(repo, landing);
+  for (const context of [3, 1]) {
+    const patch = equivalenceDiff(repo, [`--unified=${context}`, base, candidate, '--', ...paths]);
+    if (!patch.trim()) return null;
+    const carrier = ordered.find((commit: string) => reverseAppliesAt(repo, commit, patch));
+    if (!carrier) continue;
+    if (oldestParent && reverseAppliesAt(repo, oldestParent, patch)) return null;
+    return { landingCommit: carrier, context };
+  }
+  return null;
+}
+
+function equivalentLandedDelivery(repo: string, ticket: any, opts: any) {
+  const submission = ticket.submission;
+  const refusal = (reason: string, message: string, extra: any = {}) => ({ refusal: { ok: false, reason, ...extra, message: `${ticket.ref} reconciliation refused: ${message}` } });
+  const candidate = resolveCommitOrNull(repo, String(submission.commit || ''));
+  const paths = changedIntegrationPaths(repo, submission);
+  if (!candidate || !paths.length) return opts.attested ? refusal('delivery_content_missing', 'the pinned candidate has no changed paths to attest.') : { ok: false };
+  const named: string[] = [];
+  for (const requested of opts.landingCommits) {
+    if (!SUBMISSION_COMMIT_RE.test(requested)) return refusal('landing_commit_invalid', `landingCommits entry ${JSON.stringify(requested)} is not a commit hash.`);
+    const resolved = resolveCommitOrNull(repo, requested);
+    if (!resolved) return refusal('landing_commit_unknown', `landing commit ${requested} does not exist in ${repo}.`);
+    named.push(resolved);
+  }
+  // Only commits the orchestrator names open the fold, later-edit, and attested routes: a reachable
+  // deliveryCommit alone keeps the exact and forge-squash contract (SQ-383), so a squash that also
+  // carries unsubmitted paths or rewritten lines is never accepted as a delivery by implication.
+  const landing = named.length ? Array.from(new Set([...named, ...(opts.reachable ? [opts.deliveryCommit] : [])])) : [];
+  if (opts.attested && !landing.length) {
+    return refusal('landing_commits_required', 'an attested delivery must name the landing commits on the target that carry this work as landingCommits.');
+  }
+  const unreachable = landing.filter((commit: string) => !isAncestorCommit(repo, commit, opts.landedHead));
+  if (unreachable.length) {
+    return refusal('landing_commit_not_reachable', `landing commit ${unreachable.join(', ')} is not reachable from ${opts.where}. Only commits on the target's landed history can carry a delivery; a commit present only on this machine is not a landing.`, { landingCommits: unreachable });
+  }
+  if (named.length || opts.attested) {
+    const related = landing.filter((commit: string) => deliveredCommitPaths(repo, commit).some((file: string) => paths.includes(file)));
+    if (!related.length) {
+      return refusal('landing_commits_unrelated', `landing commits ${landing.join(', ')} touch none of the candidate's changed paths (${paths.join(', ')}), so they cannot carry this work.`, { landingCommits: landing });
+    }
+  }
+  const revertRefusal = (reverted: any) => refusal('delivery_reverted', `landing commit ${reverted.landing} was reverted by ${reverted.revert} on ${opts.where}, so the work is no longer delivered there.`, { landingCommit: reverted.landing, revertCommit: reverted.revert });
+  const patches = patchEquivalentLanding(repo, submission, candidate, opts.landedHead, paths);
+  if (patches) {
+    const landed = Array.from(new Set(patches.map((match: any) => match.landed)));
+    const reverted = revertedLanding(repo, landed, opts.landedHead, paths);
+    if (reverted) return revertRefusal(reverted);
+    const newest = newestLandingCommit(repo, landed);
+    return { ok: true, kind: 'patch-equivalent', evidence: 'patch_equivalent', landingCommit: newest || landed[0], verifyCommit: newest || opts.landedHead, landingCommits: landed, equivalentPatches: patches };
+  }
+  if (!landing.length) return { ok: false };
+  const reverted = revertedLanding(repo, landing, opts.landedHead, paths);
+  if (reverted) return revertRefusal(reverted);
+  const diff = landedDiffEquivalent(repo, submission, candidate, landing, paths);
+  if (diff) {
+    return { ok: true, kind: 'landed-diff-equivalent', evidence: 'landed_diff_equivalent', landingCommit: diff.landingCommit, verifyCommit: diff.landingCommit, landingCommits: landing, diffContext: diff.context };
+  }
+  if (opts.attested) {
+    const newest = newestLandingCommit(repo, landing);
+    return { ok: true, kind: 'attested', evidence: 'attested', attested: true, landingCommit: newest || landing[0], verifyCommit: newest || opts.landedHead, landingCommits: landing };
+  }
+  return { ok: false };
+}
+
 function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
   opts = opts || {};
   const preflight = validateIntegrationSubmission(slug, idOrRef, { deliveryInteractionCommit: opts.deliveryInteractionCommit });
@@ -1871,18 +2097,29 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
         else throw error;
       }
     }
-    const deliveryMethod = workingTreeDeliveryMethod(opts.deliveryMethod);
     const requestedDeliveryMethod = String(opts.deliveryMethod || '').trim();
-    if (requestedDeliveryMethod && !deliveryMethod) {
+    // SQ-407: `attested` is the orchestrator's last-resort route for work that landed on the target
+    // in a form the board cannot prove equivalent; it is never a working-tree method.
+    const attestedDelivery = requestedDeliveryMethod === ATTESTED_DELIVERY_METHOD;
+    const deliveryMethod = attestedDelivery ? null : workingTreeDeliveryMethod(opts.deliveryMethod);
+    if (requestedDeliveryMethod && !deliveryMethod && !attestedDelivery) {
       return {
         ok: false,
         reason: 'invalid_delivery_method',
         ticket,
-        message: `${ticket.ref} reconciliation refused: deliveryMethod must be reset, working-tree, or manual.`,
+        message: `${ticket.ref} reconciliation refused: deliveryMethod must be reset, working-tree, manual, or attested.`,
       };
     }
+    const landingCommits = normalizeLandingCommits(opts.landingCommits);
+    const landedWhere = landedRemote ? `${landedRemote.remote}/${landedRemote.branch}` : target.branch;
+    const equivalenceHint = () => equivalentDeliveryHint(landedPathHistory(repo, ticket.submission, landedHead), landedWhere);
     const workingTreeDelivery = deliveryMethod !== null && !reachable;
-    if (!reachable && !workingTreeDelivery) {
+    // SQ-407: the pinned candidate itself, unreachable because its work landed by rebase,
+    // cherry-pick, or fold, is reconciled only through the equivalence routes below, which measure
+    // the target's landed history and never accept a commit that is not on it.
+    const equivalenceOnly = !reachable && !workingTreeDelivery
+      && (deliveryCommit === resolveCommitOrNull(repo, String(ticket.submission.commit || '')) || pinnedCandidateMatches(repo, ticket, deliveryCommit));
+    const notReachableRefusal = () => {
       const where = landedRemote
         ? `the live ${landedRemote.remote}/${landedRemote.branch} tip ${landedTip} that remote ${landedRemote.remote} advertised just now. Landedness is decided only by that advertisement; local refs, the checkout, and other local branches are not consulted, so a commit present only on this machine is refused`
         : target.branch;
@@ -1891,9 +2128,10 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
         reason: 'delivery_not_reachable',
         ticket,
         ...(landedRemote ? { remote: landedRemote.remote, branch: landedRemote.branch, remoteTip: landedTip } : {}),
-        message: `${ticket.ref} reconciliation refused: delivery commit ${deliveryCommit} is not reachable from ${where}. Record a reset, working-tree, or manual delivery with this pinned candidate and deliveryMethod; its content must be present in the integration working tree, or have landed on the target's first-parent history, exactly or as a clean forge squash of the candidate onto that commit's parent.`,
+        message: `${ticket.ref} reconciliation refused: delivery commit ${deliveryCommit} is not reachable from ${where}. Record a reset, working-tree, or manual delivery with this pinned candidate and deliveryMethod; its content must be present in the integration working tree, or have landed on the target's first-parent history, exactly or as a clean forge squash of the candidate onto that commit's parent.${equivalenceHint()}`,
       };
-    }
+    };
+    if (!reachable && !workingTreeDelivery && !equivalenceOnly) return notReachableRefusal();
     if (workingTreeDelivery && !pinnedCandidateMatches(repo, ticket, deliveryCommit)) {
       return {
         ok: false,
@@ -1907,18 +2145,21 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
     const workingTreeContent = (commit: string, extraPaths: string[] = []) => (checkoutCarriesTarget
       ? workingTreeContainsSubmittedContent(repo, ticket.submission, commit, extraPaths)
       : { ok: false, missing: Array.from(new Set([...changedIntegrationPaths(repo, ticket.submission), ...extraPaths])) });
-    let content: any = workingTreeDelivery && !reachable
-      ? workingTreeContent(deliveryCommit)
-      : deliveryContainsSubmittedContent(repo, ticket.submission, deliveryCommit);
+    let content: any = equivalenceOnly
+      ? { ok: false, missing: changedIntegrationPaths(repo, ticket.submission) }
+      : workingTreeDelivery && !reachable
+        ? workingTreeContent(deliveryCommit)
+        : deliveryContainsSubmittedContent(repo, ticket.submission, deliveryCommit);
     let descendant: any = null;
     let landingCommit: string | null = null;
     let forgeSquash: any = null;
+    let equivalent: any = null;
     if (!content.ok && workingTreeDelivery) {
       landingCommit = landedCommitWithContent(repo, ticket.submission, deliveryCommit, landedHead);
       if (landingCommit) content = { ok: true, evidence: 'landed_candidate_content' };
     }
     // SQ-383: the forge squash of a candidate whose shared file the target edited concurrently.
-    if (!content.ok) {
+    if (!content.ok && !equivalenceOnly) {
       // A named delivery commit is the squash; the content it must carry is the pinned candidate's.
       const pinnedCandidate = workingTreeDelivery ? deliveryCommit : resolveCommitOrNull(repo, String(ticket.submission.commit || ''));
       forgeSquash = !pinnedCandidate
@@ -1931,6 +2172,38 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
         content = { ok: true, evidence: 'forge_squash_merge' };
       }
     }
+    // SQ-407: work that landed on the target by rebase, cherry-pick, fold, or with later edits.
+    // Every candidate patch on the landed history (patch_equivalent), the candidate's diff present
+    // in named landing commits (landed_diff_equivalent), or, last, an orchestrator attestation over
+    // named landing commits that touch the candidate's paths. Each landing must be on landedHead.
+    const equivalenceApplies = !workingTreeDelivery && !String(opts.deliveryInteractionCommit || '').trim();
+    if (!content.ok && equivalenceApplies) {
+      const landed: any = equivalentLandedDelivery(repo, ticket, {
+        landingCommits,
+        reachable,
+        deliveryCommit,
+        landedHead,
+        where: landedWhere,
+        attested: attestedDelivery,
+      });
+      if (landed.refusal) return Object.assign({ ticket }, landed.refusal);
+      if (landed.ok) {
+        equivalent = landed;
+        landingCommit = landed.verifyCommit;
+        content = { ok: true, evidence: landed.evidence };
+      }
+    }
+    // Named landing commits that prove nothing get their own refusal before the generic one.
+    if (!content.ok && equivalenceApplies && (landingCommits.length || attestedDelivery)) {
+      return {
+        ok: false,
+        reason: 'landed_equivalence_unproven',
+        ticket,
+        landingCommits,
+        message: `${ticket.ref} reconciliation refused: neither ${deliveryCommit} nor landing commits ${landingCommits.join(', ') || '(none)'} prove the candidate's content on ${landedWhere}; its patches are not all on the landed history and its diff is not present in the named landing commits. Name the commits that carried the work, or record deliveryMethod "attested" with them when the work landed in a form the board cannot prove.`,
+      };
+    }
+    if (!content.ok && equivalenceOnly) return notReachableRefusal();
     if (!content.ok) {
       const candidate = String(ticket.submission.commit || '').toLowerCase();
       const reviewed: any = reviewedCandidateDescendant(repo, ticket, opts.deliveryInteractionCommit);
@@ -1939,7 +2212,7 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
         const requested = String(opts.deliveryInteractionCommit || '').trim();
         const hint = requested
           ? ` deliveryInteractionCommit ${reviewed.interactionCommit || requested} is not a descendant of pinned candidate ${candidate}, so it cannot stand in for the candidate content; name the reviewed commit made on top of ${candidate}.`
-          : ` If the delivery carries a reviewed fix committed on top of the pinned candidate (for example a squash of candidate plus review fix), name that reviewed descendant of ${candidate} as deliveryInteractionCommit; it may change submitted paths only, and the delivery is then checked against its content.`;
+          : ` If the delivery carries a reviewed fix committed on top of the pinned candidate (for example a squash of candidate plus review fix), name that reviewed descendant of ${candidate} as deliveryInteractionCommit; it may change submitted paths only, and the delivery is then checked against its content.${workingTreeDelivery ? '' : equivalenceHint()}`;
         return {
           ok: false,
           reason: 'delivery_content_missing',
@@ -1971,7 +2244,9 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
         };
       }
     }
-    const interaction = workingTreeDelivery || descendant
+    // SQ-407: an equivalence landing already measured the landed history itself; later target
+    // edits of the candidate's lines are what the landed-diff route is for, not an interaction.
+    const interaction = workingTreeDelivery || descendant || equivalent
       ? { ok: true, interaction: null }
       : reviewedMergedTreeInteraction(repo, ticket, deliveryCommit, landedHead, opts.deliveryInteractionCommit);
     if (!interaction.ok) return Object.assign({ ticket }, interaction);
@@ -1995,7 +2270,9 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
         message: `${ticket.ref} merged-tree verification returned ${verify.status} for recorded delivery ${deliveryCommit}: ${verify.command || `verification ${verify.status}`}. Log: ${verify.logPath || 'not created'}.${verificationRepinHint(ticket, verify)}`,
       });
     }
-    const deliveredFiles = landingCommit
+    const deliveredFiles = equivalent
+      ? Array.from(new Set(equivalent.landingCommits.flatMap((commit: string) => deliveredCommitPaths(repo, commit))))
+      : landingCommit
       ? Array.from(new Set([...deliveredCommitPaths(repo, landingCommit), ...(descendant ? descendant.paths : [])]))
       : workingTreeDelivery
       ? workingTreeDeliveryPaths(repo)
@@ -2003,7 +2280,9 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
         ? Array.from(new Set([...deliveredCommitPaths(repo, deliveryCommit), ...(interaction.interaction || descendant).paths]))
         : deliveredCommitPaths(repo, deliveryCommit);
     const deliveryIdentity = {
-      kind: descendant
+      kind: equivalent
+        ? equivalent.kind
+        : descendant
         ? 'reviewed-candidate-descendant'
         : interaction.interaction ? 'reviewed-merged-tree-interaction' : forgeSquash ? 'forge-squash' : landingCommit ? 'landed-candidate-content' : workingTreeDelivery ? 'pinned-working-tree' : 'reachable-commit',
       pinnedRef: submissionGitRef(ticket),
@@ -2014,7 +2293,18 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
       ...(workingTreeDelivery ? { method: deliveryMethod } : {}),
       ...(landingCommit ? { landingCommit } : {}),
       ...(forgeSquash ? { forgeSquash } : {}),
+      ...(equivalent ? {
+        evidence: equivalent.evidence,
+        landingCommits: equivalent.landingCommits,
+        ...(equivalent.equivalentPatches ? { equivalentPatches: equivalent.equivalentPatches } : {}),
+        ...(equivalent.diffContext ? { diffContext: equivalent.diffContext } : {}),
+        ...(equivalent.attested ? { method: ATTESTED_DELIVERY_METHOD, attestation: reason } : {}),
+      } : {}),
     };
+    // SQ-407: an attested delivery is the orchestrator's word that the work landed, backed by
+    // reachable landing commits and a passing merged-tree verification but not by a content
+    // proof, so it is recorded as attested and never as verified (or as abandoned).
+    const attestedOutcome = Boolean(equivalent?.attested);
     // SQ-383: a checkout that does not carry the target played no part in this delivery, so the
     // recorded head is the live target tip the delivery was proven against, not that checkout.
     const recordedHead = checkoutCarriesTarget ? resultingHead : landedHead;
@@ -2037,10 +2327,11 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
       contentEvidence: descendant
         ? `${content.evidence}:reviewed_candidate_descendant`
         : interaction.interaction ? `${content.evidence}:reviewed_merged_tree_interaction` : content.evidence,
-      outcome: 'verified',
+      ...(equivalent ? { landingCommits: equivalent.landingCommits } : {}),
+      outcome: attestedOutcome ? ATTESTED_DELIVERY_METHOD : 'verified',
       recordedAt: new Date().toISOString(),
       deliveredAt: new Date().toISOString(),
-      verifiedAt: new Date().toISOString(),
+      ...(attestedOutcome ? { attestedAt: new Date().toISOString(), attestation: reason, verifiedAt: undefined } : { verifiedAt: new Date().toISOString() }),
     }, { wave: reconciledDeliveryWave(slug, ticket, deliveryRevision, verify) });
     return recorded.ok ? { ok: true, ticket: recorded.ticket, integration: recorded.ticket.submission.integration } : recorded;
   } catch (error: any) {

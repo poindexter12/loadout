@@ -872,7 +872,7 @@
   },
   {
     "name": "groomClose",
-    "description": "Frozen ticket target; abandonSubmission:true; reset/working-tree/manual; reviewed interaction.",
+    "description": "Frozen ticket target; landed by rebase/fold/edits: landingCommits, attested last; abandonSubmission:true if never landed; reset/working-tree/manual; reviewed interaction.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -906,8 +906,15 @@
           "enum": [
             "reset",
             "working-tree",
-            "manual"
+            "manual",
+            "attested"
           ]
+        },
+        "landingCommits": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "abandonSubmission": {
           "type": "boolean"
