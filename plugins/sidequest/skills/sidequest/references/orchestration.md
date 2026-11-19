@@ -404,10 +404,27 @@ an unfamiliar subsystem can become a `codebase-exploration` spike when that give
 a better brief. Spikes that must execute modified code: set `readonly:false` at filing time, don't recategorize. `Explore`, `claude-code-guide`, and `statusline-setup` are narrow harness utilities that may
 run without a prepared Sidequest dispatch, but `Explore` is a quick evidence sweep, not an investigation
 route: it inherits the session model, and on a routed board the third Explore spawn without any board
-interaction is refused, as is any Explore relaunch of work a generic Agent was already denied for. Deep or
-fan-out investigation is a `codebase-exploration` spike. Other delegated implementation, research, review,
-or domain analysis needs a ticketed route; its concise findings inform the next ticket boundaries. Workflow agents
-remain governed by their Workflow contract.
+interaction is refused. Deep or fan-out investigation is a `codebase-exploration` spike. Other delegated
+implementation, research, review, or domain analysis that belongs to the board needs a ticketed route; its
+concise findings inform the next ticket boundaries. Workflow agents remain governed by their Workflow contract.
+
+Any other main-session Agent spawn that is not a Sidequest executor (a third-party plugin agent such as
+`sg:spec-interviewer`, `general-purpose`, a project agent) is not refused: the gate sets
+`run_in_background: true` and leaves everything else alone, so the agent keeps its own definition,
+permission mode, model, and isolation. It has no claim, briefing, or route, so it is not a substitute for
+an executor, and one whose prompt carries a dispatch briefing or `[sidequest-...]` marker is denied.
+Agent types that must stay in the foreground (an interviewer that asks the user questions, for example)
+go on the foreground list, a key in Claude Code's own settings files:
+
+```json
+{ "sidequest": { "foregroundAgents": ["sg:spec-interviewer"] } }
+```
+
+It is read from `<project>/.claude/settings.local.json`, then `<project>/.claude/settings.json`, then the
+user `settings.json` under `CLAUDE_CONFIG_DIR` (default `~/.claude`). The most specific file that defines
+the key supplies the whole list: a project list REPLACES the user list rather than merging with it, and an
+explicit `[]` clears it. `Explore`, `claude-code-guide`, and `statusline-setup` stay foreground whatever
+the list says.
 
 ## Agent teams (CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS)
 

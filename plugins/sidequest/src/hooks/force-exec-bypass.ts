@@ -10,6 +10,8 @@ import { readSessionState, sessionStateFile, writeSessionState } from './shared/
 // Dependency-free, so bundling it keeps launch naming identical in the hook and
 // in the store even when the installed lib is mid-upgrade.
 import { canonicalExecutorName, dispatchLaunchName, DIAGNOSTIC_PROBE_NAME } from '../lib/exec-names.js';
+// Dependency-free apart from claude-home, so it bundles the same way (SQ-402).
+import { BUILTIN_FOREGROUND_AGENT_TYPES, isForegroundAgentType, resolveForegroundAgents } from '../lib/agent-foreground.js';
 
 // The dispatch and executor-lifecycle guard: refuse under board lock contention rather than allow a launch,
 // steer or write unchecked (SQ-133).
@@ -18,7 +20,7 @@ failClosedOnBoardBusy();
 const { canonicalPath } = require(path.join(__dirname, '..', 'lib', 'worktrees.js')) as { canonicalPath: (value: unknown) => string };
 const { isInScope: scopeMatch } = require(path.join(__dirname, '..', 'lib', 'scope-match.js')) as { isInScope: (file: unknown, files: unknown) => boolean };
 
-const PASS_THROUGH_AGENT_TYPES = new Set(['Explore', 'claude-code-guide', 'statusline-setup']);
+const PASS_THROUGH_AGENT_TYPES = new Set(BUILTIN_FOREGROUND_AGENT_TYPES);
 const EXECUTOR_HELPER_TYPES = new Set(['Explore', 'claude-code-guide', 'web-researcher', 'general-purpose']);
 const HELPER_REVIEW_WORK_RE = /\b(?:audits?|auditors?|auditing|audited|reviews?|reviewers?|reviewing|reviewed|review-audit)\b/i;
 
@@ -239,54 +241,66 @@ function diagnosticProbeDenyReason(): string {
   return `sidequest: ${DIAGNOSTIC_PROBE_NAME} is reserved for a foreground dispatch self-test. Use description "Sidequest dispatch self-test." and prompt "Diagnose Sidequest dispatch machinery. Read package.json, then report whether the Agent spawn can use a read-only tool." Omit model, ticket refs, isolation, and background mode. Ordinary work needs a ticket.`;
 }
 
+// Reached only by Sidequest-named agent types that are not a current executor: every other
+// non-executor main-session spawn is backgrounded (SQ-402) before this point.
 function agentDenyReason(type: string, classification: ExecutorClassification): string {
-  if (type.startsWith('sidequest-')) {
-    if (classification.kind === 'ticket' || classification.kind === 'legacy_ticket') {
-      return `sidequest: ${type} looks like a Sidequest executor name but is invalid or retired. Re-run dispatch and spawn the returned executor.`;
-    }
-    return `sidequest: ${type} is an unknown Sidequest agent type. Use the executor returned by dispatch.`;
+  if (classification.kind === 'ticket' || classification.kind === 'legacy_ticket') {
+    return `sidequest: ${type} looks like a Sidequest executor name but is invalid or retired. Re-run dispatch and spawn the returned executor.`;
   }
-  return `sidequest: ${type || 'custom'} is a generic Agent, not a Sidequest ticket executor. ` +
-    'For a tiny lookup, use Read, Glob, Grep, or WebFetch inline, not WebSearch. A usable route needs a fresh Board MCP dispatch and its exact returned executor. Board MCP is the lifecycle authority: reload or reconnect Sidequest, then re-dispatch. Do not use a raw Agent or Sidequest CLI fallback. Any delegated work, including a quick investigation, needs a ticket: file a spike (usually codebase-exploration), route it, dispatch it, then spawn the returned executor. The blocked work still gates any dependent action: do not proceed to a PR, merge, publish, or ship until its ticket is filed, dispatched, and closed; rerouting around this block is a violation.';
+  return `sidequest: ${type || 'unnamed'} is an unknown Sidequest agent type. Use the executor returned by dispatch.`;
 }
 
-// dispatchAdmission has four statuses and only 'routed' can carry a dispatch. The generic-Agent guard
-// below used to enumerate 'routing-disabled' and 'no-usable-route' by hand, so 'no-project' - what an
-// unregistered project returns on every call before its first Board MCP call - skipped it and fell
-// through to agentDenyReason. That message ends "do not proceed to a PR, merge, publish, or ship until
-// its ticket is filed, dispatched, and closed", which on an unregistered project is unsatisfiable: the
-// remedy it names needs the route that does not exist, while session-start tells the same session
-// "substantive work may stay inline". Both messages deny; only the guidance differed, and it was wrong.
-//
-// The isCurrentExecutor guard above deliberately still enumerates the two, and must NOT be widened to
-// !== 'routed': dispatchAdmission also returns 'no-project' when the store module fails to load, so
-// widening it refuses every prepared dispatch executor on a transient store error instead of letting it
-// reach dispatch validation. Verified - widening it fails 14 tests, among them the exact-executor
-// bypass cases.
-function unroutedGenericDenyReason(status: DispatchAdmission['status']): string {
-  if (status === 'no-project') {
-    return 'sidequest: this project is not registered on a Sidequest board, so there is no executor route. ' +
-      'Continue bounded inline work with direct tools; do not create a fake Sidequest or raw Agent lifecycle ' +
-      'fallback. Nothing here gates a PR, merge, publish, or ship - no ticket is required for this work. The ' +
-      'first Board MCP call registers the project if you want one.';
-  }
-  return 'sidequest: this project has no usable executor route. Continue bounded inline work with direct tools; do not create a fake Sidequest or raw Agent lifecycle fallback.';
+// A type that claims the Sidequest namespace or an executor-shaped name must be a real executor:
+// `sidequest-*`, anything under the `sidequest:` plugin namespace that is not a bundled agent (those
+// canonicalize to their bare name first), and another plugin's `<ns>:sidequest-*` look-alike. These
+// keep the exact-executor deny instead of being backgrounded as an ordinary agent.
+function isSidequestNamedType(type: string): boolean {
+  const lastSegment = type.slice(type.lastIndexOf(':') + 1);
+  return type.startsWith('sidequest-') || type.startsWith('sidequest:') || lastSegment.startsWith('sidequest-');
 }
 
-// Explore needs no prepared dispatch, so it is the open door next to every generic-Agent deny: a live
-// session relaunched a denied general-purpose job as Explore and fanned four of them out on the session
-// model (SQ-2214). On a routed board this guard closes that door. Denied generic work is remembered per
-// session and refused when it comes back as Explore, and fan-out past the free spawns without any board
-// interaction is refused toward a spike ticket. Subagent callers never reach this guard: their Explore
-// spawns take the rewriteExecutorHelper path first, so executors' helpers stay untouched.
+// Any `[sidequest-...]` marker line: the live `[sidequest-route model=... effort=...]` form and the
+// retired bare markers alike.
+const SIDEQUEST_MARKER_LINE_RE = /^\s*\[sidequest-[a-z][a-z0-9-]*(?:\s[^\]\n]*)?\]\s*$/m;
+
+// A prepared dispatch (its briefing launch) or a route marker belongs to the exact returned executor.
+// An ordinary agent carrying one would run a ticket's lifecycle outside the executor checks below.
+function carriesDispatchPayload(toolInput: Record<string, unknown>): boolean {
+  const prompt = typeof toolInput.prompt === 'string' ? toolInput.prompt : '';
+  return Boolean(prompt) && (dispatchLaunches(prompt).length > 0 || SIDEQUEST_MARKER_LINE_RE.test(prompt));
+}
+
+function dispatchPayloadDenyReason(type: string): string {
+  return `sidequest: ${type || 'unnamed'} is not a Sidequest executor but carries a dispatch briefing or [sidequest-...] marker. Ticket work runs only in the exact executor dispatch returned: re-run dispatch and pass its spawn unchanged. Other work needs no marker.`;
+}
+
+function foregroundProjectDir(input: HookInput): string {
+  return String(process.env.CLAUDE_PROJECT_DIR || '').trim() || stringField(input, 'cwd').trim();
+}
+
+// SQ-402: a main-session Agent spawn that is not a Sidequest executor is not refused. It runs in the
+// background with its own definition, permission mode, model, and isolation; only run_in_background
+// changes. Types on the foreground list (built-in harness utilities plus the `sidequest.foregroundAgents`
+// settings list, project replacing user) pass through untouched. Applies in routed, unrouted, and
+// unregistered projects alike, so no board lookup is needed.
+function backgroundOrdinaryAgent(input: HookInput, toolInput: Record<string, unknown>, type: string): void {
+  if (carriesDispatchPayload(toolInput)) {
+    writeDeny('PreToolUse', dispatchPayloadDenyReason(type));
+    return;
+  }
+  if (isForegroundAgentType(type, resolveForegroundAgents({ projectDir: foregroundProjectDir(input) }))) return;
+  writeToolUpdate(
+    { ...toolInput, run_in_background: true },
+    `sidequest: ${type || 'this agent'} is not a Sidequest executor, so it runs in the background with its own definition and permission mode. To keep a type in the foreground, list it in Claude Code settings under "sidequest": {"foregroundAgents": [...]}; a project list replaces the user list.`,
+  );
+}
+
+// Explore needs no prepared dispatch and inherits the session model, so on a routed board fan-out past
+// the free spawns without any board interaction is refused toward a spike ticket (SQ-2214). Subagent
+// callers never reach this guard: their Explore spawns take the rewriteExecutorHelper path first, so
+// executors' helpers stay untouched. The per-session "denied generic work" record that used to refuse an
+// Explore relaunch went away with the generic-Agent refusal itself (SQ-402).
 const EXPLORE_FREE_SPAWNS = 2;
-const DENIED_WORK_PROMPT_PREFIX_CHARS = 160;
-const DENIED_WORK_MAX_RECORDS = 20;
-
-interface DeniedWorkRecord {
-  description: string;
-  promptPrefix: string;
-}
 
 function guardSessionId(input: HookInput): string {
   return (
@@ -297,52 +311,11 @@ function guardSessionId(input: HookInput): string {
   ).trim();
 }
 
-function normalizedWork(value: unknown): string {
-  return String(value ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
-}
-
-function deniedWorkPromptPrefix(toolInput: Record<string, unknown>): string {
-  return normalizedWork(toolInput.prompt).slice(0, DENIED_WORK_PROMPT_PREFIX_CHARS);
-}
-
-function deniedWorkRecords(state: Record<string, unknown>): DeniedWorkRecord[] {
-  if (!Array.isArray(state.deniedWork)) return [];
-  return state.deniedWork.filter((record): record is DeniedWorkRecord =>
-    isRecord(record) && typeof record.description === 'string' && typeof record.promptPrefix === 'string');
-}
-
-function recordDeniedGenericWork(input: HookInput, toolInput: Record<string, unknown>): void {
-  const sessionId = guardSessionId(input);
-  if (!sessionId) return;
-  try {
-    const file = sessionStateFile('explore-fanout', sessionId);
-    const state = readSessionState(file);
-    const records = deniedWorkRecords(state);
-    records.push({ description: normalizedWork(toolInput.description), promptPrefix: deniedWorkPromptPrefix(toolInput) });
-    state.deniedWork = records.slice(-DENIED_WORK_MAX_RECORDS);
-    writeSessionState(file, state);
-  } catch (_) {
-    /* bookkeeping must never block the deny that follows */
-  }
-}
-
-function matchesDeniedWork(records: DeniedWorkRecord[], toolInput: Record<string, unknown>): boolean {
-  const description = normalizedWork(toolInput.description);
-  const promptPrefix = deniedWorkPromptPrefix(toolInput);
-  return records.some((record) =>
-    (record.description !== '' && record.description === description)
-    || (record.promptPrefix !== '' && record.promptPrefix === promptPrefix));
-}
-
-function guardMainSessionExplore(input: HookInput, toolInput: Record<string, unknown>): void {
+function guardMainSessionExplore(input: HookInput): void {
   const sessionId = guardSessionId(input);
   if (!sessionId || dispatchAdmission(input).status !== 'routed') return;
   const file = sessionStateFile('explore-fanout', sessionId);
   const state = readSessionState(file);
-  if (matchesDeniedWork(deniedWorkRecords(state), toolInput)) {
-    writeDeny('PreToolUse', 'sidequest: this Explore spawn matches work a generic Agent was already denied for. The block applied to the work, not the agent type. File a spike ticket (usually codebase-exploration), route it, dispatch it, then spawn the returned executor; rerouting denied work through Explore is a violation.');
-    return;
-  }
   const priorPasses = Number(state.explorePasses) || 0;
   const boardInteraction = Boolean(readSessionState(sessionStateFile('inline-work', sessionId)).boardInteraction);
   if (priorPasses >= EXPLORE_FREE_SPAWNS && !boardInteraction) {
@@ -1033,7 +1006,7 @@ function main(): void {
     return;
   }
   if (PASS_THROUGH_AGENT_TYPES.has(type)) {
-    if (type === 'Explore') guardMainSessionExplore(input, toolInput);
+    if (type === 'Explore') guardMainSessionExplore(input);
     return;
   }
   if (classification.kind === 'diagnostic') {
@@ -1044,14 +1017,17 @@ function main(): void {
     writeToolUpdate({ ...toolInput, mode: 'bypassPermissions', run_in_background: false });
     return;
   }
-  const isDispatchExecutor = classification.kind === 'codex_dispatch' || classification.kind === 'read_only_codex_dispatch';
-  const admission = dispatchAdmission(input);
-  if (isCurrentExecutor(classification) && (admission.status === 'routing-disabled' || admission.status === 'no-usable-route')) {
-    writeDeny('PreToolUse', 'sidequest: this project has no usable executor route. Continue only bounded inline work, or restore routing and an available category route before a fresh Board MCP dispatch.');
+  if (!isCurrentExecutor(classification) && !isSidequestNamedType(type)) {
+    backgroundOrdinaryAgent(input, toolInput, type);
     return;
   }
-  if (!isCurrentExecutor(classification) && !type.startsWith('sidequest-') && admission.status !== 'routed') {
-    writeDeny('PreToolUse', unroutedGenericDenyReason(admission.status));
+  const isDispatchExecutor = classification.kind === 'codex_dispatch' || classification.kind === 'read_only_codex_dispatch';
+  const admission = dispatchAdmission(input);
+  // Deliberately enumerates the two statuses and must NOT be widened to !== 'routed': dispatchAdmission
+  // also returns 'no-project' when the store module fails to load, so widening it refuses every prepared
+  // dispatch executor on a transient store error instead of letting it reach dispatch validation.
+  if (isCurrentExecutor(classification) && (admission.status === 'routing-disabled' || admission.status === 'no-usable-route')) {
+    writeDeny('PreToolUse', 'sidequest: this project has no usable executor route. Continue only bounded inline work, or restore routing and an available category route before a fresh Board MCP dispatch.');
     return;
   }
   const dispatchValidation = preparedDispatchValidation(input);
@@ -1093,7 +1069,6 @@ function main(): void {
     }
   }
   if (!isCurrentExecutor(classification)) {
-    if (!type.startsWith('sidequest-') && admission.status === 'routed') recordDeniedGenericWork(input, toolInput);
     writeDeny('PreToolUse', agentDenyReason(type, classification));
     return;
   }

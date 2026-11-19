@@ -111,7 +111,8 @@ the exact executor and spawn object a fresh `dispatch <ref>` returned.
   mismatch, bouncing the ticket back.
 - **Haiku routes:** spawn the stable executor returned in `exec.agent` with
   `model: exec.model`, `mode: "bypassPermissions"`, and a unique `name`, like every other Claude
-  route. A plain generic Agent is denied by the Sidequest gate.
+  route. A plain generic Agent is not an executor: the Sidequest gate runs it in the background as an
+  ordinary agent, with no claim, briefing, or route, so it cannot carry ticket work.
 - Worktree isolation: tickets with declared files carry `isolation: "worktree"` in `spawn`; pass it
   unchanged. `--shared-tree` / `{sharedTree:true}` is an escape hatch only for a task that depends
   on uncommitted local state, and its reason belongs in a ticket comment before spawning. A bounded
