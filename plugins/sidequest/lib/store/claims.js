@@ -1,5 +1,59 @@
 "use strict";
 const { defaultHostSleep } = require("../host-sleep.js");
+const questionLog = require("./question-log.js");
+const PARK_STATUS = "awaiting-user";
+const PARK_MODES = ["held", "released"];
+const PARK_PREVIEW_CHARS = 120;
+function parkRefKey(ref) {
+  return String(ref || "").trim().toUpperCase();
+}
+function parkQuestionStates(slug, ref, opts) {
+  const key = parkRefKey(ref);
+  if (!slug || !key) return [];
+  try {
+    const fold = questionLog.readQuestionLog(questionLog.questionLogDir(String(slug)));
+    const pool = opts?.includeRecent ? { ...fold.recent || {}, ...fold.open || {} } : fold.open || {};
+    return Object.values(pool).filter((state) => state && parkRefKey(state.ref) === key).sort((left, right) => String(left.asked?.at).localeCompare(String(right.asked?.at)) || String(left.qid).localeCompare(String(right.qid)));
+  } catch (_error) {
+    return [];
+  }
+}
+function openBlockingQuestions(states) {
+  return (Array.isArray(states) ? states : []).filter((state) => state && state.state === "open" && state.asked?.blocking !== false);
+}
+function heldParkQuestions(states, claim) {
+  const claimedMs = Date.parse(claim && claim.at);
+  return openBlockingQuestions(states).filter((state) => {
+    if (state.asked?.origin === "filing") return false;
+    if (!Array.isArray(state.sent) || !state.sent.length) return false;
+    const askedMs = Date.parse(state.asked?.at);
+    return !Number.isFinite(claimedMs) || !Number.isFinite(askedMs) || askedMs >= claimedMs;
+  });
+}
+function parkFirstLine(text, max = PARK_PREVIEW_CHARS) {
+  const line = String(text || "").split(/\r?\n/).map((part) => part.trim()).find(Boolean) || "";
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+function parkQuestionLine(state) {
+  const header = state?.asked?.header ? `[${state.asked.header}] ` : "";
+  return `- ${state?.seq || "?"} \`${state?.qid}\`: ${header}${parkFirstLine(state?.asked?.text)}`;
+}
+function parkCommentBody(ref, mode, states, detail) {
+  const lines = (Array.isArray(states) ? states : []).map(parkQuestionLine);
+  const stage = mode === "held" ? "Parked **awaiting-user** (held): the claim and worktree stay with the executor, and the answer resumes it." : "Parked **awaiting-user** (released): the claim is given up, and answering makes the ticket dispatchable with the decisions packet.";
+  const why = String(detail || "").trim();
+  return [`⏸️ ${stage}${why ? ` ${why}` : ""}`, ...lines.length ? ["Open questions:", ...lines] : []].join("\n");
+}
+function unparkCommentBody(ref, toStatus, states, detail) {
+  const lines = (Array.isArray(states) ? states : []).map((state) => {
+    const answer = state?.answered;
+    const outcome = state?.state === "declined" || answer?.declined ? "declined" : answer ? `answered \`${answer.aid}\`${answer.preview || answer.text ? `: ${parkFirstLine(answer.preview || answer.text)}` : ""}` : state?.state || "closed";
+    return `- ${state?.seq || "?"} \`${state?.qid}\`: ${outcome}`;
+  });
+  const why = String(detail || "").trim();
+  const head = toStatus === "doing" ? `▶️ Unparked to **doing**: the held executor resumes in its own worktree.${why ? ` ${why}` : ""}` : `▶️ Unparked to **todo**: the next dispatch carries the decisions packet.${why ? ` ${why}` : ""}`;
+  return [head, ...lines].join("\n");
+}
 function createClaims(dependencies) {
   const {
     hostSleep: injectedHostSleep,
@@ -9,7 +63,8 @@ function createClaims(dependencies) {
     isolatedDispatchWorktreeMissing,
     getTicket,
     putTicket,
-    withTicketLock
+    withTicketLock,
+    resumeHeldPark
   } = dependencies;
   const DEFAULT_CLAIM_IDLE_MIN = 60;
   const DEFAULT_CLAIM_ABANDON_MIN = 24 * 60;
@@ -25,7 +80,7 @@ function createClaims(dependencies) {
     ["failed-check", "failed_check"]
   ]);
   const NEGATIVE_CONTROL_COMMENT = "[sidequest:negative-control] ";
-  const RELEASE_KINDS = /* @__PURE__ */ new Set(["handback", "oracle"]);
+  const RELEASE_KINDS = /* @__PURE__ */ new Set(["handback", "oracle", "question"]);
   function technicalBlockerRelease(args) {
     const reason = String(args?.reason || "").trim();
     const oracle = String(args?.oracle || "").trim();
@@ -69,7 +124,7 @@ function createClaims(dependencies) {
     return {
       ok: false,
       reason: "release_kind_required",
-      message: 'release: choose kind "technical_blocker" for a failed command, "contradiction" for an absent target with probe evidence, "oracle" to park for a human verdict, or "handback" for another non-technical release. Technical blockers need command, exitCode, and outputTail; contradictions need command and outputTail.'
+      message: 'release: choose kind "technical_blocker" for a failed command, "contradiction" for an absent target with probe evidence, "oracle" to park for a human verdict, "question" to park awaiting-user on an open blocking question you asked, or "handback" for another non-technical release. Technical blockers need command, exitCode, and outputTail; contradictions need command and outputTail.'
     };
   }
   function releaseCommentBody(reason, evidence) {
@@ -254,9 +309,10 @@ ${evidence.outputTail}`;
       }
       return null;
     }
-    if (dispatch) {
+    const heldPark = ticket.status === PARK_STATUS && ticket.park?.mode === "held";
+    if (dispatch || heldPark) {
       if (idleBeyond(claimAbandonMs())) {
-        return { kind: "abandoned", idleMs, reason: "no board activity from the claim holder past the unobserved-death backstop" };
+        return { kind: "abandoned", idleMs, reason: heldPark ? "the held awaiting-user park passed the 24 h abandon backstop" : "no board activity from the claim holder past the unobserved-death backstop" };
       }
       return null;
     }
@@ -300,6 +356,9 @@ ${evidence.outputTail}`;
     const claim = ticket && ticket.claim;
     if (!claim || !claim.by || by != null && claim.by !== by) return false;
     claim.activeAt = now || (/* @__PURE__ */ new Date()).toISOString();
+    if (by != null && ticket.status === PARK_STATUS && ticket.park?.mode === "held" && typeof resumeHeldPark === "function") {
+      resumeHeldPark(ticket, by, claim.activeAt);
+    }
     return true;
   }
   function touchClaim(slug, idOrRef, by) {
@@ -341,4 +400,13 @@ ${evidence.outputTail}`;
     verificationCompletionCheck
   };
 }
-module.exports = { createClaims };
+module.exports = {
+  PARK_MODES,
+  PARK_STATUS,
+  createClaims,
+  heldParkQuestions,
+  openBlockingQuestions,
+  parkCommentBody,
+  parkQuestionStates,
+  unparkCommentBody
+};

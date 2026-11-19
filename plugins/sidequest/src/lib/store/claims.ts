@@ -1,6 +1,93 @@
 'use strict';
 
 const { defaultHostSleep } = require('../host-sleep.js');
+const questionLog = require('./question-log.js');
+
+// The parked status (US-8). A ticket waits here on a user answer in one of two stages
+// (story contract U1): `held` keeps the executor's claim and worktree so the answer resumes
+// the same agent; `released` has given the claim up, so the next dispatch is a fresh one that
+// carries the decisions packet. A park is never ready and never dispatchable.
+const PARK_STATUS = 'awaiting-user';
+const PARK_MODES = ['held', 'released'];
+const PARK_PREVIEW_CHARS = 120;
+
+function parkRefKey(ref?: unknown) {
+  return String(ref || '').trim().toUpperCase();
+}
+
+// Every live question on one ticket, from the project's question log. The log is a separate
+// store: when it is missing or unreadable the ticket simply has no questions, so a board write
+// never fails because the log does.
+function parkQuestionStates(slug?: any, ref?: any, opts?: { includeRecent?: boolean }): any[] {
+  const key = parkRefKey(ref);
+  if (!slug || !key) return [];
+  try {
+    const fold = questionLog.readQuestionLog(questionLog.questionLogDir(String(slug)));
+    const pool = opts?.includeRecent ? { ...(fold.recent || {}), ...(fold.open || {}) } : (fold.open || {});
+    return Object.values(pool)
+      .filter((state: any) => state && parkRefKey(state.ref) === key)
+      .sort((left: any, right: any) => String(left.asked?.at).localeCompare(String(right.asked?.at)) || String(left.qid).localeCompare(String(right.qid)));
+  } catch (_error: unknown) {
+    return [];
+  }
+}
+
+// Open means unanswered. An answered question can stay in the fold's live set until its
+// delivery is recorded, but it no longer blocks anything.
+function openBlockingQuestions(states?: any[]) {
+  return (Array.isArray(states) ? states : []).filter((state: any) => state && state.state === 'open' && state.asked?.blocking !== false);
+}
+
+// The held-park predicate: an open blocking question this claim asked at runtime, whose
+// SendMessage to main was recorded. The `sent` event is the evidence the orchestrator was told;
+// without it the turn end is not a park (block-once and the detach backstops cover that).
+function heldParkQuestions(states?: any[], claim?: any) {
+  const claimedMs = Date.parse(claim && claim.at);
+  return openBlockingQuestions(states).filter((state: any) => {
+    if (state.asked?.origin === 'filing') return false;
+    if (!Array.isArray(state.sent) || !state.sent.length) return false;
+    const askedMs = Date.parse(state.asked?.at);
+    return !Number.isFinite(claimedMs) || !Number.isFinite(askedMs) || askedMs >= claimedMs;
+  });
+}
+
+function parkFirstLine(text?: unknown, max = PARK_PREVIEW_CHARS) {
+  const line = String(text || '').split(/\r?\n/).map((part) => part.trim()).find(Boolean) || '';
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+function parkQuestionLine(state?: any) {
+  const header = state?.asked?.header ? `[${state.asked.header}] ` : '';
+  return `- ${state?.seq || '?'} \`${state?.qid}\`: ${header}${parkFirstLine(state?.asked?.text)}`;
+}
+
+// Story contract U4 (a): the park and unpark comments are the durable board history, so they
+// carry the qid, seq, header, first line and answer preview, never the full question or answer.
+function parkCommentBody(ref?: any, mode?: any, states?: any[], detail?: any) {
+  const lines = (Array.isArray(states) ? states : []).map(parkQuestionLine);
+  const stage = mode === 'held'
+    ? 'Parked **awaiting-user** (held): the claim and worktree stay with the executor, and the answer resumes it.'
+    : 'Parked **awaiting-user** (released): the claim is given up, and answering makes the ticket dispatchable with the decisions packet.';
+  const why = String(detail || '').trim();
+  return [`⏸️ ${stage}${why ? ` ${why}` : ''}`, ...(lines.length ? ['Open questions:', ...lines] : [])].join('\n');
+}
+
+function unparkCommentBody(ref?: any, toStatus?: any, states?: any[], detail?: any) {
+  const lines = (Array.isArray(states) ? states : []).map((state: any) => {
+    const answer = state?.answered;
+    const outcome = state?.state === 'declined' || answer?.declined
+      ? 'declined'
+      : answer
+        ? `answered \`${answer.aid}\`${answer.preview || answer.text ? `: ${parkFirstLine(answer.preview || answer.text)}` : ''}`
+        : state?.state || 'closed';
+    return `- ${state?.seq || '?'} \`${state?.qid}\`: ${outcome}`;
+  });
+  const why = String(detail || '').trim();
+  const head = toStatus === 'doing'
+    ? `▶️ Unparked to **doing**: the held executor resumes in its own worktree.${why ? ` ${why}` : ''}`
+    : `▶️ Unparked to **todo**: the next dispatch carries the decisions packet.${why ? ` ${why}` : ''}`;
+  return [head, ...lines].join('\n');
+}
 
 function createClaims(dependencies: any) {
   const {
@@ -12,6 +99,7 @@ function createClaims(dependencies: any) {
     getTicket,
     putTicket,
     withTicketLock,
+    resumeHeldPark,
   } = dependencies;
 
   const DEFAULT_CLAIM_IDLE_MIN = 60;
@@ -28,7 +116,8 @@ function createClaims(dependencies: any) {
     ['failed-check', 'failed_check'],
   ]);
   const NEGATIVE_CONTROL_COMMENT = '[sidequest:negative-control] ';
-  const RELEASE_KINDS = new Set(['handback', 'oracle']);
+  // `question` parks the ticket awaiting-user on an open blocking question it asked (US-8).
+  const RELEASE_KINDS = new Set(['handback', 'oracle', 'question']);
 
   function technicalBlockerRelease(args?: { releaseKind?: unknown; command?: unknown; exitCode?: unknown; oracle?: unknown; outputTail?: unknown; reason?: unknown }): { ok: true; evidence: { command: string; exitCode?: number; kind: string; outputTail: string } | null; releaseKind: string | null } | { ok: false; message: string; reason: string } {
     const reason = String(args?.reason || '').trim();
@@ -77,7 +166,7 @@ function createClaims(dependencies: any) {
     return {
       ok: false,
       reason: 'release_kind_required',
-      message: 'release: choose kind "technical_blocker" for a failed command, "contradiction" for an absent target with probe evidence, "oracle" to park for a human verdict, or "handback" for another non-technical release. Technical blockers need command, exitCode, and outputTail; contradictions need command and outputTail.',
+      message: 'release: choose kind "technical_blocker" for a failed command, "contradiction" for an absent target with probe evidence, "oracle" to park for a human verdict, "question" to park awaiting-user on an open blocking question you asked, or "handback" for another non-technical release. Technical blockers need command, exitCode, and outputTail; contradictions need command and outputTail.',
     };
   }
 
@@ -274,9 +363,12 @@ function createClaims(dependencies: any) {
       }
       return null;
     }
-    if (dispatch) {
+    // A held park is waiting on a person, not stalled: only the 24 h abandon backstop detaches
+    // it (story contract U1), never the short no-dispatch idle rule.
+    const heldPark = ticket.status === PARK_STATUS && ticket.park?.mode === 'held';
+    if (dispatch || heldPark) {
       if (idleBeyond(claimAbandonMs())) {
-        return { kind: 'abandoned', idleMs, reason: 'no board activity from the claim holder past the unobserved-death backstop' };
+        return { kind: 'abandoned', idleMs, reason: heldPark ? 'the held awaiting-user park passed the 24 h abandon backstop' : 'no board activity from the claim holder past the unobserved-death backstop' };
       }
       return null;
     }
@@ -325,6 +417,11 @@ function createClaims(dependencies: any) {
     const claim = ticket && ticket.claim;
     if (!claim || !claim.by || (by != null && claim.by !== by)) return false;
     claim.activeAt = now || new Date().toISOString();
+    // A board call from the holder of a held park means the executor resumed on its own
+    // (story contract U1, held -> doing). Only the holder counts: `by` must be named.
+    if (by != null && ticket.status === PARK_STATUS && ticket.park?.mode === 'held' && typeof resumeHeldPark === 'function') {
+      resumeHeldPark(ticket, by, claim.activeAt);
+    }
     return true;
   }
 
@@ -369,4 +466,13 @@ function createClaims(dependencies: any) {
   };
 }
 
-module.exports = { createClaims };
+module.exports = {
+  PARK_MODES,
+  PARK_STATUS,
+  createClaims,
+  heldParkQuestions,
+  openBlockingQuestions,
+  parkCommentBody,
+  parkQuestionStates,
+  unparkCommentBody,
+};
