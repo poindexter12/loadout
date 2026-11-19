@@ -35,9 +35,9 @@ __export(board_reconciliation_reminder_exports, {
   boardReconciliationReminderForStore: () => boardReconciliationReminderForStore
 });
 module.exports = __toCommonJS(board_reconciliation_reminder_exports);
-var import_node_crypto2 = __toESM(require("node:crypto"));
-var import_node_fs2 = __toESM(require("node:fs"));
-var import_node_path3 = __toESM(require("node:path"));
+var import_node_crypto3 = __toESM(require("node:crypto"));
+var import_node_fs3 = __toESM(require("node:fs"));
+var import_node_path4 = __toESM(require("node:path"));
 
 // src/lib/claude-home.ts
 var import_node_os = __toESM(require("node:os"));
@@ -49,8 +49,105 @@ function resolveSidequestHome(env = process.env) {
   return import_node_path.default.join(configDir ? import_node_path.default.resolve(configDir) : import_node_path.default.join(import_node_os.default.homedir(), ".claude"), "sidequest");
 }
 
-// src/hooks/shared/input.ts
+// src/lib/mkdir-lock.ts
+var import_node_crypto = __toESM(require("node:crypto"));
 var import_node_fs = __toESM(require("node:fs"));
+var import_node_path2 = __toESM(require("node:path"));
+var MKDIR_LOCK_WAIT_MS = 500;
+var MKDIR_LOCK_RETRY_MS = 5;
+var waitBuffer = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+function sleepSync(ms) {
+  Atomics.wait(waitBuffer, 0, 0, Math.max(0, ms));
+}
+function lockOwnerFile(lockDirectory) {
+  try {
+    const owners = import_node_fs.default.readdirSync(lockDirectory).filter((name) => name.startsWith("owner-"));
+    const [ownerName] = owners;
+    return owners.length === 1 && ownerName ? import_node_path2.default.join(lockDirectory, ownerName) : null;
+  } catch (_) {
+    return null;
+  }
+}
+function lockOwnerAlive(ownerFile) {
+  try {
+    const owner = Number(import_node_fs.default.readFileSync(ownerFile, "utf8").trim());
+    if (!Number.isInteger(owner) || owner <= 0) return true;
+    try {
+      process.kill(owner, 0);
+      return true;
+    } catch (error) {
+      return error.code !== "ESRCH";
+    }
+  } catch (error) {
+    return error.code !== "ENOENT";
+  }
+}
+function waitForTestGate(markerVariable, gateVariable, retryMs) {
+  const marker = markerVariable ? process.env[markerVariable] : void 0;
+  if (marker) import_node_fs.default.writeFileSync(marker, `${process.pid}
+`);
+  const gate = gateVariable ? process.env[gateVariable] : void 0;
+  while (gate && import_node_fs.default.existsSync(gate)) sleepSync(retryMs);
+}
+function removeStaleLock(lockDirectory, ownerFile) {
+  try {
+    import_node_fs.default.rmSync(ownerFile, { force: true });
+    import_node_fs.default.rmdirSync(lockDirectory);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+function acquireMkdirLock(lockDirectory, options = {}) {
+  const waitMs = options.waitMs ?? MKDIR_LOCK_WAIT_MS;
+  const retryMs = options.retryMs ?? MKDIR_LOCK_RETRY_MS;
+  const gates = options.testGates || {};
+  const generation = `${process.pid}-${import_node_crypto.default.randomUUID()}`;
+  const ownerName = `owner-${generation}`;
+  const candidateDirectory = `${lockDirectory}.${generation}`;
+  const publishedOwnerFile = import_node_path2.default.join(lockDirectory, ownerName);
+  const deadline = Date.now() + waitMs;
+  import_node_fs.default.mkdirSync(import_node_path2.default.dirname(lockDirectory), { recursive: true });
+  try {
+    import_node_fs.default.mkdirSync(candidateDirectory);
+    import_node_fs.default.writeFileSync(import_node_path2.default.join(candidateDirectory, ownerName), `${process.pid}
+`);
+    while (true) {
+      try {
+        import_node_fs.default.renameSync(candidateDirectory, lockDirectory);
+        waitForTestGate(gates.acquiredMarker, gates.holdGate, retryMs);
+        return publishedOwnerFile;
+      } catch (_) {
+        const ownerFile = lockOwnerFile(lockDirectory);
+        if (ownerFile && !lockOwnerAlive(ownerFile)) {
+          waitForTestGate(gates.staleMarker, gates.staleGate, retryMs);
+          removeStaleLock(lockDirectory, ownerFile);
+          const cleanedMarker = gates.staleCleanedMarker ? process.env[gates.staleCleanedMarker] : void 0;
+          if (cleanedMarker) import_node_fs.default.writeFileSync(cleanedMarker, `${process.pid}
+`);
+          continue;
+        }
+        if (Date.now() >= deadline) return null;
+        sleepSync(retryMs);
+      }
+    }
+  } finally {
+    try {
+      import_node_fs.default.rmSync(candidateDirectory, { recursive: true, force: true });
+    } catch (_) {
+    }
+  }
+}
+function releaseMkdirLock(ownerFile) {
+  try {
+    import_node_fs.default.rmSync(ownerFile, { force: true });
+    import_node_fs.default.rmdirSync(import_node_path2.default.dirname(ownerFile));
+  } catch (_) {
+  }
+}
+
+// src/hooks/shared/input.ts
+var import_node_fs2 = __toESM(require("node:fs"));
 
 // src/lib/exec-names.ts
 var EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
@@ -85,7 +182,7 @@ function isRecord(value) {
 }
 function readStdin() {
   try {
-    const raw = import_node_fs.default.readFileSync(0, "utf8");
+    const raw = import_node_fs2.default.readFileSync(0, "utf8");
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!isRecord(parsed)) return null;
@@ -107,7 +204,7 @@ function stringField(input, ...names) {
 }
 
 // src/hooks/shared/output.ts
-var import_node_crypto = __toESM(require("node:crypto"));
+var import_node_crypto2 = __toESM(require("node:crypto"));
 var CONTEXT_BUDGETS = Object.freeze({
   SessionStart: 4 * 1024,
   UserPromptSubmit: 1024,
@@ -127,7 +224,7 @@ function contextBudget(hookEventName) {
   return CONTEXT_BUDGETS[hookEventName] || 512;
 }
 function stableWatermark(value) {
-  return import_node_crypto.default.createHash("sha256").update(value, "utf8").digest("hex").slice(0, 16);
+  return import_node_crypto2.default.createHash("sha256").update(value, "utf8").digest("hex").slice(0, 16);
 }
 function truncateUtf8(value, maxBytes) {
   if (byteLength(value) <= maxBytes) return value;
@@ -163,19 +260,23 @@ function writeContext(hookEventName, additionalContext, initialUserMessage = "")
 }
 
 // src/hooks/shared/paths.ts
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_path3 = __toESM(require("node:path"));
 function pluginRoot() {
-  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path2.default.join(__dirname, "..");
+  return process.env.CLAUDE_PLUGIN_ROOT || import_node_path3.default.join(__dirname, "..");
 }
 function runtimeModule(name) {
-  return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
+  return import_node_path3.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
 // src/hooks/board-reconciliation-reminder.ts
 var MAX_MESSAGE_BYTES = 360;
-var STATE_LOCK_WAIT_MS = 500;
-var STATE_LOCK_RETRY_MS = 5;
-var stateLockWaitBuffer = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+var STATE_LOCK_TEST_GATES = {
+  acquiredMarker: "SIDEQUEST_TEST_STOP_LOCK_ACQUIRED_MARKER",
+  holdGate: "SIDEQUEST_TEST_STOP_LOCK_HOLD_GATE",
+  staleMarker: "SIDEQUEST_TEST_STOP_STALE_LOCK_MARKER",
+  staleGate: "SIDEQUEST_TEST_STOP_STALE_LOCK_GATE",
+  staleCleanedMarker: "SIDEQUEST_TEST_STOP_STALE_LOCK_CLEANED_MARKER"
+};
 function nudgeOff() {
   const value = String(process.env.SIDEQUEST_NUDGE || "").trim().toLowerCase();
   return value === "off" || value === "0" || value === "false" || value === "no";
@@ -200,94 +301,14 @@ function countLabel(count, singular, plural = singular + "s") {
 }
 function reminderStateFile(sessionId) {
   const home = resolveSidequestHome();
-  const key = import_node_crypto2.default.createHash("sha256").update(sessionId).digest("hex");
-  return import_node_path3.default.join(home, "hook-state", `stop-reminder-${key}.json`);
-}
-function stateLockOwnerFile(lockDirectory) {
-  try {
-    const owners = import_node_fs2.default.readdirSync(lockDirectory).filter((name) => name.startsWith("owner-"));
-    const [ownerName] = owners;
-    return owners.length === 1 && ownerName ? import_node_path3.default.join(lockDirectory, ownerName) : null;
-  } catch (_) {
-    return null;
-  }
-}
-function stateLockOwnerAlive(ownerFile) {
-  try {
-    const owner = Number(import_node_fs2.default.readFileSync(ownerFile, "utf8").trim());
-    if (!Number.isInteger(owner) || owner <= 0) return true;
-    try {
-      process.kill(owner, 0);
-      return true;
-    } catch (error) {
-      return error.code !== "ESRCH";
-    }
-  } catch (error) {
-    return error.code !== "ENOENT";
-  }
-}
-function waitForTestGate(markerVariable, gateVariable) {
-  const marker = process.env[markerVariable];
-  if (marker) import_node_fs2.default.writeFileSync(marker, `${process.pid}
-`);
-  const gate = process.env[gateVariable];
-  while (gate && import_node_fs2.default.existsSync(gate)) {
-    Atomics.wait(stateLockWaitBuffer, 0, 0, STATE_LOCK_RETRY_MS);
-  }
-}
-function removeStaleStateLock(lockDirectory, ownerFile) {
-  try {
-    import_node_fs2.default.rmSync(ownerFile, { force: true });
-    import_node_fs2.default.rmdirSync(lockDirectory);
-    return true;
-  } catch (_) {
-    return false;
-  }
+  const key = import_node_crypto3.default.createHash("sha256").update(sessionId).digest("hex");
+  return import_node_path4.default.join(home, "hook-state", `stop-reminder-${key}.json`);
 }
 function acquireStateLock(file) {
-  const lockDirectory = `${file}.lock-v2`;
-  const generation = `${process.pid}-${import_node_crypto2.default.randomUUID()}`;
-  const ownerName = `owner-${generation}`;
-  const candidateDirectory = `${lockDirectory}.${generation}`;
-  const publishedOwnerFile = import_node_path3.default.join(lockDirectory, ownerName);
-  const deadline = Date.now() + STATE_LOCK_WAIT_MS;
-  import_node_fs2.default.mkdirSync(import_node_path3.default.dirname(file), { recursive: true });
-  try {
-    import_node_fs2.default.mkdirSync(candidateDirectory);
-    import_node_fs2.default.writeFileSync(import_node_path3.default.join(candidateDirectory, ownerName), `${process.pid}
-`);
-    while (true) {
-      try {
-        import_node_fs2.default.renameSync(candidateDirectory, lockDirectory);
-        waitForTestGate("SIDEQUEST_TEST_STOP_LOCK_ACQUIRED_MARKER", "SIDEQUEST_TEST_STOP_LOCK_HOLD_GATE");
-        return publishedOwnerFile;
-      } catch (_) {
-        const ownerFile = stateLockOwnerFile(lockDirectory);
-        if (ownerFile && !stateLockOwnerAlive(ownerFile)) {
-          waitForTestGate("SIDEQUEST_TEST_STOP_STALE_LOCK_MARKER", "SIDEQUEST_TEST_STOP_STALE_LOCK_GATE");
-          removeStaleStateLock(lockDirectory, ownerFile);
-          const cleanedMarker = process.env.SIDEQUEST_TEST_STOP_STALE_LOCK_CLEANED_MARKER;
-          if (cleanedMarker) import_node_fs2.default.writeFileSync(cleanedMarker, `${process.pid}
-`);
-          continue;
-        }
-        if (Date.now() >= deadline) return null;
-        Atomics.wait(stateLockWaitBuffer, 0, 0, STATE_LOCK_RETRY_MS);
-      }
-    }
-  } finally {
-    try {
-      import_node_fs2.default.rmSync(candidateDirectory, { recursive: true, force: true });
-    } catch (_) {
-    }
-  }
+  return acquireMkdirLock(`${file}.lock-v2`, { testGates: STATE_LOCK_TEST_GATES });
 }
 function releaseStateLock(ownerFile) {
-  try {
-    import_node_fs2.default.rmSync(ownerFile, { force: true });
-    import_node_fs2.default.rmdirSync(import_node_path3.default.dirname(ownerFile));
-  } catch (_) {
-  }
+  releaseMkdirLock(ownerFile);
 }
 function rememberTransition(reminder) {
   const file = reminderStateFile(reminder.sessionId);
@@ -297,12 +318,12 @@ function rememberTransition(reminder) {
     if (!lockFile) return false;
     let prior = null;
     try {
-      prior = JSON.parse(import_node_fs2.default.readFileSync(file, "utf8"));
+      prior = JSON.parse(import_node_fs3.default.readFileSync(file, "utf8"));
     } catch (error) {
       if (error.code !== "ENOENT") return false;
     }
     if (prior?.state === reminder.state) return false;
-    import_node_fs2.default.writeFileSync(file, JSON.stringify({ state: reminder.state }));
+    import_node_fs3.default.writeFileSync(file, JSON.stringify({ state: reminder.state }));
     return true;
   } catch (_) {
     return false;
@@ -317,7 +338,7 @@ function clearReminderState(sessionId) {
   try {
     lockFile = acquireStateLock(file);
     if (!lockFile) return;
-    import_node_fs2.default.rmSync(file, { force: true });
+    import_node_fs3.default.rmSync(file, { force: true });
   } catch (_) {
   } finally {
     if (lockFile) releaseStateLock(lockFile);
@@ -409,7 +430,7 @@ function main() {
   const message = boardReconciliationReminder(data);
   if (message) writeContext("Stop", message);
 }
-if (import_node_path3.default.basename(process.argv[1] || "") === "board-reconciliation-reminder.js") main();
+if (import_node_path4.default.basename(process.argv[1] || "") === "board-reconciliation-reminder.js") main();
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   boardReconciliationReminder,

@@ -3,14 +3,21 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveSidequestHome } from '../lib/claude-home.js';
+import { acquireMkdirLock, releaseMkdirLock, type MkdirLockTestGates } from '../lib/mkdir-lock.js';
 import { readStdin, stringField, type HookInput } from './shared/input.js';
 import { writeContext } from './shared/output.js';
 import { runtimeModule } from './shared/paths.js';
 
 const MAX_MESSAGE_BYTES = 360;
-const STATE_LOCK_WAIT_MS = 500;
-const STATE_LOCK_RETRY_MS = 5;
-const stateLockWaitBuffer = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+// The per-session state file's lock lives in src/lib/mkdir-lock.ts (shared with the question
+// log since SQ-415). These gate names are the ones test/hooks-routing.test.ts drives.
+const STATE_LOCK_TEST_GATES: MkdirLockTestGates = {
+  acquiredMarker: 'SIDEQUEST_TEST_STOP_LOCK_ACQUIRED_MARKER',
+  holdGate: 'SIDEQUEST_TEST_STOP_LOCK_HOLD_GATE',
+  staleMarker: 'SIDEQUEST_TEST_STOP_STALE_LOCK_MARKER',
+  staleGate: 'SIDEQUEST_TEST_STOP_STALE_LOCK_GATE',
+  staleCleanedMarker: 'SIDEQUEST_TEST_STOP_STALE_LOCK_CLEANED_MARKER',
+};
 
 interface Ticket {
   ref?: string;
@@ -90,91 +97,12 @@ function reminderStateFile(sessionId: string): string {
   return path.join(home, 'hook-state', `stop-reminder-${key}.json`);
 }
 
-function stateLockOwnerFile(lockDirectory: string): string | null {
-  try {
-    const owners = fs.readdirSync(lockDirectory).filter((name) => name.startsWith('owner-'));
-    const [ownerName] = owners;
-    return owners.length === 1 && ownerName ? path.join(lockDirectory, ownerName) : null;
-  } catch (_) {
-    return null;
-  }
-}
-
-function stateLockOwnerAlive(ownerFile: string): boolean {
-  try {
-    const owner = Number(fs.readFileSync(ownerFile, 'utf8').trim());
-    if (!Number.isInteger(owner) || owner <= 0) return true;
-    try {
-      process.kill(owner, 0);
-      return true;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-    }
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== 'ENOENT';
-  }
-}
-
-function waitForTestGate(markerVariable: string, gateVariable: string): void {
-  const marker = process.env[markerVariable];
-  if (marker) fs.writeFileSync(marker, `${process.pid}\n`);
-  const gate = process.env[gateVariable];
-  while (gate && fs.existsSync(gate)) {
-    Atomics.wait(stateLockWaitBuffer, 0, 0, STATE_LOCK_RETRY_MS);
-  }
-}
-
-function removeStaleStateLock(lockDirectory: string, ownerFile: string): boolean {
-  try {
-    fs.rmSync(ownerFile, { force: true });
-    fs.rmdirSync(lockDirectory);
-    return true;
-  } catch (_) {
-    return false;
-  }
-}
-
 function acquireStateLock(file: string): string | null {
-  const lockDirectory = `${file}.lock-v2`;
-  const generation = `${process.pid}-${crypto.randomUUID()}`;
-  const ownerName = `owner-${generation}`;
-  const candidateDirectory = `${lockDirectory}.${generation}`;
-  const publishedOwnerFile = path.join(lockDirectory, ownerName);
-  const deadline = Date.now() + STATE_LOCK_WAIT_MS;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  try {
-    fs.mkdirSync(candidateDirectory);
-    fs.writeFileSync(path.join(candidateDirectory, ownerName), `${process.pid}\n`);
-    while (true) {
-      try {
-        fs.renameSync(candidateDirectory, lockDirectory);
-        waitForTestGate('SIDEQUEST_TEST_STOP_LOCK_ACQUIRED_MARKER', 'SIDEQUEST_TEST_STOP_LOCK_HOLD_GATE');
-        return publishedOwnerFile;
-      } catch (_) {
-        const ownerFile = stateLockOwnerFile(lockDirectory);
-        if (ownerFile && !stateLockOwnerAlive(ownerFile)) {
-          waitForTestGate('SIDEQUEST_TEST_STOP_STALE_LOCK_MARKER', 'SIDEQUEST_TEST_STOP_STALE_LOCK_GATE');
-          removeStaleStateLock(lockDirectory, ownerFile);
-          const cleanedMarker = process.env.SIDEQUEST_TEST_STOP_STALE_LOCK_CLEANED_MARKER;
-          if (cleanedMarker) fs.writeFileSync(cleanedMarker, `${process.pid}\n`);
-          continue;
-        }
-        if (Date.now() >= deadline) return null;
-        Atomics.wait(stateLockWaitBuffer, 0, 0, STATE_LOCK_RETRY_MS);
-      }
-    }
-  } finally {
-    try {
-      fs.rmSync(candidateDirectory, { recursive: true, force: true });
-    } catch (_) {}
-  }
+  return acquireMkdirLock(`${file}.lock-v2`, { testGates: STATE_LOCK_TEST_GATES });
 }
 
 function releaseStateLock(ownerFile: string): void {
-  try {
-    fs.rmSync(ownerFile, { force: true });
-    fs.rmdirSync(path.dirname(ownerFile));
-  } catch (_) {}
+  releaseMkdirLock(ownerFile);
 }
 
 function rememberTransition(reminder: Reminder): boolean {
