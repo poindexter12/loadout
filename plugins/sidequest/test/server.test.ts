@@ -748,6 +748,210 @@ function fakeServer(refusals?: any) {
   return server;
 }
 
+/* ------------------------------------------------------------------ *
+ *  SQ-417 (US-8 Q3): the question log's dashboard read API
+ * ------------------------------------------------------------------ */
+
+const questionLog = require('../lib/store/question-log.js');
+
+function questionProject(name?: any) {
+  const slug = store.ensureProject(fs.mkdtempSync(path.join(os.tmpdir(), `sq-questions-${name}-`)), `Questions ${name}`).slug;
+  return { slug, dir: questionLog.questionLogDir(slug) };
+}
+
+function askedOk(result?: any) {
+  assert.strictEqual(result.ok, true, JSON.stringify(result));
+  return result;
+}
+
+// Seeds one ticket's worth of questions in every state, with answers whose text is unique so a
+// leak into a list or detail response is a plain substring match.
+function seedQuestions(dir?: any) {
+  const base = Date.now() - 60_000;
+  let tick = 0;
+  const at = () => ({ now: base + (tick += 1000) }); // distinct, ordered times: qids within one ms sort randomly
+  const inlineAnswer = 'INLINE-ANSWER-SQ417 use the shared fold';
+  const longAnswer = `LONG-ANSWER-SQ417 ${'body text '.repeat(400)}`; // over the 2 KiB inline cap
+  const supersededAnswer = 'SUPERSEDED-ANSWER-SQ417 first thoughts';
+  const options = [{ label: 'Fold', description: 'reuse the fold' }, { label: 'Reread', description: 'read the file' }];
+  const inline = askedOk(questionLog.askQuestion(dir, { ref: 'SQ-900', agent: 'sq-900-exec', header: 'Fold?', text: 'Fold or reread?', options, default: 'Fold' }, at()));
+  const long = askedOk(questionLog.askQuestion(dir, { ref: 'SQ-900', agent: 'sq-900-exec', text: 'Write the long design note?' }, at()));
+  const open = askedOk(questionLog.askQuestion(dir, { ref: 'SQ-900', agent: 'sq-900-exec', text: 'Still open question' }, at()));
+  const declined = askedOk(questionLog.askQuestion(dir, { ref: 'SQ-901', origin: 'filing', text: 'Filing question to decline' }, at()));
+  const first = askedOk(questionLog.answerQuestion(dir, { ref: 'SQ-900', question: inline.qid, text: supersededAnswer, via: 'user' }, at()));
+  const replaced = askedOk(questionLog.answerQuestion(dir, { ref: 'SQ-900', question: inline.qid, text: inlineAnswer, via: 'dashboard', supersedes: first.aid }, at()));
+  const body = askedOk(questionLog.answerQuestion(dir, { ref: 'SQ-900', question: long.qid, text: longAnswer, via: 'orchestrator' }, at()));
+  askedOk(questionLog.answerQuestion(dir, { ref: 'SQ-901', question: declined.qid, decline: true }, at()));
+  askedOk(questionLog.recordSent(dir, { qid: inline.qid, to: 'main' }, at()));
+  askedOk(questionLog.recordDelivered(dir, { aid: replaced.aid }, at()));
+  assert.strictEqual(body.inline, false, 'the long answer must live in bodies/');
+  return { inline, long, open, declined, first, replaced, body, inlineAnswer, longAnswer, supersededAnswer };
+}
+
+const ANSWER_MARKERS = ['INLINE-ANSWER-SQ417', 'LONG-ANSWER-SQ417', 'SUPERSEDED-ANSWER-SQ417'];
+
+function assertNoAnswerText(raw?: any, where?: any) {
+  for (const marker of ANSWER_MARKERS) assert.ok(!raw.includes(marker), `${where} leaked answer text ${marker}`);
+  assert.ok(!/"preview"\s*:/.test(raw), `${where} carries a preview`);
+  assert.ok(!/"bodyRef"\s*:/.test(raw), `${where} carries a bodyRef`);
+  assert.ok(!raw.includes('bodies/'), `${where} names a body file`);
+}
+
+test('SQ-417 GET /api/questions lists question text, ticket, asker, status and times, never answer text', async (t?: any) => {
+  const { slug, dir } = questionProject('list');
+  const seeded = seedQuestions(dir);
+  const started = await start(await availablePort());
+  t.after(() => started.server.close());
+
+  for (const endpoint of [`/api/questions?project=${slug}`, '/api/questions?project=all', '/api/questions', `/api/questions?project=${slug}&state=answered`]) {
+    const raw = await requestRaw(started.port, endpoint);
+    assert.strictEqual(raw.status, 200, endpoint);
+    assertNoAnswerText(raw.body, endpoint);
+  }
+
+  const listed = await fetchJson(started.port, `/api/questions?project=${slug}`);
+  assert.strictEqual(listed.project, slug);
+  assert.deepStrictEqual(listed.questions.map((row?: any) => row.qid), [seeded.declined.qid, seeded.open.qid, seeded.long.qid, seeded.inline.qid], 'newest asked first');
+  const inline = listed.questions.find((row?: any) => row.qid === seeded.inline.qid);
+  assert.deepStrictEqual(Object.keys(inline).sort(), ['askedAt', 'answeredAt', 'asker', 'blocking', 'closedAt', 'declined', 'header', 'project', 'qid', 'ref', 'seq', 'state', 'text', 'ticketId', 'timeToAnswerMs', 'via'].sort());
+  assert.strictEqual(inline.text, 'Fold or reread?');
+  assert.strictEqual(inline.ref, 'SQ-900');
+  assert.strictEqual(inline.seq, 'Q1');
+  assert.strictEqual(inline.asker, 'sq-900-exec');
+  assert.strictEqual(inline.state, 'answered');
+  assert.strictEqual(inline.via, 'dashboard');
+  assert.strictEqual(typeof inline.timeToAnswerMs, 'number');
+  assert.ok(inline.answeredAt >= inline.askedAt);
+  const open = listed.questions.find((row?: any) => row.qid === seeded.open.qid);
+  assert.deepStrictEqual([open.state, open.answeredAt, open.timeToAnswerMs, open.via], ['open', null, null, null]);
+  const declined = listed.questions.find((row?: any) => row.qid === seeded.declined.qid);
+  assert.deepStrictEqual([declined.state, declined.asker, declined.declined], ['declined', 'filing', true]);
+
+  const all = await fetchJson(started.port, '/api/questions?project=all');
+  assert.strictEqual(all.project, 'all');
+  assert.ok(all.questions.some((row?: any) => row.qid === seeded.inline.qid && row.project === slug));
+
+  assert.deepStrictEqual((await fetchJson(started.port, `/api/questions?project=${slug}&state=open`)).questions.map((row?: any) => row.qid), [seeded.open.qid]);
+  assert.deepStrictEqual((await fetchJson(started.port, `/api/questions?project=${slug}&state=declined`)).questions.map((row?: any) => row.qid), [seeded.declined.qid]);
+  assert.deepStrictEqual((await fetchJson(started.port, `/api/questions?project=${slug}&ref=sq-901`)).questions.map((row?: any) => row.qid), [seeded.declined.qid]);
+
+  const page = await fetchJson(started.port, `/api/questions?project=${slug}&limit=3`);
+  assert.strictEqual(page.questions.length, 3);
+  assert.strictEqual(page.nextBefore, seeded.long.qid);
+  const rest = await fetchJson(started.port, `/api/questions?project=${slug}&limit=3&before=${page.nextBefore}`);
+  assert.deepStrictEqual(rest.questions.map((row?: any) => row.qid), [seeded.inline.qid]);
+  assert.strictEqual(rest.nextBefore, null);
+
+  assert.strictEqual((await requestJson(started.port, 'GET', `/api/questions?project=${slug}&state=maybe`)).status, 400);
+  assert.strictEqual((await requestJson(started.port, 'GET', `/api/questions?project=${slug}&limit=0`)).status, 400);
+  assert.strictEqual((await requestJson(started.port, 'GET', `/api/questions?project=${slug}&before=soon`)).status, 400);
+  assert.strictEqual((await requestJson(started.port, 'GET', '/api/questions?project=no-such-board')).status, 404);
+  assert.strictEqual((await requestJson(started.port, 'GET', '/api/questions?project=..')).status, 400);
+});
+
+test('SQ-417 GET /api/questions/<qid> returns the full record with answer metadata only; /answer returns the text', async (t?: any) => {
+  const { slug, dir } = questionProject('detail');
+  const seeded = seedQuestions(dir);
+  const started = await start(await availablePort());
+  t.after(() => started.server.close());
+
+  const raw = await requestRaw(started.port, `/api/questions/${seeded.inline.qid}?project=${slug}`);
+  assert.strictEqual(raw.status, 200);
+  assertNoAnswerText(raw.body, 'detail');
+  const { question } = JSON.parse(raw.body);
+  assert.strictEqual(question.text, 'Fold or reread?');
+  assert.strictEqual(question.header, 'Fold?');
+  assert.deepStrictEqual(question.options, [{ label: 'Fold', description: 'reuse the fold' }, { label: 'Reread', description: 'read the file' }]);
+  assert.strictEqual(question.default, 'Fold');
+  assert.strictEqual(question.archived, false);
+  assert.strictEqual(question.answer.aid, seeded.replaced.aid);
+  assert.strictEqual(question.answer.via, 'dashboard');
+  assert.strictEqual(question.answer.supersedes, seeded.first.aid);
+  assert.strictEqual(question.answer.stored, 'inline');
+  assert.strictEqual(question.answer.bytes, Buffer.byteLength(seeded.inlineAnswer));
+  assert.deepStrictEqual(question.superseded.map((answer?: any) => answer.aid), [seeded.first.aid], 'the supersede chain');
+  assert.deepStrictEqual(question.events.map((event?: any) => event.type).sort(), ['answered', 'answered', 'asked', 'delivered', 'sent']);
+  assert.strictEqual(question.answerUrl, `/api/questions/${seeded.inline.qid}/answer?project=${slug}`);
+
+  // The detail locates a qid without a project too, across every board with a log.
+  assert.strictEqual((await fetchJson(started.port, `/api/questions/${seeded.inline.qid}`)).question.project, slug);
+
+  const answer = await fetchJson(started.port, question.answerUrl);
+  assert.deepStrictEqual([answer.text, answer.aid, answer.current, answer.stored], [seeded.inlineAnswer, seeded.replaced.aid, true, 'inline']);
+  const earlier = await fetchJson(started.port, `/api/questions/${seeded.inline.qid}/answer?project=${slug}&aid=${seeded.first.aid}`);
+  assert.deepStrictEqual([earlier.text, earlier.current], [seeded.supersededAnswer, false]);
+
+  const longDetail = await fetchJson(started.port, `/api/questions/${seeded.long.qid}?project=${slug}`);
+  assert.strictEqual(longDetail.question.answer.stored, 'body');
+  assert.strictEqual(longDetail.question.answer.userAuthored, false, 'orchestrator answers are labelled not user-authored');
+  assert.strictEqual(longDetail.question.answer.bytes, Buffer.byteLength(seeded.longAnswer));
+  const body = await fetchJson(started.port, `/api/questions/${seeded.long.qid}/answer?project=${slug}`);
+  assert.strictEqual(body.text, seeded.longAnswer, 'a long answer is read back from its body file');
+
+  const declinedDetail = await fetchJson(started.port, `/api/questions/${seeded.declined.qid}?project=${slug}`);
+  assert.deepStrictEqual([declinedDetail.question.state, declinedDetail.question.answer.declined, declinedDetail.question.answerUrl], ['declined', true, null]);
+  const declined = await fetchJson(started.port, `/api/questions/${seeded.declined.qid}/answer?project=${slug}`);
+  assert.deepStrictEqual([declined.declined, declined.text], [true, null]);
+
+  assert.strictEqual((await requestJson(started.port, 'GET', `/api/questions/${seeded.open.qid}/answer?project=${slug}`)).status, 404, 'an open question has no answer');
+  assert.strictEqual((await requestJson(started.port, 'GET', `/api/questions/${seeded.inline.qid}/answer?project=${slug}&aid=a_zzzzzzzz_zzzzzz`)).status, 404);
+  assert.strictEqual((await requestJson(started.port, 'GET', `/api/questions/q_zzzzzzzz_zzzzzz?project=${slug}`)).status, 404);
+  assert.strictEqual((await requestJson(started.port, 'GET', `/api/questions/not-a-qid?project=${slug}`)).status, 400);
+  assert.strictEqual((await requestJson(started.port, 'GET', `/api/questions/${seeded.inline.qid}?project=no-such-board`)).status, 404);
+
+  fs.rmSync(path.join(dir, 'bodies', `${seeded.body.aid}.txt`));
+  const missing = await requestJson(started.port, 'GET', `/api/questions/${seeded.long.qid}/answer?project=${slug}`);
+  assert.strictEqual(missing.status, 404);
+  assert.match(missing.body.error, /missing/);
+});
+
+test('SQ-417 question reads use the in-memory fold and touch no store function but readMeta (never the board lock)', { concurrency: false }, async (t?: any) => {
+  const { slug, dir } = questionProject('nolock');
+  const seeded = seedQuestions(dir);
+  const started = await start(await availablePort());
+  t.after(() => started.server.close());
+
+  const originals = new Map<string, any>();
+  for (const [name, value] of Object.entries(store)) {
+    if (typeof value !== 'function' || name === 'readMeta') continue;
+    originals.set(name, value);
+    store[name] = () => { throw new Error(`question read called store.${name}`); };
+  }
+  t.after(() => { for (const [name, value] of originals) store[name] = value; });
+
+  assert.strictEqual((await fetchJson(started.port, `/api/questions?project=${slug}`)).questions.length, 4);
+  assert.strictEqual((await fetchJson(started.port, `/api/questions/${seeded.inline.qid}?project=${slug}`)).question.qid, seeded.inline.qid);
+  assert.strictEqual((await fetchJson(started.port, `/api/questions/${seeded.long.qid}/answer?project=${slug}`)).text, seeded.longAnswer);
+
+  // A new question appended after the first read shows up: the cached fold advances.
+  const later = askedOk(questionLog.askQuestion(dir, { ref: 'SQ-902', agent: 'sq-902-exec', text: 'Appended after the first read' }));
+  const after = await fetchJson(started.port, `/api/questions?project=${slug}`);
+  assert.strictEqual(after.questions.length, 5);
+  assert.strictEqual(after.questions[0].qid, later.qid);
+});
+
+test('SQ-417 archived questions list from their segment index, and their detail and answer still resolve', async (t?: any) => {
+  const { slug, dir } = questionProject('archive');
+  const asked = askedOk(questionLog.askQuestion(dir, { ref: 'SQ-910', agent: 'sq-910-exec', text: 'September question' }, { now: Date.parse('2026-09-10T12:00:00.000Z') }));
+  const answered = askedOk(questionLog.answerQuestion(dir, { ref: 'SQ-910', question: asked.qid, text: 'INLINE-ANSWER-SQ417 archived' }, { now: Date.parse('2026-09-10T12:05:00.000Z') }));
+  askedOk(questionLog.recordDelivered(dir, { aid: answered.aid }, { now: Date.parse('2026-09-10T12:06:00.000Z') }));
+  const current = askedOk(questionLog.askQuestion(dir, { ref: 'SQ-911', text: 'October question' }, { now: Date.parse('2026-10-01T00:00:05.000Z') }));
+  assert.strictEqual(questionLog.listArchivedSegments(dir).length, 1, 'the new month rotated the segment');
+  const started = await start(await availablePort());
+  t.after(() => started.server.close());
+
+  const raw = await requestRaw(started.port, `/api/questions?project=${slug}`);
+  assertNoAnswerText(raw.body, 'archived list');
+  const listed = JSON.parse(raw.body).questions;
+  assert.deepStrictEqual(listed.map((row?: any) => row.qid), [current.qid, asked.qid]);
+  assert.strictEqual(listed[1].state, 'answered');
+  assert.strictEqual(listed[1].timeToAnswerMs, 5 * 60 * 1000);
+
+  const detail = await fetchJson(started.port, `/api/questions/${asked.qid}?project=${slug}`);
+  assert.deepStrictEqual([detail.question.archived, detail.question.answer.aid], [true, answered.aid]);
+  assert.strictEqual((await fetchJson(started.port, `/api/questions/${asked.qid}/answer?project=${slug}`)).text, 'INLINE-ANSWER-SQ417 archived');
+});
+
 test('listenOn walks past EADDRINUSE and Windows-excluded EACCES ports', async () => {
   const refusals = new Map([[50000, 'EACCES'], [50001, 'EACCES'], [50002, 'EADDRINUSE']]);
   const port = await listenOn(fakeServer(refusals), 50000, '127.0.0.1', 700);
