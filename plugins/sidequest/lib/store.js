@@ -2990,7 +2990,7 @@ function recordedDelivery(slug, ticket, commit, evidence) {
 }
 function pendingSubmissionDeliveryRefusal(ticket, result) {
   return Object.assign({}, result, {
-    message: `${String(result?.message || `${ticket.ref} submission could not be recorded as delivered.`)} To discard this pending candidate instead, use groomClose with \`abandonSubmission: true\`; the board records it as abandoned.`
+    message: `${String(result?.message || `${ticket.ref} submission could not be recorded as delivered.`)} To discard this pending candidate instead, once no landing on the target carries its work, use groomClose with \`abandonSubmission: true\`; the board records it as abandoned.`
   });
 }
 function clearUnclaimedDispatch(slug, idOrRef, opts) {
@@ -3007,7 +3007,7 @@ function clearUnclaimedDispatch(slug, idOrRef, opts) {
     const state = dispatchState(ticket);
     if (!ticket || !state || !ticket.dispatchNonce || state.terminalAt) {
       const outcome = String(state?.outcome || "unknown").trim() || "unknown";
-      const pendingSubmissionGuidance = pendingSubmission(ticket) ? ` This ticket has a pending submission: use groomClose with deliveryCommit when the delivered commit preserves the candidate, or groomClose with abandonSubmission: true when it does not.` : "";
+      const pendingSubmissionGuidance = pendingSubmission(ticket) ? ` This ticket has a pending submission: use groomClose with deliveryCommit when the delivered commit preserves the candidate, with landingCommits (or deliveryMethod "attested" and landingCommits) when its work landed on the target by rebase, fold, or later edits, or with abandonSubmission: true when it never landed.` : "";
       return {
         ok: false,
         reason: "no_unclaimed_dispatch",
@@ -3141,12 +3141,15 @@ function completeTicketAsControlPlane(slug, idOrRef, opts) {
       const deliveredSubmission = recordDeliveredSubmission(slug, idOrRef, {
         target,
         deliveryCommit: ticket.submission?.commit,
+        equivalentLanding: true,
+        landingCommits: opts.landingCommits,
+        ...String(opts.deliveryMethod || "").trim() === "attested" ? { deliveryMethod: "attested" } : {},
         reason
       });
       if (!deliveredSubmission.ok) {
         const landed = commitScope.submissionCommitReachedIntegrationBranch(readMeta(slug)?.path || "", ticket.submission || {}, target?.branch);
         return landed ? deliveredSubmission : Object.assign({}, deliveredSubmission, {
-          message: `${String(deliveredSubmission.message || `${ticket.ref} submission could not be recorded as delivered.`)} Its candidate is not reachable from ${target?.branch || "the integration branch"}, so if it never landed and no longer merges, close it as an abandoned submission instead: \`sidequest groom-close ${ticket.ref} --abandon-submission --reason "<evidence it never landed>"\` (MCP \`abandonSubmission: true\`).`
+          message: `${String(deliveredSubmission.message || `${ticket.ref} submission could not be recorded as delivered.`)} Its candidate is not reachable from ${target?.branch || "the integration branch"}, so if it never landed (no rebase, cherry-pick, fold, or attested landing carries it) and no longer merges, close it as an abandoned submission instead: \`sidequest groom-close ${ticket.ref} --abandon-submission --reason "<evidence it never landed>"\` (MCP \`abandonSubmission: true\`).`
         });
       }
     }
@@ -3164,6 +3167,9 @@ function completeTicketAsControlPlane(slug, idOrRef, opts) {
       deliveryCommit: opts.deliveryCommit,
       deliveryInteractionCommit: opts.deliveryInteractionCommit,
       deliveryMethod: opts.deliveryMethod,
+      // SQ-407: a groomClose naming its delivery commit may also prove an equivalent landing.
+      equivalentLanding: true,
+      landingCommits: opts.landingCommits,
       reason
     });
     if (!recordedSubmission.ok) return pendingSubmissionDeliveryRefusal(ticket, recordedSubmission);
