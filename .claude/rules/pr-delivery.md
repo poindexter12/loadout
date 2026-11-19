@@ -23,8 +23,9 @@ priority: 50
 - Do not hand-push a wave branch while that mode is on — it would duplicate the board's PR. The hand
   procedure (`git push -u origin HEAD:refs/heads/<branch>`, open the PR, leave local `main` alone,
   then `git fetch origin` and reconcile) is the fallback for `local` mode only.
-- Auto-merge does not fire on this repository. `gh pr merge --auto` has been armed and silently failed
-  to land a green PR twice (#37, #39), so merge every green PR explicitly and confirm `main` moved.
+- Auto-merge is unreliable here. The board arms it on wave PRs and it often lands them (#72, #75), but
+  it has also silently failed to land a green PR (#37, #39). Once checks are green, confirm `main`
+  moved; if the PR is still open, merge it explicitly.
 - One exemption, and it is the only one: `scripts/release/cut.mjs --push` publishes `main` and its
   tag atomically under the Sidequest publish lock. It is release-owned and uses the ruleset's admin
   bypass; there is no pre-push hook in this repo to enforce it. Everything it publishes must already
