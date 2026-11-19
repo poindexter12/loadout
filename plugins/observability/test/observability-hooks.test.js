@@ -477,6 +477,8 @@ test('hooks.json launches the observer and registers observability across lifecy
   const commandsFor = (event) => (hooks[event] || []).flatMap((group) => group.hooks.map((h) => h.command)).join(' ');
   assert.ok(commandsFor('SessionStart').includes('lib/observability/ensure.js'));
   assert.ok(commandsFor('SessionStart').includes('--launch'));
+  const launchHook = hooks.SessionStart[0].hooks[0];
+  assert.equal(launchHook.timeout, 2, 'ensure launch has startup headroom');
   assert.ok(commandsFor('PreToolUse').includes('request-body-preflight.js'));
   for (const event of ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'SubagentStart', 'SubagentStop']) {
     assert.ok(commandsFor(event).includes('observability.js'), `observability missing on ${event}`);
