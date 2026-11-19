@@ -68,7 +68,10 @@ const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 // The filter stays structured for the same reason deliveryChannel did: an orchestrator turning the
 // mirror on has to know that an empty filter is refused and that review categories need naming, and
 // a packed string would make it learn both from a refusal instead of the schema.
-const MCP_TOOLS_LIST_MAX_BYTES = 24950;
+// Raised from 24950 for groomClose landingCommits and deliveryMethod "attested" (SQ-407, 147 bytes)
+// while preserving the 2.5KB reserve. Without them an orchestrator closing work that landed by rebase,
+// fold, or later edits had no legal move but a false "abandoned".
+const MCP_TOOLS_LIST_MAX_BYTES = 25100;
 const MCP_TOOLS_LIST_HEADROOM_BYTES = 2500;
 
 function serverVersion() {

@@ -238,7 +238,9 @@ async function cmdGroomClose(opts, positional) {
     abandonSubmission: opts["abandon-submission"] === true,
     deliveryCommit: opts["delivery-commit"],
     deliveryInteractionCommit: opts["delivery-interaction-commit"],
-    deliveryMethod: opts["delivery-method"]
+    deliveryMethod: opts["delivery-method"],
+    // SQ-407: commits on the target carrying work that landed by rebase, cherry-pick, or fold.
+    landingCommits: opts["landing-commit"]
   });
   if (res.ok && !res.idempotent) closeDispatchExecutor(ticket);
   if (res.ok && opts.integration) {
