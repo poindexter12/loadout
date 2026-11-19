@@ -7,11 +7,14 @@ import { isSubagent, stringField, type HookInput } from './input.js';
 import { pluginRoot } from './paths.js';
 
 // The sweep removes worktrees, backs up dirty ones and prunes branches: dozens of
-// git subprocesses plus recursive directory deletes. Its cost is bimodal — a few
-// hundred ms when there is nothing to collect, ten seconds or more when there is —
-// so awaiting it unbounded is what pushes SessionStart past the harness timeout,
-// and a timed-out hook has its whole stdout discarded.
-const DEFAULT_DEADLINE_MS = 2500;
+// git subprocesses plus recursive directory deletes, after whole-board bookkeeping
+// (stale claims and the global ticket read) that alone measured 2.3-7.3s on a
+// 629-ticket board. SessionStart used to wait up to 2500ms for it, which it could
+// never meet, so every start paid the full wait and printed a deferral (SQ-405).
+// SessionStart now hands the sweep to the detached worker and returns at once, the
+// way SessionEnd does (SQ-386); the worker's report drains on the next start.
+// SIDEQUEST_SWEEP_DEADLINE_MS remains as an explicit opt-in wait budget, for tests
+// and diagnosis that need to observe a sweep inside the same start.
 
 export const DEFERRAL_NOTICE =
   'sidequest: worktree sweep exceeded its SessionStart budget and is still running in the background.';
@@ -33,9 +36,29 @@ const EMPTY_SWEEP_PROGRESS: SweepProgress = { planned: 0, removed: 0, keptByReas
 export const HANDOFF_FAILED_NOTICE =
   'sidequest: worktree sweep could not run, so stale agent worktrees were not collected this session.';
 
-export function deadlineMs(): number {
-  const raw = Number(process.env.SIDEQUEST_SWEEP_DEADLINE_MS);
-  return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_DEADLINE_MS;
+// null means no wait: the default. A number is an explicit opt-in wait budget.
+export function deadlineMs(): number | null {
+  const value = String(process.env.SIDEQUEST_SWEEP_DEADLINE_MS ?? '').trim();
+  if (!value) return null;
+  const raw = Number(value);
+  return Number.isFinite(raw) && raw >= 0 ? raw : null;
+}
+
+// The worker is detached and has no external deadline, but it must not inherit the
+// server's lock budget (15s x 3 attempts): one contended write stalled a sweep for
+// 46s (SQ-253). It deliberately does not import shared/sqlite-budget.js, whose
+// fail-open budget calls process.exit(0): that would end the worker mid-sweep with
+// no report and leave a fresh progress file that makes SessionEnd skip its sweep as
+// "in flight" for ten minutes. This budget waits once, then throws into the worker's
+// own error handling, which records the failure in its report for the next start.
+// A board read that fails skips that project's collection, so nothing is removed on
+// a guess (SQ-405).
+export function installSweepWorkerBudget(): void {
+  Reflect.set(globalThis, Symbol.for('sidequest.sqlite-busy-policy'), Object.freeze({
+    label: 'sweep-worker',
+    timeoutMs: 5_000,
+    attempts: 1,
+  }));
 }
 
 function stateDirectory(): string {
@@ -91,7 +114,7 @@ function clearSweepProgress(cwd: string): void {
   } catch (_) {}
 }
 
-export function deferralNotice(cwd: string, progress: SweepProgress): string {
+export function deferralNotice(cwd: string, progress: SweepProgress, budgetMs: number = deadlineMs() ?? 0): string {
   const kept = Object.values(progress.keptByReason).reduce((total, count) => total + count, 0);
   const reasons = Object.entries(progress.keptByReason).map(([reason, count]) => `${reason} ${count}`).join(', ') || 'none';
   const command = `node "${pluginRoot()}/bin/sidequest.js" worktrees sweep --yes --project "${path.resolve(cwd || '.')}"`;
@@ -102,7 +125,7 @@ export function deferralNotice(cwd: string, progress: SweepProgress): string {
   // that instead of the capture failure in front of them. The assessed count is
   // what makes that misreading avoidable: "assessed 0 of 81" says the zeros are a
   // starting position, where bare "planned 0" read as a verdict (SQ-267).
-  return `${DEFERRAL_NOTICE} Progress at the ${deadlineMs()}ms budget, not a final result: assessed ${progress.considered} of ${progress.total} candidate worktrees, planned ${progress.planned}, removed ${progress.removed}, skipped ${kept} (${reasons}). The detached sweep keeps running and reports on the next session start. Finish it sooner with ${command}.`;
+  return `${DEFERRAL_NOTICE} Progress at the ${budgetMs}ms budget, not a final result: assessed ${progress.considered} of ${progress.total} candidate worktrees, planned ${progress.planned}, removed ${progress.removed}, skipped ${kept} (${reasons}). The detached sweep keeps running and reports on the next session start. Finish it sooner with ${command}.`;
 }
 
 export function writeReport(cwd: string, notices: string[]): void {
@@ -230,21 +253,44 @@ export function detachSweep(data: HookInput): string[] {
   return [];
 }
 
-// Always runs the sweep in a detached child and waits only up to the deadline. The
-// child owns the mutating work, so a slow sweep costs the session its deadline
-// rather than its entire injected context.
-export async function runSweep(data: HookInput): Promise<string[]> {
+type StartedSweep = Readonly<{ carried: string[]; child: ChildProcess | null }>;
+
+// Drains what earlier sweeps left for this start, then hands this start's sweep to a
+// detached worker. Unlike detachSweep it does not skip when a worker is in flight: a
+// start is the only run that reconciles this session's lost launches, so it always
+// spawns, as it did before SQ-405.
+function startSweepWorker(data: HookInput): StartedSweep {
   const cwd = sweepCwd(data);
   const carried = [...drainCarried(cwd), ...(drainReport(cwd) || [])];
-  const budget = deadlineMs();
   writeSweepProgress(cwd, EMPTY_SWEEP_PROGRESS);
-  let child: ChildProcess;
   try {
-    child = spawnSweepWorker(data, cwd, { sessionId: stringField(data, 'session_id', 'sessionId') });
+    return { carried, child: spawnSweepWorker(data, cwd, { sessionId: stringField(data, 'session_id', 'sessionId') }) };
   } catch (_) {
     clearSweepProgress(cwd);
-    return [...carried, HANDOFF_FAILED_NOTICE];
+    return { carried, child: null };
   }
+}
+
+// SQ-405: SessionStart's sweep. Synchronous on purpose: it spawns the detached worker
+// and returns the notices earlier sweeps left, never waiting on this one. The worker
+// writes its report for the next session start.
+export function startSweep(data: HookInput): string[] {
+  const { carried, child } = startSweepWorker(data);
+  if (!child) return [...carried, HANDOFF_FAILED_NOTICE];
+  child.once('error', () => {});
+  child.unref();
+  return carried;
+}
+
+// The opt-in waiting form, used only when SIDEQUEST_SWEEP_DEADLINE_MS is set: runs the
+// sweep in a detached child and waits up to that budget. Without a budget it is
+// startSweep and returns at once.
+export async function runSweep(data: HookInput): Promise<string[]> {
+  const budget = deadlineMs();
+  if (budget === null) return startSweep(data);
+  const cwd = sweepCwd(data);
+  const { carried, child } = startSweepWorker(data);
+  if (!child) return [...carried, HANDOFF_FAILED_NOTICE];
 
   const outcome = await new Promise<'exited' | 'deferred' | 'failed'>((resolve) => {
     if (budget === 0) return resolve('deferred');
@@ -259,7 +305,7 @@ export async function runSweep(data: HookInput): Promise<string[]> {
   }
   if (outcome === 'deferred') {
     child.unref();
-    return [...carried, deferralNotice(cwd, readSweepProgress(cwd))];
+    return [...carried, deferralNotice(cwd, readSweepProgress(cwd), budget)];
   }
   const report = drainReport(cwd);
   return report === null ? [...carried, HANDOFF_FAILED_NOTICE] : [...carried, ...report];

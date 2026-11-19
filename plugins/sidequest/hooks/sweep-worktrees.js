@@ -93,6 +93,13 @@ var import_node_crypto = __toESM(require("node:crypto"));
 var import_node_fs2 = __toESM(require("node:fs"));
 var import_node_path3 = __toESM(require("node:path"));
 var EMPTY_SWEEP_PROGRESS = { planned: 0, removed: 0, keptByReason: {}, considered: 0, total: 0 };
+function installSweepWorkerBudget() {
+  Reflect.set(globalThis, /* @__PURE__ */ Symbol.for("sidequest.sqlite-busy-policy"), Object.freeze({
+    label: "sweep-worker",
+    timeoutMs: 5e3,
+    attempts: 1
+  }));
+}
 function stateDirectory() {
   const home = resolveSidequestHome();
   return import_node_path3.default.join(home, "sweep-reports");
@@ -368,6 +375,7 @@ async function sweepWorktrees(data, includeKnownProjects) {
 }
 
 // src/hooks/sweep-worktrees.ts
+installSweepWorkerBudget();
 function argument(name) {
   const index = process.argv.indexOf(`--${name}`);
   return index >= 0 ? String(process.argv[index + 1] || "") : "";

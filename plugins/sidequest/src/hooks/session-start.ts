@@ -187,6 +187,8 @@ async function main(): Promise<void> {
   registerSweepSession(data);
   let sweepNotices: string[] = [];
   let auditNotices: string[] = [];
+  // SQ-405: runSweep only spawns the detached worker and returns what earlier sweeps left;
+  // it waits on this start's sweep only under an explicit SIDEQUEST_SWEEP_DEADLINE_MS.
   [sweepNotices, auditNotices] = await Promise.all([
     runSweep(data).catch((error: unknown) => [`sidequest: worktree sweep failed: ${error instanceof Error ? error.message : String(error)}`]),
     runAuditHandoff(data).catch(() => []),

@@ -268,13 +268,14 @@ var import_node_child_process = require("node:child_process");
 var import_node_crypto2 = __toESM(require("node:crypto"));
 var import_node_fs4 = __toESM(require("node:fs"));
 var import_node_path5 = __toESM(require("node:path"));
-var DEFAULT_DEADLINE_MS = 2500;
 var DEFERRAL_NOTICE = "sidequest: worktree sweep exceeded its SessionStart budget and is still running in the background.";
 var EMPTY_SWEEP_PROGRESS = { planned: 0, removed: 0, keptByReason: {}, considered: 0, total: 0 };
 var HANDOFF_FAILED_NOTICE = "sidequest: worktree sweep could not run, so stale agent worktrees were not collected this session.";
 function deadlineMs() {
-  const raw = Number(process.env.SIDEQUEST_SWEEP_DEADLINE_MS);
-  return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_DEADLINE_MS;
+  const value = String(process.env.SIDEQUEST_SWEEP_DEADLINE_MS ?? "").trim();
+  if (!value) return null;
+  const raw = Number(value);
+  return Number.isFinite(raw) && raw >= 0 ? raw : null;
 }
 function stateDirectory2() {
   const home = resolveSidequestHome();
@@ -320,11 +321,11 @@ function clearSweepProgress(cwd) {
   } catch (_) {
   }
 }
-function deferralNotice(cwd, progress) {
+function deferralNotice(cwd, progress, budgetMs = deadlineMs() ?? 0) {
   const kept = Object.values(progress.keptByReason).reduce((total, count) => total + count, 0);
   const reasons = Object.entries(progress.keptByReason).map(([reason, count]) => `${reason} ${count}`).join(", ") || "none";
   const command = `node "${pluginRoot()}/bin/sidequest.js" worktrees sweep --yes --project "${import_node_path5.default.resolve(cwd || ".")}"`;
-  return `${DEFERRAL_NOTICE} Progress at the ${deadlineMs()}ms budget, not a final result: assessed ${progress.considered} of ${progress.total} candidate worktrees, planned ${progress.planned}, removed ${progress.removed}, skipped ${kept} (${reasons}). The detached sweep keeps running and reports on the next session start. Finish it sooner with ${command}.`;
+  return `${DEFERRAL_NOTICE} Progress at the ${budgetMs}ms budget, not a final result: assessed ${progress.considered} of ${progress.total} candidate worktrees, planned ${progress.planned}, removed ${progress.removed}, skipped ${kept} (${reasons}). The detached sweep keeps running and reports on the next session start. Finish it sooner with ${command}.`;
 }
 function drainReport(cwd) {
   const file = reportFile(cwd);
@@ -384,18 +385,31 @@ function drainCarried(cwd) {
   }
   return notices;
 }
-async function runSweep(data) {
+function startSweepWorker(data) {
   const cwd = sweepCwd(data);
   const carried = [...drainCarried(cwd), ...drainReport(cwd) || []];
-  const budget = deadlineMs();
   writeSweepProgress(cwd, EMPTY_SWEEP_PROGRESS);
-  let child;
   try {
-    child = spawnSweepWorker(data, cwd, { sessionId: stringField(data, "session_id", "sessionId") });
+    return { carried, child: spawnSweepWorker(data, cwd, { sessionId: stringField(data, "session_id", "sessionId") }) };
   } catch (_) {
     clearSweepProgress(cwd);
-    return [...carried, HANDOFF_FAILED_NOTICE];
+    return { carried, child: null };
   }
+}
+function startSweep(data) {
+  const { carried, child } = startSweepWorker(data);
+  if (!child) return [...carried, HANDOFF_FAILED_NOTICE];
+  child.once("error", () => {
+  });
+  child.unref();
+  return carried;
+}
+async function runSweep(data) {
+  const budget = deadlineMs();
+  if (budget === null) return startSweep(data);
+  const cwd = sweepCwd(data);
+  const { carried, child } = startSweepWorker(data);
+  if (!child) return [...carried, HANDOFF_FAILED_NOTICE];
   const outcome = await new Promise((resolve) => {
     if (budget === 0) return resolve("deferred");
     const timer = setTimeout(() => resolve("deferred"), budget);
@@ -414,7 +428,7 @@ async function runSweep(data) {
   }
   if (outcome === "deferred") {
     child.unref();
-    return [...carried, deferralNotice(cwd, readSweepProgress(cwd))];
+    return [...carried, deferralNotice(cwd, readSweepProgress(cwd), budget)];
   }
   const report = drainReport(cwd);
   return report === null ? [...carried, HANDOFF_FAILED_NOTICE] : [...carried, ...report];
