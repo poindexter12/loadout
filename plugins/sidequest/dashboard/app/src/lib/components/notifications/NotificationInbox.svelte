@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { Notification } from '../../types';
+  import type { Notification, OpenQuestion } from '../../types';
   import type { BoardState } from '../../state/board.svelte';
 
   let { state }: { state: BoardState } = $props();
@@ -15,6 +15,7 @@
   let unread = $derived(state.raw?.notifications.unread ?? 0);
   let unreadNeeds = $derived(state.raw?.notifications.unreadNeeds ?? 0);
   let activityUnread = $derived(Math.max(0, unread - unreadNeeds));
+  let openQuestions = $derived(state.raw?.notifications.openQuestions ?? []);
   let notificationIcon = '';
 
   function isRead(notification: Notification) {
@@ -47,6 +48,14 @@
   }
 
   async function openNotification(notification: Notification) {
+    const question = notification.question as { qid: string; project?: string } | undefined;
+    if (question) {
+      if (question.project) state.selectProject(question.project);
+      state.view = 'questions';
+      globalThis.location.hash = `/questions/${question.qid}`;
+      state.popover = null;
+      return;
+    }
     if (!isRead(notification)) await state.markNotificationsRead({ id: notification.id });
     const project = typeof notification.projectSlug === 'string' ? notification.projectSlug : undefined;
     if (project) state.selectProject(project);
@@ -60,6 +69,13 @@
       state.openArchive();
       state.toast(`Opening archived ticket ${notification.ticketRef}.`);
     }
+  }
+
+  function openQuestion(question: OpenQuestion) {
+    if (question.project) state.selectProject(question.project);
+    state.view = 'questions';
+    globalThis.location.hash = `/questions/${question.qid}`;
+    state.popover = null;
   }
 
   function createNotificationIcon() {
@@ -145,6 +161,15 @@
       {/each}
     </div>
     <div class="notification-list">
+      {#if state.inboxTab === 'needs'}
+        {#each openQuestions as question (question.qid)}
+          <button class="notification needs question" onclick={() => openQuestion(question)}>
+            <span class="dot" aria-hidden="true"></span>
+            <span class="copy"><strong>{question.header ?? question.seq}</strong><span>{question.ref} · Needs an answer</span></span>
+            <time>{notificationTime({ createdAt: question.askedAt })}</time>
+          </button>
+        {/each}
+      {/if}
       {#each state.unreadBuckets[state.inboxTab] as notification (notification.id)}
         <button class:read={isRead(notification)} class:needs={notification.kind === 'reminder'} class="notification" onclick={() => openNotification(notification)}>
           <span class="dot" aria-hidden="true"></span>
@@ -154,9 +179,10 @@
           </span>
           <time>{notificationTime(notification)}</time>
         </button>
-      {:else}
-        <p class="empty">{emptyCopy[state.inboxTab]}</p>
       {/each}
+      {#if state.unreadBuckets[state.inboxTab].length === 0 && (state.inboxTab !== 'needs' || openQuestions.length === 0)}
+        <p class="empty">{emptyCopy[state.inboxTab]}</p>
+      {/if}
     </div>
   </section>
 {/if}

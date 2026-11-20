@@ -503,6 +503,39 @@ function answerUrl(slug, qid, aid) {
   const query = `project=${encodeURIComponent(slug)}${aid ? `&aid=${encodeURIComponent(aid)}` : ""}`;
   return `/api/questions/${encodeURIComponent(qid)}/answer?${query}`;
 }
+function activityLimit(raw) {
+  if (raw == null || raw === "") return 100;
+  const limit = Number(raw);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new QuestionRequestError(400, "limit must be an integer from 1 to 500");
+  return limit;
+}
+function activityItems(q) {
+  const scope = questionProjects(q.project);
+  const since = q.since == null || q.since === "" ? null : String(q.since);
+  if (since && !Number.isFinite(Date.parse(since))) throw new QuestionRequestError(400, "since must be an ISO time");
+  const activity = [];
+  for (const slug of scope.slugs) {
+    for (const question of projectQuestionRows(slug)) {
+      activity.push({ id: `question:${question.qid}:asked`, at: question.askedAt, title: "Question asked", detail: `${question.ref} · ${question.header || question.seq}` });
+      if (question.answeredAt) activity.push({ id: `question:${question.qid}:answered`, at: question.answeredAt, title: "Question answered", detail: `${question.ref} · ${question.header || question.seq}` });
+      if (question.closedAt && question.state === "withdrawn") activity.push({ id: `question:${question.qid}:withdrawn`, at: question.closedAt, title: "Question withdrawn", detail: `${question.ref} · ${question.header || question.seq}` });
+    }
+    for (const ticket of store.listTickets(slug)) {
+      const ref = ticket.ref || ticket.id;
+      for (const comment of Array.isArray(ticket.comments) ? ticket.comments : []) {
+        if (!comment?.at) continue;
+        activity.push({ id: `comment:${slug}:${ticket.id}:${comment.id || comment.at}`, at: comment.at, title: "Ticket comment", detail: `${ref} · ${comment.by || "unknown"}` });
+      }
+      for (const attempt of Array.isArray(ticket.dispatch?.attempts) ? ticket.dispatch.attempts : []) {
+        const at = attempt?.at || attempt?.startedAt || attempt?.preparedAt;
+        if (!at) continue;
+        activity.push({ id: `dispatch:${slug}:${ticket.id}:${attempt.id || at}`, at, title: "Dispatch attempt", detail: `${ref} · ${attempt.outcome || "started"}` });
+      }
+    }
+  }
+  const cutoff = since ? Date.parse(since) : null;
+  return activity.filter((item) => cutoff == null || Date.parse(item.at) >= cutoff).sort((left, right) => Date.parse(right.at) - Date.parse(left.at) || String(left.id).localeCompare(String(right.id))).slice(0, activityLimit(q.limit));
+}
 function questionDetail(q, qid) {
   const { slug, state, archived } = locateQuestion(q, qid);
   const asked = state.asked;
@@ -1063,6 +1096,10 @@ async function handle(req, res) {
     sendQuestionResponse(res, () => questionList(q));
     return;
   }
+  if (req.method === "GET" && pathname === "/api/activity") {
+    sendQuestionResponse(res, () => ({ project: q.project || "all", activity: activityItems(q) }));
+    return;
+  }
   const questionAnswerMatch = /^\/api\/questions\/([^/]+)\/answer$/.exec(pathname);
   if (req.method === "GET" && questionAnswerMatch) {
     sendQuestionResponse(res, () => questionAnswer(q, questionAnswerMatch[1]));
@@ -1314,8 +1351,9 @@ async function handle(req, res) {
     const notifications = store.listNotifications(opts);
     const unreadList = store.listNotifications(Object.assign({}, opts, { unreadOnly: true, kind: void 0, limit: void 0 }));
     const unread = unreadList.length;
-    const unreadNeeds = unreadList.filter((n) => n.kind === "reminder").length;
-    sendJson(res, 200, { notifications, unread, unreadNeeds });
+    const openQuestions = questionProjects(opts.projectSlug).slugs.flatMap((slug) => projectQuestionRows(slug)).filter((question) => question.state === "open").map((question) => ({ qid: question.qid, project: question.project, ref: question.ref, seq: question.seq, header: question.header, askedAt: question.askedAt }));
+    const unreadNeeds = unreadList.filter((n) => n.kind === "reminder").length + openQuestions.length;
+    sendJson(res, 200, { notifications, unread, unreadNeeds, openQuestions });
     return;
   }
   if (req.method === "POST" && pathname === "/api/notifications/read") {
