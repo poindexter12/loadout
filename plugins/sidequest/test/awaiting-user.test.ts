@@ -128,7 +128,9 @@ test('answering the last open blocking question unparks a held park to doing wit
   const first = ask(ticket);
   const second = ask(ticket, { text: 'Which region should it deploy to?' });
   stopTurn(run);
-  assert.deepStrictEqual(store.getTicket(slug, ticket.ref).park.qids.sort(), [first.qid, second.qid].sort());
+  const held = store.getTicket(slug, ticket.ref);
+  assert.strictEqual(held.status, 'awaiting-user', 'a turn end on sent questions parks the ticket');
+  assert.deepStrictEqual(held.park.qids.sort(), [first.qid, second.qid].sort());
 
   answer(ticket, first.qid);
   const partial = store.unparkTicket(slug, ticket.ref);
@@ -170,6 +172,7 @@ test('a held park ignores idle silence until the 24 h backstop, and owner Sessio
   ask(ticket);
   stopTurn(run);
   const parked = store.getTicket(slug, ticket.ref);
+  assert.strictEqual(parked.status, 'awaiting-user', 'a turn end on a sent question parks the ticket');
   assert.strictEqual(parked.park.mode, 'held');
 
   assert.strictEqual(store.claimReleaseVerdict(parked, Date.now() + 23 * HOUR_MS), null);
