@@ -4,6 +4,7 @@
   import Toolbar from './lib/components/shell/Toolbar.svelte';
   import BoardView from './lib/components/board/BoardView.svelte';
   import ArchiveView from './lib/components/shell/ArchiveView.svelte';
+  import QuestionsView from './lib/components/questions/QuestionsView.svelte';
   import TicketDialog from './lib/components/ticket/TicketDialog.svelte';
   import Lightbox from './lib/components/common/Lightbox.svelte';
   import ToastRegion from './lib/components/common/ToastRegion.svelte';
@@ -39,6 +40,8 @@
     <Toolbar {state} />
     {#if state.view === 'archive'}
       <ArchiveView {state} />
+    {:else if state.view === 'questions'}
+      <QuestionsView {state} />
     {:else}
       <BoardView {state} />
     {/if}
