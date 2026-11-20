@@ -981,7 +981,7 @@ function createDispatch(dependencies) {
   function higherPriorityReadyWork(ticket, readySet, now = Date.now()) {
     if (!ticket) return [];
     const rank = dispatchPriorityRank(ticket.priority);
-    return (Array.isArray(readySet) ? readySet : []).filter((candidate) => candidate && candidate.id !== ticket.id && candidate.ref !== ticket.ref).filter((candidate) => dispatchPriorityRank(candidate.priority) < rank).filter((candidate) => candidate.status !== "awaiting-oracle").filter((candidate) => !dispatchInFlight(dispatchState(candidate), now)).sort((left, right) => dispatchPriorityRank(left.priority) - dispatchPriorityRank(right.priority) || String(left.createdAt).localeCompare(String(right.createdAt))).map((candidate) => ({ ref: candidate.ref, priority: candidate.priority }));
+    return (Array.isArray(readySet) ? readySet : []).filter((candidate) => candidate && candidate.id !== ticket.id && candidate.ref !== ticket.ref).filter((candidate) => dispatchPriorityRank(candidate.priority) < rank).filter((candidate) => candidate.status !== "awaiting-oracle" && candidate.status !== "awaiting-user").filter((candidate) => !dispatchInFlight(dispatchState(candidate), now)).sort((left, right) => dispatchPriorityRank(left.priority) - dispatchPriorityRank(right.priority) || String(left.createdAt).localeCompare(String(right.createdAt))).map((candidate) => ({ ref: candidate.ref, priority: candidate.priority }));
   }
   function dispatchPriorityBypass(ticket, readySet, now = Date.now()) {
     if (dispatchState(ticket)?.priorityOverride) return [];
@@ -1492,6 +1492,9 @@ function createDispatch(dependencies) {
       if (pendingSubmission(t)) {
         const candidate = String(t.submission.commit || t.submission.sourceRevision?.value || "").trim();
         throw new Error(`prepare dispatch: ${t.ref} has a pending submission${candidate ? ` (${candidate})` : ""} waiting on integration, so it is parked for the publish transaction rather than for another executor. Integrate it (\`sidequest integrate ${t.ref} --by <who>\`), send it back for repair and dispatch the replacement (\`sidequest rework ${t.ref} --by ${t.submission.by || "<candidate-owner>"} --review <review-ticket-or-evidence> --reason "what needs repair"\`), or close it as abandoned (\`sidequest groom-close ${t.ref} --abandon-submission --reason "<evidence it never landed>"\`).`);
+      }
+      if (t.status === "awaiting-user") {
+        throw new Error(`prepare dispatch: awaiting_user: ${t.ref} is parked (${t.park?.mode || "released"}) on open questions to the user, so it is not dispatchable. Answer them with answer({ref:"${t.ref}", ...}); the last answer unparks it, and a released park then dispatches with the decisions packet.`);
       }
       if (current?.terminalAt && current.sharedTree === false && !current.claimedAt && !(t.claim && t.claim.by)) {
         const recoveryFacts = unclaimedWorktreeRecoveryFacts(projectPath, t, current);
@@ -2928,6 +2931,7 @@ function createDispatch(dependencies) {
           stopped = true;
         } else if (active) {
           state.turnEndedAt = now;
+          if (typeof dependencies.parkHeldOnTurnEnd === "function") dependencies.parkHeldOnTurnEnd(match.slug, t, now);
         }
         stampDispatchEvent(t, "subagent-stop", now);
         putTicket(match.slug, t);

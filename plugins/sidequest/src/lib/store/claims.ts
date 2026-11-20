@@ -41,11 +41,14 @@ function openBlockingQuestions(states?: any[]) {
 // The held-park predicate: an open blocking question this claim asked at runtime, whose
 // SendMessage to main was recorded. The `sent` event is the evidence the orchestrator was told;
 // without it the turn end is not a park (block-once and the detach backstops cover that).
-function heldParkQuestions(states?: any[], claim?: any) {
+// `requireSent: false` drops the SendMessage requirement, for the detach backstops: a claim that
+// asked and then died before sending still parks released rather than reverting to todo.
+function heldParkQuestions(states?: any[], claim?: any, opts?: { requireSent?: boolean }) {
   const claimedMs = Date.parse(claim && claim.at);
+  const requireSent = opts?.requireSent !== false;
   return openBlockingQuestions(states).filter((state: any) => {
     if (state.asked?.origin === 'filing') return false;
-    if (!Array.isArray(state.sent) || !state.sent.length) return false;
+    if (requireSent && (!Array.isArray(state.sent) || !state.sent.length)) return false;
     const askedMs = Date.parse(state.asked?.at);
     return !Number.isFinite(claimedMs) || !Number.isFinite(askedMs) || askedMs >= claimedMs;
   });
@@ -83,9 +86,12 @@ function unparkCommentBody(ref?: any, toStatus?: any, states?: any[], detail?: a
     return `- ${state?.seq || '?'} \`${state?.qid}\`: ${outcome}`;
   });
   const why = String(detail || '').trim();
-  const head = toStatus === 'doing'
-    ? `▶️ Unparked to **doing**: the held executor resumes in its own worktree.${why ? ` ${why}` : ''}`
-    : `▶️ Unparked to **todo**: the next dispatch carries the decisions packet.${why ? ` ${why}` : ''}`;
+  const stage = toStatus === 'doing'
+    ? 'the held executor resumes in its own worktree.'
+    : toStatus === 'todo'
+      ? 'the next dispatch carries the decisions packet.'
+      : 'the open questions are closed.';
+  const head = `▶️ Unparked to **${toStatus || 'todo'}**: ${stage}${why ? ` ${why}` : ''}`;
   return [head, ...lines].join('\n');
 }
 

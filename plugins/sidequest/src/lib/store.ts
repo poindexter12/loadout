@@ -62,7 +62,16 @@ const { createStories } = require('./store/stories.js');
 const { createComments } = require('./store/comments.js');
 const { createPlans } = require('./store/plans.js');
 const { createReads } = require('./store/reads.js');
-const { createClaims } = require('./store/claims.js');
+const {
+  PARK_STATUS,
+  createClaims,
+  heldParkQuestions,
+  openBlockingQuestions,
+  parkCommentBody,
+  parkQuestionStates,
+  unparkCommentBody,
+} = require('./store/claims.js');
+const questionLog = require('./store/question-log.js');
 const { createLocks } = require('./store/locks.js');
 const { createPulse } = require('./store/pulse.js');
 const { createRouting } = require('./store/routing.js');
@@ -543,6 +552,7 @@ const {
   setDispatchPlanObserver,
 } = (dispatch = createDispatch({
   ARTIFACT_BASELINE_MAX_PATHS,
+  parkHeldOnTurnEnd: (...args: any[]) => parkHeldOnTurnEnd(...args),
   normalizeCategoryId: (...args: any[]) => normalizeCategoryId(...args),
   projectRoutingEnabled,
   routingDisabledMessage,
@@ -1275,6 +1285,7 @@ const {
   getTicket,
   putTicket,
   withTicketLock,
+  resumeHeldPark: (...args: any[]) => resumeHeldPark(...args),
 });
 
 const {
@@ -1817,7 +1828,10 @@ function newTicketId() {
  *  Projects
  * ------------------------------------------------------------------ */
 
-const VALID_STATUS = ['todo', 'doing', 'awaiting-oracle', 'done'];
+// `awaiting-user` is the parked status (US-8): a ticket waiting on a user answer to a question
+// its executor asked. It is entered only by release({kind:"question"}) or a held executor's turn
+// end, never by add or update, and it is never ready or dispatchable.
+const VALID_STATUS = ['todo', 'doing', 'awaiting-user', 'awaiting-oracle', 'done'];
 const VALID_PRIORITY = ['low', 'normal', 'high', 'urgent'];
 
 const STORY_PALETTE = ['#c2683f', '#3f8f8a', '#7a5ba8', '#7d8a3f', '#b45573', '#4a72a8', '#c19a3e', '#4f8f6a'];
@@ -2052,6 +2066,11 @@ function requireStatus(s?: any) {
   const status = String(s).toLowerCase();
   if (!VALID_STATUS.includes(status)) {
     throw new Error(`Invalid status "${s}". Valid statuses: ${VALID_STATUS.join(', ')}. Deletion is not a status; use the MCP remove tool or CLI rm.`);
+  }
+  // add and update are the only callers. A park carries a park record and open questions in the
+  // question log, so it cannot be typed into existence.
+  if (status === PARK_STATUS) {
+    throw new Error(`Status "${PARK_STATUS}" cannot be set by add or update. The executor holding the claim enters it with release({kind:"question"}) on an open question it asked, or by ending its turn after making ask's SendMessage; answering the last open question leaves it.`);
   }
   return status;
 }
@@ -2352,6 +2371,11 @@ function claimTicket(slug?: any, idOrRef?: any, by?: any, opts?: any) {
       }
     }
     if (t.status === 'done') return { ok: false, reason: 'done', ticket: t };
+    // A park waits on the user. Only a held park's own holder may touch its claim; a released park
+    // is claimed again only after the last answer moves it to todo.
+    if (t.status === PARK_STATUS && !(t.park?.mode === 'held' && t.claim && t.claim.by === by)) {
+      return { ok: false, reason: 'awaiting_user', ticket: t, message: `${t.ref} is parked (${t.park?.mode || 'released'}) on open questions to the user. Answer them with answer({ref:"${t.ref}", ...}); the last answer unparks it.` };
+    }
     const now = new Date().toISOString();
     const lifecycleAuthority = { actor: by, operation: 'claim', sessionId: opts.sessionId || null };
     const directExecution = opts.direct || !currentDispatch;
@@ -2569,7 +2593,7 @@ function releaseTicket(slug?: any, idOrRef?: any, by?: any, opts?: any) {
   if (releaseComment && !releaseComment.ok) throw new Error(`release comment ${releaseComment.reason}`);
   const found = getTicket(slug, idOrRef);
   if (!found) return { ok: false, reason: 'not_found' };
-  return withTicketLock(slug, found.id, () => {
+  const result = withTicketLock(slug, found.id, () => {
     const t = getTicket(slug, found.id);
     if (!t) return { ok: false, reason: 'not_found' };
     // A ticket that finished is done — never yanked back to another status by a
@@ -2783,6 +2807,52 @@ function releaseTicket(slug?: any, idOrRef?: any, by?: any, opts?: any) {
       throw new Error('ticket already awaits an oracle verdict');
     }
     if (oracleRequested) oracleMarker(dispatch, opts, null);
+    // US-8 park (story contract U1). `question` parks the holder's own claim on an open blocking
+    // question it asked. A detach is a backstop release (the sweep's verdict, the owner's
+    // SessionEnd, a terminal observed stop, or an explicit parkDetach) of a ticket that is parked
+    // or whose claim asked an open blocking question: it gives the claim up but keeps the ticket
+    // parked as `released`, never `todo`, because the question still waits on the user.
+    const questionRelease = opts.releaseKind === 'question';
+    const requestedStatus = opts.status ? coerceStatus(opts.status, null) : null;
+    if (questionRelease && requestedStatus && requestedStatus !== PARK_STATUS) {
+      throw new Error(`question release must set the ticket to ${PARK_STATUS}`);
+    }
+    const parkStates = parkQuestionStates(slug, t.ref);
+    const openParkQuestions = openBlockingQuestions(parkStates);
+    const detachRelease = !questionRelease && !oracleRelease && requestedStatus === 'todo'
+      && (opts.requireReleaseVerdict === true || opts.claimRelease?.kind === 'session_ended' || opts.parkDetach === true);
+    const claimAskedQuestions = liveClaim ? heldParkQuestions(parkStates, held, { requireSent: false }) : [];
+    const detachToPark = detachRelease && openParkQuestions.length > 0
+      && (t.status === PARK_STATUS || claimAskedQuestions.length > 0);
+    if (requestedStatus === PARK_STATUS && !questionRelease && !detachToPark) {
+      throw new Error(`release cannot set ${PARK_STATUS} without kind "question"; that kind parks the holder's claim on an open question it asked.`);
+    }
+    if (questionRelease) {
+      if (!liveClaim || heldOwner !== by) {
+        return { ok: false, reason: 'not_claimed', ticket: t, message: `Only the executor holding ${t.ref}'s claim may park it on a question.` };
+      }
+      if (!openParkQuestions.length) {
+        return {
+          ok: false,
+          reason: 'no_open_question',
+          ticket: t,
+          message: `${t.ref} has no open blocking question in its question log, so there is nothing to park on. Ask first with ask({ref:"${t.ref}", ...}) and make the SendMessage it returns; release kind "question" only parks on a question that is already open.`,
+        };
+      }
+      const writableDispatch = Boolean(dispatch) && !readonlyDispatch;
+      const checkpointAtMs = Date.parse(t.checkpoint?.at);
+      const claimAtMs = Date.parse(held?.at);
+      const checkpointed = Boolean(t.checkpoint) && t.checkpoint.by === by
+        && (!Number.isFinite(claimAtMs) || (Number.isFinite(checkpointAtMs) && checkpointAtMs >= claimAtMs));
+      if (writableDispatch && !checkpointed) {
+        return {
+          ok: false,
+          reason: 'checkpoint_required',
+          ticket: t,
+          message: `${t.ref} is write-capable work, and a released park gives up the claim. Record a checkpoint first with checkpoint({ref:"${t.ref}", by:"${by}", commit or worktree, verify}), so the dispatch after the answer resumes this retained work, then release with kind "question" again.`,
+        };
+      }
+    }
     // The sweep decides on an unlocked snapshot; re-check under the lock so a
     // claim that came back to life in between is never released out from under it.
     if (opts.requireReleaseVerdict) {
@@ -2889,8 +2959,24 @@ function releaseTicket(slug?: any, idOrRef?: any, by?: any, opts?: any) {
     t.dispatchNonce = null;
     t.dispatchExecutor = null;
     if (reopenedSubmission) t.submission = null;
-    if (opts.status) t.status = coerceStatus(opts.status, t.status);
+    if (opts.status && !questionRelease && !detachToPark) t.status = coerceStatus(opts.status, t.status);
     else if (oracleRelease) t.status = 'awaiting-oracle';
+    let parkFollowUp: any = null;
+    if (questionRelease || detachToPark) {
+      const detach = questionRelease ? 'question' : opts.claimRelease?.kind || (opts.parkDetach ? 'no_send_message' : 'abandoned');
+      t.status = PARK_STATUS;
+      applyPark(t, 'released', openParkQuestions, heldOwner || by, now, detach);
+      // D5/U4: entering the park writes its one short park comment. A held park detaching to
+      // released writes a stage note instead of the sweep's "released to todo" note, which the
+      // sweep callers skip for a ticket that is still parked.
+      parkFollowUp = { kind: 'park', states: openParkQuestions, detach, stage: previousStatus === PARK_STATUS ? 'detach' : 'enter' };
+    } else if (t.park || previousStatus === PARK_STATUS) {
+      // Leaving a park any other way closes the questions it was waiting on.
+      clearPark(t);
+    }
+    if (!parkFollowUp && openParkQuestions.length && (t.status === 'todo' || t.status === 'done' || t.status === 'awaiting-oracle')) {
+      parkFollowUp = { kind: 'withdraw', reason: t.status === 'awaiting-oracle' ? 'oracle' : 'ticket-closed', states: openParkQuestions, wasParked: previousStatus === PARK_STATUS };
+    }
     if (t.status !== previousStatus) t.statusTransition = { from: previousStatus, to: t.status, at: now };
     if (t.status === 'todo' && (previousStatus !== 'todo' || (held && held.by))) {
       appendReworkEvent(t, 'released_to_todo', {
@@ -2975,9 +3061,121 @@ function releaseTicket(slug?: any, idOrRef?: any, by?: any, opts?: any) {
       ok: true,
       ticket: t,
       comment,
+      ...(parkFollowUp ? { parkFollowUp } : {}),
       ...(reopenedSubmission ? { clearedSubmission: reopenedSubmission } : {}),
       ...(opts.completionComment && opts.completionComment.advisory ? { advisory: opts.completionComment.advisory } : {}),
     };
+  });
+  return finishParkFollowUp(slug, result, opts.source || 'cli');
+}
+
+// The question log has its own lock, so park bookkeeping that writes it runs after the ticket
+// lock is released and the two locks never nest. The ticket record is already authoritative;
+// a failed log write leaves an open question the next park or unpark retries.
+function finishParkFollowUp(slug?: any, result?: any, source?: any) {
+  const followUp = result && result.ok ? result.parkFollowUp : null;
+  if (!followUp) return result;
+  delete result.parkFollowUp;
+  const ticket = result.ticket;
+  if (followUp.kind === 'withdraw') {
+    try {
+      questionLog.withdrawQuestion(questionLog.questionLogDir(String(slug)), { ref: ticket.ref, reason: followUp.reason });
+    } catch (_error: unknown) {
+      // Best effort: the ticket left the park, and the next fold still shows the question open.
+    }
+    if (!followUp.wasParked) return result;
+    addComment(slug, ticket.id, { by: 'sidequest', kind: 'comment', source, body: unparkCommentBody(ticket.ref, ticket.status, followUp.states, `The ${followUp.states.length === 1 ? 'question was' : 'questions were'} withdrawn (${followUp.reason}).`) });
+    return result;
+  }
+  const why = followUp.detach === 'question'
+    ? 'The executor released with kind "question".'
+    : followUp.stage === 'detach'
+      ? `The held claim detached (${followUp.detach}); the ticket stays parked and the claim is gone.`
+      : `Detached: ${followUp.detach}.`;
+  addComment(slug, ticket.id, { by: 'sidequest', kind: 'comment', source, body: parkCommentBody(ticket.ref, ticket.park?.mode || 'released', followUp.states, why) });
+  return result;
+}
+
+// ticket.park = {mode, qids, parkedAt, by} (story contract U1). `held` keeps the claim and the
+// worktree; `released` has given the claim up. `parkedAt` is when the ticket entered the park, so
+// a held park detaching to released keeps it, and the question age still counts from the start.
+function applyPark(t?: any, mode?: any, states?: any[], by?: any, at?: any, detach?: any) {
+  const prior = t.park && typeof t.park === 'object' ? t.park : null;
+  t.park = {
+    mode,
+    qids: (states || []).map((state: any) => state?.qid).filter(Boolean),
+    parkedAt: prior?.parkedAt || at,
+    by: prior?.by || by || null,
+    ...(mode === 'released' ? { releasedAt: at, ...(detach ? { detach } : {}) } : {}),
+  };
+  return t.park;
+}
+
+function clearPark(t?: any) {
+  if (t && Object.prototype.hasOwnProperty.call(t, 'park')) delete t.park;
+}
+
+function pushParkComment(t?: any, body?: any, at?: any) {
+  if (!Array.isArray(t.comments)) t.comments = [];
+  t.comments.push(createComment({ by: 'sidequest', kind: 'comment', source: 'sidequest', body }, at));
+}
+
+// Held to doing: the holder made a board call on its own held park, so it is working again. It
+// runs inside the holder's ticket lock (touchClaimActivity), so it mutates the ticket in place.
+// The questions stay open in the log; answering them is the answer path's job, not this one.
+function resumeHeldPark(t?: any, by?: any, at?: any) {
+  if (!t || t.status !== PARK_STATUS || t.park?.mode !== 'held') return false;
+  const now = at || new Date().toISOString();
+  // The hook has no board slug, so the comment names the park's recorded qids, not a log fold.
+  const states = (t.park.qids || []).map((qid: any) => ({ qid }));
+  clearPark(t);
+  t.status = 'doing';
+  t.statusTransition = { from: PARK_STATUS, to: 'doing', at: now };
+  pushParkComment(t, unparkCommentBody(t.ref, 'doing', states, `${by} resumed work on its held claim.`), now);
+  return true;
+}
+
+// Held park at turn end (U1): a live claim whose executor asked an open blocking question this
+// claim and recorded the SendMessage, then ended its turn, parks held. Runs inside
+// markDispatchStopped's ticket lock. Without a sent question the turn end is not a park.
+function parkHeldOnTurnEnd(slug?: any, t?: any, at?: any) {
+  if (!t || t.status !== 'doing' || !t.claim || !t.claim.by) return false;
+  const states = heldParkQuestions(parkQuestionStates(slug, t.ref), t.claim);
+  if (!states.length) return false;
+  const now = at || new Date().toISOString();
+  t.status = PARK_STATUS;
+  applyPark(t, 'held', states, t.claim.by, now);
+  t.statusTransition = { from: 'doing', to: PARK_STATUS, at: now };
+  pushParkComment(t, parkCommentBody(t.ref, 'held', states, `${t.claim.by} ended its turn after asking; it keeps its claim and worktree.`), now);
+  return true;
+}
+
+// The answer path (Q4) calls this after it records an answer or withdrawal. While any blocking
+// question is still open the park stays. Otherwise held goes to doing (the holder resumes in its
+// own worktree) and released goes to todo (the next dispatch carries the decisions packet).
+function unparkTicket(slug?: any, idOrRef?: any, opts: any = {}) {
+  const found = getTicket(slug, idOrRef);
+  if (!found) return { ok: false, reason: 'not_found' };
+  return withTicketLock(slug, found.id, () => {
+    const t = getTicket(slug, found.id);
+    if (!t) return { ok: false, reason: 'not_found' };
+    if (t.status !== PARK_STATUS) return { ok: true, ticket: t, unparked: false, reason: 'not_parked' };
+    const states = parkQuestionStates(slug, t.ref, { includeRecent: true });
+    const open = openBlockingQuestions(states);
+    if (open.length) return { ok: true, ticket: t, unparked: false, reason: 'questions_open', open: open.map((state: any) => state.qid) };
+    const now = new Date().toISOString();
+    const toStatus = t.park?.mode === 'held' && t.claim && t.claim.by ? 'doing' : 'todo';
+    const closed = states.filter((state: any) => (t.park?.qids || []).includes(state.qid));
+    clearPark(t);
+    t.status = toStatus;
+    t.statusTransition = { from: PARK_STATUS, to: toStatus, at: now };
+    pushParkComment(t, unparkCommentBody(t.ref, toStatus, closed, opts.detail), now);
+    t.lastEventType = 'status';
+    t.lastEventSource = opts.source || 'sidequest';
+    t.updatedAt = now;
+    putTicket(slug, t);
+    queueEventNotification(slug, t, t.lastEventType, t.lastEventSource);
+    return { ok: true, ticket: t, unparked: true, status: toStatus };
   });
 }
 
@@ -2995,7 +3193,8 @@ function releaseTerminalClaim(slug?: any, idOrRef?: any, expectedClaim?: any, so
     requireReleaseVerdict: true,
     claimRelease: { kind: verdict.kind, reason: verdict.reason, idleMs: Number.isFinite(verdict.idleMs) ? verdict.idleMs : null },
   });
-  if (released.ok) {
+  // A detached park is not back in the pool; its park comment already says so (US-8).
+  if (released.ok && released.ticket?.status !== PARK_STATUS) {
     addComment(slug, ticket.id, {
       by: 'sidequest',
       kind: 'comment',
@@ -3780,6 +3979,7 @@ function readyCandidates(slug?: any, opts?: any) {
   return listTickets(slug)
     .filter((t?: any) => !t.archived)
     .filter((t?: any) => t.status !== 'done')
+    .filter((t?: any) => t.status !== PARK_STATUS) // parked on a user answer: never ready (US-8)
     .filter((t?: any) => !pendingSubmission(t)) // parked for integration, not for another executor
     .filter((t?: any) => !t.claim || claimReclaimable(t))
     .filter((t?: any) => !isBlocked(slug, t))
@@ -3829,6 +4029,7 @@ function claimNext(slug?: any, by?: any, opts?: any) {
   const candidates = listTickets(slug)
     .filter((t?: any) => !t.archived)
     .filter((t?: any) => t.status !== 'done')
+    .filter((t?: any) => t.status !== PARK_STATUS) // parked on a user answer: never ready (US-8)
     .filter((t?: any) => !pendingSubmission(t)) // parked for integration, not for another executor
     .filter((t?: any) => !t.claim || claimReclaimable(t) || t.claim.by === by)
     .filter((t?: any) => !opts.priority || t.priority === String(opts.priority).toLowerCase())
@@ -4269,6 +4470,7 @@ module.exports = {
   bindClaimRuntimeIdentity,
   claimTicket,
   releaseTicket,
+  unparkTicket,
   completeTicket,
   workingTreeDeliveryCandidate,
   externalDeliverableCloseout,

@@ -21,11 +21,12 @@ function parkQuestionStates(slug, ref, opts) {
 function openBlockingQuestions(states) {
   return (Array.isArray(states) ? states : []).filter((state) => state && state.state === "open" && state.asked?.blocking !== false);
 }
-function heldParkQuestions(states, claim) {
+function heldParkQuestions(states, claim, opts) {
   const claimedMs = Date.parse(claim && claim.at);
+  const requireSent = opts?.requireSent !== false;
   return openBlockingQuestions(states).filter((state) => {
     if (state.asked?.origin === "filing") return false;
-    if (!Array.isArray(state.sent) || !state.sent.length) return false;
+    if (requireSent && (!Array.isArray(state.sent) || !state.sent.length)) return false;
     const askedMs = Date.parse(state.asked?.at);
     return !Number.isFinite(claimedMs) || !Number.isFinite(askedMs) || askedMs >= claimedMs;
   });
@@ -51,7 +52,8 @@ function unparkCommentBody(ref, toStatus, states, detail) {
     return `- ${state?.seq || "?"} \`${state?.qid}\`: ${outcome}`;
   });
   const why = String(detail || "").trim();
-  const head = toStatus === "doing" ? `▶️ Unparked to **doing**: the held executor resumes in its own worktree.${why ? ` ${why}` : ""}` : `▶️ Unparked to **todo**: the next dispatch carries the decisions packet.${why ? ` ${why}` : ""}`;
+  const stage = toStatus === "doing" ? "the held executor resumes in its own worktree." : toStatus === "todo" ? "the next dispatch carries the decisions packet." : "the open questions are closed.";
+  const head = `▶️ Unparked to **${toStatus || "todo"}**: ${stage}${why ? ` ${why}` : ""}`;
   return [head, ...lines].join("\n");
 }
 function createClaims(dependencies) {

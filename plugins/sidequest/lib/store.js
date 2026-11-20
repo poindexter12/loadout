@@ -34,7 +34,16 @@ const { createStories } = require("./store/stories.js");
 const { createComments } = require("./store/comments.js");
 const { createPlans } = require("./store/plans.js");
 const { createReads } = require("./store/reads.js");
-const { createClaims } = require("./store/claims.js");
+const {
+  PARK_STATUS,
+  createClaims,
+  heldParkQuestions,
+  openBlockingQuestions,
+  parkCommentBody,
+  parkQuestionStates,
+  unparkCommentBody
+} = require("./store/claims.js");
+const questionLog = require("./store/question-log.js");
 const { createLocks } = require("./store/locks.js");
 const { createPulse } = require("./store/pulse.js");
 const { createRouting } = require("./store/routing.js");
@@ -638,6 +647,7 @@ const {
   setDispatchPlanObserver
 } = dispatch = createDispatch({
   ARTIFACT_BASELINE_MAX_PATHS,
+  parkHeldOnTurnEnd: (...args) => parkHeldOnTurnEnd(...args),
   normalizeCategoryId: (...args) => normalizeCategoryId(...args),
   projectRoutingEnabled,
   routingDisabledMessage,
@@ -1242,7 +1252,8 @@ const {
   isolatedDispatchWorktreeMissing,
   getTicket,
   putTicket,
-  withTicketLock
+  withTicketLock,
+  resumeHeldPark: (...args) => resumeHeldPark(...args)
 });
 const {
   addComment,
@@ -1728,7 +1739,7 @@ function newTicketId() {
   const r = crypto.randomBytes(4).toString("hex");
   return `tk_${t}_${r}`;
 }
-const VALID_STATUS = ["todo", "doing", "awaiting-oracle", "done"];
+const VALID_STATUS = ["todo", "doing", "awaiting-user", "awaiting-oracle", "done"];
 const VALID_PRIORITY = ["low", "normal", "high", "urgent"];
 const STORY_PALETTE = ["#c2683f", "#3f8f8a", "#7a5ba8", "#7d8a3f", "#b45573", "#4a72a8", "#c19a3e", "#4f8f6a"];
 const STORY_COLOR_NAMES = {
@@ -1918,6 +1929,9 @@ function requireStatus(s) {
   const status = String(s).toLowerCase();
   if (!VALID_STATUS.includes(status)) {
     throw new Error(`Invalid status "${s}". Valid statuses: ${VALID_STATUS.join(", ")}. Deletion is not a status; use the MCP remove tool or CLI rm.`);
+  }
+  if (status === PARK_STATUS) {
+    throw new Error(`Status "${PARK_STATUS}" cannot be set by add or update. The executor holding the claim enters it with release({kind:"question"}) on an open question it asked, or by ending its turn after making ask's SendMessage; answering the last open question leaves it.`);
   }
   return status;
 }
@@ -2163,6 +2177,9 @@ function claimTicket(slug, idOrRef, by, opts) {
       }
     }
     if (t2.status === "done") return { ok: false, reason: "done", ticket: t2 };
+    if (t2.status === PARK_STATUS && !(t2.park?.mode === "held" && t2.claim && t2.claim.by === by)) {
+      return { ok: false, reason: "awaiting_user", ticket: t2, message: `${t2.ref} is parked (${t2.park?.mode || "released"}) on open questions to the user. Answer them with answer({ref:"${t2.ref}", ...}); the last answer unparks it.` };
+    }
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const lifecycleAuthority = { actor: by, operation: "claim", sessionId: opts.sessionId || null };
     const directExecution = opts.direct || !currentDispatch;
@@ -2354,7 +2371,7 @@ function releaseTicket(slug, idOrRef, by, opts) {
   if (releaseComment && !releaseComment.ok) throw new Error(`release comment ${releaseComment.reason}`);
   const found = getTicket(slug, idOrRef);
   if (!found) return { ok: false, reason: "not_found" };
-  return withTicketLock(slug, found.id, () => {
+  const result = withTicketLock(slug, found.id, () => {
     const t = getTicket(slug, found.id);
     if (!t) return { ok: false, reason: "not_found" };
     if (t.status === "done" && !opts.force) {
@@ -2520,6 +2537,44 @@ function releaseTicket(slug, idOrRef, by, opts) {
       throw new Error("ticket already awaits an oracle verdict");
     }
     if (oracleRequested) oracleMarker(dispatch2, opts, null);
+    const questionRelease = opts.releaseKind === "question";
+    const requestedStatus = opts.status ? coerceStatus(opts.status, null) : null;
+    if (questionRelease && requestedStatus && requestedStatus !== PARK_STATUS) {
+      throw new Error(`question release must set the ticket to ${PARK_STATUS}`);
+    }
+    const parkStates = parkQuestionStates(slug, t.ref);
+    const openParkQuestions = openBlockingQuestions(parkStates);
+    const detachRelease = !questionRelease && !oracleRelease && requestedStatus === "todo" && (opts.requireReleaseVerdict === true || opts.claimRelease?.kind === "session_ended" || opts.parkDetach === true);
+    const claimAskedQuestions = liveClaim ? heldParkQuestions(parkStates, held, { requireSent: false }) : [];
+    const detachToPark = detachRelease && openParkQuestions.length > 0 && (t.status === PARK_STATUS || claimAskedQuestions.length > 0);
+    if (requestedStatus === PARK_STATUS && !questionRelease && !detachToPark) {
+      throw new Error(`release cannot set ${PARK_STATUS} without kind "question"; that kind parks the holder's claim on an open question it asked.`);
+    }
+    if (questionRelease) {
+      if (!liveClaim || heldOwner !== by) {
+        return { ok: false, reason: "not_claimed", ticket: t, message: `Only the executor holding ${t.ref}'s claim may park it on a question.` };
+      }
+      if (!openParkQuestions.length) {
+        return {
+          ok: false,
+          reason: "no_open_question",
+          ticket: t,
+          message: `${t.ref} has no open blocking question in its question log, so there is nothing to park on. Ask first with ask({ref:"${t.ref}", ...}) and make the SendMessage it returns; release kind "question" only parks on a question that is already open.`
+        };
+      }
+      const writableDispatch = Boolean(dispatch2) && !readonlyDispatch;
+      const checkpointAtMs = Date.parse(t.checkpoint?.at);
+      const claimAtMs = Date.parse(held?.at);
+      const checkpointed = Boolean(t.checkpoint) && t.checkpoint.by === by && (!Number.isFinite(claimAtMs) || Number.isFinite(checkpointAtMs) && checkpointAtMs >= claimAtMs);
+      if (writableDispatch && !checkpointed) {
+        return {
+          ok: false,
+          reason: "checkpoint_required",
+          ticket: t,
+          message: `${t.ref} is write-capable work, and a released park gives up the claim. Record a checkpoint first with checkpoint({ref:"${t.ref}", by:"${by}", commit or worktree, verify}), so the dispatch after the answer resumes this retained work, then release with kind "question" again.`
+        };
+      }
+    }
     if (opts.requireReleaseVerdict) {
       if (!claimReleaseVerdict(t)) {
         return {
@@ -2612,8 +2667,20 @@ function releaseTicket(slug, idOrRef, by, opts) {
     t.dispatchNonce = null;
     t.dispatchExecutor = null;
     if (reopenedSubmission) t.submission = null;
-    if (opts.status) t.status = coerceStatus(opts.status, t.status);
+    if (opts.status && !questionRelease && !detachToPark) t.status = coerceStatus(opts.status, t.status);
     else if (oracleRelease) t.status = "awaiting-oracle";
+    let parkFollowUp = null;
+    if (questionRelease || detachToPark) {
+      const detach = questionRelease ? "question" : opts.claimRelease?.kind || (opts.parkDetach ? "no_send_message" : "abandoned");
+      t.status = PARK_STATUS;
+      applyPark(t, "released", openParkQuestions, heldOwner || by, now, detach);
+      parkFollowUp = { kind: "park", states: openParkQuestions, detach, stage: previousStatus === PARK_STATUS ? "detach" : "enter" };
+    } else if (t.park || previousStatus === PARK_STATUS) {
+      clearPark(t);
+    }
+    if (!parkFollowUp && openParkQuestions.length && (t.status === "todo" || t.status === "done" || t.status === "awaiting-oracle")) {
+      parkFollowUp = { kind: "withdraw", reason: t.status === "awaiting-oracle" ? "oracle" : "ticket-closed", states: openParkQuestions, wasParked: previousStatus === PARK_STATUS };
+    }
     if (t.status !== previousStatus) t.statusTransition = { from: previousStatus, to: t.status, at: now };
     if (t.status === "todo" && (previousStatus !== "todo" || held && held.by)) {
       appendReworkEvent(t, "released_to_todo", {
@@ -2692,9 +2759,93 @@ function releaseTicket(slug, idOrRef, by, opts) {
       ok: true,
       ticket: t,
       comment,
+      ...parkFollowUp ? { parkFollowUp } : {},
       ...reopenedSubmission ? { clearedSubmission: reopenedSubmission } : {},
       ...opts.completionComment && opts.completionComment.advisory ? { advisory: opts.completionComment.advisory } : {}
     };
+  });
+  return finishParkFollowUp(slug, result, opts.source || "cli");
+}
+function finishParkFollowUp(slug, result, source) {
+  const followUp = result && result.ok ? result.parkFollowUp : null;
+  if (!followUp) return result;
+  delete result.parkFollowUp;
+  const ticket = result.ticket;
+  if (followUp.kind === "withdraw") {
+    try {
+      questionLog.withdrawQuestion(questionLog.questionLogDir(String(slug)), { ref: ticket.ref, reason: followUp.reason });
+    } catch (_error) {
+    }
+    if (!followUp.wasParked) return result;
+    addComment(slug, ticket.id, { by: "sidequest", kind: "comment", source, body: unparkCommentBody(ticket.ref, ticket.status, followUp.states, `The ${followUp.states.length === 1 ? "question was" : "questions were"} withdrawn (${followUp.reason}).`) });
+    return result;
+  }
+  const why = followUp.detach === "question" ? 'The executor released with kind "question".' : followUp.stage === "detach" ? `The held claim detached (${followUp.detach}); the ticket stays parked and the claim is gone.` : `Detached: ${followUp.detach}.`;
+  addComment(slug, ticket.id, { by: "sidequest", kind: "comment", source, body: parkCommentBody(ticket.ref, ticket.park?.mode || "released", followUp.states, why) });
+  return result;
+}
+function applyPark(t, mode, states, by, at, detach) {
+  const prior = t.park && typeof t.park === "object" ? t.park : null;
+  t.park = {
+    mode,
+    qids: (states || []).map((state) => state?.qid).filter(Boolean),
+    parkedAt: prior?.parkedAt || at,
+    by: prior?.by || by || null,
+    ...mode === "released" ? { releasedAt: at, ...detach ? { detach } : {} } : {}
+  };
+  return t.park;
+}
+function clearPark(t) {
+  if (t && Object.prototype.hasOwnProperty.call(t, "park")) delete t.park;
+}
+function pushParkComment(t, body, at) {
+  if (!Array.isArray(t.comments)) t.comments = [];
+  t.comments.push(createComment({ by: "sidequest", kind: "comment", source: "sidequest", body }, at));
+}
+function resumeHeldPark(t, by, at) {
+  if (!t || t.status !== PARK_STATUS || t.park?.mode !== "held") return false;
+  const now = at || (/* @__PURE__ */ new Date()).toISOString();
+  const states = (t.park.qids || []).map((qid) => ({ qid }));
+  clearPark(t);
+  t.status = "doing";
+  t.statusTransition = { from: PARK_STATUS, to: "doing", at: now };
+  pushParkComment(t, unparkCommentBody(t.ref, "doing", states, `${by} resumed work on its held claim.`), now);
+  return true;
+}
+function parkHeldOnTurnEnd(slug, t, at) {
+  if (!t || t.status !== "doing" || !t.claim || !t.claim.by) return false;
+  const states = heldParkQuestions(parkQuestionStates(slug, t.ref), t.claim);
+  if (!states.length) return false;
+  const now = at || (/* @__PURE__ */ new Date()).toISOString();
+  t.status = PARK_STATUS;
+  applyPark(t, "held", states, t.claim.by, now);
+  t.statusTransition = { from: "doing", to: PARK_STATUS, at: now };
+  pushParkComment(t, parkCommentBody(t.ref, "held", states, `${t.claim.by} ended its turn after asking; it keeps its claim and worktree.`), now);
+  return true;
+}
+function unparkTicket(slug, idOrRef, opts = {}) {
+  const found = getTicket(slug, idOrRef);
+  if (!found) return { ok: false, reason: "not_found" };
+  return withTicketLock(slug, found.id, () => {
+    const t = getTicket(slug, found.id);
+    if (!t) return { ok: false, reason: "not_found" };
+    if (t.status !== PARK_STATUS) return { ok: true, ticket: t, unparked: false, reason: "not_parked" };
+    const states = parkQuestionStates(slug, t.ref, { includeRecent: true });
+    const open = openBlockingQuestions(states);
+    if (open.length) return { ok: true, ticket: t, unparked: false, reason: "questions_open", open: open.map((state) => state.qid) };
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const toStatus = t.park?.mode === "held" && t.claim && t.claim.by ? "doing" : "todo";
+    const closed = states.filter((state) => (t.park?.qids || []).includes(state.qid));
+    clearPark(t);
+    t.status = toStatus;
+    t.statusTransition = { from: PARK_STATUS, to: toStatus, at: now };
+    pushParkComment(t, unparkCommentBody(t.ref, toStatus, closed, opts.detail), now);
+    t.lastEventType = "status";
+    t.lastEventSource = opts.source || "sidequest";
+    t.updatedAt = now;
+    putTicket(slug, t);
+    queueEventNotification(slug, t, t.lastEventType, t.lastEventSource);
+    return { ok: true, ticket: t, unparked: true, status: toStatus };
   });
 }
 function releaseTerminalClaim(slug, idOrRef, expectedClaim, source) {
@@ -2711,7 +2862,7 @@ function releaseTerminalClaim(slug, idOrRef, expectedClaim, source) {
     requireReleaseVerdict: true,
     claimRelease: { kind: verdict.kind, reason: verdict.reason, idleMs: Number.isFinite(verdict.idleMs) ? verdict.idleMs : null }
   });
-  if (released.ok) {
+  if (released.ok && released.ticket?.status !== PARK_STATUS) {
     addComment(slug, ticket.id, {
       by: "sidequest",
       kind: "comment",
@@ -3347,7 +3498,7 @@ function readyCandidates(slug, opts) {
   const want = opts.model ? classifyModelFilter(opts.model) : "any";
   if (want === "unknown") throw new Error(`Unknown model: ${opts.model}`);
   const category = opts.category == null ? null : String(opts.category).trim().toLowerCase();
-  return listTickets(slug).filter((t) => !t.archived).filter((t) => t.status !== "done").filter((t) => !pendingSubmission(t)).filter((t) => !t.claim || claimReclaimable(t)).filter((t) => !isBlocked(slug, t)).filter((t) => modelMatches(t.model, want === "any" ? null : want)).filter((t) => !category || t.categoryId === category).sort((a, b) => {
+  return listTickets(slug).filter((t) => !t.archived).filter((t) => t.status !== "done").filter((t) => t.status !== PARK_STATUS).filter((t) => !pendingSubmission(t)).filter((t) => !t.claim || claimReclaimable(t)).filter((t) => !isBlocked(slug, t)).filter((t) => modelMatches(t.model, want === "any" ? null : want)).filter((t) => !category || t.categoryId === category).sort((a, b) => {
     const pr = priorityRank(a.priority) - priorityRank(b.priority);
     if (pr !== 0) return pr;
     return String(a.createdAt).localeCompare(String(b.createdAt));
@@ -3379,7 +3530,7 @@ function claimNext(slug, by, opts) {
   const want = opts.model ? classifyModelFilter(opts.model) : "any";
   if (want === "unknown") throw new Error(`Unknown model: ${opts.model}`);
   const category = opts.category == null ? null : String(opts.category).trim().toLowerCase();
-  const candidates = listTickets(slug).filter((t) => !t.archived).filter((t) => t.status !== "done").filter((t) => !pendingSubmission(t)).filter((t) => !t.claim || claimReclaimable(t) || t.claim.by === by).filter((t) => !opts.priority || t.priority === String(opts.priority).toLowerCase()).filter((t) => modelMatches(t.model, want === "any" ? null : want)).filter((t) => !category || t.categoryId === category).filter((t) => opts.includeBlocked || !isBlocked(slug, t)).sort((a, b) => {
+  const candidates = listTickets(slug).filter((t) => !t.archived).filter((t) => t.status !== "done").filter((t) => t.status !== PARK_STATUS).filter((t) => !pendingSubmission(t)).filter((t) => !t.claim || claimReclaimable(t) || t.claim.by === by).filter((t) => !opts.priority || t.priority === String(opts.priority).toLowerCase()).filter((t) => modelMatches(t.model, want === "any" ? null : want)).filter((t) => !category || t.categoryId === category).filter((t) => opts.includeBlocked || !isBlocked(slug, t)).sort((a, b) => {
     const pr = priorityRank(a.priority) - priorityRank(b.priority);
     if (pr !== 0) return pr;
     return String(a.createdAt).localeCompare(String(b.createdAt));
@@ -3783,6 +3934,7 @@ module.exports = {
   bindClaimRuntimeIdentity,
   claimTicket,
   releaseTicket,
+  unparkTicket,
   completeTicket,
   workingTreeDeliveryCandidate,
   externalDeliverableCloseout,
