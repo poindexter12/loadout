@@ -2,8 +2,6 @@
 'use strict';
 
 const fs = require('node:fs');
-const path = require('node:path');
-
 const { markOffered, statusFor } = require('../lib/state.js');
 
 function readStdin() {
@@ -15,9 +13,8 @@ function readStdin() {
   }
 }
 
-function offerReason(status, projectDir) {
-  const cli = path.resolve(__dirname, '..', 'bin', 'quartermaster.js');
-  return `quartermaster: ${status.unanalyzedSessions} sessions and ${status.frictionEvents} friction events since last resupply. Offer an optimization round. With user or standing permission, run /quartermaster:resupply. If declined, run node "${cli}" decline-resupply --project "${projectDir}" to reset.`;
+function offerReason(status) {
+  return `quartermaster: ${status.unanalyzedSessions} sessions and ${status.frictionEvents} friction events since last resupply. With permission, offer /quartermaster:resupply. If declined, use the skill's decline-resupply command.`;
 }
 
 function main() {
@@ -32,7 +29,7 @@ function main() {
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'Stop',
-      additionalContext: offerReason(status, projectDir),
+      additionalContext: offerReason(status),
     },
   }));
 }
