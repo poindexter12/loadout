@@ -30,12 +30,13 @@ function recordOverdueTallies(projectDir, stateDir) {
   }
 }
 
-function runHook(projectDir, stateDir, overrides = {}) {
+function runHook(projectDir, stateDir, overrides = {}, environment = {}) {
   const result = spawnSync(process.execPath, [HOOK], {
     env: {
       ...process.env,
       CLAUDE_PROJECT_DIR: projectDir,
       QUARTERMASTER_STATE_DIR: stateDir,
+      ...environment,
     },
     input: JSON.stringify({ session_id: 'stop-session', stop_hook_active: false, cwd: projectDir, ...overrides }),
     encoding: 'utf8',
@@ -69,8 +70,19 @@ test('Stop offer adds context once with the resupply skill and decline escape ha
   assert.equal(output.hookSpecificOutput.hookEventName, 'Stop');
   assert.match(output.hookSpecificOutput.additionalContext, /\/quartermaster:resupply/);
   assert.match(output.hookSpecificOutput.additionalContext, /decline-resupply/);
+  assert.match(output.hookSpecificOutput.additionalContext, /skill/);
   assert.match(output.hookSpecificOutput.additionalContext, /4 sessions/);
   assert.ok(Buffer.byteLength(JSON.stringify(output)) <= 512, 'Stop guidance stays inside the hook output budget');
+});
+
+test('Stop offer stays within the hook output budget with long install and project paths', () => {
+  const { projectDir, stateDir } = overdueProject();
+  const longProjectDir = path.join(projectDir, ...Array(5).fill('project-path-'.repeat(10)));
+  recordOverdueTallies(longProjectDir, stateDir);
+  const longPluginRoot = path.join(projectDir, ...Array(5).fill('plugin-root-'.repeat(10)));
+
+  const output = JSON.parse(runHook(longProjectDir, stateDir, {}, { CLAUDE_PLUGIN_ROOT: longPluginRoot }));
+  assert.ok(Buffer.byteLength(JSON.stringify(output)) <= 512, 'Stop guidance is independent of install and project paths');
 });
 
 test('Stop offer stays silent while handling its own continuation', () => {

@@ -90,7 +90,7 @@ test('keeps startup-only and startup-or-resume hooks separate with SessionStart 
   });
 });
 
-test('Stop resupply decline command uses resolved hook and project paths', () => {
+test('Stop resupply guidance does not embed installation or project paths', () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quartermaster-project-'));
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quartermaster-state-'));
   const environment = { QUARTERMASTER_STATE_DIR: stateDir };
@@ -115,7 +115,9 @@ test('Stop resupply decline command uses resolved hook and project paths', () =>
   assert.ok(hookSpecificOutput, 'Stop offer uses hook-specific output');
   const { additionalContext: reason } = hookSpecificOutput;
   assert.equal(hookSpecificOutput.hookEventName, 'Stop');
-  assert.match(reason, new RegExp(`node "${path.join(__dirname, '..', 'bin', 'quartermaster.js')}"`));
-  assert.match(reason, new RegExp(`--project "${projectDir}"`));
+  assert.match(reason, /decline-resupply/);
+  assert.match(reason, /skill/);
   assert.doesNotMatch(reason, /\$\{CLAUDE_/);
+  assert.doesNotMatch(reason, /quartermaster\.js/);
+  assert.doesNotMatch(reason, new RegExp(projectDir));
 });
