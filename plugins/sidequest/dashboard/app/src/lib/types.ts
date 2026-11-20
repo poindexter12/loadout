@@ -45,7 +45,12 @@ export interface RoutingProfile { id: string; name: string; description?: string
 export interface RoutingPreview { project: string; from: RoutingProfile; to: RoutingProfile; drift: { changed: string[]; missing: string[]; added: string[] }; addCollisions: string[]; foreignBase: { id: string; baseProfileId: string; profileId: string; kind: string }[]; preparedDispatches: { id: string; ref: string; title: string }[]; }
 export interface Notification { id: string; kind: string; read?: boolean; ticketId?: string; projectSlug?: string; [key: string]: unknown; }
 export interface Health { ok: true; name: string; pid: number; startedAt: string; version: string; }
-export interface NotificationPayload { notifications: Notification[]; unread: number; unreadNeeds: number; }
+export interface OpenQuestion { qid: string; project?: string; ref: string; seq: string; header?: string | null; askedAt: string; }
+export interface NotificationPayload { notifications: Notification[]; unread: number; unreadNeeds: number; openQuestions?: OpenQuestion[]; }
+export interface QuestionRow { qid: string; project: string; ref: string; ticketId?: string | null; seq: string; header?: string | null; text: string; asker?: string | null; state: 'open' | 'answered' | 'declined' | 'withdrawn'; blocking: boolean; askedAt: string; answeredAt?: string | null; closedAt?: string | null; timeToAnswerMs: number | null; via?: string | null; }
+export interface QuestionAnswer { qid: string; project: string; text: string | null; }
+export interface QuestionDetail extends QuestionRow { options: { label: string; description: string }[] | null; multiSelect: boolean; default: string | null; answer: { aid: string; at: string; via: string; declined: boolean } | null; answerUrl: string | null; }
+export interface ActivityItem { id: string; at: string; title: string; detail: string; [key: string]: unknown; }
 export interface Snapshot { projects: Project[]; tickets: Ticket[]; stories: Story[]; categories: Category[]; notifications: NotificationPayload; health: Health; }
 export interface RoutingCatalog { categoryDraftAvailable?: boolean; [key: string]: unknown; }
 export type JsonRecord = Record<string, unknown>;

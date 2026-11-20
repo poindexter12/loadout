@@ -64,6 +64,7 @@
     <div class="menu-wrap" data-tour="sort-menu"><button class:active={state.sort !== 'manual'} aria-expanded={state.popover === 'sort'} onclick={() => toggle('sort')}>Sort: {selectedSort[1]}</button>
       {#if state.popover === 'sort'}<div class="popover" role="menu">{#each sortOptions as [key, label, hint] (key)}<button role="menuitemradio" aria-checked={state.sort === key} onclick={() => setSort(key)}><span>{label}</span><small>{hint}</small></button>{/each}</div>{/if}
     </div>
+    <button class:active={state.view === 'questions'} onclick={() => state.view = 'questions'}>Questions</button>
     <button class="new-ticket" data-tour="new-ticket" onclick={() => state.openDialog = 'create'}>New ticket</button>
     <NotificationInbox {state} />
     <SettingsDialog {state} />
