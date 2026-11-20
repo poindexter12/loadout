@@ -135,6 +135,7 @@ function createWorkers(dependencies) {
         });
         if (res && res.ok) {
           released.push(t.ref);
+          if (res.ticket && res.ticket.status === "awaiting-user") continue;
           try {
             addComment(c.slug, c.ticketId, {
               by: "sidequest",

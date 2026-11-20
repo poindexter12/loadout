@@ -1270,7 +1270,7 @@ function higherPriorityReadyWork(ticket?: any, readySet?: any, now = Date.now())
   return (Array.isArray(readySet) ? readySet : [])
     .filter((candidate: any) => candidate && candidate.id !== ticket.id && candidate.ref !== ticket.ref)
     .filter((candidate: any) => dispatchPriorityRank(candidate.priority) < rank)
-    .filter((candidate: any) => candidate.status !== 'awaiting-oracle')
+    .filter((candidate: any) => candidate.status !== 'awaiting-oracle' && candidate.status !== 'awaiting-user')
     .filter((candidate: any) => !dispatchInFlight(dispatchState(candidate), now))
     .sort((left: any, right: any) => dispatchPriorityRank(left.priority) - dispatchPriorityRank(right.priority)
       || String(left.createdAt).localeCompare(String(right.createdAt)))
@@ -1940,6 +1940,11 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
     if (pendingSubmission(t)) {
       const candidate = String(t.submission.commit || t.submission.sourceRevision?.value || '').trim();
       throw new Error(`prepare dispatch: ${t.ref} has a pending submission${candidate ? ` (${candidate})` : ''} waiting on integration, so it is parked for the publish transaction rather than for another executor. Integrate it (\`sidequest integrate ${t.ref} --by <who>\`), send it back for repair and dispatch the replacement (\`sidequest rework ${t.ref} --by ${t.submission.by || '<candidate-owner>'} --review <review-ticket-or-evidence> --reason "what needs repair"\`), or close it as abandoned (\`sidequest groom-close ${t.ref} --abandon-submission --reason "<evidence it never landed>"\`).`);
+    }
+    // awaiting_user (US-8): a parked ticket waits on a user answer. Dispatching it would race the
+    // held executor, or start a released park before its decisions packet exists.
+    if (t.status === 'awaiting-user') {
+      throw new Error(`prepare dispatch: awaiting_user: ${t.ref} is parked (${t.park?.mode || 'released'}) on open questions to the user, so it is not dispatchable; pulse({ref:"${t.ref}"}) lists them. Answer each with answer({ref:"${t.ref}", ...}), or answer({decline:true}) to let the executor ask at runtime; the last answer unparks it, and a released park then dispatches with the decisions packet.`);
     }
     if (current?.terminalAt && current.sharedTree === false && !current.claimedAt && !(t.claim && t.claim.by)) {
       const recoveryFacts = unclaimedWorktreeRecoveryFacts(projectPath, t, current);
@@ -3703,6 +3708,7 @@ function markDispatchStopped(sessionId?: any, executor?: any, agentId?: any, age
   const tickets: any[] = [];
   let stopped = false;
   for (const match of matches) {
+    let unsentPark: any = null;
     const result = withTicketLock(match.slug, match.id, () => {
       const t = getTicket(match.slug, match.id);
       const state = dispatchState(t);
@@ -3722,6 +3728,10 @@ function markDispatchStopped(sessionId?: any, executor?: any, agentId?: any, age
         stopped = true;
       } else if (active) {
         state.turnEndedAt = now;
+        // U1 held park: a turn end after ask's recorded SendMessage parks the ticket and keeps the
+        // claim. Read lazily so the dependency can be wired after createDispatch returns.
+        const park = typeof dependencies.parkHeldOnTurnEnd === 'function' ? dependencies.parkHeldOnTurnEnd(match.slug, t, now) : false;
+        if (park === 'detach') unsentPark = { ...t.claim };
       }
       stampDispatchEvent(t, 'subagent-stop', now);
       putTicket(match.slug, t);
@@ -3729,6 +3739,11 @@ function markDispatchStopped(sessionId?: any, executor?: any, agentId?: any, age
     });
     if (!result || !result.ok) return { ok: false, reason: 'not_found' };
     stopped = stopped || result.stopped;
+    // U1 missing SendMessage: the release takes its own ticket lock, so it runs after this one.
+    if (unsentPark && typeof dependencies.detachUnsentPark === 'function') {
+      const detached = dependencies.detachUnsentPark(match.slug, match.id, unsentPark);
+      if (detached && detached.ok && detached.ticket) result.ticket = detached.ticket;
+    }
     tickets.push(result.ticket);
   }
   return { ok: true, ticket: tickets[0], tickets, stopped };

@@ -402,7 +402,7 @@ function listContextArguments(args) {
   return Object.fromEntries(["status", "archived", "detail", "all"].filter((key) => args[key] !== void 0).map((key) => [key, args[key]]));
 }
 function listContextRows(project, args) {
-  const status = args.status == null && !args.all ? ["todo", "doing", "awaiting-oracle"] : args.status;
+  const status = args.status == null && !args.all ? ["todo", "doing", "awaiting-user", "awaiting-oracle"] : args.status;
   const brief = !args.detail;
   const payload = store.listPayload(project, {
     status,

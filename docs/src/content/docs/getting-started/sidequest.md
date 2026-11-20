@@ -128,6 +128,8 @@ For substantial changes, Claude can turn the request into a story with linked ti
 
 Sidequest keeps ticket activity visible in the board. Ask Claude to check active work after a restart or when you need help with a ticket that was started in another session.
 
+When an executor needs a decision only you can make, its ticket waits in the `awaiting-user` status until you answer. An awaiting-user ticket is never offered as ready work and cannot be dispatched. The wait starts held: the executor keeps its claim and worktree, so your answer lets it continue where it stopped. A held wait turns released if it goes unanswered for 24 hours, if the owning session ends, if the question was never actually sent to you, or if the executor hands the ticket back on purpose. A released wait has given up its claim, and once the last question is answered the ticket returns to the ready pool and is dispatched again with your decisions included. `pulse` on the ticket shows how many questions are open and how long the oldest has waited.
+
 ### Where the non-Claude models come from
 
 Routing can send a ticket to a non-Claude model, and Sidequest finds those models in two places. If Model Gateway is installed, its published catalog is read directly. Sidequest also asks whichever endpoint `ANTHROPIC_BASE_URL` points at for its model list, the same list Claude Code reads for its own `/model` picker, so a relay you run yourself contributes models without Model Gateway being installed at all. The two sources combine: a model both of them publish keeps its Model Gateway name, so existing routes are never renamed, and an endpoint-only model is added alongside. First-party Claude models are never treated as external, so pointing the variable at the real API changes nothing about routing.
@@ -189,7 +191,7 @@ Use `sidequest issue list SQ-123` to see the links and `sidequest issue unlink S
 
 `sidequest audit` is report-only by default. It summarizes four things: board tickets whose fix looks landed, open GitHub issues with no ticket, linked issues whose state or labels differ from the board, and any unavailable GitHub or Git evidence. `sidequest audit --apply` performs only the proposed actions for **linked** issues. It never changes unlinked issues, creates tickets, or closes board tickets.
 
-For a linked issue, todo tickets leave it open with no Sidequest status label. Doing, awaiting-oracle, and pending-submission work is open with `status:in-progress`; done but unreleased work is open with `status:in-testing`. When every linked ticket is released, Sidequest removes those status labels, posts one release marker comment, and closes the issue. Applying the same audit again is safe: existing labels and release comments are not duplicated.
+For a linked issue, todo tickets leave it open with no Sidequest status label. Doing, awaiting-user, awaiting-oracle, and pending-submission work is open with `status:in-progress`; done but unreleased work is open with `status:in-testing`. When every linked ticket is released, Sidequest removes those status labels, posts one release marker comment, and closes the issue. Applying the same audit again is safe: existing labels and release comments are not duplicated.
 
 ### Mirror bugs and features automatically
 
