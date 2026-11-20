@@ -3,7 +3,7 @@
   import type { BoardState } from '../../state/board.svelte';
   import type { ActivityItem, QuestionDetail, QuestionRow } from '../../types';
 
-  let { state }: { state: BoardState } = $props();
+  let { state: board }: { state: BoardState } = $props();
   let tab = $state<'questions' | 'activity'>('questions');
   let questions = $state<QuestionRow[]>([]);
   let activity = $state<ActivityItem[]>([]);
@@ -15,7 +15,7 @@
   let answer = $state<string | null>(null);
   let answerLoading = $state(false);
 
-  const project = $derived(state.selectedProject === 'all' ? 'all' : state.selectedProject);
+  const project = $derived(board.selectedProject === 'all' ? 'all' : board.selectedProject);
 
   function ago(value?: string | null) {
     if (!value) return '—';
@@ -39,8 +39,8 @@
     error = '';
     try {
       const [questionResponse, activityResponse] = await Promise.all([
-        state.api.questions({ project, state: 'all' }),
-        state.api.activity({ project, limit: 100 })
+        board.api.questions({ project, state: 'all' }),
+        board.api.activity({ project, limit: 100 })
       ]);
       questions = questionResponse.questions;
       activity = activityResponse.activity;
@@ -56,10 +56,10 @@
     detailLoading = true;
     answer = null;
     try {
-      selected = (await state.api.question(row.qid, row.project)).question;
+      selected = (await board.api.question(row.qid, row.project)).question;
       globalThis.location.hash = `/questions/${row.qid}`;
     } catch (caught) {
-      state.toast(caught instanceof Error ? caught.message : 'Could not load question.');
+      board.toast(caught instanceof Error ? caught.message : 'Could not load question.');
       selected = null;
     } finally {
       detailLoading = false;
@@ -77,9 +77,9 @@
     if (!selected?.answerUrl) return;
     answerLoading = true;
     try {
-      answer = (await state.api.questionAnswer(selected.qid, selected.project)).text;
+      answer = (await board.api.questionAnswer(selected.qid, selected.project)).text;
     } catch (caught) {
-      state.toast(caught instanceof Error ? caught.message : 'Could not load answer.');
+      board.toast(caught instanceof Error ? caught.message : 'Could not load answer.');
     } finally {
       answerLoading = false;
     }
@@ -91,7 +91,7 @@
     if (!qid) return;
     const openFromHash = async () => {
       try {
-        const detail = await state.api.question(qid, project);
+        const detail = await board.api.question(qid, project);
         selected = detail.question;
         selectedQid = qid;
       } catch { /* A deleted or inaccessible deep link leaves the list available. */ }

@@ -797,6 +797,37 @@ function assertNoAnswerText(raw?: any, where?: any) {
   assert.ok(!raw.includes('bodies/'), `${where} names a body file`);
 }
 
+test('SQ-423 GET /api/activity is chronological and never exposes answer text', async (t?: any) => {
+  const { slug, dir } = questionProject('activity');
+  const seeded = seedQuestions(dir);
+  const ticket = store.createTicket(slug, { title: 'Activity ticket', description: 'Activity', priority: 'normal' });
+  store.addComment(slug, ticket.id, { by: 'tester', body: 'Activity comment' });
+  const started = await start(await availablePort());
+  t.after(() => started.server.close());
+
+  const raw = await requestRaw(started.port, `/api/activity?project=${slug}&limit=100`);
+  assert.strictEqual(raw.status, 200);
+  assertNoAnswerText(raw.body, 'activity');
+  const activity = JSON.parse(raw.body).activity;
+  assert.ok(activity.some((item?: any) => item.id === `question:${seeded.open.qid}:asked`));
+  assert.ok(activity.some((item?: any) => item.title === 'Ticket comment' && item.detail.includes(ticket.ref)));
+  assert.deepStrictEqual(activity.map((item?: any) => item.at), activity.map((item?: any) => item.at).slice().sort().reverse(), 'newest first');
+  assert.strictEqual((await requestJson(started.port, 'GET', `/api/activity?project=${slug}&limit=0`)).status, 400);
+  assert.strictEqual((await requestJson(started.port, 'GET', `/api/activity?project=${slug}&since=soon`)).status, 400);
+});
+
+test('SQ-423 notifications expose open questions without creating a notification row', async (t?: any) => {
+  const { slug, dir } = questionProject('notifications');
+  const seeded = seedQuestions(dir);
+  const started = await start(await availablePort());
+  t.after(() => started.server.close());
+
+  const result = await fetchJson(started.port, `/api/notifications?project=${slug}`);
+  assert.deepStrictEqual(result.openQuestions.map((question?: any) => question.qid), [seeded.open.qid]);
+  assert.strictEqual(result.openQuestions[0].project, slug);
+  assert.strictEqual(result.unreadNeeds, result.notifications.filter((notification?: any) => notification.kind === 'reminder').length + 1);
+});
+
 test('SQ-417 GET /api/questions lists question text, ticket, asker, status and times, never answer text', async (t?: any) => {
   const { slug, dir } = questionProject('list');
   const seeded = seedQuestions(dir);

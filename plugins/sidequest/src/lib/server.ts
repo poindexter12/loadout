@@ -605,6 +605,47 @@ function answerUrl(slug: string, qid: string, aid?: any) {
 }
 
 // GET /api/questions/<qid>?project=: the full record, answer metadata only.
+// `/api/activity` is deliberately a compact audit feed. In particular, question
+// events name the question but never include an answer or its preview: detail is
+// fetched only through the question endpoint, then its separate answer endpoint.
+function activityLimit(raw?: any) {
+  if (raw == null || raw === '') return 100;
+  const limit = Number(raw);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new QuestionRequestError(400, 'limit must be an integer from 1 to 500');
+  return limit;
+}
+
+function activityItems(q?: any) {
+  const scope = questionProjects(q.project);
+  const since = q.since == null || q.since === '' ? null : String(q.since);
+  if (since && !Number.isFinite(Date.parse(since))) throw new QuestionRequestError(400, 'since must be an ISO time');
+  const activity: any[] = [];
+  for (const slug of scope.slugs) {
+    for (const question of projectQuestionRows(slug)) {
+      activity.push({ id: `question:${question.qid}:asked`, at: question.askedAt, title: 'Question asked', detail: `${question.ref} · ${question.header || question.seq}` });
+      if (question.answeredAt) activity.push({ id: `question:${question.qid}:answered`, at: question.answeredAt, title: 'Question answered', detail: `${question.ref} · ${question.header || question.seq}` });
+      if (question.closedAt && question.state === 'withdrawn') activity.push({ id: `question:${question.qid}:withdrawn`, at: question.closedAt, title: 'Question withdrawn', detail: `${question.ref} · ${question.header || question.seq}` });
+    }
+    for (const ticket of store.listTickets(slug)) {
+      const ref = ticket.ref || ticket.id;
+      for (const comment of Array.isArray(ticket.comments) ? ticket.comments : []) {
+        if (!comment?.at) continue;
+        activity.push({ id: `comment:${slug}:${ticket.id}:${comment.id || comment.at}`, at: comment.at, title: 'Ticket comment', detail: `${ref} · ${comment.by || 'unknown'}` });
+      }
+      for (const attempt of Array.isArray(ticket.dispatch?.attempts) ? ticket.dispatch.attempts : []) {
+        const at = attempt?.at || attempt?.startedAt || attempt?.preparedAt;
+        if (!at) continue;
+        activity.push({ id: `dispatch:${slug}:${ticket.id}:${attempt.id || at}`, at, title: 'Dispatch attempt', detail: `${ref} · ${attempt.outcome || 'started'}` });
+      }
+    }
+  }
+  const cutoff = since ? Date.parse(since) : null;
+  return activity
+    .filter((item?: any) => cutoff == null || Date.parse(item.at) >= cutoff)
+    .sort((left?: any, right?: any) => Date.parse(right.at) - Date.parse(left.at) || String(left.id).localeCompare(String(right.id)))
+    .slice(0, activityLimit(q.limit));
+}
+
 function questionDetail(q?: any, qid?: any) {
   const { slug, state, archived } = locateQuestion(q, qid);
   const asked = state.asked;
@@ -1169,6 +1210,11 @@ async function handle(req?: any, res?: any) {
     return;
   }
 
+  if (req.method === 'GET' && pathname === '/api/activity') {
+    sendQuestionResponse(res, () => ({ project: q.project || 'all', activity: activityItems(q) }));
+    return;
+  }
+
   const questionAnswerMatch = /^\/api\/questions\/([^/]+)\/answer$/.exec(pathname);
   if (req.method === 'GET' && questionAnswerMatch) {
     sendQuestionResponse(res, () => questionAnswer(q, questionAnswerMatch[1]));
@@ -1458,8 +1504,12 @@ async function handle(req?: any, res?: any) {
     // client holds doesn't include an older unread event.
     const unreadList = store.listNotifications(Object.assign({}, opts, { unreadOnly: true, kind: undefined, limit: undefined }));
     const unread = unreadList.length;
-    const unreadNeeds = unreadList.filter((n?: any) => n.kind === 'reminder').length;
-    sendJson(res, 200, { notifications, unread, unreadNeeds });
+    const openQuestions = questionProjects(opts.projectSlug).slugs
+      .flatMap((slug: string) => projectQuestionRows(slug))
+      .filter((question?: any) => question.state === 'open')
+      .map((question?: any) => ({ qid: question.qid, project: question.project, ref: question.ref, seq: question.seq, header: question.header, askedAt: question.askedAt }));
+    const unreadNeeds = unreadList.filter((n?: any) => n.kind === 'reminder').length + openQuestions.length;
+    sendJson(res, 200, { notifications, unread, unreadNeeds, openQuestions });
     return;
   }
 
