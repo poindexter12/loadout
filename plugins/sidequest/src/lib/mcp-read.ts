@@ -125,7 +125,7 @@ const tools: ToolDefinition[] = [
       properties: {
         project: PROJECT_PROP,
         ref: { type: 'string', description: 'Return this one ticket in full.' },
-        status: { type: 'string', enum: ['todo', 'doing', 'awaiting-oracle', 'done'] },
+        status: { type: 'string', enum: ['todo', 'doing', 'awaiting-user', 'awaiting-oracle', 'done'] },
         archived: { type: 'boolean' },
         detail: { type: 'boolean', description: 'Audit only: full bodies and comment threads. Orchestration uses default brief rows; liveness uses changes/pulse.' },
         brief: { type: 'boolean', description: 'One compact row per ticket. This is the default unless detail:true.' },
@@ -143,7 +143,7 @@ const tools: ToolDefinition[] = [
       }
       // MCP board reads are routine orchestration reads, so omit completed work
       // and ticket bodies unless the caller explicitly asks for either.
-      const status = args.status == null && !args.all ? ['todo', 'doing', 'awaiting-oracle'] : args.status;
+      const status = args.status == null && !args.all ? ['todo', 'doing', 'awaiting-user', 'awaiting-oracle'] : args.status;
       const brief = args.detail ? false : args.brief !== false;
       // Default paging starts only at the external tool-result ceiling. Callers
       // that pass limit or all control row count themselves.

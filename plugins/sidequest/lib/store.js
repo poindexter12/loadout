@@ -648,6 +648,7 @@ const {
 } = dispatch = createDispatch({
   ARTIFACT_BASELINE_MAX_PATHS,
   parkHeldOnTurnEnd: (...args) => parkHeldOnTurnEnd(...args),
+  detachUnsentPark: (...args) => detachUnsentPark(...args),
   normalizeCategoryId: (...args) => normalizeCategoryId(...args),
   projectRoutingEnabled,
   routingDisabledMessage,
@@ -2154,6 +2155,9 @@ function claimTicket(slug, idOrRef, by, opts) {
     }
     const delay = testClaimLockDelayMs();
     if (delay) busyWait(delay);
+    if (t2.status === PARK_STATUS && !(t2.park?.mode === "held" && t2.claim && t2.claim.by === by)) {
+      return { ok: false, reason: "awaiting_user", ticket: t2, message: `${t2.ref} is parked (${t2.park?.mode || "released"}) on open questions to the user; pulse({ref:"${t2.ref}"}) lists them. Answer each with answer({ref:"${t2.ref}", ...}), or answer({decline:true}) to let the executor ask at runtime; the last answer unparks it.` };
+    }
     const directClaimReason = directReason(opts.reason);
     if (opts.direct && isRoutedTicket(t2) && !directClaimReason) return { ok: false, reason: "direct_reason_required", ticket: t2 };
     if (opts.direct && isRoutedTicket(t2) && !directReasonAllowed(directClaimReason)) return { ok: false, reason: "direct_not_allowed", ticket: t2, expectedExecutor: expectedClaimExecutor(t2) };
@@ -2177,9 +2181,6 @@ function claimTicket(slug, idOrRef, by, opts) {
       }
     }
     if (t2.status === "done") return { ok: false, reason: "done", ticket: t2 };
-    if (t2.status === PARK_STATUS && !(t2.park?.mode === "held" && t2.claim && t2.claim.by === by)) {
-      return { ok: false, reason: "awaiting_user", ticket: t2, message: `${t2.ref} is parked (${t2.park?.mode || "released"}) on open questions to the user. Answer them with answer({ref:"${t2.ref}", ...}); the last answer unparks it.` };
-    }
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const lifecycleAuthority = { actor: by, operation: "claim", sessionId: opts.sessionId || null };
     const directExecution = opts.direct || !currentDispatch;
@@ -2814,14 +2815,19 @@ function resumeHeldPark(t, by, at) {
 }
 function parkHeldOnTurnEnd(slug, t, at) {
   if (!t || t.status !== "doing" || !t.claim || !t.claim.by) return false;
-  const states = heldParkQuestions(parkQuestionStates(slug, t.ref), t.claim);
-  if (!states.length) return false;
+  const all = parkQuestionStates(slug, t.ref);
+  const states = heldParkQuestions(all, t.claim);
+  if (!states.length) return heldParkQuestions(all, t.claim, { requireSent: false }).length ? "detach" : false;
   const now = at || (/* @__PURE__ */ new Date()).toISOString();
   t.status = PARK_STATUS;
   applyPark(t, "held", states, t.claim.by, now);
   t.statusTransition = { from: "doing", to: PARK_STATUS, at: now };
   pushParkComment(t, parkCommentBody(t.ref, "held", states, `${t.claim.by} ended its turn after asking; it keeps its claim and worktree.`), now);
-  return true;
+  return "held";
+}
+function detachUnsentPark(slug, idOrRef, expectedClaim) {
+  if (!expectedClaim || !expectedClaim.by) return { ok: false, reason: "not_claimed" };
+  return releaseTicket(slug, idOrRef, expectedClaim.by, { status: "todo", parkDetach: true, expectedClaim, source: "subagent-stop" });
 }
 function unparkTicket(slug, idOrRef, opts = {}) {
   const found = getTicket(slug, idOrRef);

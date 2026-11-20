@@ -54,7 +54,7 @@ export const BOARD_TABLES = [
 ] as const;
 export type BoardTable = typeof BOARD_TABLES[number];
 
-const TICKET_STATUSES = ['todo', 'doing', 'awaiting-oracle', 'done'];
+const TICKET_STATUSES = ['todo', 'doing', 'awaiting-user', 'awaiting-oracle', 'done'];
 
 export interface BoardMoveBlocker {
   kind: 'claim' | 'dispatch' | 'publish-lock' | 'collision';

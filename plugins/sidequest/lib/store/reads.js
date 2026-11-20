@@ -94,7 +94,7 @@ function createReads(dependencies) {
     const project = String(slug || "");
     const filter = {
       archived: !!opts.archived,
-      status: opts.status == null && !opts.all ? ["todo", "doing", "awaiting-oracle"] : opts.status
+      status: opts.status == null && !opts.all ? ["todo", "doing", "awaiting-user", "awaiting-oracle"] : opts.status
     };
     const paging = !opts.all && opts.limit == null && opts.maxBytes == null ? Object.assign({}, opts, { limit: DEFAULT_LIST_PAGE_LIMIT }) : opts;
     const total = countTickets(project, filter);

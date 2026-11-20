@@ -553,6 +553,7 @@ const {
 } = (dispatch = createDispatch({
   ARTIFACT_BASELINE_MAX_PATHS,
   parkHeldOnTurnEnd: (...args: any[]) => parkHeldOnTurnEnd(...args),
+  detachUnsentPark: (...args: any[]) => detachUnsentPark(...args),
   normalizeCategoryId: (...args: any[]) => normalizeCategoryId(...args),
   projectRoutingEnabled,
   routingDisabledMessage,
@@ -2348,6 +2349,12 @@ function claimTicket(slug?: any, idOrRef?: any, by?: any, opts?: any) {
     }
     const delay = testClaimLockDelayMs();
     if (delay) busyWait(delay);
+    // A park waits on the user, and that is the actionable refusal, so it precedes every other one.
+    // Only a held park's own holder may touch its claim; a released park is claimed again only
+    // after the last answer moves it to todo.
+    if (t.status === PARK_STATUS && !(t.park?.mode === 'held' && t.claim && t.claim.by === by)) {
+      return { ok: false, reason: 'awaiting_user', ticket: t, message: `${t.ref} is parked (${t.park?.mode || 'released'}) on open questions to the user; pulse({ref:"${t.ref}"}) lists them. Answer each with answer({ref:"${t.ref}", ...}), or answer({decline:true}) to let the executor ask at runtime; the last answer unparks it.` };
+    }
     const directClaimReason = directReason(opts.reason);
     if (opts.direct && isRoutedTicket(t) && !directClaimReason) return { ok: false, reason: 'direct_reason_required', ticket: t };
     if (opts.direct && isRoutedTicket(t) && !directReasonAllowed(directClaimReason)) return { ok: false, reason: 'direct_not_allowed', ticket: t, expectedExecutor: expectedClaimExecutor(t) };
@@ -2371,11 +2378,6 @@ function claimTicket(slug?: any, idOrRef?: any, by?: any, opts?: any) {
       }
     }
     if (t.status === 'done') return { ok: false, reason: 'done', ticket: t };
-    // A park waits on the user. Only a held park's own holder may touch its claim; a released park
-    // is claimed again only after the last answer moves it to todo.
-    if (t.status === PARK_STATUS && !(t.park?.mode === 'held' && t.claim && t.claim.by === by)) {
-      return { ok: false, reason: 'awaiting_user', ticket: t, message: `${t.ref} is parked (${t.park?.mode || 'released'}) on open questions to the user. Answer them with answer({ref:"${t.ref}", ...}); the last answer unparks it.` };
-    }
     const now = new Date().toISOString();
     const lifecycleAuthority = { actor: by, operation: 'claim', sessionId: opts.sessionId || null };
     const directExecution = opts.direct || !currentDispatch;
@@ -3137,17 +3139,27 @@ function resumeHeldPark(t?: any, by?: any, at?: any) {
 
 // Held park at turn end (U1): a live claim whose executor asked an open blocking question this
 // claim and recorded the SendMessage, then ended its turn, parks held. Runs inside
-// markDispatchStopped's ticket lock. Without a sent question the turn end is not a park.
+// markDispatchStopped's ticket lock. Returns 'held' when it parked, or 'detach' when the claim
+// asked an open blocking question but never recorded the SendMessage: nobody can resume that agent,
+// so the caller detaches it to a released park through detachUnsentPark, outside this lock.
 function parkHeldOnTurnEnd(slug?: any, t?: any, at?: any) {
   if (!t || t.status !== 'doing' || !t.claim || !t.claim.by) return false;
-  const states = heldParkQuestions(parkQuestionStates(slug, t.ref), t.claim);
-  if (!states.length) return false;
+  const all = parkQuestionStates(slug, t.ref);
+  const states = heldParkQuestions(all, t.claim);
+  if (!states.length) return heldParkQuestions(all, t.claim, { requireSent: false }).length ? 'detach' : false;
   const now = at || new Date().toISOString();
   t.status = PARK_STATUS;
   applyPark(t, 'held', states, t.claim.by, now);
   t.statusTransition = { from: 'doing', to: PARK_STATUS, at: now };
   pushParkComment(t, parkCommentBody(t.ref, 'held', states, `${t.claim.by} ended its turn after asking; it keeps its claim and worktree.`), now);
-  return true;
+  return 'held';
+}
+
+// Missing SendMessage (U1): the turn ended on an asked-but-unsent question. Release the claim
+// into a released park; the expected claim guards against a fresh claim landing in between.
+function detachUnsentPark(slug?: any, idOrRef?: any, expectedClaim?: any) {
+  if (!expectedClaim || !expectedClaim.by) return { ok: false, reason: 'not_claimed' };
+  return releaseTicket(slug, idOrRef, expectedClaim.by, { status: 'todo', parkDetach: true, expectedClaim, source: 'subagent-stop' });
 }
 
 // The answer path (Q4) calls this after it records an answer or withdrawal. While any blocking

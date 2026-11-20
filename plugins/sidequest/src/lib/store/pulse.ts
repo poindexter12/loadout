@@ -4,6 +4,22 @@ const { execFileSync } = require('node:child_process');
 const { canonicalPreparedDispatchExecutor } = require('../prepared-dispatch.js');
 const { readPrWatchState } = require('./project-watch.js');
 const { HOST_SLEEP_GUIDANCE, defaultHostSleep, reclassifyLivenessForHostSleep } = require('../host-sleep.js');
+const { openBlockingQuestions, parkQuestionStates } = require('./claims.js');
+
+// Pulse and watch show a park's stage and its open questions (US-8). Only a parked ticket reads
+// the question log, so a board-wide watch does not fold the log once per ticket.
+function parkProjection(slug?: any, ticket?: any) {
+  if (!ticket || ticket.status !== 'awaiting-user') return null;
+  const open = openBlockingQuestions(parkQuestionStates(slug, ticket.ref));
+  const oldest = open.reduce((min: any, state: any) => {
+    const at = state?.asked?.at;
+    return at && (!min || String(at) < String(min)) ? at : min;
+  }, null);
+  return {
+    park: { mode: ticket.park?.mode || 'released', parkedAt: ticket.park?.parkedAt || null, by: ticket.park?.by || null },
+    questions: { open: open.length, oldest },
+  };
+}
 
 function createGitHubCiRunsProvider(projectPath: string, execute = execFileSync) {
   const command = (program: string, arguments_: string[]) => execute(program, arguments_, {
@@ -379,6 +395,7 @@ function createPulse(dependencies: any) {
       checkpoint: checkpointProjection(ticket),
       scope: scopePulse(slug, ticket),
       ...(oracleProjection(ticket) ? { oracle: oracleProjection(ticket) } : {}),
+      ...(parkProjection(slug, ticket) || {}),
       ...(warnings.length ? { warnings } : {}),
       submission: submissionProjection(ticket.submission),
       awaitingMergeWaves: awaitingMergeWavesPulse(slug),
@@ -431,6 +448,7 @@ function createPulse(dependencies: any) {
             },
           } : {}),
           ...(oracleProjection(ticket) ? { oracle: oracleProjection(ticket) } : {}),
+          ...(parkProjection(slug, ticket) || {}),
           ...(warnings.length ? { warnings } : {}),
           updatedAt: ticket.updatedAt,
         };
@@ -493,6 +511,8 @@ function createBoardWatch(dependencies: any) {
   function actionableEvent(ticket: any): { type: string; author: string; excerpt: string; warningIdentity?: string } | null {
     if (ownedByAnotherSession(ticket)) return null;
     if (ticket.status === 'awaiting-oracle') return { type: 'awaiting-oracle', author: '', excerpt: '' };
+    // A park is waiting on the user's answer, so it alerts like an oracle ask (US-8).
+    if (ticket.status === 'awaiting-user') return { type: 'awaiting-user', author: '', excerpt: String(ticket.park?.mode || '') };
     if (ticket.lastEventType === 'release' || ticket.lastEventType === 'scope-request') {
       return { type: ticket.lastEventType, author: '', excerpt: '' };
     }
