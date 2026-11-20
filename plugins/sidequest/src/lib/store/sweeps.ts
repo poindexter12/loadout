@@ -81,11 +81,15 @@ function sweepStaleClaims(opts?: any) {
           }
           continue;
         }
-        released.push({ project: project.slug, ref: ticket.ref, kind: verdict.kind });
-        addComment(project.slug, ticket.id, {
-          by: 'sidequest', kind: 'comment', source,
-          body: claimReleaseNote(ticket, verdict),
-        });
+        // A detached park (US-8) stays awaiting-user, not todo; its park comment records the detach.
+        const parked = res.ticket?.status === 'awaiting-user';
+        released.push({ project: project.slug, ref: ticket.ref, kind: verdict.kind, ...(parked ? { parked: true } : {}) });
+        if (!parked) {
+          addComment(project.slug, ticket.id, {
+            by: 'sidequest', kind: 'comment', source,
+            body: claimReleaseNote(ticket, verdict),
+          });
+        }
       } catch (_: any) {
         // One inaccessible board must not prevent other dead claims from recovering.
       }

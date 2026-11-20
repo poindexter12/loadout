@@ -77,13 +77,16 @@ function createSweeps({ addComment, claimAbandonMs, claimIdleMs, claimReleaseNot
             }
             continue;
           }
-          released.push({ project: project.slug, ref: ticket.ref, kind: verdict.kind });
-          addComment(project.slug, ticket.id, {
-            by: "sidequest",
-            kind: "comment",
-            source,
-            body: claimReleaseNote(ticket, verdict)
-          });
+          const parked = res.ticket?.status === "awaiting-user";
+          released.push({ project: project.slug, ref: ticket.ref, kind: verdict.kind, ...parked ? { parked: true } : {} });
+          if (!parked) {
+            addComment(project.slug, ticket.id, {
+              by: "sidequest",
+              kind: "comment",
+              source,
+              body: claimReleaseNote(ticket, verdict)
+            });
+          }
         } catch (_) {
         }
       }
