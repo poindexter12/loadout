@@ -4118,7 +4118,7 @@ ${verify.outputTail}` : null
       const wave = { id: waveId, baseline: opened.baseline, participants: participantRefs };
       if (gate.verification.status === "toolchain_missing") {
         const worktreeSetup = String(boardConfig(slug)?.worktreeSetup || "").trim();
-        const setupEvidence = worktreeSetup ? `Configured worktree setup ${JSON.stringify(worktreeSetup)} should provide that command before the gate runs.` : "No worktree setup is configured to provide the missing command.";
+        const setupEvidence = worktreeSetup ? `Configured worktree setup ${JSON.stringify(worktreeSetup)} should provide that command before the gate runs.` : "No worktree setup is configured to provide the missing command or dependencies; board_config worktreeSetup or worktreeDependencyPaths can provision them for every worktree.";
         return {
           ok: false,
           reason: "assembled_wave_environment_problem",

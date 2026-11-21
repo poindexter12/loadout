@@ -4897,7 +4897,7 @@ function assembleSubmissionWave(slug?: any, refs?: any, opts?: any) {
       const worktreeSetup = String(boardConfig(slug)?.worktreeSetup || '').trim();
       const setupEvidence = worktreeSetup
         ? `Configured worktree setup ${JSON.stringify(worktreeSetup)} should provide that command before the gate runs.`
-        : 'No worktree setup is configured to provide the missing command.';
+        : 'No worktree setup is configured to provide the missing command or dependencies; board_config worktreeSetup or worktreeDependencyPaths can provision them for every worktree.';
       return {
         ok: false,
         reason: 'assembled_wave_environment_problem',
