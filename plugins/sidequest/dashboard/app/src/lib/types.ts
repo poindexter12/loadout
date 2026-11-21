@@ -49,6 +49,7 @@ export interface OpenQuestion { qid: string; project?: string; ref: string; seq:
 export interface NotificationPayload { notifications: Notification[]; unread: number; unreadNeeds: number; openQuestions?: OpenQuestion[]; }
 export interface QuestionRow { qid: string; project: string; ref: string; ticketId?: string | null; seq: string; header?: string | null; text: string; asker?: string | null; state: 'open' | 'answered' | 'declined' | 'withdrawn'; blocking: boolean; askedAt: string; answeredAt?: string | null; closedAt?: string | null; timeToAnswerMs: number | null; via?: string | null; }
 export interface QuestionAnswer { qid: string; project: string; text: string | null; }
+export interface QuestionAnswered { ok: true; project: string; ref: string; status: string; qid: string; aid: string; seq: string; declined: boolean; via: string; idempotent: boolean; openForTicket: string[]; blockingOpen: number; send: { to: string; message: string } | null; next?: string; delivery: string; }
 export interface QuestionDetail extends QuestionRow { options: { label: string; description: string }[] | null; multiSelect: boolean; default: string | null; answer: { aid: string; at: string; via: string; declined: boolean } | null; answerUrl: string | null; }
 export interface ActivityItem { id: string; at: string; title: string; detail: string; [key: string]: unknown; }
 export interface Snapshot { projects: Project[]; tickets: Ticket[]; stories: Story[]; categories: Category[]; notifications: NotificationPayload; health: Health; }

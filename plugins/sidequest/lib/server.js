@@ -593,12 +593,83 @@ function questionAnswer(q, qid) {
     text
   };
 }
+let answerToolHandler = null;
+function answerTool() {
+  if (!answerToolHandler) {
+    const tool = require("./mcp-questions").tools.find((candidate) => candidate.name === "answer");
+    if (!tool) throw new Error("the answer board tool is missing");
+    answerToolHandler = tool.handler;
+  }
+  return answerToolHandler;
+}
+const SESSION_ENV_KEYS = ["CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID"];
+function withoutSessionIdentity(run) {
+  const saved = SESSION_ENV_KEYS.map((key) => [key, process.env[key]]);
+  for (const key of SESSION_ENV_KEYS) delete process.env[key];
+  try {
+    return run();
+  } finally {
+    for (const [key, value] of saved) if (value !== void 0) process.env[key] = value;
+  }
+}
+const ANSWER_REFUSAL_STATUS = {
+  already_answered: 409,
+  no_such_question: 409,
+  answer_empty: 400,
+  answer_too_long: 400,
+  question_log_busy: 503
+};
+class AnswerRefusal extends QuestionRequestError {
+  body;
+  constructor(status, body) {
+    super(status, body.error);
+    this.body = body;
+  }
+}
+function answerDelivery(result) {
+  const parts = [result.send ? `${result.send.to} holds ${result.ref}'s claim and gets this answer on its next board call. If it has stopped, the orchestrating session resumes it with the SendMessage below.` : `No executor holds ${result.ref}. The answer rides in the briefing of its next dispatch.`];
+  if (result.status === "awaiting-user") parts.push(`${result.ref} still waits on other questions: ${(result.openForTicket || []).join(", ")}.`);
+  return parts.join(" ");
+}
+function postQuestionAnswer(q, qid, body) {
+  const { slug, state } = locateQuestion(q, qid);
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new QuestionRequestError(400, "the body must be a JSON object with text or decline");
+  if (body.supersedes != null) throw new QuestionRequestError(400, "the dashboard does not supersede an answer; the first answer stands");
+  if (body.text != null && typeof body.text !== "string") throw new QuestionRequestError(400, "text must be a string");
+  if (body.decline != null && typeof body.decline !== "boolean") throw new QuestionRequestError(400, "decline must be true or false");
+  const decline = body.decline === true;
+  if (decline && typeof body.text === "string" && body.text.trim()) throw new QuestionRequestError(400, "give text or decline, not both");
+  if (!store.getTicket(slug, state.ref)) throw new QuestionRequestError(404, `ticket ${state.ref} is no longer on board ${slug}`);
+  const result = withoutSessionIdentity(() => answerTool()({
+    ref: state.ref,
+    project: slug,
+    question: state.qid,
+    text: decline ? null : body.text,
+    decline,
+    via: "dashboard"
+  }));
+  if (!result.ok) {
+    let error = result.message || result.reason;
+    if (result.reason === "already_answered") {
+      error = `${state.ref} ${state.seq} is already answered (${result.aid}${result.via ? ` via ${result.via}` : ""}). The first answer stands; reload to see it.`;
+    }
+    throw new AnswerRefusal(ANSWER_REFUSAL_STATUS[result.reason] || 400, {
+      error,
+      reason: result.reason,
+      qid: state.qid,
+      ...result.aid ? { aid: result.aid } : {},
+      ...result.max != null ? { max: result.max, length: result.length } : {}
+    });
+  }
+  const { instruction: _instruction, ...recorded } = result;
+  return { ...recorded, delivery: answerDelivery(result) };
+}
 function sendQuestionResponse(res, build) {
   try {
     sendJson(res, 200, build());
   } catch (error) {
     if (error instanceof QuestionRequestError) {
-      sendJson(res, error.status, { error: error.message });
+      sendJson(res, error.status, error instanceof AnswerRefusal ? error.body : { error: error.message });
       return;
     }
     throw error;
@@ -1103,6 +1174,17 @@ async function handle(req, res) {
   const questionAnswerMatch = /^\/api\/questions\/([^/]+)\/answer$/.exec(pathname);
   if (req.method === "GET" && questionAnswerMatch) {
     sendQuestionResponse(res, () => questionAnswer(q, questionAnswerMatch[1]));
+    return;
+  }
+  if (req.method === "POST" && questionAnswerMatch) {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (_) {
+      sendJson(res, 400, { error: "invalid JSON body" });
+      return;
+    }
+    sendQuestionResponse(res, () => postQuestionAnswer(q, questionAnswerMatch[1], body));
     return;
   }
   const questionMatch = /^\/api\/questions\/([^/]+)$/.exec(pathname);
