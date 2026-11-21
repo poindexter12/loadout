@@ -4,6 +4,8 @@ const { refPrefixOf } = require('./projects.js');
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationRef } = require('../kernel/review-binding');
 const { classifyVerificationKind, verificationRequirement } = require('../kernel/verification.js');
 const { normalizeExternalWorktrees } = require('../kernel/worktree');
+const questionLog = require('./question-log.js');
+const { PARK_STATUS, parkCommentBody } = require('./claims.js');
 
 // `verifyCommandErrors` returns no error for an empty command, and
 // `classifyVerificationKind` keeps an explicitly declared `command` kind, so a
@@ -48,6 +50,63 @@ function normalizeTicketBaseRef(value: any): string | null {
     throw new Error(`base ref ${JSON.stringify(ref)} is not a plain branch, remote-tracking ref, tag, or commit name. Name the ref exactly, for example "feat/my-branch", "origin/feat/my-branch", or a commit hash.`);
   }
   return ref;
+}
+
+// US-8 Q8 (story contract D1, plan §2.7): `needsInput` classifies a ticket at filing as one that
+// needs the user before any executor can start. It is the question text itself, bounded by the
+// question log's own limit. The question lives in the per-project log (origin `filing`, no
+// asking agent), never on the board; the board holds only the released park and its comment.
+// The log append runs before the ticket lock is taken: question-log I/O never holds a board lock.
+function normalizeNeedsInput(value: any): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') throw new Error('needsInput must be a string: the question the user must answer before dispatch.');
+  const text = value.trim();
+  if (!text) return null;
+  const bytes = Buffer.byteLength(text, 'utf8');
+  if (bytes > questionLog.MAX_QUESTION_BYTES) {
+    throw new Error(`needsInput is ${bytes} bytes; a question is at most ${questionLog.MAX_QUESTION_BYTES}. Put the background in the description and keep needsInput to the question.`);
+  }
+  return text;
+}
+
+function askFilingQuestion(slug: any, ticket: { id: string; ref: string }, text: string, session: any) {
+  const ownerSession = String(session || '').trim() || null;
+  const asked = questionLog.askQuestion(questionLog.questionLogDir(String(slug)), {
+    ref: ticket.ref,
+    ticketId: ticket.id,
+    origin: 'filing',
+    agent: null,
+    ownerSession,
+    session: ownerSession,
+    text,
+    blocking: true,
+  });
+  if (!asked.ok) throw new Error(`needsInput: ${asked.reason}: ${asked.message}`);
+  return asked;
+}
+
+function withdrawFilingQuestion(slug: any, ref: string, qid: string) {
+  try {
+    questionLog.withdrawQuestion(questionLog.questionLogDir(String(slug)), { ref, qid, reason: 'ticket-closed' });
+  } catch (_error: unknown) {
+    // Best effort: the ticket never parked, and the fold still names the question's ref.
+  }
+}
+
+// The released park a filing question starts in (same shape as store.ts applyPark): there is no
+// claim to hold, so answering it moves the ticket to todo and the next dispatch is a fresh one.
+function applyFilingPark(t: any, asked: any, text: string, at: string, createComment: any) {
+  t.statusTransition = { from: t.status || null, to: PARK_STATUS, at };
+  t.status = PARK_STATUS;
+  t.park = { mode: 'released', qids: [asked.qid], parkedAt: at, by: 'filing', releasedAt: at, origin: 'filing' };
+  if (!Array.isArray(t.comments)) t.comments = [];
+  const state = { qid: asked.qid, seq: asked.seq, asked: { text } };
+  t.comments.push(createComment({
+    by: 'sidequest',
+    kind: 'comment',
+    source: 'sidequest',
+    body: parkCommentBody(t.ref, 'released', [state], `Filed with needsInput: dispatch refuses it until answer({ref:"${t.ref}", question:"${asked.qid}"}) records the user's answer, or answer({decline:true}) lets the executor ask at runtime.`),
+  }, at));
 }
 
 function createTickets(dependencies: any) {
@@ -231,6 +290,10 @@ function createTicket(slug?: any, fields?: any, reviewTarget?: any) {
     throw new Error('generic ticket fields cannot set reviewTarget; pass the review target transition separately');
   }
   const status = fields.status === undefined ? 'todo' : requireStatus(fields.status);
+  const needsInput = normalizeNeedsInput(fields.needsInput);
+  if (needsInput && status !== 'todo') {
+    throw new Error(`needsInput files the ticket awaiting-user, so it cannot also be filed as status "${status}"; omit status.`);
+  }
   const id = newTicketId();
   // `nextSeq` has already stepped over any number whose ref is shipped history, and it read the
   // same prefix to do it, so the two must agree on how a board's prefix is resolved: both go
@@ -323,7 +386,16 @@ function createTicket(slug?: any, fields?: any, reviewTarget?: any) {
   };
   const verifyError = authoringVerifyError(ticket, readMeta(slug)?.path);
   if (verifyError) throw new Error(`${verifyError} Keep acceptance criteria in a comment, not the verify field.`);
-  persistWithReviewBinding(slug, ticket, reviewTarget);
+  // Every refusal above has run, so a needsInput question is only logged for a ticket that will
+  // exist; a persist failure after it withdraws the question rather than leave it orphaned.
+  const filed = needsInput ? askFilingQuestion(slug, ticket, needsInput, fields.needsInputSession) : null;
+  if (filed && needsInput) applyFilingPark(ticket, filed, needsInput, now, createComment);
+  try {
+    persistWithReviewBinding(slug, ticket, reviewTarget);
+  } catch (error: unknown) {
+    if (filed) withdrawFilingQuestion(slug, ticket.ref, filed.qid);
+    throw error;
+  }
   queueEventNotification(slug, ticket, 'created', ticket.lastEventSource);
   return ticket;
 }
@@ -1249,9 +1321,19 @@ function updateTicket(slug?: any, idOrRef?: any, patch?: any, reviewTarget?: any
   if (Object.hasOwn(patch, 'reviewTarget')) {
     throw new Error('generic ticket patch cannot set, change, or clear reviewTarget; pass the review target transition separately');
   }
+  // needsInput (US-8 Q8): checked on the unlocked read, logged before the lock, and checked again
+  // under the lock, so a ticket claimed or moved in between refuses and its question is withdrawn.
+  const needsInput = normalizeNeedsInput(patch.needsInput);
+  if (needsInput) {
+    const filingRefusal = filingParkRefusal(found, patch);
+    if (filingRefusal) throw new Error(filingRefusal);
+  }
+  const filed = needsInput ? askFilingQuestion(slug, found, needsInput, patch.needsInputSession) : null;
   const apply = (t?: any) => {
     const closeoutUpdateRefusal = activeClaimCloseoutUpdateRefusal(t, patch, options);
     if (closeoutUpdateRefusal) throw new Error(closeoutUpdateRefusal);
+    const racedFilingRefusal = filed ? filingParkRefusal(t, patch) : null;
+    if (racedFilingRefusal) throw new Error(racedFilingRefusal);
     const nextStatus = patch.status == null ? null : requireStatus(patch.status);
     const doneRefusal = nextStatus === 'done' ? updateDoneRefusal(t) : null;
     if (doneRefusal) throw new Error(doneRefusal);
@@ -1380,11 +1462,12 @@ function updateTicket(slug?: any, idOrRef?: any, patch?: any, reviewTarget?: any
         return false;
       });
     }
+    const now = new Date().toISOString();
+    if (filed && needsInput) applyFilingPark(t, filed, needsInput, now, createComment);
     // Record the event: a status move vs. a plain edit, and who made it. Source
     // defaults to "cli" (the CLI / a subagent), so only the dashboard tags itself.
     t.lastEventType = t.status !== prevStatus ? 'status' : 'edit';
     t.lastEventSource = patch.source ? String(patch.source) : 'cli';
-    const now = new Date().toISOString();
     if (t.status !== prevStatus) t.statusTransition = { from: prevStatus, to: t.status, at: now };
     t.updatedAt = now;
     t.referenceUpdatedAt = now;
@@ -1403,14 +1486,44 @@ function updateTicket(slug?: any, idOrRef?: any, patch?: any, reviewTarget?: any
       if (locked) releaseLock(lock, locked);
     }
   };
-  const targetRef = reviewTarget === undefined ? '' : String(reviewTarget?.ref || '').trim().toUpperCase();
-  const sourceTicket = targetRef ? getTicket(slug, targetRef) : null;
-  if (!sourceTicket) return applyUnderTicketLock();
-  // The source lock is taken first and always in that order, so a review binding
-  // and a concurrent source mutation can never deadlock against each other.
-  const updated = withSourceTicketLock(slug, sourceTicket.id, applyUnderTicketLock);
-  queueEventNotification(slug, getTicket(slug, sourceTicket.id), 'status', patch.source ? String(patch.source) : 'cli');
-  return updated;
+  const applyAndPersist = () => {
+    const targetRef = reviewTarget === undefined ? '' : String(reviewTarget?.ref || '').trim().toUpperCase();
+    const sourceTicket = targetRef ? getTicket(slug, targetRef) : null;
+    if (!sourceTicket) return applyUnderTicketLock();
+    // The source lock is taken first and always in that order, so a review binding
+    // and a concurrent source mutation can never deadlock against each other.
+    const updated = withSourceTicketLock(slug, sourceTicket.id, applyUnderTicketLock);
+    queueEventNotification(slug, getTicket(slug, sourceTicket.id), 'status', patch.source ? String(patch.source) : 'cli');
+    return updated;
+  };
+  if (!filed) return applyAndPersist();
+  try {
+    const updated = applyAndPersist();
+    if (!updated) withdrawFilingQuestion(slug, found.ref, filed.qid);
+    return updated;
+  } catch (error: unknown) {
+    const stored = getTicket(slug, found.id);
+    if (!(stored?.park?.qids || []).includes(filed.qid)) withdrawFilingQuestion(slug, found.ref, filed.qid);
+    throw error;
+  }
+}
+
+// needsInput on update parks only a todo ticket nobody holds (plan §2.7). Anything else already
+// has a route to the user: a live executor asks at runtime, and a park already waits on one.
+function filingParkRefusal(t: any, patch: any) {
+  if (patch.status != null && patch.status !== 'todo') {
+    return `needsInput parks ${t.ref} awaiting-user, so it cannot be combined with status "${patch.status}"; omit status.`;
+  }
+  if (t.status === PARK_STATUS) {
+    return `needsInput: ${t.ref} is already awaiting-user; pulse({ref:"${t.ref}"}) lists its open questions. Answer those first, then file the next one.`;
+  }
+  if (t.status !== 'todo' || (t.claim && t.claim.by)) {
+    const hint = t.claim && t.claim.by
+      ? `its claim holder ${t.claim.by} asks the user at runtime with ask`
+      : t.status === 'done' ? 'reopen it to todo first' : 'only a todo ticket can be classified at filing';
+    return `needsInput parks a todo ticket nobody holds; ${t.ref} is ${t.status}${t.claim && t.claim.by ? ' and claimed' : ''}, so ${hint}.`;
+  }
+  return null;
 }
 
 // Locked so a delete can never yank the ticket/lock file out from under a

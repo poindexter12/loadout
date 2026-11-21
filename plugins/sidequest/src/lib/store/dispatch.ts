@@ -1943,8 +1943,13 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
     }
     // awaiting_user (US-8): a parked ticket waits on a user answer. Dispatching it would race the
     // held executor, or start a released park before its decisions packet exists.
+    // A ticket filed with needsInput (US-8 Q8) lands here too: its park carries origin "filing".
     if (t.status === 'awaiting-user') {
-      throw new Error(`prepare dispatch: awaiting_user: ${t.ref} is parked (${t.park?.mode || 'released'}) on open questions to the user, so it is not dispatchable; pulse({ref:"${t.ref}"}) lists them. Answer each with answer({ref:"${t.ref}", ...}), or answer({decline:true}) to let the executor ask at runtime; the last answer unparks it, and a released park then dispatches with the decisions packet.`);
+      const qids = (Array.isArray(t.park?.qids) ? t.park.qids : []).filter(Boolean);
+      const filed = t.park?.origin === 'filing' ? ' was filed with needsInput and' : '';
+      const named = qids.length ? ` (${qids.join(', ')})` : '';
+      const answerFirst = qids.length ? `answer ${qids.join(', ')} first` : 'answer each open question first';
+      throw new Error(`prepare dispatch: awaiting_user: ${t.ref}${filed} is parked (${t.park?.mode || 'released'}) on open questions to the user${named}, so it is not dispatchable. Ask the user, then ${answerFirst} (pulse({ref:"${t.ref}"}) shows it) with answer({ref:"${t.ref}", question:"<qid>", text:"..."}), or answer({ref:"${t.ref}", decline:true}) to let the executor ask at runtime; the last answer unparks it, and a released park then dispatches with the decisions packet.`);
     }
     if (current?.terminalAt && current.sharedTree === false && !current.claimedAt && !(t.claim && t.claim.by)) {
       const recoveryFacts = unclaimedWorktreeRecoveryFacts(projectPath, t, current);

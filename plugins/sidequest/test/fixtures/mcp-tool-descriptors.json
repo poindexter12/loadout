@@ -406,6 +406,10 @@
         },
         "unclassified": {
           "type": "boolean"
+        },
+        "needsInput": {
+          "type": "string",
+          "description": "Question for the user, up to 1500 bytes: files awaiting-user; dispatch refuses until answered or declined."
         }
       },
       "required": [
@@ -610,6 +614,10 @@
               "const": "none"
             }
           ]
+        },
+        "needsInput": {
+          "type": "string",
+          "description": "As add; todo and unclaimed only."
         }
       },
       "required": [
