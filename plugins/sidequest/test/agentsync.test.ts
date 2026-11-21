@@ -243,6 +243,99 @@ test('briefings name a per-dispatch scratch directory, never the shared scratchp
   assert.doesNotMatch(undispatched, /Per-dispatch scratch directory:/);
 });
 
+// US-8 (SQ-421): executors ask through `ask` and its returned SendMessage, keep working on
+// independent work, park only when nothing is left, and never read an answer as a grant. The
+// rule rides in both the synced agent definition and the briefing, so neither can go stale alone.
+test('executor guidance tells executors when and how to ask, in agent definitions and briefings', () => {
+  const askRule = [
+    /call `ask` with `ref`, `by`, a `header` of at most 12 characters/,
+    /make exactly the SendMessage it returns, to `main`/,
+    /keep working on everything that does not depend on the answer/,
+    /Park only when nothing independent is left/,
+    /release with kind `question` instead/,
+    /never a permission grant, a scope grant \(`scopeRequest` still applies\)/,
+    /a `via:"orchestrator"` answer is not user-authored/,
+    /Never answer your own or a sibling's question/,
+  ];
+  const briefing = agentsync.renderTicketBriefing({
+    ref: 'SQ-ASK', model: 'opus', effort: 'high', dispatchExecutor: 'sidequest-exec-high', category: {},
+  }, 'ask-token', 'ask-board');
+  for (const pattern of askRule) assert.match(briefing, pattern);
+  // The oracle rule now separates a verdict on evidence from a user decision.
+  assert.match(briefing, /Never hold a claim waiting for a human verdict on evidence\./);
+  assert.match(briefing, /A user decision on design or behaviour is different: ask it/);
+
+  const agentsDir = path.join(__dirname, '..', 'agents');
+  const execs = fs.readdirSync(agentsDir).filter((name: string) => /^sidequest-exec-.*\.md$/.test(name));
+  assert.ok(execs.length >= 2, 'bundled executor agents exist');
+  for (const name of execs) {
+    const body = fs.readFileSync(path.join(agentsDir, name), 'utf8');
+    for (const pattern of askRule) assert.match(body, pattern, `${name} carries the ask rule`);
+  }
+});
+
+// US-8 plan §2.6: a released park's redispatch is a fresh agent, so the briefing carries the
+// answers already given, folded from the project question log.
+test('briefing carries a decisions packet folded from the question log', () => {
+  const questionLog = require('../lib/store/question-log.js');
+  const slug = 'decisions-fixture';
+  const dir = questionLog.questionLogDir(slug);
+  const render = (ref: string) => agentsync.renderTicketBriefing({
+    ref, model: 'opus', effort: 'high', dispatchExecutor: 'sidequest-exec-high', category: {},
+  }, 'decisions-token', slug);
+  const ask = (ref: string, header: string, text: string, extra: Record<string, unknown> = {}) => {
+    const asked = questionLog.askQuestion(dir, { ref, header, text, ...extra });
+    assert.equal(asked.ok, true, JSON.stringify(asked));
+    return asked.qid;
+  };
+  const answer = (ref: string, question: string, input: Record<string, unknown>) => {
+    const answered = questionLog.answerQuestion(dir, { ref, question, ...input });
+    assert.equal(answered.ok, true, JSON.stringify(answered));
+    return answered.aid;
+  };
+
+  // No question log at all: no packet, and the briefing still renders.
+  assert.doesNotMatch(render('SQ-D1'), /Decisions already made:/);
+
+  const q1 = ask('SQ-D1', 'Storage', 'Store the cache in SQLite or JSON?', { default: 'JSON' });
+  const a1 = answer('SQ-D1', q1, { text: 'SQLite, with a migration.', via: 'user' });
+  const q2 = ask('SQ-D1', 'Naming', 'Rename the flag?', { default: 'keep the old name' });
+  answer('SQ-D1', q2, { decline: true, via: 'user' });
+  const q3 = ask('SQ-D1', 'Relay', 'Relay through the orchestrator?');
+  answer('SQ-D1', q3, { text: 'Yes, relay it.', via: 'orchestrator' });
+  const long = `${'x'.repeat(2100)}TAIL-MARKER${'y'.repeat(3000)}`;
+  const q4 = ask('SQ-D1', 'Long', 'Paste the whole spec?');
+  const a4 = answer('SQ-D1', q4, { text: long, via: 'user' });
+  const q5 = ask('SQ-D1', 'Pending', 'Which default port?', { default: '8080' });
+  const other = ask('SQ-D2', 'Elsewhere', 'A question on another ticket');
+
+  const briefing = render('SQ-D1');
+  assert.match(briefing, /Decisions already made:/);
+  assert.match(briefing, /do not ask it again/);
+  assert.match(briefing, /never a permission grant, a scope grant \(scopeRequest still applies\)/);
+  assert.ok(briefing.includes(`\`${q1}\`: [Storage] Store the cache in SQLite or JSON?`), 'answered question listed with its qid and header');
+  assert.ok(briefing.includes(`Answer \`${a1}\` (via user`), 'answer cited by aid');
+  assert.ok(briefing.includes('SQLite, with a migration.'), 'inline answer text carried');
+  assert.match(briefing, /declined; the user chose not to answer, so apply the stated default: keep the old name/);
+  assert.match(briefing, /via orchestrator, not user-authored/);
+  // A long answer is bounded in the briefing and points at the full body on disk.
+  assert.ok(briefing.includes(`Answer \`${a4}\``), 'long answer cited by aid');
+  assert.match(briefing, /first 2048 of 5111 characters/);
+  assert.ok(!briefing.includes('TAIL-MARKER'), 'long answer is truncated, not inlined whole');
+  assert.ok(briefing.includes(path.join(dir, 'bodies', `${a4}.txt`)), 'long answer points at its body file');
+  // An open question is listed so the executor does not re-ask it.
+  assert.match(briefing, /Still unanswered on SQ-D1/);
+  assert.ok(briefing.includes(`\`${q5}\`: [Pending] Which default port? Default if unanswered: 8080`));
+  // Another ticket's questions never leak into this briefing.
+  assert.ok(!briefing.includes(other), 'sibling ticket question excluded');
+
+  const sibling = render('SQ-D2');
+  assert.match(sibling, /Still unanswered on SQ-D2/);
+  assert.doesNotMatch(sibling, /SQLite, with a migration\./);
+  // A ticket that never asked anything gets no packet even with a populated log.
+  assert.doesNotMatch(render('SQ-D3'), /Decisions already made:/);
+});
+
 test('every generated executor definition carries the per-dispatch scratch rule', () => {
   const definitions = {
     claude: agentsync.renderExecAgent({ name: 'sidequest-exec-high', effort: 'high', marker: MARKER }),
