@@ -53,9 +53,9 @@ function makeBoard(label: string) {
 
 type Board = ReturnType<typeof makeBoard>;
 
-function submitCandidate(board: Board, file: string) {
+function submitCandidate(board: Board, file: string, from = board.base) {
   const ticket = store.createTicket(board.slug, { title: `candidate ${file}`, files: [file], executorVerifyKind: 'manual', executorVerify: MANUAL_VERIFY });
-  git(['checkout', '--detach', board.base], board.repo);
+  git(['checkout', '--detach', from], board.repo);
   fs.writeFileSync(path.join(board.repo, file), `${file}\n`);
   git(['add', file], board.repo);
   git(['commit', '-m', `candidate ${file}`], board.repo);
@@ -67,7 +67,10 @@ function submitCandidate(board: Board, file: string) {
   const range = commitScope.submissionRange(board.repo, { commit, gitRef, upstream: target.upstream, integrationBranch: target.branch });
   assert.equal(range.ok, true, JSON.stringify(range));
   assert.equal(store.claimTicket(board.slug, ticket.ref, 'worker', { direct: true }).ok, true);
-  const submitted = store.submitTicket(board.slug, ticket.ref, 'worker', { commit, gitRef, range, verify: MANUAL_VERIFY, source: 'test' });
+  // Record the range the way MCP submit does (mcp-lifecycle submit), with the
+  // local integration branch alongside the origin/<branch> upstream (SQ-431).
+  const recorded = Object.assign({}, range, { integrationMode: target.mode, integrationBranch: target.branch });
+  const submitted = store.submitTicket(board.slug, ticket.ref, 'worker', { commit, gitRef, range: recorded, verify: MANUAL_VERIFY, source: 'test' });
   assert.equal(submitted.ok, true, submitted.message || submitted.reason);
   return ticket.ref as string;
 }
@@ -140,8 +143,8 @@ function viaStore(board: Board, port: Port, refs: string[]): Promise<any> {
 }
 
 // Submits and assembles one wave, then opens its PR (awaiting merge).
-async function openWave(board: Board, files: string[], waveId: string, port: Port) {
-  const refs = files.map((file) => submitCandidate(board, file));
+async function openWave(board: Board, files: string[], waveId: string, port: Port, from = board.base) {
+  const refs = files.map((file) => submitCandidate(board, file, from));
   assemble(board, refs, waveId);
   const opened = await viaStore(board, port, refs);
   assert.equal(opened.ok, true, opened.message || opened.reason);
@@ -228,6 +231,51 @@ test('MERGED closes every wave participant through the integration close with th
   assert.equal(again.ok, false);
   assert.equal(again.reason, 'submission_required');
   assert.equal(port.views().length, 1);
+});
+
+// Another change landed on the remote after the board's local main was last
+// moved, and in pr mode the board never moves it. Work dispatched from that
+// newer origin/main records a base local main does not contain.
+function advanceRemote(board: Board, file: string) {
+  const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-pr-reconcile-landed-'));
+  git(['clone', '-q', board.remote, clone], os.tmpdir());
+  configureIdentity(clone);
+  fs.writeFileSync(path.join(clone, file), 'landed elsewhere\n');
+  git(['add', file], clone);
+  git(['commit', '-q', '-m', `landed ${file}`], clone);
+  git(['push', '-q', 'origin', 'HEAD:main'], clone);
+  git(['fetch', '-q', 'origin'], board.repo);
+  return git(['rev-parse', 'origin/main'], board.repo);
+}
+
+// The SQ-423 shape: a one-ticket wave. Single-ticket integrate revalidates the
+// stored range before it reaches the PR reconcile, so this is the path that
+// refused; the multi-ticket wave path reconciles without that check.
+test('SQ-431: MERGED singleton reconciles while local main is behind origin/main', async () => {
+  const board = makeBoard('stale-local-main');
+  const port = fakePort(431);
+  const dispatchBase = advanceRemote(board, 'landed.txt');
+  assert.notEqual(dispatchBase, board.base);
+  const { refs, pr, branch } = await openWave(board, ['nu.txt'], 'wave-stale-main', port, dispatchBase);
+  for (const ref of refs) assert.equal(store.getTicket(board.slug, ref).submission.base, dispatchBase, 'the stored base is the newer origin/main');
+
+  const mergeSha = mergeOnRemote(board, branch);
+  // As in the incident: origin/main is fetched and holds the merge, so the
+  // stored base is reachable from the remote but not from local main.
+  git(['fetch', '-q', 'origin'], board.repo);
+  assert.equal(git(['rev-parse', 'origin/main'], board.repo), mergeSha);
+  port.report({ state: 'MERGED', mergeCommit: mergeSha, headSha: pr.headSha, checks: 'success' });
+  assert.equal(git(['rev-parse', 'refs/heads/main'], board.repo), board.base, 'local main is still behind origin/main');
+  assert.equal(store.getTicket(board.slug, refs[0]).submission.integrationBranch, 'main', 'the submission records local main, as SQ-423 did');
+  const result = await viaMcp(board, port, refs);
+  assert.equal(result.ok, true, result.message || result.reason);
+  assert.notEqual(result.reason, 'base_not_reachable');
+  for (const ref of refs) {
+    const ticket = store.getTicket(board.slug, ref);
+    assert.equal(ticket.status, 'done', `${ref} closed on merge despite the stale local main`);
+    assert.equal(ticket.submission.integration.deliveryCommit, mergeSha);
+  }
+  assert.equal(git(['rev-parse', 'refs/heads/main'], board.repo), board.base, 'reconcile still never moves local main');
 });
 
 test('a fresh CLI process reconciles the stored awaiting-merge record and closes the ticket (restart)', async () => {
