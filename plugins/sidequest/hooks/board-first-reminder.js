@@ -179,7 +179,8 @@ function runtimeModule(name) {
   return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
-// src/hooks/shared/session-state.ts
+// src/hooks/shared/questions.ts
+var import_node_crypto2 = __toESM(require("node:crypto"));
 var import_node_fs3 = __toESM(require("node:fs"));
 var import_node_path4 = __toESM(require("node:path"));
 
@@ -193,22 +194,141 @@ function resolveSidequestHome(env = process.env) {
   return import_node_path3.default.join(configDir ? import_node_path3.default.resolve(configDir) : import_node_path3.default.join(import_node_os.default.homedir(), ".claude"), "sidequest");
 }
 
+// src/hooks/shared/questions.ts
+var ORPHAN_AFTER_MS = 10 * 60 * 1e3;
+var MARKER_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
+function questionLog() {
+  return require(runtimeModule("store/question-log"));
+}
+function hash(value) {
+  return import_node_crypto2.default.createHash("sha256").update(value).digest("hex");
+}
+function stateDir(...parts) {
+  return import_node_path4.default.join(resolveSidequestHome(), "hook-state", ...parts);
+}
+function suppressionFile(sessionId) {
+  return stateDir(`question-surfaced-${hash(sessionId)}.json`);
+}
+function seenFile(qid) {
+  return stateDir("question-seen", qid);
+}
+function sessionEndedFile(sessionId) {
+  return stateDir("question-session-ended", hash(sessionId));
+}
+function writeAtomic(file, contents) {
+  import_node_fs3.default.mkdirSync(import_node_path4.default.dirname(file), { recursive: true });
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  import_node_fs3.default.writeFileSync(temp, contents);
+  import_node_fs3.default.renameSync(temp, file);
+}
+function mtimeMs(file) {
+  try {
+    return import_node_fs3.default.statSync(file).mtimeMs;
+  } catch (_) {
+    return null;
+  }
+}
+function projectSlugFor(start, store) {
+  try {
+    let project = store.findProject(store.nearestRepoRoot(start));
+    if (!project.ok || !project.slug) project = store.findProject(start);
+    return project.ok && project.slug ? project.slug : null;
+  } catch (_) {
+    return null;
+  }
+}
+function surfacedQids(sessionId) {
+  try {
+    const parsed = JSON.parse(import_node_fs3.default.readFileSync(suppressionFile(sessionId), "utf8"));
+    return new Set(Array.isArray(parsed.qids) ? parsed.qids.filter((qid) => typeof qid === "string") : []);
+  } catch (_) {
+    return /* @__PURE__ */ new Set();
+  }
+}
+function markSurfaced(sessionId, qids) {
+  if (!sessionId || !qids.length) return;
+  const ql = questionLog();
+  try {
+    const merged = surfacedQids(sessionId);
+    for (const qid of qids) merged.add(qid);
+    writeAtomic(suppressionFile(sessionId), JSON.stringify({ qids: [...merged] }));
+  } catch (_) {
+  }
+  for (const qid of qids) {
+    if (!ql.isQuestionId(qid)) continue;
+    try {
+      writeAtomic(seenFile(qid), (/* @__PURE__ */ new Date()).toISOString());
+    } catch (_) {
+    }
+  }
+}
+function routedTo(question, sessionId, now) {
+  const owner = question.asked.ownerSession;
+  if (!owner || owner === sessionId) return true;
+  if (mtimeMs(sessionEndedFile(owner)) !== null) return true;
+  const lastSeen = mtimeMs(seenFile(question.qid)) ?? Date.parse(question.asked.at);
+  return Number.isFinite(lastSeen) && now - lastSeen >= ORPHAN_AFTER_MS;
+}
+function routedOpenQuestions(slug, sessionId, now = Date.now()) {
+  const ql = questionLog();
+  const dir = ql.questionLogDir(slug);
+  if (!import_node_fs3.default.existsSync(dir)) return [];
+  return ql.openQuestions(dir).filter((question) => routedTo(question, sessionId, now));
+}
+function unsurfacedQuestions(slug, sessionId, now = Date.now()) {
+  const surfaced = surfacedQids(sessionId);
+  return routedOpenQuestions(slug, sessionId, now).filter((question) => !surfaced.has(question.qid));
+}
+function byteLength2(value) {
+  return Buffer.byteLength(value, "utf8");
+}
+function clipText(value, maxBytes) {
+  const flat = String(value || "").replace(/\s+/g, " ").trim();
+  if (byteLength2(flat) <= maxBytes) return flat;
+  let clipped = "";
+  for (const character of flat) {
+    if (byteLength2(clipped + character) > Math.max(0, maxBytes - byteLength2("…"))) break;
+    clipped += character;
+  }
+  return `${clipped.trimEnd()}…`;
+}
+function questionLabel(question) {
+  return `${question.ref} ${question.seq}`;
+}
+function answerCall(question) {
+  return `answer({ref:"${question.ref}",question:"${question.qid}",text:…})`;
+}
+function withClippedText(prefix, text, suffix, maxBytes) {
+  return `${prefix}${clipText(text, maxBytes - byteLength2(prefix) - byteLength2(suffix))}${suffix}`;
+}
+function promptQuestionRelay(questions, maxBytes = 1024) {
+  const [first, ...rest] = questions;
+  if (!first) return "";
+  const header = first.asked.header ? `${first.asked.header}: ` : "";
+  const others = rest.length ? ` Also open: ${rest.slice(0, 4).map(questionLabel).join(", ")}${rest.length > 4 ? ` (+${rest.length - 4} more)` : ""}.` : "";
+  const prefix = `Sidequest: ${questionLabel(first)} needs the user (qid ${first.qid}${first.asked.blocking ? ", blocking" : ""}). ${header}`;
+  const suffix = `. Ask the user with AskUserQuestion, then ${answerCall(first)}; never answer it yourself.${others}`;
+  return withClippedText(prefix, first.asked.text, suffix, maxBytes);
+}
+
 // src/hooks/shared/session-state.ts
+var import_node_fs4 = __toESM(require("node:fs"));
+var import_node_path5 = __toESM(require("node:path"));
 function sessionStateFile(prefix, sessionId) {
   const home = resolveSidequestHome();
-  return import_node_path4.default.join(home, "tmp", "state", `${prefix}-${encodeURIComponent(sessionId)}.json`);
+  return import_node_path5.default.join(home, "tmp", "state", `${prefix}-${encodeURIComponent(sessionId)}.json`);
 }
 function readSessionState(file) {
   try {
-    const parsed = JSON.parse(import_node_fs3.default.readFileSync(file, "utf8"));
+    const parsed = JSON.parse(import_node_fs4.default.readFileSync(file, "utf8"));
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   } catch (_) {
     return {};
   }
 }
 function writeSessionState(file, state) {
-  import_node_fs3.default.mkdirSync(import_node_path4.default.dirname(file), { recursive: true });
-  import_node_fs3.default.writeFileSync(file, JSON.stringify(state));
+  import_node_fs4.default.mkdirSync(import_node_path5.default.dirname(file), { recursive: true });
+  import_node_fs4.default.writeFileSync(file, JSON.stringify(state));
 }
 
 // src/hooks/board-first-reminder.ts
@@ -220,10 +340,31 @@ function boardFor(input) {
   if (!found.ok || !found.slug || store.projectDispatchAdmission(found.slug).status !== "routed") return null;
   return found.slug;
 }
+function questionRelay(input, sessionId) {
+  try {
+    const store = require(runtimeModule("store"));
+    const slug = projectSlugFor(stringField(input, "cwd") || process.env.CLAUDE_PROJECT_DIR || process.cwd(), store);
+    if (!slug) return "";
+    const pending = unsurfacedQuestions(slug, sessionId).reverse();
+    const newest = pending[0];
+    if (!newest) return "";
+    const relay = promptQuestionRelay(pending);
+    if (relay) markSurfaced(sessionId, [newest.qid]);
+    return relay;
+  } catch (_) {
+    return "";
+  }
+}
 function main() {
   const input = readStdin();
   if (!input || isSubagent(input)) return;
   const id = stringField(input, "session_id", "sessionId").trim();
+  if (!id) return;
+  const relay = questionRelay(input, id);
+  if (relay) {
+    writeContext("UserPromptSubmit", relay);
+    return;
+  }
   const prompt = stringField(input, "prompt").trim();
   if (!id || !prompt || AUTOMATION_TAG.test(prompt)) return;
   const file = sessionStateFile("board-first", id);

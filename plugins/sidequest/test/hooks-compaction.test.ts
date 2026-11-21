@@ -27,6 +27,8 @@ import {
   assertAllFullContexts,
   linkedWorktreeFixturePath,
   fixtureState,
+  addStopTicket,
+  STOP,
   type SessionStartReader,
 } from './_hooks-fixture.js';
 
@@ -517,6 +519,46 @@ test('subagent-start warns only for embedded worktrees outside the receiving age
   const warning = runHook(SUBAGENT_START, payload);
   assert.match(warning, /1 foreign agent worktree in play/);
   assert.match(warning, /Keep error-severity diagnostics in your own files actionable\./);
+});
+
+// US-8 Q6: a compaction drops the question text the session was shown, so PostCompact clears the
+// session's suppression and names what is still open in one line. Its own project keeps the
+// question away from every other test's hooks.
+test('US-8 Q6: PostCompact clears question suppression and emits one open-question line', () => {
+  const questionLog = require('../lib/store/question-log.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-q6-compact-'));
+  const projectSlug = store.ensureProject(dir).slug;
+  const ticket = addStopTicket('Q6 compaction fixture', {}, projectSlug);
+  const sessionId = `q6-compact-${++fixtureState.sqSeq}`;
+  const asked = questionLog.askQuestion(questionLog.questionLogDir(projectSlug), {
+    ref: ticket.ref,
+    ticketId: ticket.id,
+    header: 'Schema',
+    text: 'Which schema should the migration target?',
+    blocking: true,
+    ownerSession: sessionId,
+  });
+  assert.strictEqual(asked.ok, true, asked.message);
+  const stop = () => runHook(STOP, { session_id: sessionId, cwd: dir });
+
+  assert.match(stop(), /needs the user: Which schema/);
+  assert.doesNotMatch(stop(), /needs the user/, 'surfaced once before the compaction');
+
+  const transcript = path.join(SIDEQUEST_HOME, `${sessionId}.jsonl`);
+  fs.writeFileSync(transcript, '[]');
+  const line = runHook(POST_COMPACT, { session_id: sessionId, cwd: dir, transcript_path: transcript, compact_summary: 'a real summary' });
+  assert.ok(line.startsWith(`Sidequest: 1 open question needs the user: ${ticket.ref} ${asked.seq}. `), line);
+  assert.doesNotMatch(line, /\n/, 'PostCompact emits a single line');
+  assert.ok(Buffer.byteLength(line, 'utf8') <= 400, `PostCompact line is ${Buffer.byteLength(line, 'utf8')} bytes`);
+
+  assert.match(stop(), /needs the user: Which schema/, 'the compaction re-arms the question for the next stop');
+  assert.strictEqual(runHook(POST_COMPACT, {
+    session_id: sessionId,
+    agent_id: 'q6-compact-subagent',
+    cwd: dir,
+    transcript_path: transcript,
+    compact_summary: 'a real summary',
+  }), '', 'a subagent compaction emits nothing');
 });
 
 export {};

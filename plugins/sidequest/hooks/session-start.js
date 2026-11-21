@@ -53,8 +53,8 @@ function failOpen(error) {
 installBudget(failOpen);
 
 // src/hooks/session-start.ts
-var import_node_fs9 = __toESM(require("node:fs"));
-var import_node_path10 = __toESM(require("node:path"));
+var import_node_fs10 = __toESM(require("node:fs"));
+var import_node_path11 = __toESM(require("node:path"));
 
 // src/hooks/shared/input.ts
 var import_node_fs2 = __toESM(require("node:fs"));
@@ -568,30 +568,104 @@ function registerSweepSession(data) {
   }
 }
 
-// src/hooks/diagnostic-worktree-warning.ts
+// src/hooks/shared/questions.ts
+var import_node_crypto4 = __toESM(require("node:crypto"));
 var import_node_fs7 = __toESM(require("node:fs"));
 var import_node_path8 = __toESM(require("node:path"));
+var ORPHAN_AFTER_MS = 10 * 60 * 1e3;
+var MARKER_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
+function questionLog() {
+  return require(runtimeModule("store/question-log"));
+}
+function hash(value) {
+  return import_node_crypto4.default.createHash("sha256").update(value).digest("hex");
+}
+function stateDir(...parts) {
+  return import_node_path8.default.join(resolveSidequestHome(), "hook-state", ...parts);
+}
+function seenFile(qid) {
+  return stateDir("question-seen", qid);
+}
+function sessionEndedFile(sessionId3) {
+  return stateDir("question-session-ended", hash(sessionId3));
+}
+function mtimeMs(file) {
+  try {
+    return import_node_fs7.default.statSync(file).mtimeMs;
+  } catch (_) {
+    return null;
+  }
+}
+function projectSlugFor(start, store) {
+  try {
+    let project = store.findProject(store.nearestRepoRoot(start));
+    if (!project.ok || !project.slug) project = store.findProject(start);
+    return project.ok && project.slug ? project.slug : null;
+  } catch (_) {
+    return null;
+  }
+}
+function routedTo(question, sessionId3, now) {
+  const owner = question.asked.ownerSession;
+  if (!owner || owner === sessionId3) return true;
+  if (mtimeMs(sessionEndedFile(owner)) !== null) return true;
+  const lastSeen = mtimeMs(seenFile(question.qid)) ?? Date.parse(question.asked.at);
+  return Number.isFinite(lastSeen) && now - lastSeen >= ORPHAN_AFTER_MS;
+}
+function routedOpenQuestions(slug, sessionId3, now = Date.now()) {
+  const ql = questionLog();
+  const dir = ql.questionLogDir(slug);
+  if (!import_node_fs7.default.existsSync(dir)) return [];
+  return ql.openQuestions(dir).filter((question) => routedTo(question, sessionId3, now));
+}
+function byteLength2(value) {
+  return Buffer.byteLength(value, "utf8");
+}
+function clipText(value, maxBytes) {
+  const flat = String(value || "").replace(/\s+/g, " ").trim();
+  if (byteLength2(flat) <= maxBytes) return flat;
+  let clipped = "";
+  for (const character of flat) {
+    if (byteLength2(clipped + character) > Math.max(0, maxBytes - byteLength2("…"))) break;
+    clipped += character;
+  }
+  return `${clipped.trimEnd()}…`;
+}
+function questionLabel(question) {
+  return `${question.ref} ${question.seq}`;
+}
+function questionSummaryLine(questions, maxBytes = 400) {
+  if (!questions.length) return "";
+  const shown = questions.slice(0, 6).map(questionLabel).join(", ");
+  const extra = questions.length > 6 ? ` (+${questions.length - 6} more)` : "";
+  const line = `Sidequest: ${questions.length} open question${questions.length === 1 ? "" : "s"} need${questions.length === 1 ? "s" : ""} the user: ${shown}${extra}. Read each with pulse({ref}), ask with AskUserQuestion, then answer({ref,question,text}).`;
+  return clipText(line, maxBytes);
+}
+
+// src/hooks/diagnostic-worktree-warning.ts
+var import_node_fs8 = __toESM(require("node:fs"));
+var import_node_path9 = __toESM(require("node:path"));
 var ENDED_RUN_WINDOW_MS = 2 * 60 * 60 * 1e3;
 function gitDirectory(entry) {
   try {
-    if (import_node_fs7.default.statSync(entry).isDirectory()) return entry;
-    const linkedGitDirectory = /^gitdir:\s*(.+)$/m.exec(import_node_fs7.default.readFileSync(entry, "utf8"))?.[1];
-    return linkedGitDirectory ? import_node_path8.default.resolve(import_node_path8.default.dirname(entry), linkedGitDirectory.trim()) : null;
+    if (import_node_fs8.default.statSync(entry).isDirectory()) return entry;
+    const linkedGitDirectory = /^gitdir:\s*(.+)$/m.exec(import_node_fs8.default.readFileSync(entry, "utf8"))?.[1];
+    return linkedGitDirectory ? import_node_path9.default.resolve(import_node_path9.default.dirname(entry), linkedGitDirectory.trim()) : null;
   } catch (_) {
     return null;
   }
 }
 function checkoutLocation(start) {
-  let current = import_node_path8.default.resolve(start);
+  let current = import_node_path9.default.resolve(start);
   for (; ; ) {
-    const found = gitDirectory(import_node_path8.default.join(current, ".git"));
+    const found = gitDirectory(import_node_path9.default.join(current, ".git"));
     if (found) {
-      if (import_node_path8.default.basename(found) === ".git") return { checkoutRoot: current, projectRoot: current };
-      const commonGitDirectory = import_node_path8.default.resolve(found, "..", "..");
-      if (import_node_path8.default.basename(commonGitDirectory) === ".git") return { checkoutRoot: current, projectRoot: import_node_path8.default.dirname(commonGitDirectory) };
+      if (import_node_path9.default.basename(found) === ".git") return { checkoutRoot: current, projectRoot: current };
+      const commonGitDirectory = import_node_path9.default.resolve(found, "..", "..");
+      if (import_node_path9.default.basename(commonGitDirectory) === ".git") return { checkoutRoot: current, projectRoot: import_node_path9.default.dirname(commonGitDirectory) };
       return null;
     }
-    const parent = import_node_path8.default.dirname(current);
+    const parent = import_node_path9.default.dirname(current);
     if (parent === current) return null;
     current = parent;
   }
@@ -601,7 +675,7 @@ function comparablePath(value) {
     const lease = require(runtimeModule("kernel/worktree"));
     return lease.canonicalPath(value);
   } catch (_) {
-    const resolved = import_node_path8.default.resolve(value);
+    const resolved = import_node_path9.default.resolve(value);
     return process.platform === "win32" ? resolved.toLowerCase() : resolved;
   }
 }
@@ -610,7 +684,7 @@ function agentWorktreeRoots(projectRoot) {
     const worktrees = require(runtimeModule("worktrees"));
     return worktrees.agentWorktreeRoots(projectRoot);
   } catch (_) {
-    return [import_node_path8.default.join(projectRoot, ".claude", "worktrees")];
+    return [import_node_path9.default.join(projectRoot, ".claude", "worktrees")];
   }
 }
 function endedRecently(dispatch, now) {
@@ -632,7 +706,7 @@ function boardWorktrees(projectRoot, now) {
       if (!dispatch || !worktree || dispatch.sharedTree !== false) return [];
       const lifecycle = lifecycleOf(store, ticket, dispatch, now);
       if (lifecycle === "ended" && !endedRecently(dispatch, now)) return [];
-      return [{ worktree, ref: String(ticket.ref || ""), lifecycle, onDisk: import_node_fs7.default.existsSync(worktree) }];
+      return [{ worktree, ref: String(ticket.ref || ""), lifecycle, onDisk: import_node_fs8.default.existsSync(worktree) }];
     });
   } catch (_) {
     return [];
@@ -641,7 +715,7 @@ function boardWorktrees(projectRoot, now) {
 function unclaimedWorktreeDirectories(roots) {
   return roots.flatMap((root) => {
     try {
-      return import_node_fs7.default.readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name.startsWith("agent-")).map((entry) => ({ worktree: import_node_path8.default.join(root, entry.name), ref: "", lifecycle: "ended", onDisk: true }));
+      return import_node_fs8.default.readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name.startsWith("agent-")).map((entry) => ({ worktree: import_node_path9.default.join(root, entry.name), ref: "", lifecycle: "ended", onDisk: true }));
     } catch (_) {
       return [];
     }
@@ -685,17 +759,17 @@ function diagnosticWorktreeWarning(input, now = Date.now()) {
 }
 
 // src/lib/plugin-freshness.ts
-var import_node_crypto4 = __toESM(require("node:crypto"));
-var import_node_fs8 = __toESM(require("node:fs"));
+var import_node_crypto5 = __toESM(require("node:crypto"));
+var import_node_fs9 = __toESM(require("node:fs"));
 var import_node_os3 = __toESM(require("node:os"));
-var import_node_path9 = __toESM(require("node:path"));
+var import_node_path10 = __toESM(require("node:path"));
 var SIDEQUEST_PLUGIN_ID = "sidequest@loadout";
 function claudeHome(options = {}) {
   return resolveClaudeHome(options.claudeHome);
 }
 function normalizedPath(value) {
   if (typeof value !== "string" || !value.trim()) return null;
-  return import_node_path9.default.resolve(value).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return import_node_path10.default.resolve(value).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 function pathsOverlap(left, right) {
   return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
@@ -731,7 +805,7 @@ function compareSemver(left, right) {
 function registryInstalls(projectPath, options = {}) {
   let registry;
   try {
-    registry = JSON.parse(import_node_fs8.default.readFileSync(import_node_path9.default.join(claudeHome(options), "plugins", "installed_plugins.json"), "utf8"));
+    registry = JSON.parse(import_node_fs9.default.readFileSync(import_node_path10.default.join(claudeHome(options), "plugins", "installed_plugins.json"), "utf8"));
   } catch (_) {
     return [];
   }
@@ -749,7 +823,7 @@ function registryInstalls(projectPath, options = {}) {
 function loadedPluginVersion(pluginRoot2 = process.env.CLAUDE_PLUGIN_ROOT) {
   if (!pluginRoot2) return null;
   try {
-    const manifest = JSON.parse(import_node_fs8.default.readFileSync(import_node_path9.default.join(pluginRoot2, ".claude-plugin", "plugin.json"), "utf8"));
+    const manifest = JSON.parse(import_node_fs9.default.readFileSync(import_node_path10.default.join(pluginRoot2, ".claude-plugin", "plugin.json"), "utf8"));
     return typeof manifest.version === "string" ? manifest.version : null;
   } catch (_) {
     return null;
@@ -768,7 +842,7 @@ function sidequestReloadWarning(projectPath, options = {}) {
   return `Sidequest: loaded ${loadedVersion}, installed ${installedVersion}. Run /reload-plugins or restart Claude Code before dispatching work.`;
 }
 function stateDirectory4(options = {}) {
-  return options.stateDirectory || import_node_path9.default.join(import_node_os3.default.tmpdir(), "loadout", "freshness-warnings", "loaded-plugin-versions");
+  return options.stateDirectory || import_node_path10.default.join(import_node_os3.default.tmpdir(), "loadout", "freshness-warnings", "loaded-plugin-versions");
 }
 function sessionId2(input) {
   const value = input.session_id ?? input.sessionId;
@@ -777,16 +851,16 @@ function sessionId2(input) {
 function loadedVersionStateFile(input, pluginId = SIDEQUEST_PLUGIN_ID, options = {}) {
   const id = sessionId2(input);
   if (!id) return null;
-  const digest = import_node_crypto4.default.createHash("sha256").update(`${id}\0${pluginId}`).digest("hex");
-  return import_node_path9.default.join(stateDirectory4(options), `${digest}.json`);
+  const digest = import_node_crypto5.default.createHash("sha256").update(`${id}\0${pluginId}`).digest("hex");
+  return import_node_path10.default.join(stateDirectory4(options), `${digest}.json`);
 }
 function reportLoadedSidequestVersion(input, options = {}) {
   const version = loadedPluginVersion(options.pluginRoot);
   const stateFile3 = loadedVersionStateFile(input, SIDEQUEST_PLUGIN_ID, options);
   if (!version || !stateFile3) return version;
   try {
-    import_node_fs8.default.mkdirSync(import_node_path9.default.dirname(stateFile3), { recursive: true });
-    import_node_fs8.default.writeFileSync(stateFile3, JSON.stringify({ pluginId: SIDEQUEST_PLUGIN_ID, version }));
+    import_node_fs9.default.mkdirSync(import_node_path10.default.dirname(stateFile3), { recursive: true });
+    import_node_fs9.default.writeFileSync(stateFile3, JSON.stringify({ pluginId: SIDEQUEST_PLUGIN_ID, version }));
   } catch (_) {
   }
   return version;
@@ -885,7 +959,7 @@ function upstreamDefectDestination() {
     const store = require(runtimeModule("store"));
     const project = store.listProjects({ all: true }).find((candidate) => {
       const root = String(candidate.path || "").trim();
-      return root && import_node_fs9.default.existsSync(import_node_path10.default.join(root, "plugins", "sidequest", ".claude-plugin", "plugin.json"));
+      return root && import_node_fs10.default.existsSync(import_node_path11.default.join(root, "plugins", "sidequest", ".claude-plugin", "plugin.json"));
     });
     if (project) return `Offer to file it as a ticket on the ${project.name} board on this machine (the Loadout working copy), not via the Anthropic feedback tool.`;
   } catch (_) {
@@ -904,6 +978,16 @@ function hasMidWaveBoard(data) {
     return store.worktreeGcTickets().some((ticket) => ticket.project === found.slug && !ticket.archived && ticket.status !== "done" && (Boolean(ticket.submission?.commit && !ticket.submission.integratedAt) || Boolean(ticket.claimLive && ticket.dispatch && !ticket.dispatch.terminalAt)));
   } catch (_) {
     return false;
+  }
+}
+function openQuestionLine(data, sessionId3) {
+  if (process.env.SIDEQUEST_AGENT || !sessionId3 || !isPrimarySession(data)) return "";
+  try {
+    const store = require(runtimeModule("store"));
+    const slug = projectSlugFor(stringField(data, "cwd", "project_dir", "projectDir") || process.env.CLAUDE_PROJECT_DIR || process.cwd(), store);
+    return slug ? questionSummaryLine(routedOpenQuestions(slug, sessionId3), 300) : "";
+  } catch (_) {
+    return "";
   }
 }
 function emit(context, notice, initialUserMessage = "") {
@@ -929,6 +1013,7 @@ async function main() {
   ]);
   const source = stringField(data, "source");
   const restartNotice = [
+    openQuestionLine(data, sessionId3),
     freshnessNotice,
     source === "compact" || source === "resume" ? "" : diagnosticWorktreeWarning(data),
     ...sweepNotices,
