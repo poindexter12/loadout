@@ -8,9 +8,10 @@ const { tools: ticketTools } = require("./mcp-tickets");
 const { tools: lifecycleTools } = require("./mcp-lifecycle");
 const { tools: collaborationTools } = require("./mcp-collaboration");
 const { tools: routingTools } = require("./mcp-routing");
+const { tools: questionTools, pendingAnswerHolder, attachPendingAnswers, attachPulseQuestions } = require("./mcp-questions");
 const SERVER_NAME = "sidequest";
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18";
-const MCP_TOOLS_LIST_MAX_BYTES = 25170;
+const MCP_TOOLS_LIST_MAX_BYTES = 27180;
 const MCP_TOOLS_LIST_HEADROOM_BYTES = 2500;
 function serverVersion() {
   try {
@@ -24,7 +25,8 @@ const TOOLS = [
   ...ticketTools,
   ...lifecycleTools,
   ...collaborationTools,
-  ...routingTools
+  ...routingTools,
+  ...questionTools
 ];
 const MCP_CLI_ONLY_TOOLS = /* @__PURE__ */ new Set([
   "native_agent",
@@ -53,6 +55,8 @@ const MUTATING_TOOLS = /* @__PURE__ */ new Set([
   "issue_link",
   "assign",
   "dispatch",
+  "ask",
+  "answer",
   "category_add",
   "category_edit",
   "category_detach",
@@ -199,12 +203,18 @@ async function runTool(tool, rawArgs, context) {
     if (claimedProject) args.project = claimedProject;
   }
   if (!toolMutates(tool.name, args)) {
+    const holder = pendingAnswerHolder(tool.name, args);
     const output = await tool.handler(args, context);
-    return acknowledgeAliases(tool.name === "context_page" ? output : boundedReadPayload(tool.name, output), aliases);
+    const bounded = tool.name === "context_page" ? output : boundedReadPayload(tool.name, output);
+    const withQuestions = tool.name === "pulse" ? attachPulseQuestions(bounded, args) : bounded;
+    return acknowledgeAliases(attachPendingAnswers(withQuestions, holder), aliases);
   }
   assertMutationFreshness(args.project);
   const board = mutationQueueKey(tool.name, args);
-  return enqueueMutation(board, async () => acknowledgeAliases(await tool.handler(args, context), aliases));
+  return enqueueMutation(board, async () => {
+    const holder = pendingAnswerHolder(tool.name, args);
+    return acknowledgeAliases(attachPendingAnswers(await tool.handler(args, context), holder), aliases);
+  });
 }
 function progressReporter(params, options) {
   const progressToken = params?._meta?.progressToken;
@@ -251,6 +261,18 @@ const MCP_SCHEMA_PROPERTY_DESCRIPTIONS = {
   release: {
     command: "Required for blocker/contradiction.",
     outputTail: "Required blocker/contradiction output."
+  },
+  ask: {
+    header: "Up to 12 chars.",
+    question: "First line must stand alone; up to 1500 bytes.",
+    options: "2 to 4; omit for free text.",
+    default: "Required: what you do if unanswered.",
+    blocking: "Default true.",
+    withdraw: "qid to withdraw instead of asking."
+  },
+  answer: {
+    question: "qid; defaults to the oldest open.",
+    supersedes: "Prior aid; only when the user changed their mind."
   },
   story_log: { entry: "Must begin DECISION:, CONSTRAINT:, or DISCOVERY:; max 16,000 UTF-8 bytes." },
   category_edit: { fallbackModel: "null clears fallback." },

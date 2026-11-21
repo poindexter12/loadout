@@ -774,7 +774,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: 'release',
-    description: 'Release a held claim, or surrender this worker’s token-validated unbound dispatch with kind technical_blocker. Use kind oracle with an oracle ask to park it as awaiting-oracle for a human verdict, then exit. The oracle handoff stays visible while the ticket remains awaiting-oracle. The control plane reclaims a dead executor’s claim with force:true under its own by, never the holder’s id.',
+    description: 'Release a held claim, or surrender this worker’s token-validated unbound dispatch with kind technical_blocker. Use kind oracle with an oracle ask to park it as awaiting-oracle for a human verdict, then exit. The oracle handoff stays visible while the ticket remains awaiting-oracle. Kind question parks it awaiting-user on its open ask questions once no independent work remains. The control plane reclaims a dead executor’s claim with force:true under its own by, never the holder’s id.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -782,7 +782,7 @@ const tools: ToolDefinition[] = [
         project: PROJECT_PROP,
         by: { type: 'string' },
         reason: { type: 'string' },
-        kind: { type: 'string', enum: ['technical_blocker', 'contradiction', 'oracle', 'handback'] },
+        kind: { type: 'string', enum: ['technical_blocker', 'contradiction', 'oracle', 'handback', 'question'] },
         command: { type: 'string', description: 'Required for blocker/contradiction.' },
         exitCode: { type: 'integer' },
         outputTail: { type: 'string', description: 'Required blocker/contradiction output.' },
@@ -807,7 +807,7 @@ const tools: ToolDefinition[] = [
         // drops a parked candidate; reclaiming a dead executor's claim must not
         // quietly do either of those.
         forceClaimTakeover: args.force === true,
-        status: args.kind === 'oracle' ? 'awaiting-oracle' : args.status,
+        status: args.kind === 'oracle' ? 'awaiting-oracle' : args.kind === 'question' ? 'awaiting-user' : args.status,
         oracle: args.oracle,
         candidate: args.candidate,
         deliverable: args.deliverable,
