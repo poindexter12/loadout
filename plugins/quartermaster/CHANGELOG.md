@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.1 (2026-11-20)
+
+Released in v4.18.0, up from 0.12.0.
+
+### Fixes
+
+- Add SessionStart hook timing headroom (SQ-406)
+- Keep the Quartermaster Stop resupply offer within Claude Code's hook context budget (SQ-427)
+  Quartermaster's overdue-resupply Stop guidance no longer embeds checkout-specific plugin and project paths. It remains actionable through the resupply skill's decline command and stays inside Claude Code's 512-byte hook-output budget even from long worktree paths.
+
 ## 0.12.0 (2026-11-16)
 
 Released in v4.16.0, up from 0.11.1.
