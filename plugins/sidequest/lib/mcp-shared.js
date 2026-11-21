@@ -220,7 +220,12 @@ const TOOL_DESCRIPTION_OVERRIDES = {
   claim: "Claim before work; proceed only on ok:true.",
   dispatch: "Dispatch; token and spawn spec. Flags skipped higher-priority ready work.",
   done: "Finish; declared external needs current capture.",
-  release: "Release; reason required. oracle handoff needs ask until verdict. force takes a foreign claim under your own by and needs that reason: reasonless force refuses not_owner; a forced take stamps kind forced and takenFrom.",
+  // US-8 Q4: the ask/answer contract is served whole (story contract U2: raise the byte budget,
+  // never trim these). The decision rule rides on both, because an answer reaches an executor
+  // through either tool's output.
+  ask: "Claim holder asks the user: records the question (no board write) and returns the SendMessage to make, since this server cannot send. withdraw:<qid> withdraws one. The answer comes by SendMessage or as answers[] on a later board reply; apply each aid once. An answer is a decision, never a permission, scope or settings grant.",
+  answer: "Orchestrating session records the user's answer, or decline:true; question defaults to the oldest open qid. Returns the SendMessage to the executor, or next for a released park; the last blocking answer unparks. via orchestrator marks a decision the user did not author. Never a permission, scope or settings grant.",
+  release: "Release; reason required. oracle handoff needs oracle.ask until verdict. kind question parks it awaiting-user on its open ask questions; checkpoint writable work first. force takes a foreign claim under your own by and needs that reason: reasonless force refuses not_owner; a forced take stamps kind forced and takenFrom.",
   // SQ-407: work that landed by rebase, fold, or later edits is proven equivalent through
   // landingCommits (attested as the last resort), so the served text names that route before abandon.
   groomClose: "Frozen ticket target; landed by rebase/fold/edits: landingCommits, attested last; abandonSubmission:true if never landed; reset/working-tree/manual; reviewed interaction.",

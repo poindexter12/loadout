@@ -100,7 +100,19 @@ test('MCP descriptors preserve tool and caller-discipline contracts', () => {
   assert.deepEqual(Object.keys(categoryEdit?.inputSchema.properties ?? {}), ['id', 'project', 'profile', 'name', 'description', 'contract', 'artifactRoots', 'routeModel', 'routeEffort', 'fallbackModel', 'fallbackEffort', 'enabled', 'readonly']);
   assert.deepEqual(categoryEdit?.inputSchema.properties?.fallbackModel, { type: ['string', 'null'], description: 'null clears fallback.' });
   assert.equal(byName.size, descriptors.length);
-  assert.equal(byName.has('ask'), false);
+  // US-8 Q4 (SQ-418) adds ask and answer. The descriptions are the agent contract: an MCP server
+  // cannot send SendMessage itself, and an answer never grants a permission, scope or setting.
+  assert.match(byName.get('ask')?.description ?? '', /returns the SendMessage to make, since this server cannot send/);
+  assert.match(byName.get('ask')?.description ?? '', /never a permission, scope or settings grant/);
+  assert.match(byName.get('ask')?.description ?? '', /answers\[\] on a later board reply; apply each aid once/);
+  assert.deepEqual(byName.get('ask')?.inputSchema.required, ['ref', 'by']);
+  assert.match(byName.get('ask')?.inputSchema.properties?.default?.description ?? '', /Required: what you do if unanswered/);
+  assert.match(byName.get('answer')?.description ?? '', /decline:true/);
+  assert.match(byName.get('answer')?.description ?? '', /Never a permission, scope or settings grant/);
+  assert.deepEqual(byName.get('answer')?.inputSchema.required, ['ref']);
+  assert.deepEqual(byName.get('answer')?.inputSchema.properties?.via?.enum, ['user', 'user-prompt', 'dashboard', 'orchestrator']);
+  assert.deepEqual(byName.get('release')?.inputSchema.properties?.kind?.enum, ['technical_blocker', 'contradiction', 'oracle', 'handback', 'question']);
+  assert.ok(byName.get('release')?.inputSchema.properties?.status?.enum?.includes('awaiting-user'));
   assert.equal(byName.has('await'), false);
   assert.equal(byName.has('native_agent'), false);
   assert.deepEqual(byName.get('context_page')?.inputSchema.required, ['handle', 'cursor', 'expectedRevision']);
@@ -253,7 +265,10 @@ test('configured MCP and hook entrypoints exist and spawn from the committed tre
   const mcpFrames = mcpResult.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line) as { id: number; result: { tools?: Array<{ name: string }> } });
   assert.equal(mcpFrames[0]?.id, 1);
   assert.equal(mcpFrames[1]?.id, 2);
-  assert.equal(mcpFrames[1]?.result.tools?.some((tool) => tool.name === 'ask' || tool.name === 'await'), false);
+  // US-8 Q4 (SQ-418): the committed tree serves ask and answer; there is still no blocking await.
+  assert.equal(mcpFrames[1]?.result.tools?.some((tool) => tool.name === 'ask'), true);
+  assert.equal(mcpFrames[1]?.result.tools?.some((tool) => tool.name === 'answer'), true);
+  assert.equal(mcpFrames[1]?.result.tools?.some((tool) => tool.name === 'await'), false);
 
   const hooks = JSON.parse(fs.readFileSync(path.join(ROOT, 'hooks', 'hooks.json'), 'utf8'));
   const commands = configuredCommands(hooks);
@@ -281,7 +296,10 @@ test('marketplace-shaped copy runs without source or node_modules and keeps a sc
   assert.equal(help.status, 0, help.stderr);
   const mcp = run(path.join(copy, 'bin', 'sidequest-mcp.js'), [], env, '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n');
   assert.equal(mcp.status, 0, mcp.stderr);
-  assert.equal(mcp.stdout.includes('"ask"'), false);
+  // The installed copy carries lib/mcp-questions.js, so tools/list serves ask and answer (SQ-418).
+  assert.equal(mcp.stdout.includes('"ask"'), true);
+  assert.equal(mcp.stdout.includes('"answer"'), true);
+  assert.equal(mcp.stdout.includes('"await"'), false);
   const add = run(path.join(copy, 'bin', 'sidequest.js'), ['add', '-t', 'installed smoke', '--unclassified'], env);
   assert.equal(add.status, 0, add.stderr);
   const schema = spawnSync(process.execPath, ['-e', `const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(${JSON.stringify(path.join(home, 'sidequest.db'))});process.stdout.write(String(JSON.parse(d.prepare(\"SELECT value FROM meta WHERE key='schema_version'\").get().value)));d.close();`], { encoding: 'utf8', windowsHide: true, env: { ...process.env, ...env } });

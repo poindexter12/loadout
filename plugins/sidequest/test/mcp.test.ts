@@ -138,7 +138,7 @@ test('tools/list advertises the board tools with input schemas', async () => {
   assert.ok(groomClose.inputSchema.properties.recoveryEvidence, 'groomClose requires terminal-agent evidence before clearing an unclaimed dispatch');
   const release = resp.result.tools.find((tool: any) => tool.name === 'release');
   assert.ok(release.inputSchema.properties.oracle, 'release exposes an oracle ask');
-  assert.deepEqual(release.inputSchema.properties.kind.enum, ['technical_blocker', 'contradiction', 'oracle', 'handback'], 'release classifies reasoned handoffs');
+  assert.deepEqual(release.inputSchema.properties.kind.enum, ['technical_blocker', 'contradiction', 'oracle', 'handback', 'question'], 'release classifies reasoned handoffs');
   assert.ok(release.inputSchema.properties.command, 'release exposes command evidence for technical blockers and contradictions');
   assert.match(release.inputSchema.properties.command.description, /Required for blocker\/contradiction/);
   assert.ok(release.inputSchema.properties.exitCode, 'release exposes optional contradiction and required technical-blocker exit-code evidence');
