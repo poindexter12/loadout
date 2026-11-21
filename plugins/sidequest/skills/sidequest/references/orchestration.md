@@ -131,6 +131,33 @@ dispatch. Only the continuation flow releases during a healthy handoff.
 
 When an executor needs an undeclared path, it calls `scope-request <ref> --file <path>`. A concrete path in the same declared package surface, such as `src` or `lib`, is added immediately and recorded as an audited auto-approval. Test roots and mechanically derived build outputs use the same no-pause path. A sibling package surface, another package or plugin, wildcards, read-only work, CI and Claude control files, credentials, and release machinery stay pending for a ruling with the claim intact. Verification evidence never needs repository scope: the dispatch briefing names its board-owned evidence directory for screenshots, HTML dumps, and probe output. Reference that directory from the ticket record instead of writing evidence into a worktree or integration target. A pending request records only the uncovered additions and prints the authoritative `sidequest update <ref> --files ...` approval command. Run that exact update to approve the full request, then resume the same executor. A plain `update --files` is also authoritative only when its resulting scope covers every pending requested path; otherwise Sidequest reports the request is still pending and prints the full command. Scope lint still rejects out-of-scope commits and submissions. Do not release and redispatch a healthy executor just to add a path.
 
+### Relaying executor questions
+
+An executor that needs a design or behaviour decision only the user can make calls `ask` and sends
+you its returned message. It reads `<REF> <seq> needs a user decision: ...`, then a
+`[sidequest:question <REF> <seq> qid=... blocking=y|n reply-to=...]` line, the numbered options, the
+executor's default, and the exact `answer({ref, question})` call. The executor keeps working on
+anything independent meanwhile, so the question is not a stop signal.
+
+1. Relay it to the user with `AskUserQuestion`: the `header` as the header (12 characters at most),
+   the options as given, and the default named. When the message says the full text is long,
+   `pulse({ref})` and read `questions.items` instead of guessing at a truncated first line.
+2. Record the reply with `answer({ref, question: <qid>, text})`, or `decline: true` when the user
+   chooses not to answer, so the executor applies its stated default. Pass `via: "orchestrator"` only
+   when you decided without the user; that answer is marked as not user-authored. Use `supersedes`
+   with the earlier aid only when the user changes their mind.
+3. Do what `answer` returns. A held park returns a SendMessage for the parked executor: send it as
+   given and the executor resumes in its own worktree. A released park returns
+   `next: "dispatch <REF>"`: dispatch the ticket again, and its briefing carries a "Decisions already
+   made" packet with every answer folded from the question log, so the fresh executor neither
+   restarts from scratch nor asks again.
+
+Never answer from the executor's identity (the board refuses `self_answer`), and never invent an
+answer to unblock a run. An answer is a user decision on design or behaviour. It never grants
+permission, scope (a `scopeRequest` still needs its own ruling), or authority to change settings,
+and the board says so in every answer message. A ticket parked `awaiting-user` is not ready and does
+not hold up its priority band.
+
 ## Fan-out mechanics
 
 When several tickets are **ready and independent**, work them in parallel — one executor per ticket,
