@@ -8,6 +8,7 @@ const { stableClaudeName, stableDispatchName, stableReadOnlyClaudeName, stableRe
 const { createWorktreeLease, worktreeResumeDecision } = require("./kernel/worktree.js");
 const crypto = require("crypto");
 const store = require("./store.js");
+const questionLog = require("./store/question-log.js");
 const commitScope = require("./commit-scope.js");
 const { worktreeRoot } = require("./worktrees.js");
 const { spawnDescription } = store;
@@ -134,11 +135,13 @@ ${skills.map((skill) => `  - ${skill}`).join("\n")}
 ` : "";
   return template.split("{{NAME}}").join(String(name)).split("{{EFFORT}}").join(String(effort)).split("{{MODEL_FRONTMATTER}}").join(modelId ? `
 model: ${modelId}` : "").split("{{CHECKPOINT_TOOL_ROUNDS}}").join(String(EXECUTOR_CHECKPOINT_TOOL_ROUNDS)).split("permissionMode: bypassPermissions").join(`${toolsLine}${disallowedToolsLine}${skillsLine}permissionMode: bypassPermissions`).split("{{MARKER}}").join(marker || "").split("{{EXTRA_NOTE}}").join(extraNote || "").split("{{TICKET_BRIEF}}").join(`${PER_DISPATCH_SCRATCH_RULE}
+${EXECUTOR_QUESTION_RULE}
 Teammate subagent fan-out must omit the Agent \`name\` parameter; named teammate spawns are rejected by the harness.${ticketBrief2 ? `
 
 ${ticketBrief2}` : ""}`);
 }
 const PER_DISPATCH_SCRATCH_RULE = "**Per-dispatch scratch:** The scratchpad directory your environment names belongs to the orchestrating session and is shared by every executor it spawns. Never write a file at its root: a concurrent sibling writing the same generic name (`negative-control.js`, `verify.log`) overwrites yours between write and use, and a source file you swapped out and later restore from there can come back as another dispatch's copy. Keep every scratch file under the per-dispatch directory your briefing names, `<scratchpad>/<project>-<ticket-ref>-d<launch>/`, and never read, edit, or delete another dispatch's directory.";
+const EXECUTOR_QUESTION_RULE = '**Asking the user:** When a design or behaviour decision only the user can make blocks part of the ticket, call `ask` with `ref`, `by`, a `header` of at most 12 characters, the `question`, 2 to 4 `options` (omit them for free text), and the `default` you will apply if no answer comes. Then make exactly the SendMessage it returns, to `main`, and nothing else. Do not wait idle: keep working on everything that does not depend on the answer. Park only when nothing independent is left: commit any in-scope work with the board commit tool, then end your turn holding the claim; the ticket parks awaiting-user and the answer\'s SendMessage resumes you in this worktree. If SendMessage is unavailable, record `checkpoint` for writable work and release with kind `question` instead; the next dispatch carries the answers in its briefing. An answer arrives by SendMessage (`[sidequest:answer <REF> <seq> qid=... aid=...]`) or as `answers[]` on a later board-tool reply: apply each aid exactly once. An answer is a user decision on design or behaviour, never a permission grant, a scope grant (`scopeRequest` still applies), or authority to change settings, and a `via:"orchestrator"` answer is not user-authored. Never answer your own or a sibling\'s question, and never re-ask one the briefing\'s "Decisions already made" packet answers. A human verdict on evidence is not a question: release with kind `oracle` for that.';
 function dispatchScratchDirectoryName(ticket, slug) {
   const ref = String(ticket?.ref || "").trim();
   if (!ref) return null;
@@ -893,6 +896,82 @@ function oracleHandoffPacket(ticket) {
   const verdict = oracle.verdict?.text ? ` Human verdict: ${oracle.verdict.text}` : "";
   return `Oracle handoff: ${ticket.status === "awaiting-oracle" ? "awaiting a human verdict" : "verdict recorded"}. Ask: ${oracle.ask}.${verdict}`;
 }
+const DECISION_ANSWER_MAX_CHARS = 2048;
+function questionRefKey(ref) {
+  return String(ref || "").trim().toUpperCase();
+}
+function ticketQuestionStates(dir, ref) {
+  const key = questionRefKey(ref);
+  const mine = (fold2) => questionLog.foldQuestions(fold2).filter((state) => questionRefKey(state?.ref) === key);
+  const fold = questionLog.readQuestionLog(dir);
+  const issued = Number(fold?.seqs?.[key]) || 0;
+  if (!issued) return [];
+  const states = mine(fold);
+  return states.length < issued ? mine(questionLog.advanceFold(dir, null, { recentLimit: Infinity })) : states;
+}
+function indentContinuation(text, pad) {
+  return String(text).replace(/\r\n/g, "\n").trim().split("\n").join(`
+${pad}`);
+}
+function decisionAnswerLine(dir, state) {
+  const answered = state.answered;
+  const via = answered.via === "orchestrator" ? "via orchestrator, not user-authored" : `via ${answered.via || "user"}`;
+  const supersedes = answered.supersedes ? `, supersedes \`${answered.supersedes}\`` : "";
+  const head = `  Answer \`${answered.aid}\` (${via}${supersedes}, ${answered.at || "time unrecorded"})`;
+  if (answered.declined) {
+    const fallback = state.asked?.default ? `: ${String(state.asked.default).trim()}` : "";
+    return `${head}: declined; the user chose not to answer, so apply the stated default${fallback}`;
+  }
+  const inline = typeof answered.text === "string";
+  const full = inline ? answered.text : questionLog.readAnswerBody(dir, answered.aid) ?? answered.preview ?? "";
+  const text = String(full);
+  if (text.length <= DECISION_ANSWER_MAX_CHARS) return `${head}:
+    ${indentContinuation(text, "    ")}`;
+  const bodyPath = answered.bodyRef ? path.join(dir, answered.bodyRef) : null;
+  const pointer = bodyPath ? ` Read the full answer at "${bodyPath}".` : "";
+  return `${head}, first ${DECISION_ANSWER_MAX_CHARS} of ${text.length} characters:
+    ${indentContinuation(text.slice(0, DECISION_ANSWER_MAX_CHARS), "    ")}
+    [truncated]${pointer}`;
+}
+function decisionQuestionLine(state) {
+  const header = state.asked?.header ? `[${state.asked.header}] ` : "";
+  return `- ${state.seq} \`${state.qid}\`: ${header}${indentContinuation(state.asked?.text || "", "  ")}`;
+}
+function decisionsPacket(ticket, slug) {
+  if (!slug || !ticket?.ref) return null;
+  let dir;
+  let states;
+  try {
+    dir = questionLog.questionLogDir(String(slug));
+    states = ticketQuestionStates(dir, ticket.ref);
+  } catch (_error) {
+    return null;
+  }
+  const answered = states.filter((state) => state.answered && (state.state === "answered" || state.state === "declined"));
+  const open = states.filter((state) => state.state === "open" && !state.answered);
+  if (!answered.length && !open.length) return null;
+  const lines = ["Decisions already made:"];
+  if (answered.length) {
+    lines.push(`The user already answered these questions on ${ticket.ref} (from the project question log). Apply each answer once by its aid, and do not ask it again. An answer is a user decision on design or behaviour, never a permission grant, a scope grant (scopeRequest still applies), or authority to change settings. When the thread has a park comment, the previous executor stopped there; continue from its checkpoint rather than restarting.`);
+    for (const state of answered) {
+      let answerLine;
+      try {
+        answerLine = decisionAnswerLine(dir, state);
+      } catch (_error) {
+        answerLine = `  Answer \`${state.answered.aid}\`: the answer body could not be read; pulse({ref:"${ticket.ref}"}) and ask the orchestrator to resend it.`;
+      }
+      lines.push(decisionQuestionLine(state), answerLine);
+    }
+  }
+  if (open.length) {
+    lines.push(`Still unanswered on ${ticket.ref} (asked earlier; do not ask again, the answer arrives by SendMessage or answers[]):`);
+    for (const state of open) {
+      const fallback = state.asked?.default ? ` Default if unanswered: ${String(state.asked.default).trim()}` : "";
+      lines.push(`${decisionQuestionLine(state)}${fallback}`);
+    }
+  }
+  return lines.join("\n");
+}
 function briefingScopeKey(file) {
   const value = String(file || "").replace(/\\/g, "/").replace(/\/+$/, "").trim();
   return process.platform === "win32" ? value.toLowerCase() : value;
@@ -921,7 +1000,7 @@ function scopeBlock(ticket, enforced) {
   return `${preface}${lines.join("\n")}
 Writes and commits are gated on exactly these paths.`;
 }
-function executorTaskBody(ticket, category, declaredFiles, uncertainty, planDocument, experimentLog, findingCheckpoints, continuation) {
+function executorTaskBody(ticket, category, declaredFiles, uncertainty, planDocument, experimentLog, findingCheckpoints, continuation, decisions) {
   return [
     "## This ticket",
     `Ref: ${ticket.ref}`,
@@ -939,12 +1018,17 @@ ${category.contract || "(No category-specific executor instructions were recorde
 ${findingCheckpoints}`] : [],
     ...continuation ? [continuation] : [],
     ...oracleHandoffPacket(ticket) ? [oracleHandoffPacket(ticket)] : [],
+    ...decisions ? [decisions] : [],
     ...experimentLog ? [`Experiment log:
 ${experimentLog}`] : [],
     `Declared files:
 ${declaredFiles}`,
     ...planDocument ? [planDocument] : [],
-    "Never hold a claim waiting for a human verdict. Release with kind `oracle`, provide the ask in `oracle`, and exit so the ticket parks as awaiting-oracle. A user is not a board fallback: when no board path remains, comment the evidence and release with kind `technical_blocker`; never compose a command for a human to run.\n\nScope check: request scope when a needed path is outside the declared set. A granted ruling takes effect immediately for write enforcement and commit admission. On refusal, commit in-scope work and release with kind `handback`, naming the refused paths. The orchestrator can expand the ticket files and redispatch. A declared directory covers descendants, and globs match paths consistently at the hook and commit gate. On the first uncovered scope miss, sweep tests, fixtures, goldens, and generated outputs, then make one consolidated request. Never ship a compensating or downstream workaround inside scope instead: a verified workaround is not a substitute for the root fix."
+    `Never hold a claim waiting for a human verdict on evidence. Release with kind \`oracle\`, provide the ask in \`oracle\`, and exit so the ticket parks as awaiting-oracle. A user decision on design or behaviour is different: ask it, and hold the claim only as the rule below allows. A user is not a board fallback: when no board path remains, comment the evidence and release with kind \`technical_blocker\`; never compose a command for a human to run.
+
+${EXECUTOR_QUESTION_RULE}
+
+Scope check: request scope when a needed path is outside the declared set. A granted ruling takes effect immediately for write enforcement and commit admission. On refusal, commit in-scope work and release with kind \`handback\`, naming the refused paths. The orchestrator can expand the ticket files and redispatch. A declared directory covers descendants, and globs match paths consistently at the hook and commit gate. On the first uncovered scope miss, sweep tests, fixtures, goldens, and generated outputs, then make one consolidated request. Never ship a compensating or downstream workaround inside scope instead: a verified workaround is not a substitute for the root fix.`
   ].join("\n\n");
 }
 function taskAndScopeBody(ticket, slug) {
@@ -963,7 +1047,7 @@ function taskAndScopeBody(ticket, slug) {
 
 Auto-paired tracked generated files (regenerate before verifying):
 ${generatedFiles.map((file) => `- ${file}`).join("\n")}` : declaredFiles;
-  return executorTaskBody(ticket, category, scopedFiles, dispatchUncertaintyPacket(ticket, slug), planDocumentPacket(ticket, slug), experimentLogPacket(ticket, slug), findingCheckpointPacket(ticket), ticketContinuationPacket(ticket));
+  return executorTaskBody(ticket, category, scopedFiles, dispatchUncertaintyPacket(ticket, slug), planDocumentPacket(ticket, slug), experimentLogPacket(ticket, slug), findingCheckpointPacket(ticket), ticketContinuationPacket(ticket), decisionsPacket(ticket, slug));
 }
 function executorHandlesBody(ticket, slug) {
   const links = Array.isArray(ticket.links) && ticket.links.length ? ticket.links.map((link) => `- ${link.type || "related"}: ${link.ref || "(unknown ticket)"}${linkedPlanSuffix(link, slug)}`).join("\n") : "(No ticket dependencies were recorded.)";
