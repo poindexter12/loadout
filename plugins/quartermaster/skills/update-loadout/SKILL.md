@@ -14,7 +14,9 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/update-loadout.js"
 ```
 
 It reads Claude Code's installed-plugin registry, refreshes the Loadout marketplace, and
-updates every active Loadout install recorded there at its recorded scope and project directory. That
+updates every active Loadout install recorded there at its recorded scope and project directory. The
+short-lived Claude Code plugin commands give SessionEnd hooks up to one minute to finish, avoiding
+spurious hook-cancellation messages while preserving the active account configuration. That
 includes user, project, and local installs across projects, not only the project where this skill is
 invoked. It does not inspect, refresh, or update third-party marketplaces or plugins. When Model Gateway
 is installed, it runs its stable updater, `node ~/.claude/model-gateway/update.js`, and surfaces that

@@ -68,14 +68,20 @@ test('enumerates every user, project, and local install across marketplaces', ()
 });
 
 test('routes project and local updates through the recorded project directory', () => {
-  const project = updateCommand({ id: 'sidequest@loadout', ...registry.plugins['sidequest@loadout'][1] }, 'claude');
-  const local = updateCommand({ id: 'sidequest@loadout', ...registry.plugins['sidequest@loadout'][2] }, 'claude');
-  const user = updateCommand({ id: 'sidequest@loadout', scope: 'user' }, 'claude');
+  const env = { CLAUDE_CONFIG_DIR: '/accounts/personal/claude', PRESERVED: 'yes' };
+  const project = updateCommand({ id: 'sidequest@loadout', ...registry.plugins['sidequest@loadout'][1] }, 'claude', env);
+  const local = updateCommand({ id: 'sidequest@loadout', ...registry.plugins['sidequest@loadout'][2] }, 'claude', env);
+  const user = updateCommand({ id: 'sidequest@loadout', scope: 'user' }, 'claude', env);
 
   assert.deepEqual(project.args, ['plugin', 'update', 'sidequest@loadout', '--scope', 'project']);
   assert.equal(project.cwd, registry.plugins['sidequest@loadout'][1].projectPath);
   assert.equal(local.cwd, registry.plugins['sidequest@loadout'][2].projectPath);
   assert.equal(user.cwd, undefined);
+  for (const command of [project, local, user]) {
+    assert.equal(command.env.CLAUDE_CONFIG_DIR, env.CLAUDE_CONFIG_DIR);
+    assert.equal(command.env.PRESERVED, env.PRESERVED);
+    assert.equal(command.env.CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS, '60000');
+  }
 });
 
 test('uses the stable model-gateway updater for upgrades and the installed command for checks', () => {
@@ -404,6 +410,12 @@ test('update and check modes touch only Loadout installs', () => withRegistry(re
   });
 
   assert.ok(updateCalls.some((command) => command.args.join(' ') === 'plugin marketplace update loadout'));
+  const pluginCommands = updateCalls.filter((command) => command.args[0] === 'plugin');
+  assert.ok(pluginCommands.length > 0);
+  for (const command of pluginCommands) {
+    assert.equal(command.env.CLAUDE_CONFIG_DIR, ISOLATED_CONFIG_DIR);
+    assert.equal(command.env.CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS, '60000');
+  }
   assert.equal(updateCalls.some((command) => command.args.join(' ').includes('another-marketplace') || command.args.join(' ').includes('other@')), false);
 
   const checkCalls = [];

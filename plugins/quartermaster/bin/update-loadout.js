@@ -314,11 +314,22 @@ function marketplacesFor(registryOrInstances) {
   return [...new Set(ids.map((id) => pluginIdParts(id)?.marketplace).filter(Boolean))].sort();
 }
 
-function updateCommand(instance, claude) {
+// `claude plugin` is a short-lived Claude Code process, but it still runs user
+// SessionEnd hooks. The CLI honors this environment variable and permits up to
+// an hour; one minute avoids cancellation noise under load without replacing
+// the caller's account-scoped environment.
+const SESSIONEND_HOOKS_TIMEOUT_MS = '60000';
+
+function pluginCommandEnv(env) {
+  return { ...env, CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: SESSIONEND_HOOKS_TIMEOUT_MS };
+}
+
+function updateCommand(instance, claude, env = process.env) {
   return {
     command: claude,
     args: ['plugin', 'update', instance.id, '--scope', instance.scope],
     cwd: instance.scope === 'user' ? undefined : instance.projectPath,
+    env: pluginCommandEnv(env),
     label: `${instance.id} (${instance.scope}${instance.projectPath ? `, ${instance.projectPath}` : ''})`,
   };
 }
@@ -341,10 +352,11 @@ function retireLegacyGatewayCommand(instance, claude) {
   };
 }
 
-function marketplaceCommand(marketplace, claude) {
+function marketplaceCommand(marketplace, claude, env = process.env) {
   return {
     command: claude,
     args: ['plugin', 'marketplace', 'update', marketplace],
+    env: pluginCommandEnv(env),
     label: `${marketplace} marketplace`,
   };
 }
@@ -638,12 +650,12 @@ function runUpdate({ env = process.env, registryFile = registryPath(env), home =
   const failures = [];
   if (!options.check) {
     for (const marketplace of marketplaces) {
-      const command = marketplaceCommand(marketplace, options.claude);
+      const command = marketplaceCommand(marketplace, options.claude, env);
       if (!execute(command, options, run, report)) failures.push(command.label);
     }
 
     for (const instance of instances) {
-      const command = updateCommand(instance, options.claude);
+      const command = updateCommand(instance, options.claude, env);
       if (!execute(command, options, run, report)) failures.push(command.label);
     }
 
