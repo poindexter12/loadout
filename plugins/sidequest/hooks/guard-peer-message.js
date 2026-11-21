@@ -174,6 +174,66 @@ function runtimeModule(name) {
   return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
+// src/hooks/shared/questions.ts
+var import_node_crypto2 = __toESM(require("node:crypto"));
+var import_node_fs3 = __toESM(require("node:fs"));
+var import_node_path4 = __toESM(require("node:path"));
+
+// src/lib/claude-home.ts
+var import_node_os = __toESM(require("node:os"));
+var import_node_path3 = __toESM(require("node:path"));
+
+// src/hooks/shared/questions.ts
+var ORPHAN_AFTER_MS = 10 * 60 * 1e3;
+var MARKER_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
+function questionLog() {
+  return require(runtimeModule("store/question-log"));
+}
+function projectSlugFor(start, store) {
+  try {
+    let project = store.findProject(store.nearestRepoRoot(start));
+    if (!project.ok || !project.slug) project = store.findProject(start);
+    return project.ok && project.slug ? project.slug : null;
+  } catch (_) {
+    return null;
+  }
+}
+function byteLength2(value) {
+  return Buffer.byteLength(value, "utf8");
+}
+function clipText(value, maxBytes) {
+  const flat = String(value || "").replace(/\s+/g, " ").trim();
+  if (byteLength2(flat) <= maxBytes) return flat;
+  let clipped = "";
+  for (const character of flat) {
+    if (byteLength2(clipped + character) > Math.max(0, maxBytes - byteLength2("…"))) break;
+    clipped += character;
+  }
+  return `${clipped.trimEnd()}…`;
+}
+function messageMarkers(message) {
+  const text = typeof message === "string" ? message : message == null ? "" : JSON.stringify(message);
+  if (!text.includes("[sidequest:")) return [];
+  const log = questionLog();
+  const markers = [];
+  for (const match of text.matchAll(/\[sidequest:(question|answer)\b([^\]]*)\]/g)) {
+    const fields = match[2] ?? "";
+    const field = (name) => {
+      const found = new RegExp(`(?:^|\\s)${name}=(\\S+)`).exec(fields);
+      return found?.[1] ?? null;
+    };
+    const qid = field("qid");
+    const aid = field("aid");
+    markers.push({
+      kind: match[1],
+      raw: match[0],
+      qid: qid && log.isQuestionId(qid) ? qid : null,
+      aid: aid && log.isAnswerId(aid) ? aid : null
+    });
+  }
+  return markers;
+}
+
 // src/hooks/guard-peer-message.ts
 function isolatedDispatchWithMissingWorktree(agentName) {
   try {
@@ -191,11 +251,39 @@ function terminalDispatchTarget(agentName) {
     return null;
   }
 }
+function markerRefusal(input, message) {
+  const markers = messageMarkers(message);
+  if (!markers.length) return null;
+  if (stringField(input, "agent_id", "agentId") && markers.some((marker) => marker.kind === "answer")) {
+    return "sidequest: an executor cannot send an answer marker. Only the orchestrating session answers a question, through answer, and an executor can never answer its own or a sibling's question.";
+  }
+  let dir;
+  let log;
+  try {
+    const store = require(runtimeModule("store"));
+    const slug = projectSlugFor(stringField(input, "cwd") || process.env.CLAUDE_PROJECT_DIR || process.cwd(), store);
+    if (!slug) return null;
+    log = questionLog();
+    dir = log.questionLogDir(slug);
+  } catch (_) {
+    return null;
+  }
+  for (const marker of markers) {
+    if (marker.qid && log.findQuestion(dir, marker.qid)) continue;
+    return `sidequest: ${clipText(marker.raw, 120)} names no question on this board. Send the exact SendMessage that ask or answer returned; never write a sidequest marker by hand.`;
+  }
+  return null;
+}
 function main() {
   const input = readStdin();
   if (!input || stringField(input, "tool_name") !== "SendMessage" || !isRecord(input.tool_input)) return;
   const toRaw = input.tool_input.to;
   const to = String(toRaw == null ? "" : toRaw).trim();
+  const refusal = markerRefusal(input, input.tool_input.message);
+  if (refusal) {
+    writeDeny("PreToolUse", refusal);
+    return;
+  }
   const terminal = terminalDispatchTarget(to);
   if (terminal) {
     writeDeny(

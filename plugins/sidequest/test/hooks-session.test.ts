@@ -42,6 +42,10 @@ import {
   claimStopTicket,
   recordTerminalAgentFailure,
   fixtureState,
+  addStopTicket,
+  STOP,
+  SUBAGENT_STOP,
+  BOARD_FIRST_REMINDER,
 } from './_hooks-fixture.js';
 
 test('stop reminder: reviewed submissions stay held until integration', () => {
@@ -778,6 +782,98 @@ test('session-start source excludes the retired lifecycle CLI fallback', () => {
   const source = fs.readFileSync(SESSION, 'utf8');
   assert.doesNotMatch(source, /list --status=doing only if MCP is absent/);
   assert.match(source, /Reconnect Board MCP, re-dispatch, and spawn the exact returned executor/);
+});
+
+// US-8 Q6: open user questions surface from the question log on Stop, UserPromptSubmit and
+// SessionStart, routed by the asking dispatch's owner session. Each fixture is its own project, so
+// its questions never reach another test's hooks.
+const questionLog = require('../lib/store/question-log.js');
+
+function sessionQuestionFixture(label: string) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `sq-q6-session-${label}-`));
+  const projectSlug = store.ensureProject(dir).slug;
+  const qdir = questionLog.questionLogDir(projectSlug);
+  const ticket = addStopTicket(`Q6 session ${label} fixture`, {}, projectSlug);
+  const owner = `q6-session-${label}-owner-${++fixtureState.sqSeq}`;
+  const ask = (header: string, text: string, blocking: boolean) => {
+    const asked = questionLog.askQuestion(qdir, { ref: ticket.ref, ticketId: ticket.id, header, text, blocking, ownerSession: owner });
+    assert.strictEqual(asked.ok, true, asked.message);
+    return asked;
+  };
+  return { dir, projectSlug, qdir, ticket, owner, ask };
+}
+
+test('US-8 Q6: Stop surfaces one open question per stop, blocking first, only to its owner session', () => {
+  const fx = sessionQuestionFixture('stop');
+  const later = fx.ask('Naming', 'Should the flag be called --dry or --plan?', false);
+  const blocking = fx.ask('Schema', `Which schema should the migration target? ${'Detail. '.repeat(120)}`, true);
+  const stop = (session: string, extra: Record<string, unknown> = {}) =>
+    runHook(STOP, { session_id: session, cwd: fx.dir, ...extra });
+
+  assert.doesNotMatch(stop(fx.owner, { stop_hook_active: true }), /needs the user/, 'a continued stop stays silent');
+
+  const first = stop(fx.owner);
+  assert.ok(first.startsWith(`Sidequest: ${fx.ticket.ref} ${blocking.seq} needs the user: Which schema`), first);
+  assert.ok(first.includes(`Full text: pulse({ref:"${fx.ticket.ref}"})`), first);
+  assert.ok(first.includes(`answer({ref:"${fx.ticket.ref}",question:"${blocking.qid}",text:…})`), first);
+  assert.match(first, / 1 more open\.$/);
+  assert.ok(Buffer.byteLength(first, 'utf8') <= 512, `Stop item is ${Buffer.byteLength(first, 'utf8')} bytes`);
+
+  const second = stop(fx.owner);
+  assert.ok(second.startsWith(`Sidequest: ${fx.ticket.ref} ${later.seq} needs the user: Should the flag`), second);
+  assert.doesNotMatch(stop(fx.owner), /needs the user/, 'a question surfaces once per session');
+  assert.doesNotMatch(stop(`q6-session-stop-stranger-${fixtureState.sqSeq}`), /needs the user/,
+    'a live owner session keeps its questions');
+});
+
+test('US-8 Q6: UserPromptSubmit relays the newest unsurfaced question, including on an executor message', () => {
+  const fx = sessionQuestionFixture('prompt');
+  const asked = fx.ask('Schema', 'Which schema should the migration target?', true);
+  const prompt = (text: string) => runHook(BOARD_FIRST_REMINDER, { session_id: fx.owner, cwd: fx.dir, prompt: text });
+
+  const relay = prompt('carry on');
+  assert.ok(relay.startsWith(`Sidequest: ${fx.ticket.ref} ${asked.seq} needs the user (qid ${asked.qid}, blocking). Schema: Which schema`), relay);
+  assert.ok(relay.includes(`answer({ref:"${fx.ticket.ref}",question:"${asked.qid}",text:…}); never answer it yourself.`), relay);
+  assert.ok(Buffer.byteLength(relay, 'utf8') <= 1024, `UPS relay is ${Buffer.byteLength(relay, 'utf8')} bytes`);
+  assert.doesNotMatch(prompt('and again'), /needs the user/, 'a relayed question is not repeated');
+
+  const next = fx.ask('Naming', 'Should the flag be called --dry or --plan?', false);
+  const onAgentMessage = prompt(`<agent-message from="q6-exec">[sidequest:question ${fx.ticket.ref} ${next.seq} qid=${next.qid} blocking=n reply-to=q6-exec]</agent-message>`);
+  assert.ok(onAgentMessage.startsWith(`Sidequest: ${fx.ticket.ref} ${next.seq} needs the user (qid ${next.qid}). Naming:`), onAgentMessage);
+});
+
+test('US-8 Q6: SessionStart names the open questions routed to the session, and an ended owner orphans them', () => {
+  const fx = sessionQuestionFixture('start');
+  const asked = fx.ask('Schema', 'Which schema should the migration target?', true);
+  const expected = `Sidequest: 1 open question needs the user: ${fx.ticket.ref} ${asked.seq}.`;
+  const start = (session: string, source: string) => runHook(SESSION, { session_id: session, source, cwd: fx.dir });
+
+  const resumed = start(fx.owner, 'resume');
+  assert.ok(resumed.startsWith(expected), resumed.slice(0, 300));
+  const stranger = `q6-session-start-stranger-${fixtureState.sqSeq}`;
+  assert.ok(!start(stranger, 'startup').includes(expected), 'a live owner keeps its questions from other sessions');
+
+  runHook(SESSION_END, { session_id: fx.owner, cwd: fx.dir });
+  assert.ok(start(stranger, 'startup').startsWith(expected), 'an ended owner orphans its open questions to the next session');
+});
+
+test('US-8 Q6: SessionEnd detaches a held park the session registry no longer lists', () => {
+  const fx = sessionQuestionFixture('end');
+  const stopPayload = claimStopTicket(fx.ticket, fx.owner, `q6-end-worker-${fixtureState.sqSeq}`, fx.projectSlug);
+  const asked = fx.ask('Schema', 'Which schema should the migration target?', true);
+  assert.strictEqual(questionLog.recordSent(fx.qdir, { qid: asked.qid, to: 'main', session: fx.owner }).ok, true);
+  assert.match(runHook(SUBAGENT_STOP, { ...stopPayload, cwd: fx.dir }), /^exec PARKED: /);
+  let ticket = store.getTicket(fx.projectSlug, fx.ticket.ref);
+  assert.strictEqual(ticket.park?.mode, 'held');
+  // A park can outlive the worker registry's TTL; simulate that so reconcileSession has nothing to release.
+  store.unregisterClaim(fx.owner, fx.projectSlug, fx.ticket.id);
+
+  runHook(SESSION_END, { session_id: fx.owner, cwd: fx.dir });
+  ticket = store.getTicket(fx.projectSlug, fx.ticket.ref);
+  assert.strictEqual(ticket.status, 'awaiting-user');
+  assert.strictEqual(ticket.park?.mode, 'released');
+  assert.strictEqual(ticket.park?.detach, 'session_ended');
+  assert.ok(!ticket.claim || !ticket.claim.by, 'the held claim is released');
 });
 
 export {};
