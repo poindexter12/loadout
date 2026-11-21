@@ -467,6 +467,17 @@ function resolvedCommit(cwd: string, name: unknown): GitResult {
   return gitResult(cwd, ['rev-parse', '--verify', `${String(name || '').trim()}^{commit}`]);
 }
 
+// Remote-tracking refs (short names such as `origin/main`) whose history holds
+// `commit`; empty when none does or Git cannot answer. Read-only: no fetch.
+function remoteRefsContaining(cwd: string, commit: string): string[] {
+  const refs = gitResult(cwd, ['for-each-ref', '--contains', commit, '--format=%(refname)', 'refs/remotes']);
+  if (!refs.ok || !refs.value) return [];
+  return refs.value.split(/\r?\n/)
+    .map((ref) => ref.trim())
+    .filter((ref) => ref.startsWith('refs/remotes/') && !ref.endsWith('/HEAD'))
+    .map((ref) => ref.slice('refs/remotes/'.length));
+}
+
 function isAncestor(cwd: string, ancestor: string, descendant: string): boolean {
   try {
     git(cwd, ['merge-base', '--is-ancestor', ancestor, descendant]);
@@ -588,7 +599,16 @@ export function submissionRange(cwd: string, options: unknown) {
   const rootBase = isEmptyTreeBase(opts.base);
   const requestedBase = opts.base && !rootBase ? resolvedCommit(cwd, opts.base) : null;
   if (requestedBase && !requestedBase.ok) return { ok: false, reason: 'missing_base', message: requestedBase.message };
-  const integrationBranch = resolvedCommit(cwd, opts.integrationBranch || upstream);
+  const integrationBranchName = String(opts.integrationBranch || upstream).trim();
+  const integrationBranch = resolvedCommit(cwd, integrationBranchName);
+  // "Integrated" means on the integration line: reachable from the local
+  // integration branch OR from the upstream this range is measured against
+  // (SQ-431). In remote and PR delivery the upstream is `origin/<branch>`, and
+  // in PR mode the board never advances the local branch, so a stale local
+  // main is the normal state there. Judging only the local branch refused a
+  // merged wave whose dispatch base sat on origin/main as base_not_reachable.
+  const onIntegrationLine = (commit: string) => (integrationBranch.ok && isAncestor(cwd, commit, integrationBranch.value))
+    || isAncestor(cwd, commit, currentUpstream.value);
   const dispatchBase = !rootBase && opts.dispatchBase ? resolvedCommit(cwd, opts.dispatchBase) : null;
   const approvedBoundaryBase = (candidate: GitResult): candidate is { ok: true; value: string } => {
     if (!candidate.ok) return false;
@@ -597,9 +617,32 @@ export function submissionRange(cwd: string, options: unknown) {
   };
   const baseIsOnTip = !!requestedBase && isAncestor(cwd, requestedBase.value, tip.value);
   const baseIsAfterMergeBase = !!requestedBase && isAncestor(cwd, mergeBase.value, requestedBase.value);
-  const baseIsIntegrated = !!requestedBase && integrationBranch.ok && isAncestor(cwd, requestedBase.value, integrationBranch.value);
+  const baseIsIntegrated = !!requestedBase && onIntegrationLine(requestedBase.value);
   if (requestedBase && (!baseIsOnTip || (!baseIsAfterMergeBase && !baseIsIntegrated))) {
-    return { ok: false, reason: 'base_not_reachable', base: requestedBase.value, actualBase: mergeBase.value, upstream, tip: tip.value };
+    // Two failures share this reason and their remedies are opposite (SQ-431).
+    // `behindRemote` lists remote-tracking refs that already hold the base
+    // while the integration line checked here does not: the work is intact
+    // and the local branch is behind, so the fix is a fast-forward, never
+    // recreating the work. Without it the refusal is genuine: the commit no
+    // longer descends from its base (`baseOnTip: false`), or the base is off
+    // the integration line altogether.
+    const behindRemote = baseIsOnTip ? remoteRefsContaining(cwd, requestedBase.value) : [];
+    return {
+      ok: false,
+      reason: 'base_not_reachable',
+      base: requestedBase.value,
+      actualBase: mergeBase.value,
+      upstream,
+      integrationBranch: integrationBranchName,
+      tip: tip.value,
+      baseOnTip: baseIsOnTip,
+      behindRemote,
+      message: behindRemote.length
+        ? `base ${requestedBase.value} is on ${behindRemote.join(', ')} but not on local ${integrationBranchName}: local ${integrationBranchName} is behind the remote. Fast-forward it and retry; do not recreate the work.`
+        : baseIsOnTip
+          ? `base ${requestedBase.value} is not on ${integrationBranchName}, ${upstream}, or any remote-tracking ref; the base is off the integration line.`
+          : `base ${requestedBase.value} is not an ancestor of the submitted commit ${tip.value}; the range is broken.`,
+    };
   }
 
   const allowedBaseNames = Array.isArray(opts.allowedBases) ? opts.allowedBases : null;
@@ -618,8 +661,7 @@ export function submissionRange(cwd: string, options: unknown) {
   // actually supplied on this call.
   const pinnedBase = !rootBase && opts.pinnedBase ? resolvedCommit(cwd, opts.pinnedBase) : null;
   const pinnedBaseKnown = !!pinnedBase && pinnedBase.ok;
-  const pinnedBaseOnIntegrationBranch = pinnedBaseKnown
-    && integrationBranch.ok && isAncestor(cwd, pinnedBase.value, integrationBranch.value);
+  const pinnedBaseOnIntegrationBranch = pinnedBaseKnown && onIntegrationLine(pinnedBase.value);
   const dispatchBaseResubmittable = !pinnedBaseKnown
     || pinnedBaseOnIntegrationBranch
     || approvedBoundaryBases.has(pinnedBase.value);
@@ -643,7 +685,7 @@ export function submissionRange(cwd: string, options: unknown) {
   if (!requestedBase && dispatchBase) {
     const dispatchBaseIsOnTip = dispatchBase.ok && isAncestor(cwd, dispatchBase.value, tip.value);
     const dispatchBaseIsAfterMergeBase = dispatchBase.ok && isAncestor(cwd, mergeBase.value, dispatchBase.value);
-    const dispatchBaseIsIntegrated = dispatchBase.ok && integrationBranch.ok && isAncestor(cwd, dispatchBase.value, integrationBranch.value);
+    const dispatchBaseIsIntegrated = dispatchBase.ok && onIntegrationLine(dispatchBase.value);
     if (dispatchBaseIsOnTip && (dispatchBaseIsAfterMergeBase || dispatchBaseIsIntegrated)) {
       effectiveBase = dispatchBase.value;
     }
