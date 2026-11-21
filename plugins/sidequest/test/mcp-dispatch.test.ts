@@ -1698,4 +1698,119 @@ test('SQ-2397: MCP handler grant is explicit while CLI source, by, and session s
   assert.equal(JSON.parse(unclaimedUpdate.stdout).ticket.externalDeliverable, true);
 });
 
+// US-8 Q8 (SQ-422, plan §2.7): needsInput classifies a ticket at filing as one that needs the user.
+const needsInputQuestionLog = require('../lib/store/question-log.js');
+function needsInputOpenQuestions(slug: string, ref: string) {
+  return needsInputQuestionLog.openQuestions(needsInputQuestionLog.questionLogDir(slug), { ref });
+}
+async function dispatchError(ref: string) {
+  const raw = await callToolRaw('dispatch', { allowUnscoped: true, ref });
+  assert.ok(raw.isError, `dispatch of ${ref} should refuse, got ${raw.content[0].text.slice(0, 200)}`);
+  return String(raw.content[0].text);
+}
+
+test('add with needsInput files awaiting-user with a filing question; dispatch refuses until answered, then dispatches', async () => {
+  const slug = store.ensureProject(PROJ).slug;
+  store.setCategory({ id: 'mcp-needs-input', name: 'MCP needs input', route: { model: 'sonnet', effort: 'high' } });
+  const added = await callTool('add', {
+    title: 'needsInput filing fixture',
+    description: DISPATCH_DESCRIPTION,
+    category: 'mcp-needs-input',
+    needsInput: 'Which storage backend should the cache use, sqlite or redis?',
+  });
+  const filed = store.getTicket(slug, added.ref);
+  assert.equal(filed.status, 'awaiting-user', 'a needsInput ticket starts awaiting-user');
+  assert.equal(filed.park.mode, 'released', 'a filing park holds no claim');
+  assert.equal(filed.park.origin, 'filing');
+  assert.equal(filed.park.qids.length, 1);
+  const [qid] = filed.park.qids;
+  const open = needsInputOpenQuestions(slug, filed.ref);
+  assert.equal(open.length, 1, 'the question is in the log, not only on the board');
+  assert.equal(open[0].qid, qid);
+  assert.equal(open[0].asked.origin, 'filing');
+  assert.equal(open[0].asked.agent, null, 'no agent asked a filing question');
+  assert.equal(open[0].asked.ownerSession, MCP_SESSION_ID, 'the filing session owns the question');
+  assert.equal(open[0].asked.text, 'Which storage backend should the cache use, sqlite or redis?');
+  assert.ok(filed.comments.some((comment: any) => comment.body.includes(qid)), 'the park comment names the qid');
+
+  const refusal = await dispatchError(filed.ref);
+  assert.match(refusal, /awaiting_user/);
+  assert.match(refusal, /filed with needsInput/);
+  assert.ok(refusal.includes(`answer ${qid} first`), refusal);
+  assert.match(refusal, /decline:true\}\) to let the executor ask at runtime/);
+  assert.equal(store.getTicket(slug, filed.ref).dispatch, undefined, 'the refused dispatch minted nothing');
+
+  const answered = await callTool('answer', { ref: filed.ref, question: qid, text: 'sqlite' });
+  assert.equal(answered.ok, true);
+  assert.equal(store.getTicket(slug, filed.ref).status, 'todo', 'the last blocking answer unparks a filing park to todo');
+  assert.equal(needsInputOpenQuestions(slug, filed.ref).length, 0);
+  await callTool('dispatch', { allowUnscoped: true, ref: filed.ref });
+  assert.ok(store.getTicket(slug, filed.ref).dispatch, 'an answered filing question makes the ticket dispatchable');
+});
+
+test('a declined filing question lets the ticket dispatch and leaves the executor to ask at runtime', async () => {
+  const slug = store.ensureProject(PROJ).slug;
+  store.setCategory({ id: 'mcp-needs-input', name: 'MCP needs input', route: { model: 'sonnet', effort: 'high' } });
+  const added = await callTool('add', { title: 'needsInput decline fixture', description: DISPATCH_DESCRIPTION, category: 'mcp-needs-input', needsInput: 'Keep the legacy flag?' });
+  const declined = await callTool('answer', { ref: added.ref, decline: true });
+  assert.equal(declined.ok, true);
+  assert.equal(declined.declined, true);
+  assert.equal(store.getTicket(slug, added.ref).status, 'todo');
+  await callTool('dispatch', { allowUnscoped: true, ref: added.ref });
+  assert.ok(store.getTicket(slug, added.ref).dispatch);
+});
+
+test('add refuses needsInput with a status or over the question byte limit, and logs no question', async () => {
+  const slug = store.ensureProject(PROJ).slug;
+  store.setCategory({ id: 'mcp-needs-input', name: 'MCP needs input', route: { model: 'sonnet', effort: 'high' } });
+  const before = needsInputQuestionLog.foldQuestions(needsInputQuestionLog.readQuestionLog(needsInputQuestionLog.questionLogDir(slug))).length;
+  // MCP add takes no status; the store refuses the combination for its other callers.
+  assert.throws(
+    () => store.createTicket(slug, { title: 'needsInput status fixture', categoryId: 'mcp-needs-input', status: 'doing', needsInput: 'Which one?' }),
+    /needsInput files the ticket awaiting-user, so it cannot also be filed as status "doing"/,
+  );
+  const tooLong = await callToolRaw('add', { title: 'needsInput size fixture', category: 'mcp-needs-input', needsInput: 'x'.repeat(needsInputQuestionLog.MAX_QUESTION_BYTES + 1) });
+  assert.ok(tooLong.isError);
+  assert.match(tooLong.content[0].text, /needsInput is \d+ bytes; a question is at most/);
+  const after = needsInputQuestionLog.foldQuestions(needsInputQuestionLog.readQuestionLog(needsInputQuestionLog.questionLogDir(slug))).length;
+  assert.equal(after, before, 'a refused filing appends nothing to the question log');
+  const blank = await callTool('add', { title: 'needsInput blank fixture', category: 'mcp-needs-input', needsInput: '   ' });
+  assert.equal(store.getTicket(slug, blank.ref).status, 'todo', 'a blank needsInput is no question');
+});
+
+test('update with needsInput parks a todo ticket nobody holds, and refuses a claimed or already parked one', async () => {
+  const slug = store.ensureProject(PROJ).slug;
+  store.setCategory({ id: 'mcp-needs-input', name: 'MCP needs input', route: { model: 'sonnet', effort: 'high' } });
+  const todo = await callTool('add', { title: 'needsInput update fixture', description: DISPATCH_DESCRIPTION, category: 'mcp-needs-input' });
+  const updated = await callTool('update', { ref: todo.ref, needsInput: 'Ship behind a flag?' });
+  assert.equal(updated.status, 'awaiting-user');
+  assert.equal(store.getTicket(slug, todo.ref).park.origin, 'filing');
+  assert.equal(needsInputOpenQuestions(slug, todo.ref).length, 1);
+  assert.match(await dispatchError(todo.ref), /awaiting_user/);
+
+  const again = await callToolRaw('update', { ref: todo.ref, needsInput: 'And a second question?' });
+  assert.ok(again.isError);
+  assert.match(again.content[0].text, /already awaiting-user; pulse/);
+  assert.equal(needsInputOpenQuestions(slug, todo.ref).length, 1, 'a refused update logs no second question');
+
+  const claimed = await callTool('add', { title: 'needsInput claimed fixture', description: DISPATCH_DESCRIPTION, category: 'mcp-needs-input' });
+  const claim = store.claimTicket(slug, claimed.ref, 'needs-input-holder', { direct: true, reason: 'Fixture: a live claim refuses needsInput.', source: 'cli' });
+  assert.equal(claim.ok, true, JSON.stringify(claim));
+  const refusedClaimed = await callToolRaw('update', { ref: claimed.ref, needsInput: 'Too late?' });
+  assert.ok(refusedClaimed.isError);
+  assert.match(refusedClaimed.content[0].text, /needsInput parks a todo ticket nobody holds; .* is doing and claimed, so its claim holder needs-input-holder asks the user at runtime with ask/);
+  assert.equal(needsInputOpenQuestions(slug, claimed.ref).length, 0);
+  assert.equal(store.getTicket(slug, claimed.ref).status, 'doing');
+});
+
+test('needsInput descriptors are in the add and update schemas', () => {
+  const byName = new Map(mcp.toolDescriptors().map((tool: any) => [tool.name, tool]));
+  for (const name of ['add', 'update']) {
+    const property = (byName.get(name) as any).inputSchema.properties.needsInput;
+    assert.equal(property.type, 'string', `${name}.needsInput is a string`);
+    assert.ok(property.description, `${name}.needsInput is described`);
+  }
+  assert.match((byName.get('add') as any).inputSchema.properties.needsInput.description, /awaiting-user; dispatch refuses until answered or declined/);
+});
+
 export {};

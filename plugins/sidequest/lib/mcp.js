@@ -11,7 +11,7 @@ const { tools: routingTools } = require("./mcp-routing");
 const { tools: questionTools, pendingAnswerHolder, attachPendingAnswers, attachPulseQuestions } = require("./mcp-questions");
 const SERVER_NAME = "sidequest";
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18";
-const MCP_TOOLS_LIST_MAX_BYTES = 27180;
+const MCP_TOOLS_LIST_MAX_BYTES = 27414;
 const MCP_TOOLS_LIST_HEADROOM_BYTES = 2500;
 function serverVersion() {
   try {
@@ -246,9 +246,16 @@ const MCP_SCHEMA_PROPERTY_DESCRIPTIONS = {
     limit: "UTF-8 bytes.",
     expectedRevision: "Revision."
   },
-  add: { complexity: "Legacy score; why required.", verify: ATTESTATION_VERIFY_CONTRACT },
+  add: {
+    complexity: "Legacy score; why required.",
+    verify: ATTESTATION_VERIFY_CONTRACT,
+    needsInput: "Question for the user, up to 1500 bytes: files awaiting-user; dispatch refuses until answered or declined."
+  },
   claim: { force: "Operator-only." },
-  update: { verify: ATTESTATION_VERIFY_CONTRACT },
+  update: {
+    verify: ATTESTATION_VERIFY_CONTRACT,
+    needsInput: "As add; todo and unclaimed only."
+  },
   supersede_submission: { supersededBy: "Repair ticket ref, not a commit." },
   comments: {
     full: "Whole bodies.",

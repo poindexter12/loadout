@@ -3,6 +3,8 @@ const { refPrefixOf } = require("./projects.js");
 const { reviewCandidateFromSubmission, sameReviewCandidate, reviewRelationFor, reviewRelationRef } = require("../kernel/review-binding");
 const { classifyVerificationKind, verificationRequirement } = require("../kernel/verification.js");
 const { normalizeExternalWorktrees } = require("../kernel/worktree");
+const questionLog = require("./question-log.js");
+const { PARK_STATUS, parkCommentBody } = require("./claims.js");
 function emptyVerifyCommandRefusal(kind, verify, fields) {
   if (String(kind ?? "").trim().toLowerCase() !== "command") return null;
   if (String(verify ?? "").trim()) return null;
@@ -18,6 +20,51 @@ function normalizeTicketBaseRef(value) {
     throw new Error(`base ref ${JSON.stringify(ref)} is not a plain branch, remote-tracking ref, tag, or commit name. Name the ref exactly, for example "feat/my-branch", "origin/feat/my-branch", or a commit hash.`);
   }
   return ref;
+}
+function normalizeNeedsInput(value) {
+  if (value === void 0 || value === null) return null;
+  if (typeof value !== "string") throw new Error("needsInput must be a string: the question the user must answer before dispatch.");
+  const text = value.trim();
+  if (!text) return null;
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > questionLog.MAX_QUESTION_BYTES) {
+    throw new Error(`needsInput is ${bytes} bytes; a question is at most ${questionLog.MAX_QUESTION_BYTES}. Put the background in the description and keep needsInput to the question.`);
+  }
+  return text;
+}
+function askFilingQuestion(slug, ticket, text, session) {
+  const ownerSession = String(session || "").trim() || null;
+  const asked = questionLog.askQuestion(questionLog.questionLogDir(String(slug)), {
+    ref: ticket.ref,
+    ticketId: ticket.id,
+    origin: "filing",
+    agent: null,
+    ownerSession,
+    session: ownerSession,
+    text,
+    blocking: true
+  });
+  if (!asked.ok) throw new Error(`needsInput: ${asked.reason}: ${asked.message}`);
+  return asked;
+}
+function withdrawFilingQuestion(slug, ref, qid) {
+  try {
+    questionLog.withdrawQuestion(questionLog.questionLogDir(String(slug)), { ref, qid, reason: "ticket-closed" });
+  } catch (_error) {
+  }
+}
+function applyFilingPark(t, asked, text, at, createComment) {
+  t.statusTransition = { from: t.status || null, to: PARK_STATUS, at };
+  t.status = PARK_STATUS;
+  t.park = { mode: "released", qids: [asked.qid], parkedAt: at, by: "filing", releasedAt: at, origin: "filing" };
+  if (!Array.isArray(t.comments)) t.comments = [];
+  const state = { qid: asked.qid, seq: asked.seq, asked: { text } };
+  t.comments.push(createComment({
+    by: "sidequest",
+    kind: "comment",
+    source: "sidequest",
+    body: parkCommentBody(t.ref, "released", [state], `Filed with needsInput: dispatch refuses it until answer({ref:"${t.ref}", question:"${asked.qid}"}) records the user's answer, or answer({decline:true}) lets the executor ask at runtime.`)
+  }, at));
 }
 function createTickets(dependencies) {
   const {
@@ -211,6 +258,10 @@ function createTickets(dependencies) {
       throw new Error("generic ticket fields cannot set reviewTarget; pass the review target transition separately");
     }
     const status = fields.status === void 0 ? "todo" : requireStatus(fields.status);
+    const needsInput = normalizeNeedsInput(fields.needsInput);
+    if (needsInput && status !== "todo") {
+      throw new Error(`needsInput files the ticket awaiting-user, so it cannot also be filed as status "${status}"; omit status.`);
+    }
     const id = newTicketId();
     const seq = nextSeq(slug);
     const ref = `${refPrefixOf(readMeta(slug))}-${seq}`;
@@ -306,7 +357,14 @@ function createTickets(dependencies) {
     };
     const verifyError = authoringVerifyError(ticket, readMeta(slug)?.path);
     if (verifyError) throw new Error(`${verifyError} Keep acceptance criteria in a comment, not the verify field.`);
-    persistWithReviewBinding(slug, ticket, reviewTarget);
+    const filed = needsInput ? askFilingQuestion(slug, ticket, needsInput, fields.needsInputSession) : null;
+    if (filed && needsInput) applyFilingPark(ticket, filed, needsInput, now, createComment);
+    try {
+      persistWithReviewBinding(slug, ticket, reviewTarget);
+    } catch (error) {
+      if (filed) withdrawFilingQuestion(slug, ticket.ref, filed.qid);
+      throw error;
+    }
     queueEventNotification(slug, ticket, "created", ticket.lastEventSource);
     return ticket;
   }
@@ -1066,9 +1124,17 @@ function createTickets(dependencies) {
     if (Object.hasOwn(patch, "reviewTarget")) {
       throw new Error("generic ticket patch cannot set, change, or clear reviewTarget; pass the review target transition separately");
     }
+    const needsInput = normalizeNeedsInput(patch.needsInput);
+    if (needsInput) {
+      const filingRefusal = filingParkRefusal(found, patch);
+      if (filingRefusal) throw new Error(filingRefusal);
+    }
+    const filed = needsInput ? askFilingQuestion(slug, found, needsInput, patch.needsInputSession) : null;
     const apply = (t) => {
       const closeoutUpdateRefusal = activeClaimCloseoutUpdateRefusal(t, patch, options);
       if (closeoutUpdateRefusal) throw new Error(closeoutUpdateRefusal);
+      const racedFilingRefusal = filed ? filingParkRefusal(t, patch) : null;
+      if (racedFilingRefusal) throw new Error(racedFilingRefusal);
       const nextStatus = patch.status == null ? null : requireStatus(patch.status);
       const doneRefusal = nextStatus === "done" ? updateDoneRefusal(t) : null;
       if (doneRefusal) throw new Error(doneRefusal);
@@ -1188,9 +1254,10 @@ function createTickets(dependencies) {
           return false;
         });
       }
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      if (filed && needsInput) applyFilingPark(t, filed, needsInput, now, createComment);
       t.lastEventType = t.status !== prevStatus ? "status" : "edit";
       t.lastEventSource = patch.source ? String(patch.source) : "cli";
-      const now = (/* @__PURE__ */ new Date()).toISOString();
       if (t.status !== prevStatus) t.statusTransition = { from: prevStatus, to: t.status, at: now };
       t.updatedAt = now;
       t.referenceUpdatedAt = now;
@@ -1209,12 +1276,37 @@ function createTickets(dependencies) {
         if (locked) releaseLock(lock, locked);
       }
     };
-    const targetRef = reviewTarget === void 0 ? "" : String(reviewTarget?.ref || "").trim().toUpperCase();
-    const sourceTicket = targetRef ? getTicket(slug, targetRef) : null;
-    if (!sourceTicket) return applyUnderTicketLock();
-    const updated = withSourceTicketLock(slug, sourceTicket.id, applyUnderTicketLock);
-    queueEventNotification(slug, getTicket(slug, sourceTicket.id), "status", patch.source ? String(patch.source) : "cli");
-    return updated;
+    const applyAndPersist = () => {
+      const targetRef = reviewTarget === void 0 ? "" : String(reviewTarget?.ref || "").trim().toUpperCase();
+      const sourceTicket = targetRef ? getTicket(slug, targetRef) : null;
+      if (!sourceTicket) return applyUnderTicketLock();
+      const updated = withSourceTicketLock(slug, sourceTicket.id, applyUnderTicketLock);
+      queueEventNotification(slug, getTicket(slug, sourceTicket.id), "status", patch.source ? String(patch.source) : "cli");
+      return updated;
+    };
+    if (!filed) return applyAndPersist();
+    try {
+      const updated = applyAndPersist();
+      if (!updated) withdrawFilingQuestion(slug, found.ref, filed.qid);
+      return updated;
+    } catch (error) {
+      const stored = getTicket(slug, found.id);
+      if (!(stored?.park?.qids || []).includes(filed.qid)) withdrawFilingQuestion(slug, found.ref, filed.qid);
+      throw error;
+    }
+  }
+  function filingParkRefusal(t, patch) {
+    if (patch.status != null && patch.status !== "todo") {
+      return `needsInput parks ${t.ref} awaiting-user, so it cannot be combined with status "${patch.status}"; omit status.`;
+    }
+    if (t.status === PARK_STATUS) {
+      return `needsInput: ${t.ref} is already awaiting-user; pulse({ref:"${t.ref}"}) lists its open questions. Answer those first, then file the next one.`;
+    }
+    if (t.status !== "todo" || t.claim && t.claim.by) {
+      const hint = t.claim && t.claim.by ? `its claim holder ${t.claim.by} asks the user at runtime with ask` : t.status === "done" ? "reopen it to todo first" : "only a todo ticket can be classified at filing";
+      return `needsInput parks a todo ticket nobody holds; ${t.ref} is ${t.status}${t.claim && t.claim.by ? " and claimed" : ""}, so ${hint}.`;
+    }
+    return null;
   }
   function deleteTicket(slug, idOrRef, options = {}) {
     const found = getTicket(slug, idOrRef);
