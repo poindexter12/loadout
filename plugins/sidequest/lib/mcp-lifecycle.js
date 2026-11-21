@@ -258,6 +258,7 @@ function sharedTreeSubmissionBoundaries(slug, ticket) {
 function submissionRangeRemedy(ticket, range, gitRef) {
   const reason = String(range.reason || "").trim();
   const pinnedBase = dispatchBaseMessage(ticket);
+  const behindRemote = Array.isArray(range.behindRemote) ? range.behindRemote.map(String).filter(Boolean) : [];
   const approvedBoundary = Array.isArray(range.approvedBoundaries) ? range.approvedBoundaries.find((boundary) => Array.isArray(range.approvedBases) && range.approvedBases.includes(boundary.commit)) : null;
   const unrecognizedBaseRemedy = approvedBoundary ? `omit base to select ${approvedBoundary.ref}'s approved boundary ${approvedBoundary.commit} automatically, or pass \`--base ${approvedBoundary.commit}\` to use it explicitly.` : range.dispatchBaseResubmittable ? `use the recorded ${pinnedBase}; no approved submitted-ticket boundary reaches this candidate.` : `the dispatch base is no longer reachable from the current integration target; rebase this worktree onto the current integration target, re-run verify-capture, and resubmit with no base override.`;
   const remedies = {
@@ -270,7 +271,10 @@ function submissionRangeRemedy(ticket, range, gitRef) {
     unrelated_history: `rebuild only this ticket's work from ${pinnedBase}, update ${gitRef}, and resubmit.`,
     missing_base: `restore the recorded base commit, or rebuild only this ticket's work from ${pinnedBase}, then resubmit.`,
     empty_range: `the submitted commit has no work beyond its base. Submit the commit that contains this ticket's work, or use the explicit no-op closeout when no work was produced.`,
-    base_not_reachable: `the supplied base no longer reaches the submitted commit. Recreate the ticket work from ${pinnedBase}, preserve only this ticket's commits, update ${gitRef}, and resubmit.`,
+    // SQ-431: a base already on a remote-tracking ref means the local branch
+    // is behind, not that the range is broken; recreating intact work there is
+    // destructive. Only the genuine case keeps the rebuild remedy.
+    base_not_reachable: behindRemote.length ? `local ${String(range.integrationBranch || "integration branch")} is behind ${behindRemote.join(", ")}, which already holds the base. Fast-forward local ${String(range.integrationBranch || "integration branch")} to it and retry with the same commit and base; do not recreate the work.` : `the supplied base no longer reaches the submitted commit. Recreate the ticket work from ${pinnedBase}, preserve only this ticket's commits, update ${gitRef}, and resubmit.`,
     unrecognized_base: unrecognizedBaseRemedy,
     range_changed: `the stored submission range changed. Preserve the original submission for the orchestrator to reconcile; do not replace it by syncing to a branch tip.`,
     no_op_changed: `the stored no-op state changed. Preserve the original submission for the orchestrator to reconcile; do not replace it by syncing to a branch tip.`,
