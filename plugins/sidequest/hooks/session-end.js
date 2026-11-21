@@ -52,6 +52,9 @@ function failOpen(error) {
 }
 installBudget(failOpen);
 
+// src/hooks/session-end.ts
+var import_node_fs6 = __toESM(require("node:fs"));
+
 // src/hooks/shared/input.ts
 var import_node_fs2 = __toESM(require("node:fs"));
 
@@ -124,8 +127,7 @@ function runtimeModule(name) {
   return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
-// src/hooks/shared/sweep-handoff.ts
-var import_node_child_process = require("node:child_process");
+// src/hooks/shared/questions.ts
 var import_node_crypto = __toESM(require("node:crypto"));
 var import_node_fs3 = __toESM(require("node:fs"));
 var import_node_path4 = __toESM(require("node:path"));
@@ -140,16 +142,69 @@ function resolveSidequestHome(env = process.env) {
   return import_node_path3.default.join(configDir ? import_node_path3.default.resolve(configDir) : import_node_path3.default.join(import_node_os.default.homedir(), ".claude"), "sidequest");
 }
 
+// src/hooks/shared/questions.ts
+var ORPHAN_AFTER_MS = 10 * 60 * 1e3;
+var MARKER_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
+function questionLog() {
+  return require(runtimeModule("store/question-log"));
+}
+function hash(value) {
+  return import_node_crypto.default.createHash("sha256").update(value).digest("hex");
+}
+function stateDir(...parts) {
+  return import_node_path4.default.join(resolveSidequestHome(), "hook-state", ...parts);
+}
+function suppressionFile(sessionId2) {
+  return stateDir(`question-surfaced-${hash(sessionId2)}.json`);
+}
+function sessionEndedFile(sessionId2) {
+  return stateDir("question-session-ended", hash(sessionId2));
+}
+function writeAtomic(file, contents) {
+  import_node_fs3.default.mkdirSync(import_node_path4.default.dirname(file), { recursive: true });
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  import_node_fs3.default.writeFileSync(temp, contents);
+  import_node_fs3.default.renameSync(temp, file);
+}
+function projectSlugFor(start, store) {
+  try {
+    let project = store.findProject(store.nearestRepoRoot(start));
+    if (!project.ok || !project.slug) project = store.findProject(start);
+    return project.ok && project.slug ? project.slug : null;
+  } catch (_) {
+    return null;
+  }
+}
+function clearSuppression(sessionId2) {
+  if (!sessionId2) return;
+  try {
+    import_node_fs3.default.rmSync(suppressionFile(sessionId2), { force: true });
+  } catch (_) {
+  }
+}
+function markSessionEnded(sessionId2) {
+  if (!sessionId2) return;
+  try {
+    writeAtomic(sessionEndedFile(sessionId2), (/* @__PURE__ */ new Date()).toISOString());
+  } catch (_) {
+  }
+  clearSuppression(sessionId2);
+}
+
 // src/hooks/shared/sweep-handoff.ts
+var import_node_child_process = require("node:child_process");
+var import_node_crypto2 = __toESM(require("node:crypto"));
+var import_node_fs4 = __toESM(require("node:fs"));
+var import_node_path5 = __toESM(require("node:path"));
 var EMPTY_SWEEP_PROGRESS = { planned: 0, removed: 0, keptByReason: {}, considered: 0, total: 0 };
 var HANDOFF_FAILED_NOTICE = "sidequest: worktree sweep could not run, so stale agent worktrees were not collected this session.";
 function stateDirectory() {
   const home = resolveSidequestHome();
-  return import_node_path4.default.join(home, "sweep-reports");
+  return import_node_path5.default.join(home, "sweep-reports");
 }
 function reportFile(cwd) {
-  const key = import_node_crypto.default.createHash("sha1").update(import_node_path4.default.resolve(cwd || ".")).digest("hex").slice(0, 16);
-  return import_node_path4.default.join(stateDirectory(), `${key}.json`);
+  const key = import_node_crypto2.default.createHash("sha1").update(import_node_path5.default.resolve(cwd || ".")).digest("hex").slice(0, 16);
+  return import_node_path5.default.join(stateDirectory(), `${key}.json`);
 }
 function progressFile(cwd) {
   return reportFile(cwd).replace(/\.json$/, ".progress.json");
@@ -169,14 +224,14 @@ function normalizedProgress(value) {
 }
 function writeSweepProgress(cwd, progress) {
   try {
-    import_node_fs3.default.mkdirSync(stateDirectory(), { recursive: true });
-    import_node_fs3.default.writeFileSync(progressFile(cwd), JSON.stringify(normalizedProgress(progress)));
+    import_node_fs4.default.mkdirSync(stateDirectory(), { recursive: true });
+    import_node_fs4.default.writeFileSync(progressFile(cwd), JSON.stringify(normalizedProgress(progress)));
   } catch (_) {
   }
 }
 function clearSweepProgress(cwd) {
   try {
-    import_node_fs3.default.rmSync(progressFile(cwd), { force: true });
+    import_node_fs4.default.rmSync(progressFile(cwd), { force: true });
   } catch (_) {
   }
 }
@@ -184,11 +239,11 @@ function drainReport(cwd) {
   const file = reportFile(cwd);
   let raw;
   try {
-    raw = import_node_fs3.default.readFileSync(file, "utf8");
+    raw = import_node_fs4.default.readFileSync(file, "utf8");
   } catch (_) {
     return null;
   }
-  import_node_fs3.default.rmSync(file, { force: true });
+  import_node_fs4.default.rmSync(file, { force: true });
   clearSweepProgress(cwd);
   try {
     const parsed = JSON.parse(raw);
@@ -203,7 +258,7 @@ function sweepCwd(data) {
 }
 function spawnSweepWorker(data, cwd, options) {
   return (0, import_node_child_process.spawn)(process.execPath, [
-    import_node_path4.default.join(pluginRoot(), "hooks", "sweep-worktrees.js"),
+    import_node_path5.default.join(pluginRoot(), "hooks", "sweep-worktrees.js"),
     "--cwd",
     cwd,
     "--session",
@@ -221,7 +276,7 @@ function carriedFile(cwd) {
 }
 function readNotices(file) {
   try {
-    const parsed = JSON.parse(import_node_fs3.default.readFileSync(file, "utf8"));
+    const parsed = JSON.parse(import_node_fs4.default.readFileSync(file, "utf8"));
     const notices = parsed?.notices;
     return Array.isArray(notices) ? notices.map((notice) => String(notice)).filter(Boolean) : [];
   } catch (_) {
@@ -232,8 +287,8 @@ function carryPendingReport(cwd) {
   const pending = drainReport(cwd);
   if (!pending || !pending.length) return;
   try {
-    import_node_fs3.default.mkdirSync(stateDirectory(), { recursive: true });
-    import_node_fs3.default.writeFileSync(carriedFile(cwd), JSON.stringify({ notices: [...readNotices(carriedFile(cwd)), ...pending] }));
+    import_node_fs4.default.mkdirSync(stateDirectory(), { recursive: true });
+    import_node_fs4.default.writeFileSync(carriedFile(cwd), JSON.stringify({ notices: [...readNotices(carriedFile(cwd)), ...pending] }));
   } catch (_) {
   }
 }
@@ -241,11 +296,11 @@ function sweepInFlight(cwd) {
   const staleAfterMs = 10 * 60 * 1e3;
   let modified;
   try {
-    modified = import_node_fs3.default.statSync(progressFile(cwd)).mtimeMs;
+    modified = import_node_fs4.default.statSync(progressFile(cwd)).mtimeMs;
   } catch (_) {
     return false;
   }
-  return Date.now() - modified < staleAfterMs && !import_node_fs3.default.existsSync(reportFile(cwd));
+  return Date.now() - modified < staleAfterMs && !import_node_fs4.default.existsSync(reportFile(cwd));
 }
 function detachSweep(data) {
   const cwd = sweepCwd(data);
@@ -269,25 +324,25 @@ function detachSweep(data) {
 
 // src/hooks/shared/worktree-sweep.ts
 var import_node_child_process2 = require("node:child_process");
-var import_node_fs4 = __toESM(require("node:fs"));
+var import_node_fs5 = __toESM(require("node:fs"));
 var import_promises = require("node:fs/promises");
-var import_node_path5 = __toESM(require("node:path"));
+var import_node_path6 = __toESM(require("node:path"));
 var DEFAULT_NOT_INTEGRATED_SALVAGE_AGE_HOURS = 7 * 24;
 function stateFile() {
   const home = resolveSidequestHome();
-  return import_node_path5.default.join(home, "worktree-sweep-sessions.json");
+  return import_node_path6.default.join(home, "worktree-sweep-sessions.json");
 }
 function readState() {
   try {
-    return JSON.parse(import_node_fs4.default.readFileSync(stateFile(), "utf8"));
+    return JSON.parse(import_node_fs5.default.readFileSync(stateFile(), "utf8"));
   } catch (_) {
     return {};
   }
 }
 function writeState(state) {
   try {
-    import_node_fs4.default.mkdirSync(import_node_path5.default.dirname(stateFile()), { recursive: true });
-    import_node_fs4.default.writeFileSync(stateFile(), JSON.stringify(state), "utf8");
+    import_node_fs5.default.mkdirSync(import_node_path6.default.dirname(stateFile()), { recursive: true });
+    import_node_fs5.default.writeFileSync(stateFile(), JSON.stringify(state), "utf8");
   } catch (_) {
   }
 }
@@ -304,6 +359,32 @@ function unregisterSweepSession(data) {
 }
 
 // src/hooks/session-end.ts
+function detachHeldParks(store, data, sessionId2, reason) {
+  const slug = projectSlugFor(stringField(data, "cwd") || process.env.CLAUDE_PROJECT_DIR || process.cwd(), store);
+  if (!slug) return [];
+  const ql = questionLog();
+  const dir = ql.questionLogDir(slug);
+  if (!import_node_fs6.default.existsSync(dir)) return [];
+  const ticketIds = /* @__PURE__ */ new Set();
+  for (const question of ql.openQuestions(dir)) {
+    if (question.asked.ownerSession === sessionId2 && question.asked.blocking && question.ticketId) ticketIds.add(question.ticketId);
+  }
+  const detached = [];
+  for (const ticketId of ticketIds) {
+    try {
+      const ticket = store.getTicket(slug, ticketId);
+      if (!ticket || ticket.status !== "awaiting-user" || ticket.park?.mode !== "held" || !ticket.claim?.by) continue;
+      const result = store.releaseTicket(slug, ticketId, ticket.claim.by, {
+        status: "todo",
+        source: "session-end",
+        claimRelease: { kind: "session_ended", reason }
+      });
+      if (result && result.ok) detached.push(ticket.ref || ticketId);
+    } catch (_) {
+    }
+  }
+  return detached;
+}
 function main() {
   const data = readStdin();
   if (!data) return;
@@ -315,11 +396,17 @@ function main() {
   try {
     const store = require(runtimeModule("store"));
     store.reconcileSession(sessionId2, { reason, source: "session-end" });
+    try {
+      detachHeldParks(store, data, sessionId2, reason);
+    } catch (error) {
+      notices.push(`sidequest: session-end park detach failed: ${error && error.message || error}`);
+    }
     const agentsync = require(runtimeModule("agentsync"));
     agentsync.cleanupNativeAgents({ sessionId: sessionId2 });
   } catch (error) {
     notices.push(`sidequest: session-end reconciliation failed: ${error && error.message || error}`);
   }
+  markSessionEnded(sessionId2);
   unregisterSweepSession(data);
   try {
     notices.push(...detachSweep(data));

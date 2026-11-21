@@ -90,6 +90,16 @@
         ]
       },
       {
+        "matcher": "mcp__plugin_sidequest_board__answer",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/guard-answer-caller.js\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "mcp__plugin_sidequest_board__.*",
         "hooks": [
           {
@@ -190,6 +200,18 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/guard-worktree-isolation.js\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "SendMessage",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/stamp-sent-message.js\"",
             "timeout": 10
           }
         ]
