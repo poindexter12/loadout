@@ -1,6 +1,7 @@
 'use strict';
 // SQ-137: one topic shard of the former submission.test.ts, split so the runner can spread its tests
 // across workers. Shared setup and helpers live in ./_submission-fixture.ts; the tests are moved unchanged.
+import os from 'node:os';
 import {
   test,
   assert,
@@ -1042,6 +1043,162 @@ test('SQ-2429: pending candidates block a singleton without invalidation while a
   } finally {
     store.setBoardConfig(slug, { integrationMode: originalConfig.integrationMode, integrationBranch: originalConfig.integrationBranch });
     cleanBranch();
+  }
+});
+
+// SQ-436: overlapping candidates that each pin their own targeted verify command
+// deadlocked. The singleton was refused candidate_overlap ("assemble them in one
+// wave") and the joint wave was refused wave_verifier_mismatch ("split the wave").
+// These fixtures submit docs candidates under one declared `docs` scope, each with a
+// verifier that appends to its own marker file, so a test can count which verifiers
+// actually ran at the assembled gate and on the merged tree.
+function sq436Fixture(label: string) {
+  cleanBranch();
+  const originalConfig = store.boardConfig(slug);
+  store.setBoardConfig(slug, { integrationMode: 'local', integrationBranch: git(['branch', '--show-current']) });
+  const markers = fs.mkdtempSync(path.join(os.tmpdir(), `sq436-${label}-`));
+  const marker = (name: string) => path.join(markers, `${name}.log`);
+  const indexPath = path.join(PROJECT_DIR, 'docs', 'index.md');
+  fs.mkdirSync(path.dirname(indexPath), { recursive: true });
+  fs.writeFileSync(indexPath, `${label} base\n`);
+  git(['add', 'docs/index.md']);
+  git(['commit', '-m', `SQ-436 ${label} baseline`]);
+  const baseline = git(['rev-parse', 'HEAD']);
+  return {
+    baseline,
+    verifier: (name: string) => `node -e "require('fs').appendFileSync('${marker(name)}', 'x')"`,
+    runs: (name: string) => (fs.existsSync(marker(name)) ? fs.readFileSync(marker(name), 'utf8').length : 0),
+    submit(name: string, verify: string) {
+      git(['reset', '--hard', baseline]);
+      const ticket = addTicket(`SQ-436 ${label} ${name} docs candidate`, { files: ['docs'] });
+      const worker = `sq436-${label}-${name}-worker`;
+      assert.strictEqual(store.claimTicket(slug, ticket.ref, worker, { direct: true, reason: 'The SQ-436 overlap fixture requires a local direct claim.' }).ok, true);
+      const file = `docs/${label}-${name}.md`;
+      fs.writeFileSync(path.join(PROJECT_DIR, file), `${name}\n`);
+      git(['add', file]);
+      git(['commit', '-m', `SQ-436 ${label} ${name} candidate`]);
+      const commit = git(['rev-parse', 'HEAD']);
+      pin(ticket, commit);
+      const submitted = store.submitTicket(slug, ticket.ref, worker, { commit, verify });
+      assert.strictEqual(submitted.ok, true, submitted.message);
+      // The fixture repo has no remote, so the recorded upstream is the local
+      // integration branch; delivery then finds the baseline reachable from it.
+      const branch = git(['branch', '--show-current']);
+      const stored = store.getTicket(slug, ticket.ref);
+      Object.assign(stored.submission, {
+        base: baseline, upstream: branch, upstreamCommit: baseline, integrationBranch: branch,
+        commits: [commit], changedPaths: [file],
+      });
+      persist(stored);
+      git(['reset', '--hard', baseline]);
+      return { ref: ticket.ref, file };
+    },
+    restore() {
+      store.setBoardConfig(slug, { integrationMode: originalConfig.integrationMode, integrationBranch: originalConfig.integrationBranch });
+      fs.rmSync(markers, { recursive: true, force: true });
+      cleanBranch();
+    },
+  };
+}
+
+test('SQ-436: overlapping candidates with different pinned verify commands assemble and deliver as one wave that runs every verifier', () => {
+  const fixture = sq436Fixture('union');
+  try {
+    const alpha = fixture.submit('alpha', fixture.verifier('alpha'));
+    const beta = fixture.submit('beta', fixture.verifier('beta'));
+
+    // The overlap refusal still stands, and its guidance now names the joint wave as
+    // the exit and says differing verifiers do not block it.
+    const singleton = store.assembleSubmissionWave(slug, [alpha.ref]);
+    assert.strictEqual(singleton.ok, false);
+    assert.strictEqual(singleton.reason, 'candidate_overlap');
+    assert.match(singleton.message, new RegExp(`${alpha.ref} and ${beta.ref}`));
+    assert.match(singleton.message, /integrate\(\{ref:"<every named ref, comma-separated>", wave:\{\}\}\)/);
+    assert.match(singleton.message, /runs each participant's pinned command in sequence/);
+    assert.doesNotMatch(singleton.message, /split/i);
+
+    // The joint wave used to refuse wave_verifier_mismatch here. It now gates on the
+    // union: each participant's own command runs once.
+    const alphaBefore = fixture.runs('alpha');
+    const betaBefore = fixture.runs('beta');
+    const assembled = store.assembleSubmissionWave(slug, [alpha.ref, beta.ref]);
+    assert.strictEqual(assembled.ok, true, assembled.message);
+    assert.notStrictEqual(assembled.reason, 'wave_verifier_mismatch');
+    assert.deepStrictEqual(assembled.wave.participants, [alpha.ref, beta.ref]);
+    assert.strictEqual(assembled.gate.state, 'gate_passed');
+    assert.strictEqual(assembled.gate.verification.status, 'passed');
+    assert.deepStrictEqual(assembled.gate.verification.components.map((entry: any) => entry.participants), [[alpha.ref], [beta.ref]]);
+    assert.deepStrictEqual(assembled.gate.verification.components.map((entry: any) => entry.command), [fixture.verifier('alpha'), fixture.verifier('beta')]);
+    assert.strictEqual(fixture.runs('alpha'), alphaBefore + 1, 'the assembled gate ran the first participant verifier');
+    assert.strictEqual(fixture.runs('beta'), betaBefore + 1, 'the assembled gate ran the second participant verifier');
+
+    // Local delivery verifies the merged tree with the same union, not only the
+    // first participant's verifier.
+    const delivered = store.integrateSubmissionWave(slug, [alpha.ref, beta.ref], { target: store.integrationTarget(slug), mode: 'merge' });
+    assert.strictEqual(delivered.ok, true, delivered.message);
+    assert.strictEqual(fixture.runs('alpha'), alphaBefore + 2, 'merged-tree delivery ran the first participant verifier');
+    assert.strictEqual(fixture.runs('beta'), betaBefore + 2, 'merged-tree delivery ran the second participant verifier');
+    assert.strictEqual(delivered.integration.verify.status, 'passed');
+    assert.strictEqual(delivered.integration.verify.components.length, 2);
+    assert.strictEqual(fs.readFileSync(path.join(PROJECT_DIR, alpha.file), 'utf8'), 'alpha\n');
+    assert.strictEqual(fs.readFileSync(path.join(PROJECT_DIR, beta.file), 'utf8'), 'beta\n');
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('SQ-436: a union wave gate stops at the first failing participant verifier and names it', () => {
+  const fixture = sq436Fixture('failing');
+  try {
+    const alpha = fixture.submit('alpha', 'node -e "process.exit(3)"');
+    const beta = fixture.submit('beta', fixture.verifier('beta'));
+    const betaBefore = fixture.runs('beta');
+    const assembled = store.assembleSubmissionWave(slug, [alpha.ref, beta.ref]);
+    assert.strictEqual(assembled.ok, false);
+    assert.strictEqual(assembled.reason, 'assembled_wave_gate_failed');
+    assert.strictEqual(assembled.gate.state, 'gate_failed');
+    assert.strictEqual(assembled.gate.verification.command, 'node -e "process.exit(3)"');
+    assert.match(assembled.message, new RegExp(`verifier 1 of 2, pinned by ${alpha.ref}, returned ${assembled.gate.verification.status}; 1 later participant verifier was not run`));
+    assert.notStrictEqual(assembled.gate.verification.status, 'passed');
+    assert.strictEqual(fixture.runs('beta'), betaBefore, 'a later verifier does not run once an earlier one failed');
+    assert.strictEqual(store.pendingSubmission(store.getTicket(slug, alpha.ref)), true);
+    assert.strictEqual(store.pendingSubmission(store.getTicket(slug, beta.ref)), true);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('SQ-436: a wave mixing manual evidence with a different command still refuses, with guidance that never says split', () => {
+  const fixture = sq436Fixture('manual');
+  try {
+    const alpha = fixture.submit('alpha', 'manual: read the rendered alpha page');
+    const beta = fixture.submit('beta', fixture.verifier('beta'));
+    const assembled = store.assembleSubmissionWave(slug, [alpha.ref, beta.ref]);
+    assert.strictEqual(assembled.ok, false);
+    assert.strictEqual(assembled.reason, 'wave_verifier_mismatch');
+    assert.match(assembled.message, new RegExp(`${alpha.ref} pins manual evidence with no runnable command`));
+    assert.doesNotMatch(assembled.message, new RegExp(`${beta.ref} pins`));
+    assert.match(assembled.message, /update\(\{ref, verify:"<runnable command>", verifyKind:"command"\}\)/);
+    assert.match(assembled.message, /no rework or redispatch/);
+    assert.match(assembled.message, /Do not split overlapping candidates/);
+    assert.doesNotMatch(assembled.message, /split the wave/);
+    assert.strictEqual(fixture.runs('beta'), 0, 'a refused wave runs no verifier');
+
+    // The named exit works as written: re-pin the manual participant in place, with
+    // the update fields the MCP tool maps verify and verifyKind onto, then assemble
+    // the same refs again. No rework, no new candidate.
+    const candidateBefore = store.getTicket(slug, alpha.ref).submission.commit;
+    store.updateTicket(slug, alpha.ref, { executorVerify: fixture.verifier('alpha'), executorVerifyKind: 'command', by: 'orchestrator' });
+    const repinned = store.getTicket(slug, alpha.ref);
+    assert.strictEqual(repinned.submission.commit, candidateBefore, 'the re-pin keeps the same candidate');
+    assert.strictEqual(repinned.submission.verificationRequirement.command, fixture.verifier('alpha'));
+    const retried = store.assembleSubmissionWave(slug, [alpha.ref, beta.ref]);
+    assert.strictEqual(retried.ok, true, retried.message);
+    assert.strictEqual(retried.gate.state, 'gate_passed');
+    assert.strictEqual(fixture.runs('alpha'), 1, 'the re-pinned command ran at the retried gate');
+    assert.strictEqual(fixture.runs('beta'), 1, 'the other participant verifier ran at the retried gate');
+  } finally {
+    fixture.restore();
   }
 });
 
