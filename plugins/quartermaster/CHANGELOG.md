@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.2 (2026-11-21)
+
+Released in v4.19.0, up from 0.12.1.
+
+### Fixes
+
+- Avoid SessionEnd hook cancellation noise during Loadout plugin updates (SQ-434)
+  The updater gives short-lived Claude Code plugin subprocesses enough SessionEnd hook time while retaining the caller environment.
+
 ## 0.12.1 (2026-11-20)
 
 Released in v4.18.0, up from 0.12.0.

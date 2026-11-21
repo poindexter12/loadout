@@ -8,6 +8,38 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v4.19.0 (2026-11-21)
+
+### quartermaster 0.12.1 → 0.12.2
+
+#### Fixes
+
+- Avoid SessionEnd hook cancellation noise during Loadout plugin updates (SQ-434)
+  The updater gives short-lived Claude Code plugin subprocesses enough SessionEnd hook time while retaining the caller environment.
+
+### sidequest 5.13.0 → 5.14.0
+
+#### Features
+
+- Questions surface in the orchestrating session: SubagentStop parks an asking executor (blocking once for an unsent blocking question), Stop, UserPromptSubmit, SessionStart and PostCompact relay open questions from the question log, SessionEnd detaches held parks, and hooks refuse forged markers and executor answers (SQ-420)
+- Executors ask the user through the board, keep working until nothing is left, and a redispatch carries the answers already given (SQ-421)
+  Executor agents and briefings now say to call `ask`, make the returned SendMessage, keep working on
+  independent work, and park only when nothing is left; an answer is never a permission or scope
+  grant. A released park's redispatch briefing carries a "Decisions already made" packet folded from
+  the project question log. The sidequest skill tells the orchestrator to relay questions with
+  AskUserQuestion and record them with `answer`.
+- needsInput at filing: a ticket that needs the user starts awaiting-user and dispatch refuses it until the question is answered or declined (SQ-422)
+  US-8 wave 4. `add` and `update` accept `needsInput`, the question (up to 1500 bytes) the user must answer before any executor starts. `add` files the ticket `awaiting-user` in a released park with origin `filing`, and the question goes into the question log with origin `filing`, no asking agent, and the filing session as owner. `update` does the same for a `todo` ticket nobody holds, and refuses a claimed, already parked, or non-todo ticket, because a live executor asks with `ask` instead. `needsInput` cannot be combined with `status`, and a blank one is ignored. A refused filing logs no question, and a filing whose board write fails withdraws the question it logged. Dispatch of the parked ticket refuses `awaiting_user`, naming the qid and saying it was filed with needsInput: answer it first (pulse shows it), or `answer({decline:true})` to let the executor ask at runtime. The last answer or decline moves the ticket to `todo`, and it dispatches normally. The tools/list budget rises to 27414 bytes for the two new properties instead of trimming descriptions.
+- Answer executor questions from the dashboard (SQ-424)
+  The dashboard's question detail now has an answer form, backed by `POST /api/questions/<qid>/answer`. It records the answer through the `answer` board tool with `via: "dashboard"`. The first answer wins: a different second answer gets a 409 and the first one stays. The answer reaches the executor the same way an orchestrator answer does.
+
+#### Fixes
+
+- A verifier whose package has no installed dependencies is refused as toolchain_missing with the install command, instead of failing like a code defect (SQ-428)
+  Worktrees are created without node_modules unless the board sets `worktreeSetup` or `worktreeDependencyPaths`. A pinned command verifier installs nothing, so a run such as `npm --prefix plugins/sidequest run typecheck` used to fail inside the package's scripts (`tsx: not found`, `vitest: command not found`). The shared verification process port, used by both the verify-capture wrapper and the wave gate, now checks each package the command runs scripts in first (`npm --prefix`, `cd <dir> && npm`, pnpm `--dir`/`-C`, yarn `--cwd`). When a package declares dependencies and none are installed, the run is refused as `toolchain_missing` (identity `toolchain_missing:dependencies-not-installed`) without running. The refusal names the package and its install command. A command that installs its own dependencies, such as a named suite's `npm ci`, is not checked.
+- PR-delivery reconcile no longer refuses a merged wave as base_not_reachable when local main is behind origin/main (SQ-431)
+  Range validation judged a submission base "integrated" only against the local integration branch, which PR delivery never advances. A base on origin/main now counts as on the integration line too. When base_not_reachable is genuine, the refusal now says which case it is: a base a remote-tracking ref already holds reports that local main is behind and should be fast-forwarded, with no rework, while a broken range keeps the rebuild remedy.
+
 ## v4.18.0 (2026-11-20)
 
 ### observability 0.9.0 → 0.9.1
