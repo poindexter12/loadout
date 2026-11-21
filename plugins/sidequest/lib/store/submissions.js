@@ -2240,7 +2240,7 @@ ${verify.outputTail}` : null
         return { ok: false, reason: "wave_delivery_failed", tickets: assembled.tickets, before, conflictedPaths, message };
       }
       const resultingHead = integrationGit(repo, ["rev-parse", "HEAD"]);
-      const verification = verifyDeliveredSubmission(slug, assembled.tickets[0], opts);
+      const verification = verifyDeliveredWave(slug, assembled.tickets, opts);
       if (!verificationAccepted(verification)) {
         try {
           restoreCleanIntegrationCheckout(repo, before);
@@ -3862,19 +3862,84 @@ ${verify.outputTail}` : null
       return surfaces.length ? { ref: sibling.ref, surfaces } : null;
     }).filter((overlap) => overlap !== null);
   }
+  function verificationRequirementIdentity(requirement) {
+    return JSON.stringify({ kind: requirement.kind, command: requirement.command || null, evidenceContract: requirement.evidenceContract, artifact: requirement.artifact || null });
+  }
   function waveVerificationRequirement(tickets) {
-    const requirements = tickets.map(pinnedVerificationRequirement);
-    const first = requirements[0];
+    const pinned = tickets.map((ticket) => ({ ref: ticket.ref, requirement: pinnedVerificationRequirement(ticket) }));
+    const first = pinned[0]?.requirement;
     if (!first) return { ok: false, reason: "wave_verification_required", message: "Wave assembly requires a pinned project verification requirement." };
-    const identity = JSON.stringify({ kind: first.kind, command: first.command || null, evidenceContract: first.evidenceContract, artifact: first.artifact || null });
-    if (requirements.some((requirement) => JSON.stringify({ kind: requirement.kind, command: requirement.command || null, evidenceContract: requirement.evidenceContract, artifact: requirement.artifact || null }) !== identity)) {
+    const identity = verificationRequirementIdentity(first);
+    if (pinned.every((entry) => verificationRequirementIdentity(entry.requirement) === identity)) {
+      return { ok: true, requirement: first, components: [{ requirement: first, participants: pinned.map((entry) => entry.ref) }] };
+    }
+    const commandless = pinned.filter((entry) => !String(entry.requirement.command || "").trim());
+    if (commandless.length) {
+      const named = commandless.map((entry) => `${entry.ref} pins ${entry.requirement.kind} evidence with no runnable command`).join("; ");
       return {
         ok: false,
         reason: "wave_verifier_mismatch",
-        message: "Wave assembly requires one project-defined verification gate. Its participants pin different verifier requirements, so split the wave or refresh and reverify them against the same gate."
+        message: `Wave assembly cannot form one gate for these participants: ${named}, and the other participants pin a different verifier. A wave runs every participant's pinned command in sequence, so differing commands never block it, but evidence the board cannot run must be identical across the wave. Re-pin each listed participant to a runnable command with update({ref, verify:"<runnable command>", verifyKind:"command"}) (verifyKind is required, or a manual pin stays manual); a pending candidate is re-pinned in place, with no rework or redispatch, and the next gate runs the new command. Then assemble the same refs again. Do not split overlapping candidates to get around this: candidate_overlap requires them in one wave.`
       };
     }
-    return { ok: true, requirement: first };
+    const components = [];
+    for (const entry of pinned) {
+      const command = String(entry.requirement.command).trim();
+      const existing = components.find((component) => String(component.requirement.command).trim() === command);
+      if (existing) existing.participants.push(entry.ref);
+      else components.push({ requirement: entry.requirement, participants: [entry.ref] });
+    }
+    const [only] = components;
+    if (components.length === 1 && only) return { ok: true, requirement: only.requirement, components };
+    const union = Object.freeze({
+      kind: "command",
+      command: components.map((component) => String(component.requirement.command).trim()).join(" && "),
+      evidenceContract: `each of ${components.length} distinct participant verifiers passes, run in sequence`
+    });
+    return { ok: true, requirement: union, components };
+  }
+  function sequencedWaveVerification(components, run) {
+    const results = [];
+    for (const [index, component] of components.entries()) {
+      const result = run(component, index);
+      const summary = Object.freeze({
+        participants: component.participants.slice(),
+        command: result?.command || component.requirement.command || null,
+        status: result?.status || null,
+        evidence: String(result?.evidence || ""),
+        logPath: result?.logPath || null,
+        exitCode: result?.exitCode ?? null,
+        durationMs: result?.durationMs ?? null
+      });
+      results.push(summary);
+      if (!verificationAccepted(result)) {
+        const unrun = components.length - index - 1;
+        return Object.freeze(Object.assign({}, result, {
+          evidence: `Wave gate verifier ${index + 1} of ${components.length}, pinned by ${component.participants.join(", ")}, returned ${result?.status}${unrun ? `; ${unrun} later participant verifier${unrun === 1 ? " was" : "s were"} not run` : ""}. ${String(result?.evidence || "").trim()}`.trim(),
+          components: Object.freeze(results.slice())
+        }));
+      }
+    }
+    const last = results[results.length - 1];
+    const status = results.find((entry) => entry.status !== "passed")?.status || "passed";
+    return Object.freeze({
+      kind: "command",
+      status,
+      command: results.map((entry) => entry.command).join(" && "),
+      evidence: `Wave gate ran ${results.length} distinct participant verifiers in sequence and every one was accepted: ${results.map((entry) => `${entry.participants.join(", ")}: ${entry.command} (${entry.status})`).join("; ")}.`,
+      logPath: last?.logPath || null,
+      exitCode: 0,
+      durationMs: results.reduce((total, entry) => total + (Number(entry.durationMs) || 0), 0),
+      components: Object.freeze(results.slice())
+    });
+  }
+  function verifyDeliveredWave(slug, tickets, opts) {
+    const [first] = tickets;
+    const requirement = waveVerificationRequirement(tickets);
+    if (!requirement.ok || requirement.components.length < 2) return verifyDeliveredSubmission(slug, first, opts);
+    if (opts?.skipVerify === true) return skippedVerification(requirement.requirement, opts.verificationWaiver);
+    const owners = new Map(tickets.map((ticket) => [ticket.ref, ticket]));
+    return sequencedWaveVerification(requirement.components, (component) => verifyDeliveredSubmission(slug, owners.get(component.participants[0]) || first, opts));
   }
   function authoritativeWaveVerification(slug, tickets, waveId, supplied, opts) {
     const requirement = waveVerificationRequirement(tickets);
@@ -3883,15 +3948,19 @@ ${verify.outputTail}` : null
     if (requirement.requirement.command) {
       const timeoutMilliseconds = normalizeIntegrationVerifyTimeoutMs(boardConfig(slug)?.integrationVerifyTimeoutMs);
       const candidateWorktree = tickets.length === 1 ? String(tickets[0]?.submission?.worktree || "").trim() : "";
-      return {
-        ok: true,
-        verification: phasedIntegrationVerification("candidate", opts, requirement.requirement, {
-          cwd: candidateWorktree || readMeta(slug)?.path,
-          timeoutMilliseconds,
-          logPath: integrationVerifyLogPath(slug, { ref: waveId }),
-          outputTailBytes: INTEGRATION_VERIFY_OUTPUT_TAIL_BYTES
-        })
-      };
+      const runComponent = (componentRequirement, logRef) => phasedIntegrationVerification("candidate", opts, componentRequirement, {
+        cwd: candidateWorktree || readMeta(slug)?.path,
+        timeoutMilliseconds,
+        logPath: integrationVerifyLogPath(slug, { ref: logRef }),
+        outputTailBytes: INTEGRATION_VERIFY_OUTPUT_TAIL_BYTES
+      });
+      if (requirement.components.length > 1) {
+        return {
+          ok: true,
+          verification: sequencedWaveVerification(requirement.components, (component, index) => runComponent(component.requirement, `${waveId}-verifier-${index + 1}`))
+        };
+      }
+      return { ok: true, verification: runComponent(requirement.requirement, waveId) };
     }
     if (!supplied || typeof supplied !== "object" || String(supplied.kind || "") !== requirement.requirement.kind) {
       return {
@@ -4074,7 +4143,7 @@ ${verify.outputTail}` : null
         ok: false,
         reason: "candidate_overlap",
         conflicts: scopeConflicts,
-        message: `Wave assembly paused because submitted candidates overlap: ${scopeConflicts.map((conflict) => `${conflict.participant} and ${conflict.sibling} (${conflict.surfaces.join(", ")})`).join("; ")}. These refs each hold a pending candidate that remains eligible for delivery, not merely a live declared scope; review-rejected candidates stay parked without blocking the wave. Assemble the named candidates in one wave so the delivery merge can check their actual content, or resolve one candidate before assembling a singleton.`
+        message: `Wave assembly paused because submitted candidates overlap: ${scopeConflicts.map((conflict) => `${conflict.participant} and ${conflict.sibling} (${conflict.surfaces.join(", ")})`).join("; ")}. These refs each hold a pending candidate that remains eligible for delivery, not merely a live declared scope; review-rejected candidates stay parked without blocking the wave. Assemble the named candidates in one wave so the delivery merge can check their actual content: integrate({ref:"<every named ref, comma-separated>", wave:{}}). Differing pinned verify commands do not block that wave, because its gate runs each participant's pinned command in sequence, so do not rework or re-pin them first. Otherwise resolve one candidate (deliver or supersede it) before assembling a singleton.`
       };
     }
     const firstCandidate = waveCandidates[0];
@@ -4143,7 +4212,7 @@ ${verify.outputTail}` : null
       return {
         ok: false,
         reason: "assembled_wave_gate_failed",
-        message: gate.verification?.status === "timeout" ? withVerificationTimeoutGuidance(slug, `Wave ${waveId} gate returned timeout.`, gate.verification) : `Wave ${waveId} gate returned ${gate.verification.status}. Refresh and reverify its candidates before delivery.`,
+        message: gate.verification?.status === "timeout" ? withVerificationTimeoutGuidance(slug, `Wave ${waveId} gate returned timeout.`, gate.verification) : `Wave ${waveId} gate returned ${gate.verification.status}.${Array.isArray(gate.verification.components) ? ` ${gate.verification.evidence}` : ""} Refresh and reverify its candidates before delivery.`,
         wave,
         assembly: decision.assembly,
         gate
