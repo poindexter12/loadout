@@ -2,6 +2,8 @@
 // claims only git can settle: refspec behaviour, push atomicity, and what a suite can do to the
 // refs between verification and publication.
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
@@ -490,4 +492,116 @@ test('the three real windows publish three tags and ten plugin bumps to a real r
 
   const rerun = await cut({ repoRoot: repo.root, push: true, skipTests: true, log: () => {} });
   assert.equal(rerun.status, 'nothing-to-release');
+});
+
+const CUT_SCRIPT = fileURLToPath(new URL('../cut.mjs', import.meta.url));
+
+/** Runs the cut CLI in its own process group, so a suite can signal that whole group and nothing else. */
+function runCutCli(repo, args, { timeoutMs = 120_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    // This file runs under node --test, whose context variable makes a nested node --test skip
+    // every file. A real cut is never run under a test runner, so the child gets none.
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    const child = spawn(process.execPath, [CUT_SCRIPT, '--repo', repo.root, ...args], {
+      cwd: repo.root,
+      env,
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const guard = setTimeout(() => {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch (_) { /* already gone */ }
+    }, timeoutMs);
+    child.on('error', (error) => {
+      clearTimeout(guard);
+      reject(error);
+    });
+    child.on('close', (code, signal) => {
+      clearTimeout(guard);
+      resolve({ code, signal, stdout, stderr });
+    });
+  });
+}
+
+test('a cut interrupted while its suites run rolls back, leaving no planned tag (SQ-429)', async (t) => {
+  const repo = setup(t);
+  // The released plugin's suite plays the operator's Ctrl-C or the harness's kill: it signals its
+  // whole process group, which is the cut and everything the cut started.
+  repo.write('plugins/sidequest/test/smoke.test.js', [
+    "import { execSync } from 'node:child_process';",
+    "import test from 'node:test';",
+    "test('the run is interrupted', () => {",
+    "  execSync('kill -TERM 0');",
+    "  execSync('sleep 5');",
+    '});',
+    '',
+  ].join('\n'));
+  repo.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const originalHead = repo.commit('integrate');
+  const before = repo.remoteRefs();
+
+  const run = await runCutCli(repo, ['--no-merge']);
+
+  assert.equal(run.signal, null, `the signal did not kill the cut outright:\n${run.stderr}`);
+  assert.equal(run.code, 1, `the cut failed instead of finishing:\n${run.stdout}\n${run.stderr}`);
+  assert.match(run.stderr, /the cut was interrupted by SIGTERM before anything was pushed/);
+  assert.match(run.stderr, new RegExp(`Rolled back the unpublished release: HEAD is back at ${originalHead}`));
+  assert.match(run.stdout, /running suites on release commit [0-9a-f]{40} with local tags v3\.208\.0, sidequest-v3\.6\.18;.*git tag -d v3\.208\.0 sidequest-v3\.6\.18/,
+    'the run printed the undo for a kill it could not hold, before the suites started');
+  assert.equal(repo.git('tag', '--list'), '', 'no planned tag remains');
+  assert.equal(repo.git('rev-parse', 'HEAD'), originalHead, 'HEAD is the original head again');
+  assert.equal(repo.git('status', '--porcelain', '--untracked-files=no'), '');
+  assert.deepEqual(repo.remoteRefs(), before, 'nothing reached origin');
+});
+
+test('a refused cut that cannot roll back says its tags were kept and how to clear them (SQ-429)', async (t) => {
+  const repo = setup(t);
+  repo.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
+  const originalHead = repo.commit('integrate');
+
+  // The rollback's remote check is the only probe that fails, as under a loaded host or an agent
+  // that will not sign: the checks before the build answer as usual.
+  const real = spawnRunner(repo.root);
+  let suitesRan = false;
+  const git = createGit({
+    cwd: repo.root,
+    run: (args) => (suitesRan && args[0] === 'ls-remote'
+      ? { code: 124, stdout: '', stderr: 'no answer within 60000ms, so the remote could not be checked', timedOut: true }
+      : real(args)),
+  });
+
+  let failure;
+  await assert.rejects(
+    () => cut({
+      repoRoot: repo.root,
+      git,
+      log: () => {},
+      runSuite: () => {
+        suitesRan = true;
+        return { code: 1, command: 'node --test' };
+      },
+    }),
+    (error) => {
+      failure = error;
+      return /release suites failed, nothing was published/.test(error.message);
+    },
+  );
+
+  const release = repo.git('rev-parse', 'HEAD');
+  assert.equal(failure.rollback.status, 'skipped');
+  assert.match(failure.message, new RegExp(`The local tags v3\\.208\\.0, sidequest-v3\\.6\\.18 were kept on ${release}\\. A retry stops on them as leftovers until they are deleted\\.`));
+  assert.match(failure.message, /git tag -d v3\.208\.0 sidequest-v3\.6\.18/);
+  assert.match(failure.message, /destructive-git guard refuses git tag -d without the publish lock: run sidequest publish lock first and sidequest publish unlock after/);
+  assert.equal(repo.git('tag', '--list'), 'sidequest-v3.6.18\nv3.208.0', 'the tags really were kept');
+
+  // The operator undoes the commit only, as happened on 2026-11-20: the retry names the same lock.
+  repo.git('reset', '-q', '--hard', originalHead);
+  await assert.rejects(
+    () => cut({ repoRoot: repo.root, log: () => {}, runSuite: passing }),
+    (error) => /leftovers from an unpublished attempt: v3\.208\.0, sidequest-v3\.6\.18\..*git tag -d v3\.208\.0 sidequest-v3\.6\.18 and retry.*run sidequest publish lock first/s.test(error.message),
+  );
 });
