@@ -53,9 +53,9 @@ function failOpen(error) {
 installBudget(failOpen);
 
 // src/hooks/subagent-stop.ts
-var import_node_fs3 = __toESM(require("node:fs"));
-var import_node_os = __toESM(require("node:os"));
-var import_node_path3 = __toESM(require("node:path"));
+var import_node_fs4 = __toESM(require("node:fs"));
+var import_node_os2 = __toESM(require("node:os"));
+var import_node_path5 = __toESM(require("node:path"));
 
 // src/hooks/shared/input.ts
 var import_node_fs2 = __toESM(require("node:fs"));
@@ -179,6 +179,87 @@ function runtimeModule(name) {
   return import_node_path2.default.join(pluginRoot(), "lib", `${name}.js`);
 }
 
+// src/hooks/shared/questions.ts
+var import_node_crypto2 = __toESM(require("node:crypto"));
+var import_node_fs3 = __toESM(require("node:fs"));
+var import_node_path4 = __toESM(require("node:path"));
+
+// src/lib/claude-home.ts
+var import_node_os = __toESM(require("node:os"));
+var import_node_path3 = __toESM(require("node:path"));
+function resolveSidequestHome(env = process.env) {
+  const explicit = String(env.SIDEQUEST_HOME || "").trim();
+  if (explicit) return import_node_path3.default.resolve(explicit);
+  const configDir = String(env.CLAUDE_CONFIG_DIR || "").trim();
+  return import_node_path3.default.join(configDir ? import_node_path3.default.resolve(configDir) : import_node_path3.default.join(import_node_os.default.homedir(), ".claude"), "sidequest");
+}
+
+// src/hooks/shared/questions.ts
+var ORPHAN_AFTER_MS = 10 * 60 * 1e3;
+var MARKER_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
+function questionLog() {
+  return require(runtimeModule("store/question-log"));
+}
+function hash(value) {
+  return import_node_crypto2.default.createHash("sha256").update(value).digest("hex");
+}
+function stateDir(...parts) {
+  return import_node_path4.default.join(resolveSidequestHome(), "hook-state", ...parts);
+}
+function writeAtomic(file, contents) {
+  import_node_fs3.default.mkdirSync(import_node_path4.default.dirname(file), { recursive: true });
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  import_node_fs3.default.writeFileSync(temp, contents);
+  import_node_fs3.default.renameSync(temp, file);
+}
+function mtimeMs(file) {
+  try {
+    return import_node_fs3.default.statSync(file).mtimeMs;
+  } catch (_) {
+    return null;
+  }
+}
+function blockOnceFile(agentKey) {
+  return stateDir("question-block-once", hash(agentKey));
+}
+function blockedOnce(agentKey) {
+  return Boolean(agentKey) && mtimeMs(blockOnceFile(agentKey)) !== null;
+}
+function markBlockOnce(agentKey, qids) {
+  if (!agentKey || !qids.length) return false;
+  const file = blockOnceFile(agentKey);
+  let prior = [];
+  try {
+    const parsed = JSON.parse(import_node_fs3.default.readFileSync(file, "utf8"));
+    prior = Array.isArray(parsed.qids) ? parsed.qids.filter((qid) => typeof qid === "string") : [];
+  } catch (_) {
+  }
+  const fresh = qids.filter((qid) => !prior.includes(qid));
+  if (!fresh.length) return false;
+  try {
+    writeAtomic(file, JSON.stringify({ qids: [...prior, ...fresh] }));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+function byteLength2(value) {
+  return Buffer.byteLength(value, "utf8");
+}
+function clipText(value, maxBytes) {
+  const flat = String(value || "").replace(/\s+/g, " ").trim();
+  if (byteLength2(flat) <= maxBytes) return flat;
+  let clipped = "";
+  for (const character of flat) {
+    if (byteLength2(clipped + character) > Math.max(0, maxBytes - byteLength2("…"))) break;
+    clipped += character;
+  }
+  return `${clipped.trimEnd()}…`;
+}
+function questionLabel(question) {
+  return `${question.ref} ${question.seq}`;
+}
+
 // src/hooks/subagent-stop.ts
 function fallbackClassify(type) {
   const readOnlyDispatch = /^sidequest-exec-dispatch-readonly(?:-(low|medium|high|xhigh|max))?$/.exec(type);
@@ -257,9 +338,48 @@ function terminalDispatchVerdict(store, tickets) {
     if (!ticket || ticket.status !== "done") continue;
     const comment = doneComment(ticket);
     if (!comment) continue;
-    const hash = commitHash(comment);
-    const suffix = Array.isArray(ticket.files) && ticket.files.length && !hash ? " done WITHOUT commit hash" : ` done${hash ? ` (${hash})` : ""}`;
+    const hash2 = commitHash(comment);
+    const suffix = Array.isArray(ticket.files) && ticket.files.length && !hash2 ? " done WITHOUT commit hash" : ` done${hash2 ? ` (${hash2})` : ""}`;
     return `exec FINISHED: ${ticket.ref}${suffix}; review the recorded board result. The terminal board state is authoritative; do not redispatch or investigate a contradictory task notification.`;
+  }
+  return null;
+}
+function claimQuestions(claim, filter) {
+  if (!claim.slug || !claim.ref) return [];
+  try {
+    const ql = questionLog();
+    const dir = ql.questionLogDir(claim.slug);
+    if (!import_node_fs4.default.existsSync(dir)) return [];
+    return ql.openQuestions(dir, { ref: claim.ref }).filter(filter);
+  } catch (_) {
+    return [];
+  }
+}
+function unsentBlockingQuestions(claims) {
+  const held = claims.filter((claim) => claim && claim.held && claim.status === "doing");
+  return held.flatMap((claim) => claimQuestions(claim, (question) => question.asked.blocking && !question.sent.some((sent) => !sent.aid)));
+}
+function blockOnceReason(questions) {
+  const labels = clipText(questions.map(questionLabel).join(", "), 120);
+  return `sidequest: ${labels} is blocking but was never sent. Make the SendMessage that ask returned now (to "main", with its [sidequest:question] marker), or, if SendMessage is unavailable, checkpoint and release with kind "question". This stop is blocked once.`;
+}
+function parkVerdict(store, claims) {
+  for (const claim of claims) {
+    if (!claim || claim.status !== "doing") continue;
+    let ticket = null;
+    try {
+      ticket = store.getTicket(claim.slug, claim.ticketId);
+    } catch (_) {
+      continue;
+    }
+    if (!ticket || ticket.status !== "awaiting-user") continue;
+    const qids = new Set(Array.isArray(ticket.park?.qids) ? ticket.park.qids : []);
+    const seqs = claimQuestions({ ...claim, ref: claim.ref || ticket.ref }, (question) => !qids.size || qids.has(question.qid)).map((question) => question.seq);
+    const waits = seqs.length ? seqs.join(", ") : "its open question";
+    if (ticket.park?.mode === "held") {
+      return `exec PARKED: ${ticket.ref} waits on ${waits}; answer it, then make answer's SendMessage; do not re-dispatch.`;
+    }
+    return `exec ASKING: ${ticket.ref} released to awaiting-user on ${waits}; answer it and the ticket returns to todo for a fresh dispatch that carries the decision. Do not re-dispatch before then.`;
   }
   return null;
 }
@@ -269,8 +389,8 @@ function stopVerdict(store, claims, classification, dispatchStopped, terminalTic
     const ticket = store.getTicket(claim.slug, claim.ticketId);
     const comment = ticket && doneComment(ticket, claim.by);
     if (!ticket || !comment) continue;
-    const hash = commitHash(comment);
-    const suffix = Array.isArray(ticket.files) && ticket.files.length && !hash ? " done WITHOUT commit hash" : ` done${hash ? ` (${hash})` : ""}`;
+    const hash2 = commitHash(comment);
+    const suffix = Array.isArray(ticket.files) && ticket.files.length && !hash2 ? " done WITHOUT commit hash" : ` done${hash2 ? ` (${hash2})` : ""}`;
     return `exec FINISHED: ${ticket.ref}${suffix}; review the recorded board result. The terminal board state is authoritative; do not redispatch or investigate a contradictory task notification.`;
   }
   for (const claim of claims) {
@@ -285,6 +405,8 @@ function stopVerdict(store, claims, classification, dispatchStopped, terminalTic
     if (!submissionVerdictText) continue;
     return submissionVerdictText;
   }
+  const parked = parkVerdict(store, claims);
+  if (parked) return parked;
   const terminal = terminalDispatchVerdict(store, terminalTickets);
   if (terminal) return terminal;
   const held = claims.find((claim) => claim && claim.held && claim.status === "doing");
@@ -305,9 +427,9 @@ function stopVerdict(store, claims, classification, dispatchStopped, terminalTic
 }
 function clearNearTurnCapCounter(agentId) {
   if (!agentId) return;
-  const counter = import_node_path3.default.join(import_node_os.default.tmpdir(), "sidequest-near-turn-cap", encodeURIComponent(agentId));
+  const counter = import_node_path5.default.join(import_node_os2.default.tmpdir(), "sidequest-near-turn-cap", encodeURIComponent(agentId));
   try {
-    import_node_fs3.default.unlinkSync(counter);
+    import_node_fs4.default.unlinkSync(counter);
   } catch (_) {
   }
 }
@@ -339,7 +461,16 @@ function main() {
     return;
   }
   if (!Array.isArray(claims)) return;
-  if (data.stop_hook_active) return;
+  const agentKey = agentId || agentName;
+  if (data.stop_hook_active) {
+    if (!blockedOnce(agentKey)) return;
+  } else {
+    const unsent = unsentBlockingQuestions(claims);
+    if (unsent.length && markBlockOnce(agentKey, unsent.map((question) => question.qid))) {
+      writeJson({ decision: "block", reason: blockOnceReason(unsent) });
+      return;
+    }
+  }
   let dispatchStopped = false;
   let terminalTickets = [];
   let terminalAttempts = [];

@@ -28,6 +28,8 @@ import {
   fixtureTicket,
   addStopTicket,
   fixtureState,
+  HOOKS,
+  GUARD_PEER,
 } from './_hooks-fixture.js';
 
 // SQ-128/SQ-227: the guard must key on git as the INVOCATION, never on `git` or the project path as a
@@ -579,6 +581,111 @@ test('pre-tool inline-work nudge ignores subagent identity variants and routing-
   } finally {
     store.setProjectRouting(slug, 'enabled');
   }
+});
+
+// US-8 Q6: only the orchestrating session answers a question, and a sidequest marker must name a real
+// question on the board. Each fixture is its own project, so its questions route nowhere else.
+const questionLog = require('../lib/store/question-log.js');
+const GUARD_ANSWER = path.join(HOOKS, 'guard-answer-caller.js');
+const STAMP_SENT = path.join(HOOKS, 'stamp-sent-message.js');
+
+function guardQuestionFixture(label: string) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `sq-q6-guard-${label}-`));
+  const projectSlug = store.ensureProject(dir).slug;
+  const qdir = questionLog.questionLogDir(projectSlug);
+  const ticket = addStopTicket(`Q6 guard ${label} fixture`, {}, projectSlug);
+  const asked = questionLog.askQuestion(qdir, {
+    ref: ticket.ref,
+    ticketId: ticket.id,
+    header: 'Schema',
+    text: 'Which schema should the migration target?',
+    blocking: true,
+    ownerSession: `q6-guard-${label}-owner`,
+  });
+  assert.strictEqual(asked.ok, true, asked.message);
+  const questionMarker = `[sidequest:question ${ticket.ref} ${asked.seq} qid=${asked.qid} blocking=y reply-to=q6-exec]`;
+  return { dir, projectSlug, qdir, ticket, asked, questionMarker };
+}
+
+function denyReason(output: any): string | null {
+  if (output?.hookSpecificOutput?.permissionDecision !== 'deny') return null;
+  return String(output.hookSpecificOutput.permissionDecisionReason || '');
+}
+
+test('US-8 Q6: answer is refused from any subagent agent_id and allowed for the orchestrating session', () => {
+  const answerInput = { ref: 'SQ-1', text: 'Use the v2 schema' };
+  for (const toolName of ['mcp__plugin_sidequest_board__answer', 'mcp__sidequest__answer']) {
+    const refused = denyReason(runHookOutput(GUARD_ANSWER, {
+      tool_name: toolName,
+      agent_id: 'q6-executor-agent',
+      agent_type: 'sidequest-exec-xhigh',
+      tool_input: answerInput,
+    }));
+    assert.ok(refused, `${toolName} from a subagent is denied`);
+    assert.match(refused!, /an executor cannot answer its own or a sibling's question/);
+  }
+  // `claude --agent <name>` gives the main thread an agent_type but never an agent_id.
+  assert.strictEqual(runHookOutput(GUARD_ANSWER, {
+    tool_name: 'mcp__plugin_sidequest_board__answer',
+    agent_type: 'orchestrator',
+    tool_input: answerInput,
+  }), null, 'the orchestrating session may answer');
+  assert.strictEqual(runHookOutput(GUARD_ANSWER, {
+    tool_name: 'mcp__plugin_sidequest_board__ask',
+    agent_id: 'q6-executor-agent',
+    tool_input: answerInput,
+  }), null, 'other board tools are untouched');
+});
+
+test('US-8 Q6: guard-peer-message refuses a marker naming no question and any answer marker sent by an executor', () => {
+  const fx = guardQuestionFixture('peer');
+  const send = (message: string, extra: Record<string, unknown> = {}) => runHookOutput(GUARD_PEER, {
+    tool_name: 'SendMessage',
+    cwd: fx.dir,
+    tool_input: { to: 'main', message },
+    ...extra,
+  });
+
+  assert.strictEqual(send(`${fx.questionMarker} Which schema?`, { agent_id: 'q6-exec-agent' }), null,
+    'an executor may send the question marker ask returned');
+
+  const forged = denyReason(send(`[sidequest:question ${fx.ticket.ref} Q9 qid=q_zzzzzzzz_abcdef blocking=y reply-to=q6-exec] made up`,
+    { agent_id: 'q6-exec-agent' }));
+  assert.ok(forged, 'a marker whose qid is unknown to the board is denied');
+  assert.match(forged!, /names no question on this board/);
+
+  const answered = questionLog.answerQuestion(fx.qdir, { ref: fx.ticket.ref, question: fx.asked.qid, text: 'Use v2' });
+  assert.strictEqual(answered.ok, true, answered.message);
+  const answerMarker = `[sidequest:answer ${fx.ticket.ref} ${answered.seq} qid=${answered.qid} aid=${answered.aid}]`;
+  const selfAnswer = denyReason(send(`${answerMarker} Use v2`, { agent_id: 'q6-exec-agent' }));
+  assert.ok(selfAnswer, 'an executor sending an answer marker is denied');
+  assert.match(selfAnswer!, /executor cannot send an answer marker/);
+
+  assert.strictEqual(runHookOutput(GUARD_PEER, {
+    tool_name: 'SendMessage',
+    cwd: fx.dir,
+    tool_input: { to: 'q6-exec', message: `${answerMarker} Use v2` },
+  }), null, 'the orchestrating session may send the answer marker answer returned');
+});
+
+test('US-8 Q6: the sent stamper records an answer SendMessage by aid and ignores unmarked messages', () => {
+  const fx = guardQuestionFixture('stamp');
+  const answered = questionLog.answerQuestion(fx.qdir, { ref: fx.ticket.ref, question: fx.asked.qid, text: 'Use v2' });
+  assert.strictEqual(answered.ok, true, answered.message);
+  const stamp = (message: string) => runHookOutput(STAMP_SENT, {
+    tool_name: 'SendMessage',
+    session_id: 'q6-guard-stamp-owner',
+    cwd: fx.dir,
+    tool_input: { to: 'q6-exec', message },
+  });
+
+  assert.strictEqual(stamp('plain steering, no marker'), null, 'the stamper writes no hook output');
+  assert.deepStrictEqual(questionLog.findQuestion(fx.qdir, fx.asked.qid).sent, [], 'an unmarked message stamps nothing');
+
+  stamp(`[sidequest:answer ${fx.ticket.ref} ${answered.seq} qid=${answered.qid} aid=${answered.aid}] Use v2`);
+  const sent = questionLog.findQuestion(fx.qdir, fx.asked.qid).sent;
+  assert.deepStrictEqual(sent.map((record: any) => [record.to, record.aid]), [['q6-exec', answered.aid]],
+    'the answer SendMessage is stamped against its aid and recipient');
 });
 
 export {};

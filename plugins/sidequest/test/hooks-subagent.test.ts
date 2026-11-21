@@ -1405,4 +1405,75 @@ test('SQ-303: subagent-start records the binding offer, binds inline, and settle
   assert.ok(!offer.deferred, 'a bind that reached the store is spent, however it answered');
 });
 
+// US-8 Q6: SubagentStop parks a ticket on a user question. Each fixture is its own project, so its
+// questions never route into another test's Stop, UserPromptSubmit or SessionStart.
+const questionLog = require('../lib/store/question-log.js');
+const STAMP_SENT = path.join(HOOKS, 'stamp-sent-message.js');
+
+function questionParkFixture(label: string) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `sq-q6-${label}-`));
+  const projectSlug = store.ensureProject(dir).slug;
+  const qdir = questionLog.questionLogDir(projectSlug);
+  const ticket = addStopTicket(`Q6 ${label} park fixture`, {}, projectSlug);
+  const sessionId = `q6-${label}-${Date.now()}`;
+  const stop = claimStopTicket(ticket, sessionId, `q6-${label}-worker`, projectSlug);
+  const asked = questionLog.askQuestion(qdir, {
+    ref: ticket.ref,
+    ticketId: ticket.id,
+    header: 'Schema',
+    text: 'Which schema should the migration target?',
+    blocking: true,
+    ownerSession: sessionId,
+  });
+  assert.strictEqual(asked.ok, true, asked.message);
+  return { dir, projectSlug, qdir, ticket, sessionId, stop, asked };
+}
+
+test('US-8 Q6: SubagentStop blocks once for a blocking question never sent, then parks held once it is sent', () => {
+  const fx = questionParkFixture('block-once');
+
+  const blocked = runHookOutput(SUBAGENT_STOP, fx.stop);
+  assert.strictEqual(blocked && blocked.decision, 'block', 'the first stop with an unsent blocking question is blocked');
+  assert.match(blocked.reason, /never sent/);
+  assert.ok(blocked.reason.includes(fx.ticket.ref), blocked.reason);
+  assert.strictEqual(store.getTicket(fx.projectSlug, fx.ticket.ref).status, 'doing', 'a blocked stop does not park or detach');
+
+  // The executor makes ask's SendMessage; the PostToolUse stamper records it against the question log.
+  runHookOutput(STAMP_SENT, {
+    tool_name: 'SendMessage',
+    session_id: fx.sessionId,
+    agent_id: fx.stop.agent_id,
+    cwd: fx.dir,
+    tool_input: {
+      to: 'main',
+      message: `[sidequest:question ${fx.ticket.ref} Q1 qid=${fx.asked.qid} blocking=y reply-to=${fx.stop.agent_name}] Which schema?`,
+    },
+  });
+  const sent = questionLog.findQuestion(fx.qdir, fx.asked.qid).sent;
+  assert.deepStrictEqual(sent.map((record: any) => [record.to, record.aid || null]), [['main', null]], 'the stamper recorded the send');
+
+  const verdict = runHook(SUBAGENT_STOP, { ...fx.stop, stop_hook_active: true });
+  assert.match(verdict, new RegExp(`^exec PARKED: ${fx.ticket.ref} waits on `), verdict);
+  assert.match(verdict, /do not re-dispatch/);
+  const parked = store.getTicket(fx.projectSlug, fx.ticket.ref);
+  assert.strictEqual(parked.status, 'awaiting-user');
+  assert.strictEqual(parked.park.mode, 'held', 'a sent blocking question parks held');
+});
+
+test('US-8 Q6: SubagentStop never blocks the same question twice; an ignored block detaches and reports ASKING', () => {
+  const fx = questionParkFixture('ignored-block');
+
+  assert.strictEqual(runHookOutput(SUBAGENT_STOP, fx.stop)?.decision, 'block');
+  const second = runHookOutput(SUBAGENT_STOP, { ...fx.stop, stop_hook_active: true });
+  assert.notStrictEqual(second && second.decision, 'block', 'a question blocks a stop at most once');
+  const verdict = String(second?.hookSpecificOutput?.additionalContext || '');
+  assert.match(verdict, new RegExp(`^exec ASKING: ${fx.ticket.ref} released to awaiting-user`), verdict);
+
+  const released = store.getTicket(fx.projectSlug, fx.ticket.ref);
+  assert.strictEqual(released.status, 'awaiting-user');
+  assert.strictEqual(released.park.mode, 'released', 'a never-sent question detaches the park to released');
+  const third = runHookOutput(SUBAGENT_STOP, fx.stop);
+  assert.notStrictEqual(third && third.decision, 'block', 'a later stop of the same agent is not blocked again');
+});
+
 export {};
