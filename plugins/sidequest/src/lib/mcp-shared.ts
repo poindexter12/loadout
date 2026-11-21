@@ -499,7 +499,7 @@ function listContextArguments(args: any) {
 }
 
 function listContextRows(project: string, args: any) {
-  const status = args.status == null && !args.all ? ['todo', 'doing', 'awaiting-oracle'] : args.status;
+  const status = args.status == null && !args.all ? ['todo', 'doing', 'awaiting-user', 'awaiting-oracle'] : args.status;
   const brief = !args.detail;
   const payload = store.listPayload(project, {
     status,

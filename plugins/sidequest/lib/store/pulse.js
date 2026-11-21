@@ -3,6 +3,19 @@ const { execFileSync } = require("node:child_process");
 const { canonicalPreparedDispatchExecutor } = require("../prepared-dispatch.js");
 const { readPrWatchState } = require("./project-watch.js");
 const { HOST_SLEEP_GUIDANCE, defaultHostSleep, reclassifyLivenessForHostSleep } = require("../host-sleep.js");
+const { openBlockingQuestions, parkQuestionStates } = require("./claims.js");
+function parkProjection(slug, ticket) {
+  if (!ticket || ticket.status !== "awaiting-user") return null;
+  const open = openBlockingQuestions(parkQuestionStates(slug, ticket.ref));
+  const oldest = open.reduce((min, state) => {
+    const at = state?.asked?.at;
+    return at && (!min || String(at) < String(min)) ? at : min;
+  }, null);
+  return {
+    park: { mode: ticket.park?.mode || "released", parkedAt: ticket.park?.parkedAt || null, by: ticket.park?.by || null },
+    questions: { open: open.length, oldest }
+  };
+}
 function createGitHubCiRunsProvider(projectPath, execute = execFileSync) {
   const command = (program, arguments_) => execute(program, arguments_, {
     cwd: projectPath,
@@ -326,6 +339,7 @@ function createPulse(dependencies) {
       checkpoint: checkpointProjection(ticket),
       scope: scopePulse(slug, ticket),
       ...oracleProjection(ticket) ? { oracle: oracleProjection(ticket) } : {},
+      ...parkProjection(slug, ticket) || {},
       ...warnings.length ? { warnings } : {},
       submission: submissionProjection(ticket.submission),
       awaitingMergeWaves: awaitingMergeWavesPulse(slug),
@@ -369,6 +383,7 @@ function createPulse(dependencies) {
           }
         } : {},
         ...oracleProjection(ticket) ? { oracle: oracleProjection(ticket) } : {},
+        ...parkProjection(slug, ticket) || {},
         ...warnings.length ? { warnings } : {},
         updatedAt: ticket.updatedAt
       };
@@ -427,6 +442,7 @@ function createBoardWatch(dependencies) {
   function actionableEvent(ticket) {
     if (ownedByAnotherSession(ticket)) return null;
     if (ticket.status === "awaiting-oracle") return { type: "awaiting-oracle", author: "", excerpt: "" };
+    if (ticket.status === "awaiting-user") return { type: "awaiting-user", author: "", excerpt: String(ticket.park?.mode || "") };
     if (ticket.lastEventType === "release" || ticket.lastEventType === "scope-request") {
       return { type: ticket.lastEventType, author: "", excerpt: "" };
     }

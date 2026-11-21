@@ -432,7 +432,7 @@ test('status validation fails loudly and directs deletion to remove', async () =
   const added = await callTool('add', { title: 'strict status', complexity: 1, why: 'exercise loud validation for invalid MCP status values' });
   const invalid = await callToolRaw('update', { ref: added.ref, status: 'deleted' });
   assert.ok(invalid.isError);
-  assert.match(invalid.content[0].text, /must be one of: todo, doing, awaiting-oracle, done/);
+  assert.match(invalid.content[0].text, /must be one of: todo, doing, awaiting-user, awaiting-oracle, done/);
   assert.throws(() => store.updateTicket(store.ensureProject(PROJ).slug, added.ref, { status: 'deleted' }), /remove tool/i);
   assert.throws(() => store.createTicket(store.ensureProject(PROJ).slug, { title: 'bad status', status: 'deleted' }), /remove tool/i);
 });

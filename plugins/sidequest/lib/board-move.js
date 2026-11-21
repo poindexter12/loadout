@@ -47,7 +47,7 @@ const BOARD_TABLES = [
   "tickets",
   "external_links"
 ];
-const TICKET_STATUSES = ["todo", "doing", "awaiting-oracle", "done"];
+const TICKET_STATUSES = ["todo", "doing", "awaiting-user", "awaiting-oracle", "done"];
 function all(handle, sql, ...params) {
   return handle.prepare(sql).all(...params);
 }
