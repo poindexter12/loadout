@@ -80,7 +80,10 @@ const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 // than trim these descriptions: they are the only place an executor learns that an answer is a
 // decision and never a permission, scope or settings grant, and that this server cannot send the
 // SendMessage itself, so a trimmed description would cost a lost question on every ask.
-const MCP_TOOLS_LIST_MAX_BYTES = 27180;
+// Raised from 27180 for needsInput on add and update (US-8 Q8, SQ-422: 234 bytes) while preserving
+// the 2.5KB reserve (story contract U2). An orchestrator filing work that needs the user has to find
+// the field in the schema; without it the ticket dispatches and the executor guesses the decision.
+const MCP_TOOLS_LIST_MAX_BYTES = 27414;
 const MCP_TOOLS_LIST_HEADROOM_BYTES = 2500;
 
 function serverVersion() {
@@ -326,9 +329,16 @@ const MCP_SCHEMA_PROPERTY_DESCRIPTIONS: Record<string, Record<string, string>> =
     limit: 'UTF-8 bytes.',
     expectedRevision: 'Revision.',
   },
-  add: { complexity: 'Legacy score; why required.', verify: ATTESTATION_VERIFY_CONTRACT },
+  add: {
+    complexity: 'Legacy score; why required.',
+    verify: ATTESTATION_VERIFY_CONTRACT,
+    needsInput: 'Question for the user, up to 1500 bytes: files awaiting-user; dispatch refuses until answered or declined.',
+  },
   claim: { force: 'Operator-only.' },
-  update: { verify: ATTESTATION_VERIFY_CONTRACT },
+  update: {
+    verify: ATTESTATION_VERIFY_CONTRACT,
+    needsInput: 'As add; todo and unclaimed only.',
+  },
   supersede_submission: { supersededBy: 'Repair ticket ref, not a commit.' },
   comments: {
     full: 'Whole bodies.',

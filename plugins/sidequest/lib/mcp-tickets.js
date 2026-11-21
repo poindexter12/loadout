@@ -136,10 +136,12 @@ const REVIEW_TARGET_PROP = {
   },
   required: ["ref"]
 };
+const NEEDS_INPUT_ADD_DESCRIPTION = "The question (up to 1500 bytes) the user must answer before any executor starts. The ticket is filed awaiting-user with the question in the log, and dispatch refuses it until answer records the user's answer, or answer({decline:true}) lets the executor ask at runtime. Cannot be combined with status.";
+const NEEDS_INPUT_UPDATE_DESCRIPTION = "Same as add: parks a todo ticket nobody holds awaiting-user on this question. Refused for a claimed, parked or non-todo ticket; a live executor asks with ask instead.";
 const tools = [
   {
     name: "add",
-    description: "File a new ticket. Choose category from the returned taxonomy and pass it here, or use legacy complexity + why. Set route only when the user explicitly requests a model for this one ticket; it never changes the category route. model/effort are never set directly. description is a developer-to-developer spec (Where / Contract / Bounds / Verify), passed as a normal string (real newlines fine — no shell escaping).",
+    description: "File a new ticket. Choose category from the returned taxonomy and pass it here, or use legacy complexity + why. Set route only when the user explicitly requests a model for this one ticket; it never changes the category route. model/effort are never set directly. description is a developer-to-developer spec (Where / Contract / Bounds / Verify), passed as a normal string (real newlines fine — no shell escaping). Pass needsInput when the ticket cannot start without a user decision: it is filed awaiting-user and dispatch refuses it until the question is answered or declined.",
     inputSchema: {
       type: "object",
       properties: {
@@ -173,7 +175,8 @@ const tools = [
           required: ["model", "effort"],
           description: "Optional route override for this ticket only. It never changes the category route."
         },
-        unclassified: { type: "boolean", description: "Deliberately defer classification until an update before dispatch." }
+        unclassified: { type: "boolean", description: "Deliberately defer classification until an update before dispatch." },
+        needsInput: { type: "string", description: NEEDS_INPUT_ADD_DESCRIPTION }
       },
       required: ["title"]
     },
@@ -226,6 +229,8 @@ const tools = [
         complexityWhy: args.why,
         category,
         route: args.route,
+        needsInput: args.needsInput,
+        needsInputSession: sessionOf(args),
         source: "mcp"
       }, args.reviewTarget);
       const ticket = store.getTicket(slug, created.ref) || created;
@@ -241,7 +246,7 @@ const tools = [
   },
   {
     name: "update",
-    description: 'Update ticket fields by scope. A live claim permits closeout-affecting fields only from the runtime session that prepared its dispatch; by is a label, not proof. Executors must use scopeRequest for files. A control-plane verify amendment is never frozen: it updates the live dispatch requirement, or, once the ticket has a pending submission and no live dispatch, re-pins the verify that the next integrate/groomClose merged-tree verification runs (the submission.verify record the executor wrote is unchanged). Either way it records the old and new command on the ticket, and verificationAmendment in the response names which verify the next verification runs. Any omitted field is left unchanged. Set route only for a one-ticket model override, or "none" to clear it. Editing a category route repoints future tickets too. model/effort are not accepted. Deletion is not a status; use the permanent remove tool instead.',
+    description: 'Update ticket fields by scope. A live claim permits closeout-affecting fields only from the runtime session that prepared its dispatch; by is a label, not proof. Executors must use scopeRequest for files. A control-plane verify amendment is never frozen: it updates the live dispatch requirement, or, once the ticket has a pending submission and no live dispatch, re-pins the verify that the next integrate/groomClose merged-tree verification runs (the submission.verify record the executor wrote is unchanged). Either way it records the old and new command on the ticket, and verificationAmendment in the response names which verify the next verification runs. Any omitted field is left unchanged. Set route only for a one-ticket model override, or "none" to clear it. Editing a category route repoints future tickets too. model/effort are not accepted. needsInput parks a todo ticket nobody holds awaiting-user on a question for the user. Deletion is not a status; use the permanent remove tool instead.',
     inputSchema: {
       type: "object",
       properties: {
@@ -283,7 +288,8 @@ const tools = [
             { const: "none" }
           ],
           description: 'Set a per-ticket route override or "none" to clear it. This never changes the category route.'
-        }
+        },
+        needsInput: { type: "string", description: NEEDS_INPUT_UPDATE_DESCRIPTION }
       },
       required: ["ref"]
     },
@@ -353,6 +359,10 @@ const tools = [
       }
       if (args.why !== void 0) patch.complexityWhy = args.why;
       if (args.route !== void 0) patch.route = args.route === "none" || args.route === null ? null : args.route;
+      if (args.needsInput !== void 0) {
+        patch.needsInput = args.needsInput;
+        patch.needsInputSession = sessionOf(args);
+      }
       const updated = store.updateTicket(slug, args.ref, patch, args.reviewTarget, {
         allowLiveClaimCloseoutUpdate: true
       });
