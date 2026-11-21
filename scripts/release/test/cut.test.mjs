@@ -1774,6 +1774,96 @@ test('--force-local-tests turns a CI coverage gap into a local suite run', async
   assert.ok(logs.includes(`Test CI on the pinned commit ${pinned} passed without running the suites for sidequest; they ran locally instead.`));
 });
 
+test('--force-local-tests runs only the suites CI skipped, never the ones it ran and passed', async (t) => {
+  // The v4.18.0 shape: the run executed one released plugin's full suite and short-circuited the
+  // other two legs. Rerunning the suite CI cleared on this exact commit can only add a
+  // load-sensitive refusal, so the local run is exactly the gap.
+  const context = setup(t);
+  context.writeFragment('SQ-1', { plugins: ['codex-gateway', 'sidequest', 'toolbelt'], bump: 'patch' });
+  const pinned = context.commit('integrate');
+  const logs = [];
+  const runner = ciRunner({
+    commit: pinned,
+    steps: [suiteStep('codex-gateway', 'skipped'), suiteStep('sidequest', 'success'), suiteStep('toolbelt', 'skipped')],
+  });
+  const injected = (repoRoot, commit, suites) => assertParentCiPassed(repoRoot, commit, runner, suites);
+
+  const result = await cut({
+    repoRoot: context.root,
+    forceLocalTests: true,
+    log: (message) => logs.push(message),
+    runSuite: context.runSuite,
+    assertParentCiPassed: injected,
+  });
+
+  assert.equal(result.status, 'cut');
+  assert.equal(result.ci.status, 'uncovered');
+  assert.deepEqual(result.ci.uncovered, ['codex-gateway', 'toolbelt']);
+  assert.equal(result.ci.runId, 7021, 'the gap keeps the run that covered the rest');
+  assert.deepEqual(context.suites, ['codex-gateway', 'toolbelt'], 'only the suites CI skipped run locally; sidequest never does');
+  assert.ok(logs.includes(
+    `Test workflow run 7021 on the pinned commit ${pinned} ran and passed the suites for sidequest; ` +
+    'skipping them locally and running only codex-gateway, toolbelt.',
+  ), 'the skip names the suites CI covered and the run that covered them');
+  assert.equal(context.version('sidequest'), '3.6.18', 'the CI-covered plugin still releases');
+  assert.equal(context.version('toolbelt'), '0.63.7');
+
+  // A failure in a suite CI skipped still refuses, and the CI-covered suite is still not rerun.
+  const failing = setup(t);
+  failing.writeFragment('SQ-2', { plugins: ['codex-gateway', 'sidequest', 'toolbelt'], bump: 'patch' });
+  const failingPin = failing.commit('integrate');
+  const failingRunner = ciRunner({
+    commit: failingPin,
+    steps: [suiteStep('codex-gateway', 'skipped'), suiteStep('sidequest', 'success'), suiteStep('toolbelt', 'skipped')],
+  });
+  const ran = [];
+  const failure = await rejection(cut({
+    repoRoot: failing.root,
+    forceLocalTests: true,
+    log: () => {},
+    runSuite: (suite) => {
+      ran.push(suite.plugin);
+      return { code: suite.plugin === 'toolbelt' ? 1 : 0, command: suite.command };
+    },
+    assertParentCiPassed: (repoRoot, commit, suites) => assertParentCiPassed(repoRoot, commit, failingRunner, suites),
+  }));
+  assert.match(failure.message, /release suites failed, nothing was published:\n {2}toolbelt: /);
+  assert.deepEqual(ran, ['codex-gateway', 'toolbelt']);
+  assert.equal(failing.git('tag', '--list'), '', 'no release tags were created');
+  assert.equal(failing.version('sidequest'), '3.6.17', 'the version never moved');
+});
+
+test('a hotfix with a CI coverage gap still runs every suite under --force-local-tests', async (t) => {
+  // A hotfix releases cherry-picks, not the pinned commit, so the pin's run covers nothing it ships.
+  const context = setup(t);
+  context.onBranch('dev');
+  context.write('plugins/sidequest/urgent.js', '// urgent\n');
+  const sidequestFix = context.commit('the sidequest fix');
+  context.write('plugins/toolbelt/urgent.js', '// urgent\n');
+  const toolbeltFix = context.commit('the toolbelt fix');
+  context.writeFragment('SQ-3', { plugins: ['sidequest'], bump: 'patch', commit: sidequestFix });
+  context.writeFragment('SQ-4', { plugins: ['toolbelt'], bump: 'patch', commit: toolbeltFix });
+  const hotfixPin = context.commit('note urgent tickets');
+  context.onBranch('main');
+  const runner = ciRunner({ commit: hotfixPin, steps: [suiteStep('sidequest', 'success'), suiteStep('toolbelt', 'skipped')] });
+
+  const result = await cut({
+    repoRoot: context.root,
+    mode: 'hotfix',
+    tickets: ['SQ-3', 'SQ-4'],
+    sha: hotfixPin,
+    forceLocalTests: true,
+    log: () => {},
+    runSuite: context.runSuite,
+    assertParentCiPassed: (repoRoot, commit, suites) => assertParentCiPassed(repoRoot, commit, runner, suites),
+  });
+
+  assert.equal(result.status, 'cut');
+  assert.equal(result.ci.status, 'uncovered');
+  assert.deepEqual(result.ci.uncovered, ['toolbelt']);
+  assert.deepEqual(context.suites, ['sidequest', 'toolbelt'], 'a hotfix never narrows to the CI gap');
+});
+
 test('--trust-ci refuses a window whose CI run never ran the released plugin suite', async (t) => {
   const context = setup(t);
   context.writeFragment('SQ-1', { plugins: ['sidequest'], bump: 'patch' });
