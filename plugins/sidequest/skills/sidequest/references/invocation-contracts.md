@@ -10,7 +10,10 @@ this file only covers what the schema has no way to say.
   oracle ask in `oracle` stands in for it. `kind: technical_blocker` and `kind: contradiction` additionally
   need `command` and `outputTail`, and are refused without them. `kind: oracle` parks the ticket in
   `awaiting-oracle` and the handoff stays visible until `verdict`. `kind: handback` is for refused paths:
-  commit the in-scope work first, then name the paths you could not touch.
+  commit the in-scope work first, then name the paths you could not touch. `kind: question` parks the
+  ticket in `awaiting-user` on the open questions you asked with `ask`. Use it only once no independent
+  work remains. It is refused with `no_open_question` without one, and a writable dispatch needs a
+  `checkpoint` first (`checkpoint_required`).
 - **`add` / `update` verification**: `verifyKind` is one of `suite`, `command`, `document`, `link`,
   `schema`, `manual`, `attestation`, `review`, or `custom`. `suite` and `command` require a runnable
   command. The other kinds retain the submitted evidence contract. `verifyKind: attestation` also requires

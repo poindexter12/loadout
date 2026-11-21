@@ -31,6 +31,7 @@ const { tools: ticketTools } = require('./mcp-tickets');
 const { tools: lifecycleTools } = require('./mcp-lifecycle');
 const { tools: collaborationTools } = require('./mcp-collaboration');
 const { tools: routingTools } = require('./mcp-routing');
+const { tools: questionTools, pendingAnswerHolder, attachPendingAnswers, attachPulseQuestions } = require('./mcp-questions');
 
 // A tool whose work can outlast a client's idle timeout is handed a progress
 // reporter as its second argument. Emitting on it resets that timer, so a long
@@ -74,7 +75,12 @@ const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 // Raised from 25100 for the awaiting-user status (SQ-416, 64 bytes: one enum value in list, update,
 // release and submit) while preserving the 2.5KB reserve. An orchestrator filtering or reading a
 // parked ticket has to find the status in the schema, not learn it from a refusal.
-const MCP_TOOLS_LIST_MAX_BYTES = 25170;
+// Raised from 25170 for the ask and answer tools plus release kind question (US-8 Q4, SQ-418: 2016
+// more descriptor bytes) while preserving the 2.5KB reserve. The story contract (D4, U2) says raise the budget rather
+// than trim these descriptions: they are the only place an executor learns that an answer is a
+// decision and never a permission, scope or settings grant, and that this server cannot send the
+// SendMessage itself, so a trimmed description would cost a lost question on every ask.
+const MCP_TOOLS_LIST_MAX_BYTES = 27180;
 const MCP_TOOLS_LIST_HEADROOM_BYTES = 2500;
 
 function serverVersion() {
@@ -91,6 +97,7 @@ const TOOLS: ToolDefinition[] = [
   ...lifecycleTools,
   ...collaborationTools,
   ...routingTools,
+  ...questionTools,
 ];
 
 
@@ -105,6 +112,7 @@ const TOOL_BY_NAME = new Map(TOOLS
 const MUTATING_TOOLS = new Set([
   'add', 'update', 'remove', 'archive', 'unarchive', 'claim', 'sweepClaims', 'next',
   'done', 'groomClose', 'release', 'commit', 'submit', 'supersede_submission', 'comment', 'plan', 'link', 'unlink', 'issue_link', 'assign', 'dispatch',
+  'ask', 'answer',
   'category_add', 'category_edit', 'category_detach', 'category_relink', 'category_rm',
   'profile_create', 'profile_edit', 'profile_retire', 'profile_use', 'profile_repoint', 'profile_promote',
   'archive_board', 'unarchive_board',
@@ -259,12 +267,19 @@ async function runTool(tool: ToolDefinition, rawArgs: any, context?: ToolContext
     if (claimedProject) args.project = claimedProject;
   }
   if (!toolMutates(tool.name, args)) {
+    const holder = pendingAnswerHolder(tool.name, args);
     const output = await tool.handler(args, context);
-    return acknowledgeAliases(tool.name === 'context_page' ? output : boundedReadPayload(tool.name, output), aliases);
+    const bounded = tool.name === 'context_page' ? output : boundedReadPayload(tool.name, output);
+    const withQuestions = tool.name === 'pulse' ? attachPulseQuestions(bounded, args) : bounded;
+    return acknowledgeAliases(attachPendingAnswers(withQuestions, holder), aliases);
   }
   assertMutationFreshness(args.project);
   const board = mutationQueueKey(tool.name, args);
-  return enqueueMutation(board, async () => acknowledgeAliases(await tool.handler(args, context), aliases));
+  return enqueueMutation(board, async () => {
+    // An answer the executor has not yet received rides on its next board-tool reply (US-8 Q4).
+    const holder = pendingAnswerHolder(tool.name, args);
+    return acknowledgeAliases(attachPendingAnswers(await tool.handler(args, context), holder), aliases);
+  });
 }
 
 /*
@@ -326,6 +341,18 @@ const MCP_SCHEMA_PROPERTY_DESCRIPTIONS: Record<string, Record<string, string>> =
   release: {
     command: 'Required for blocker/contradiction.',
     outputTail: 'Required blocker/contradiction output.',
+  },
+  ask: {
+    header: 'Up to 12 chars.',
+    question: 'First line must stand alone; up to 1500 bytes.',
+    options: '2 to 4; omit for free text.',
+    default: 'Required: what you do if unanswered.',
+    blocking: 'Default true.',
+    withdraw: 'qid to withdraw instead of asking.',
+  },
+  answer: {
+    question: 'qid; defaults to the oldest open.',
+    supersedes: 'Prior aid; only when the user changed their mind.',
   },
   story_log: { entry: 'Must begin DECISION:, CONSTRAINT:, or DISCOVERY:; max 16,000 UTF-8 bytes.' },
   category_edit: { fallbackModel: 'null clears fallback.' },
