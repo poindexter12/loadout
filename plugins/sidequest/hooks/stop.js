@@ -764,12 +764,148 @@ async function recordLiveRefs(input) {
   }
 }
 
+// src/hooks/shared/questions.ts
+var import_node_crypto4 = __toESM(require("node:crypto"));
+var import_node_fs7 = __toESM(require("node:fs"));
+var import_node_path8 = __toESM(require("node:path"));
+var ORPHAN_AFTER_MS = 10 * 60 * 1e3;
+var MARKER_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
+function questionLog() {
+  return require(runtimeModule("store/question-log"));
+}
+function hash(value) {
+  return import_node_crypto4.default.createHash("sha256").update(value).digest("hex");
+}
+function stateDir(...parts) {
+  return import_node_path8.default.join(resolveSidequestHome(), "hook-state", ...parts);
+}
+function suppressionFile(sessionId) {
+  return stateDir(`question-surfaced-${hash(sessionId)}.json`);
+}
+function seenFile(qid) {
+  return stateDir("question-seen", qid);
+}
+function sessionEndedFile(sessionId) {
+  return stateDir("question-session-ended", hash(sessionId));
+}
+function writeAtomic(file, contents) {
+  import_node_fs7.default.mkdirSync(import_node_path8.default.dirname(file), { recursive: true });
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  import_node_fs7.default.writeFileSync(temp, contents);
+  import_node_fs7.default.renameSync(temp, file);
+}
+function mtimeMs(file) {
+  try {
+    return import_node_fs7.default.statSync(file).mtimeMs;
+  } catch (_) {
+    return null;
+  }
+}
+function projectSlugFor(start, store) {
+  try {
+    let project = store.findProject(store.nearestRepoRoot(start));
+    if (!project.ok || !project.slug) project = store.findProject(start);
+    return project.ok && project.slug ? project.slug : null;
+  } catch (_) {
+    return null;
+  }
+}
+function surfacedQids(sessionId) {
+  try {
+    const parsed = JSON.parse(import_node_fs7.default.readFileSync(suppressionFile(sessionId), "utf8"));
+    return new Set(Array.isArray(parsed.qids) ? parsed.qids.filter((qid) => typeof qid === "string") : []);
+  } catch (_) {
+    return /* @__PURE__ */ new Set();
+  }
+}
+function markSurfaced(sessionId, qids) {
+  if (!sessionId || !qids.length) return;
+  const ql = questionLog();
+  try {
+    const merged = surfacedQids(sessionId);
+    for (const qid of qids) merged.add(qid);
+    writeAtomic(suppressionFile(sessionId), JSON.stringify({ qids: [...merged] }));
+  } catch (_) {
+  }
+  for (const qid of qids) {
+    if (!ql.isQuestionId(qid)) continue;
+    try {
+      writeAtomic(seenFile(qid), (/* @__PURE__ */ new Date()).toISOString());
+    } catch (_) {
+    }
+  }
+}
+function routedTo(question, sessionId, now) {
+  const owner = question.asked.ownerSession;
+  if (!owner || owner === sessionId) return true;
+  if (mtimeMs(sessionEndedFile(owner)) !== null) return true;
+  const lastSeen = mtimeMs(seenFile(question.qid)) ?? Date.parse(question.asked.at);
+  return Number.isFinite(lastSeen) && now - lastSeen >= ORPHAN_AFTER_MS;
+}
+function routedOpenQuestions(slug, sessionId, now = Date.now()) {
+  const ql = questionLog();
+  const dir = ql.questionLogDir(slug);
+  if (!import_node_fs7.default.existsSync(dir)) return [];
+  return ql.openQuestions(dir).filter((question) => routedTo(question, sessionId, now));
+}
+function byteLength2(value) {
+  return Buffer.byteLength(value, "utf8");
+}
+function clipText(value, maxBytes) {
+  const flat = String(value || "").replace(/\s+/g, " ").trim();
+  if (byteLength2(flat) <= maxBytes) return flat;
+  let clipped = "";
+  for (const character of flat) {
+    if (byteLength2(clipped + character) > Math.max(0, maxBytes - byteLength2("…"))) break;
+    clipped += character;
+  }
+  return `${clipped.trimEnd()}…`;
+}
+function questionLabel(question) {
+  return `${question.ref} ${question.seq}`;
+}
+function answerCall(question) {
+  return `answer({ref:"${question.ref}",question:"${question.qid}",text:…})`;
+}
+function withClippedText(prefix, text, suffix, maxBytes) {
+  return `${prefix}${clipText(text, maxBytes - byteLength2(prefix) - byteLength2(suffix))}${suffix}`;
+}
+function stopQuestionItem(question, more, maxBytes = 512) {
+  const prefix = `Sidequest: ${questionLabel(question)} needs the user: `;
+  const suffix = `. Full text: pulse({ref:"${question.ref}"}). Ask with AskUserQuestion, then ${answerCall(question)}.` + (more > 0 ? ` ${more} more open.` : "");
+  return withClippedText(prefix, question.asked.text, suffix, maxBytes);
+}
+
 // src/hooks/stop.ts
+function questionItem(input) {
+  if (isSubagent(input)) return null;
+  const sessionId = stringField(input, "session_id", "sessionId") || process.env.CLAUDE_CODE_SESSION_ID || "";
+  if (!sessionId) return null;
+  try {
+    const store = require(runtimeModule("store"));
+    const slug = projectSlugFor(stringField(input, "cwd") || process.env.CLAUDE_PROJECT_DIR || process.cwd(), store);
+    if (!slug) return null;
+    const routed = routedOpenQuestions(slug, sessionId);
+    const surfaced = surfacedQids(sessionId);
+    const pending = routed.filter((question) => !surfaced.has(question.qid));
+    const next = pending.find((question) => question.asked.blocking) || pending[0];
+    if (!next) return null;
+    markSurfaced(sessionId, [next.qid]);
+    return stopQuestionItem(next, routed.length - 1);
+  } catch (_) {
+    return null;
+  }
+}
 async function main2() {
   const input = readStdin();
   if (!input) return;
   await recordLiveRefs(input);
   if (input.stop_hook_active === true) return;
+  const question = questionItem(input);
+  if (question) {
+    writeContext("Stop", question);
+    return;
+  }
   const reconciliation = boardReconciliationReminder(input);
   if (reconciliation) {
     writeContext("Stop", reconciliation);

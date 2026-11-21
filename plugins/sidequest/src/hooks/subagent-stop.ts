@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { readStdin, stringField } from './shared/input.js';
-import { writeContext } from './shared/output.js';
+import { writeContext, writeJson } from './shared/output.js';
 import { runtimeModule } from './shared/paths.js';
+import { clipText, markBlockOnce, blockedOnce, questionLabel, questionLog, type QuestionState } from './shared/questions.js';
 
 type ExecutorKind = 'codex_dispatch' | 'claude_builtin' | 'read_only_codex_dispatch' | 'read_only_claude_builtin' | 'legacy_ticket' | 'ticket' | 'unknown';
 interface ExecutorClassification {
@@ -38,6 +39,7 @@ interface Ticket {
   dispatch?: { outcome?: string; terminalAt?: string; terminalSource?: string; turnEndedAt?: string; worktree?: string; agentName?: string };
   submission?: { commit?: string; integratedAt?: string; unscopedPaths?: string[] };
   effort?: string;
+  park?: { mode?: string; qids?: string[] } | null;
 }
 interface SubmissionReadiness {
   ok: boolean;
@@ -154,6 +156,56 @@ function terminalDispatchVerdict(store: Store, tickets: Ticket[]): string | null
   return null;
 }
 
+function claimQuestions(claim: Claim, filter: (question: QuestionState) => boolean): QuestionState[] {
+  if (!claim.slug || !claim.ref) return [];
+  try {
+    const ql = questionLog();
+    const dir = ql.questionLogDir(claim.slug);
+    if (!fs.existsSync(dir)) return [];
+    return ql.openQuestions(dir, { ref: claim.ref }).filter(filter);
+  } catch (_) {
+    return [];
+  }
+}
+
+// US-8 Q6: a blocking question the executor recorded with `ask` but never sent. `sent` records with an
+// aid belong to answer sends, so only an aid-less record counts as the question's own send.
+function unsentBlockingQuestions(claims: Claim[]): QuestionState[] {
+  const held = claims.filter((claim) => claim && claim.held && claim.status === 'doing');
+  return held.flatMap((claim) => claimQuestions(claim, (question) => question.asked.blocking
+    && !question.sent.some((sent) => !sent.aid)));
+}
+
+function blockOnceReason(questions: QuestionState[]): string {
+  const labels = clipText(questions.map(questionLabel).join(', '), 120);
+  return `sidequest: ${labels} is blocking but was never sent. Make the SendMessage that ask returned now (to "main", with its [sidequest:question] marker), or, if SendMessage is unavailable, checkpoint and release with kind "question". This stop is blocked once.`;
+}
+
+// US-8 Q6: the verdict for a turn end that parked the ticket on a user question (Q2's
+// markDispatchStopped decides held or released). Checked ahead of the terminal and WAITING verdicts,
+// because a released park is a terminal dispatch and a held park still holds its claim.
+function parkVerdict(store: Store, claims: Claim[]): string | null {
+  for (const claim of claims) {
+    if (!claim || claim.status !== 'doing') continue;
+    let ticket: Ticket | null = null;
+    try {
+      ticket = store.getTicket(claim.slug, claim.ticketId);
+    } catch (_) {
+      continue;
+    }
+    if (!ticket || ticket.status !== 'awaiting-user') continue;
+    const qids = new Set(Array.isArray(ticket.park?.qids) ? ticket.park!.qids : []);
+    const seqs = claimQuestions({ ...claim, ref: claim.ref || ticket.ref }, (question) => !qids.size || qids.has(question.qid))
+      .map((question) => question.seq);
+    const waits = seqs.length ? seqs.join(', ') : 'its open question';
+    if (ticket.park?.mode === 'held') {
+      return `exec PARKED: ${ticket.ref} waits on ${waits}; answer it, then make answer's SendMessage; do not re-dispatch.`;
+    }
+    return `exec ASKING: ${ticket.ref} released to awaiting-user on ${waits}; answer it and the ticket returns to todo for a fresh dispatch that carries the decision. Do not re-dispatch before then.`;
+  }
+  return null;
+}
+
 function stopVerdict(
   store: Store,
   claims: Claim[],
@@ -185,6 +237,9 @@ function stopVerdict(
     if (!submissionVerdictText) continue;
     return submissionVerdictText;
   }
+
+  const parked = parkVerdict(store, claims);
+  if (parked) return parked;
 
   const terminal = terminalDispatchVerdict(store, terminalTickets);
   if (terminal) return terminal;
@@ -246,7 +301,20 @@ function main(): void {
   }
   if (!Array.isArray(claims)) return;
 
-  if (data.stop_hook_active) return;
+  // US-8 Q6 block-once. A held claim with a blocking question that was recorded but never sent would
+  // detach to released at this turn end, so the first such stop is blocked to make the send. The
+  // re-entrant stop that follows our own block (stop_hook_active) must still reach markDispatchStopped,
+  // or the turn end would never park; any other re-entrant stop keeps the old no-op.
+  const agentKey = agentId || agentName;
+  if (data.stop_hook_active) {
+    if (!blockedOnce(agentKey)) return;
+  } else {
+    const unsent = unsentBlockingQuestions(claims);
+    if (unsent.length && markBlockOnce(agentKey, unsent.map((question) => question.qid))) {
+      writeJson({ decision: 'block', reason: blockOnceReason(unsent) });
+      return;
+    }
+  }
 
   let dispatchStopped = false;
   let terminalTickets: Ticket[] = [];

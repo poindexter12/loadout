@@ -9,6 +9,7 @@ import { initializeCompactionState, isPrimarySession, isReplacementCompaction } 
 import { runSweep } from './shared/sweep-handoff.js';
 import { runAuditHandoff } from './shared/audit-handoff.js';
 import { registerSweepSession } from './shared/worktree-sweep.js';
+import { projectSlugFor, questionSummaryLine, routedOpenQuestions } from './shared/questions.js';
 import { diagnosticWorktreeWarning } from './diagnostic-worktree-warning.js';
 import { reportLoadedSidequestVersion, sidequestReloadWarning } from '../lib/plugin-freshness.js';
 
@@ -169,6 +170,21 @@ function hasMidWaveBoard(data: HookInput): boolean {
   }
 }
 
+// US-8 Q6: one line naming the open user questions routed to this session. A resumed or compacted
+// session keeps its id, so it sees its own; a new session sees orphans (owner ended, or unsurfaced for
+// ten minutes). Reads the question log, never the board lock, and stays short because it rides ahead
+// of the briefing inside the same 4 KiB budget.
+function openQuestionLine(data: HookInput, sessionId: string): string {
+  if (process.env.SIDEQUEST_AGENT || !sessionId || !isPrimarySession(data)) return '';
+  try {
+    const store = require(runtimeModule('store')) as Store;
+    const slug = projectSlugFor(stringField(data, 'cwd', 'project_dir', 'projectDir') || process.env.CLAUDE_PROJECT_DIR || process.cwd(), store);
+    return slug ? questionSummaryLine(routedOpenQuestions(slug, sessionId), 300) : '';
+  } catch (_) {
+    return '';
+  }
+}
+
 function emit(context: string, notice: string, initialUserMessage = ''): void {
   const output = notice ? `${notice}\n${context}` : context;
   writeContext('SessionStart', withWorkforce(output), initialUserMessage);
@@ -195,6 +211,7 @@ async function main(): Promise<void> {
   ]);
   const source = stringField(data, 'source');
   const restartNotice = [
+    openQuestionLine(data, sessionId),
     freshnessNotice,
     source === 'compact' || source === 'resume' ? '' : diagnosticWorktreeWarning(data),
     ...sweepNotices,
