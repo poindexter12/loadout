@@ -197,8 +197,8 @@ databases), so serialize those collisions even inside a wave. A claim under a `-
 recognize means another session may be working the board; flag it first. With
 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` on, executors ARE teammates — use the teammate
 affordances, don't ignore them: answer scope requests over the mailbox, steer and resume with
-`SendMessage`, and never stop→redispatch work a message can fix. Wave mechanics,
-liveness, salvage, cost levers, agent teams:
+`SendMessage`, and never stop→redispatch work a message can fix. Question relay
+(`AskUserQuestion`, then `answer`), wave mechanics, liveness, salvage, cost levers, agent teams:
 `references/orchestration.md`.
 
 ## Category-first routing (ENFORCED)
