@@ -159,6 +159,41 @@ export function defaultSuiteRunner(repoRoot, { log = console.log, tag = 'release
   };
 }
 
+// The signals an operator or a harness ends a run with. Node's default for each is to exit at once,
+// which used to strand an unpublished window: release commit, local tags, and the publish lock.
+const INTERRUPT_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+
+/**
+ * Holds those signals while the unpublished window is open, so a Ctrl-C or a harness kill during
+ * the suites ends the cut through its own rollback instead of killing it mid-window. A listener
+ * only runs when the event loop turns, and the suites run synchronously, so the cut yields with
+ * `settle()` after each suite before it reads `received`. A signal sent to the whole process group
+ * also ends the running suite, so that is where the cut notices it. SIGKILL cannot be held.
+ */
+export function createInterruptGuard({ target = process, signals = INTERRUPT_SIGNALS } = {}) {
+  let received = null;
+  const onSignal = (signal) => {
+    received ??= signal;
+  };
+  for (const signal of signals) target.on(signal, onSignal);
+  let disposed = false;
+  return {
+    get received() {
+      return received;
+    },
+    settle: () => new Promise((resolve) => setImmediate(resolve)),
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      for (const signal of signals) target.off(signal, onSignal);
+    },
+  };
+}
+
+function interruptedError(signal) {
+  return new Error(`the cut was interrupted by ${signal} before anything was pushed, so it stopped there; nothing was published`);
+}
+
 function releaseAuditTimeoutMs(environment = process.env) {
   const timeout = Number(environment.SIDEQUEST_RELEASE_AUDIT_TIMEOUT_MS);
   return Number.isFinite(timeout) && timeout > 0 ? Math.floor(timeout) : RELEASE_AUDIT_TIMEOUT_MS;
@@ -456,9 +491,23 @@ function localTagClashMessage(git, plan, clashes, remote, { force = false } = {}
       ? `these local tags are leftovers from an unpublished attempt, which --force would recreate once the tags above are resolved: ${clashes.leftover.join(', ')}.`
       : `these local tags are leftovers from an unpublished attempt: ${clashes.leftover.join(', ')}. ` +
         `${remote} has none of them, no other configured remote lists them, and neither ${remote}/${plan.publishBranch} nor any remote-tracking branch contains the commits they mark. ` +
-        `Delete them with git tag -d ${clashes.leftover.join(' ')} and retry, or pass --force to recreate them at the new release commit; --force never moves a tag on ${remote}.`);
+        `Delete them with git tag -d ${clashes.leftover.join(' ')} and retry, or pass --force to recreate them at the new release commit; --force never moves a tag on ${remote}. ` +
+        TAG_DELETE_LOCK_NOTE);
   }
   return parts.join('\n');
+}
+
+// A cut that leaves tags behind has already released the publish lock, and inside Claude Code the
+// Sidequest destructive-git guard refuses a manual `git tag -d` without it. Every message that hands
+// the operator a `git tag -d` says so, or the printed undo is refused the moment it is run.
+const TAG_DELETE_LOCK_NOTE =
+  'From a Claude Code session, the Sidequest destructive-git guard refuses git tag -d without the publish lock: ' +
+  'run sidequest publish lock first and sidequest publish unlock after.';
+
+/** The plain statement every no-rollback failure starts its undo with: what was left, and what it blocks. */
+function keptTagsNotice(plan, commit) {
+  return `The local tags ${plan.tags.join(', ')} were kept${commit ? ` on ${commit}` : ''}. ` +
+    'A retry stops on them as leftovers until they are deleted.';
 }
 
 function tagOptFix(remotes) {
@@ -562,7 +611,7 @@ function recoverFromFailure(git, plan, context) {
   if (decision.action === 'keep') {
     return {
       rollback: { status: 'kept', reason: decision.reason },
-      message: `--keep-on-failure left the release commit ${commit} and its tags in place.\n${instructions}`,
+      message: `--keep-on-failure left the release commit ${commit} and its tags in place.\n${keptTagsNotice(plan, commit)}\n${instructions}`,
     };
   }
   if (pushStarted && !marketplacePublished) {
@@ -570,15 +619,19 @@ function recoverFromFailure(git, plan, context) {
       rollback: { status: 'skipped', reason: decision.reason },
       message: [
         `The push to ${remote} did not complete, so nothing was rolled back automatically.`,
+        keptTagsNotice(plan, commit),
         `Confirm ${remote} has neither ${commit} on ${plan.publishBranch} nor the tags ${plan.tags.join(', ')}, then undo the local window:`,
         `  git reset --hard ${basePin}`,
         `  git tag -d ${plan.tags.join(' ')}`,
+        TAG_DELETE_LOCK_NOTE,
       ].join('\n'),
     };
   }
   return {
     rollback: { status: 'skipped', reason: decision.reason },
-    message: marketplacePublished ? instructions : `Not rolled back automatically: ${decision.reason}.\n${instructions}`,
+    message: marketplacePublished
+      ? instructions
+      : `Not rolled back automatically: ${decision.reason}.\n${keptTagsNotice(plan, commit)}\n${instructions}`,
   };
 }
 
@@ -614,6 +667,7 @@ function releaseRecoveryInstructions(plan, originalHead, remote, marketplacePubl
     `  git reset --hard ${originalHead}`,
     `  git tag -d ${plan.tags.join(' ')}`,
     'A reset does not delete local tags, so run both commands before retrying.',
+    TAG_DELETE_LOCK_NOTE,
   ].join('\n');
 }
 
@@ -1144,6 +1198,13 @@ export async function cut(options = {}) {
     // Set before the first push is attempted, never after: a push that throws may still have
     // reached the remote, so from this point on nothing is rolled back automatically.
     let pushStarted = false;
+    // Until the first push, a SIGINT, SIGTERM or SIGHUP ends the cut through the rollback below
+    // rather than killing it with the window open (SQ-429).
+    const interrupt = createInterruptGuard();
+    const stopIfInterrupted = async () => {
+      await interrupt.settle();
+      if (interrupt.received) throw interruptedError(interrupt.received);
+    };
     try {
       const failures = [];
       const runSuite = options.runSuite ?? defaultSuiteRunner(repoRoot, { log, tag: plan.tag });
@@ -1152,9 +1213,18 @@ export async function cut(options = {}) {
       if (localSuitesSkipped) {
         log(`Test CI on the pinned commit ${pinned} passed; skipping local plugin suites. Pass --force-local-tests to run them.`);
       }
+      if (!skipTests && !localSuitesSkipped && plan.suites.length > 0) {
+        // The one line a SIGKILLed cut leaves behind, so its window can still be undone.
+        log(
+          `running suites on release commit ${commit} with local tags ${plan.tags.join(', ')}; ` +
+          'a failure or interrupt rolls them back, but if this process is killed outright, undo with ' +
+          `git reset --hard ${basePin} and git tag -d ${plan.tags.join(' ')}.`,
+        );
+      }
       if (!skipTests && !localSuitesSkipped) {
         for (const suite of plan.suites) {
           const result = runSuite(suite);
+          await stopIfInterrupted();
           if (result.code !== 0) {
             const logNotice = result.logPath ? ` (log: ${result.logPath})` : '';
             failures.push(`${suite.plugin}: ${result.command} exited ${result.code}${logNotice}`);
@@ -1173,6 +1243,10 @@ export async function cut(options = {}) {
         log(`warning: ${warning}`);
       }
       assertReleaseIntact(git, plan, commit);
+      // Last look before anything leaves this clone. Past here a signal takes Node's default again,
+      // because a push that has started is never rolled back.
+      await stopIfInterrupted();
+      interrupt.dispose();
 
       const refspecs = planRefspecs(plan, commit);
       const marketplacePush = marketplaceRefspecs(plan, commit);
@@ -1226,6 +1300,8 @@ export async function cut(options = {}) {
       const failure = new Error(`${error.message}\n${recovery.message}`, { cause: error });
       failure.rollback = recovery.rollback;
       throw failure;
+    } finally {
+      interrupt.dispose();
     }
   } finally {
     if (publishLockAcquired) {
