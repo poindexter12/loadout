@@ -39,6 +39,9 @@ interface RangeResult {
   reconciled?: boolean;
   divergedPath?: string;
   message?: string;
+  baseOnTip?: boolean;
+  behindRemote?: string[];
+  integrationBranch?: string;
 }
 
 const commitScope = require('../lib/commit-scope.js') as {
@@ -50,7 +53,7 @@ const commitScope = require('../lib/commit-scope.js') as {
   isInScope(file: string, files: string[]): boolean;
   validateCommitRangeScope(cwd: string, commits: string[], files: string[]): ScopeResult;
   submissionRange(cwd: string, opts: Record<string, unknown>): RangeResult;
-  validateStoredSubmissionRange(cwd: string, submission: unknown): RangeResult;
+  validateStoredSubmissionRange(cwd: string, submission: unknown, ticketRef?: unknown, integrationBranchOverride?: unknown): RangeResult;
   scopedWorkPending(cwd: string, files: unknown, opts?: unknown): any;
   ticketCommitScope(effectiveFiles: unknown, declaredFiles: unknown, ticketRef: unknown): string[];
   releaseFragmentOwner(fragment: unknown): string | null;
@@ -1361,4 +1364,99 @@ test('a foreign release fragment refusal names the requesting ref and the owning
     assert.equal(message.includes('null'), false, message);
     assert.ok(message.includes(foreignFragment), message);
   }
+});
+
+// SQ-431: in PR delivery the board never moves local main, so a merged wave
+// reconciles against origin/main while local main is still behind it.
+const { submissionRangeFailureMessage } = require('../lib/mcp-lifecycle.js') as {
+  submissionRangeFailureMessage(ticket: unknown, range: unknown, gitRef: string): string;
+};
+
+function commitFile(root: string, file: string, body: string): string {
+  fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+  fs.writeFileSync(path.join(root, file), body);
+  git(root, ['add', '--', file]);
+  git(root, ['commit', '-q', '-m', `add ${file}`]);
+  return git(root, ['rev-parse', 'HEAD']);
+}
+
+test('SQ-431: a merged candidate revalidates against origin/main while local main is behind it', () => {
+  const root = repo();
+  const staleMain = git(root, ['rev-parse', 'HEAD']);
+  git(root, ['checkout', '-q', '--detach']);
+  const landed = commitFile(root, 'plugins/other-plugin/landed.js', 'landed elsewhere\n');
+  git(root, ['update-ref', 'refs/remotes/origin/main', landed]);
+  const tip = commitFile(root, 'plugins/sidequest/stale.js', 'ticket\n');
+  pin(root, 'refs/sidequest/SQ-431', tip);
+  const range = commitScope.submissionRange(root, { commit: tip, gitRef: 'refs/sidequest/SQ-431', upstream: 'origin/main', integrationBranch: 'main' });
+  assert.equal(range.ok, true, `ticket range was refused: ${range.reason}`);
+  assert.equal(range.base, landed, 'the dispatch base is origin/main, ahead of local main');
+
+  // GitHub merges the wave; the board fetches origin/main and leaves main alone.
+  git(root, ['checkout', '-q', '--detach', landed]);
+  git(root, ['merge', '-q', '--no-ff', '-m', 'Merge pull request', tip]);
+  git(root, ['update-ref', 'refs/remotes/origin/main', git(root, ['rev-parse', 'HEAD'])]);
+  git(root, ['checkout', '-q', 'main']);
+  assert.equal(git(root, ['rev-parse', 'main']), staleMain);
+
+  const revalidated = commitScope.validateStoredSubmissionRange(root, {
+    commit: tip,
+    gitRef: 'refs/sidequest/SQ-431',
+    upstream: range.upstream,
+    upstreamCommit: range.upstreamCommit,
+    integrationBranch: 'main',
+    base: range.base,
+    commits: range.commits,
+    changedPaths: range.changedPaths,
+    admittedScope: ['plugins/sidequest/stale.js'],
+  }, 'SQ-431', 'main');
+  assert.equal(revalidated.ok, true, `merged candidate was refused: ${revalidated.reason}: ${revalidated.message || ''}`);
+  assert.deepEqual(revalidated.commits, [tip]);
+});
+
+test('SQ-431: base_not_reachable for a base the remote holds says local main is behind, not recreate the work', () => {
+  const root = repo();
+  git(root, ['checkout', '-q', '--detach']);
+  const remoteBase = commitFile(root, 'plugins/other-plugin/landed.js', 'landed elsewhere\n');
+  git(root, ['update-ref', 'refs/remotes/origin/main', remoteBase]);
+  const work = commitFile(root, 'plugins/sidequest/behind.js', 'ticket\n');
+  git(root, ['checkout', '-q', 'main']);
+  const localOnly = commitFile(root, 'plugins/other-plugin/local.js', 'local only\n');
+  git(root, ['checkout', '-q', '--detach', work]);
+  git(root, ['merge', '-q', '--no-ff', '-m', 'take local main', localOnly]);
+  const tip = git(root, ['rev-parse', 'HEAD']);
+  pin(root, 'refs/sidequest/SQ-431', tip);
+
+  const range = commitScope.submissionRange(root, { commit: tip, gitRef: 'refs/sidequest/SQ-431', upstream: 'main', integrationBranch: 'main', base: remoteBase });
+  assert.equal(range.ok, false);
+  assert.equal(range.reason, 'base_not_reachable');
+  assert.equal(range.baseOnTip, true);
+  assert.deepEqual(range.behindRemote, ['origin/main']);
+  assert.match(range.message || '', /local main is behind the remote/);
+
+  const message = submissionRangeFailureMessage({ ref: 'SQ-431', dispatch: { baseCommit: remoteBase } }, range, 'refs/sidequest/SQ-431');
+  assert.match(message, /local main is behind origin\/main/);
+  assert.match(message, /do not recreate the work/);
+  assert.doesNotMatch(message, /Recreate the ticket work/);
+});
+
+test('SQ-431: a base the submitted commit does not descend from stays a genuine rebuild refusal', () => {
+  const root = repo();
+  git(root, ['checkout', '-q', '--detach']);
+  const sideBase = commitFile(root, 'plugins/other-plugin/side.js', 'side\n');
+  git(root, ['checkout', '-q', 'main']);
+  git(root, ['checkout', '-q', '-b', 'ticket-work']);
+  const tip = commitFile(root, 'plugins/sidequest/genuine.js', 'ticket\n');
+  pin(root, 'refs/sidequest/SQ-431', tip);
+
+  const range = commitScope.submissionRange(root, { commit: tip, gitRef: 'refs/sidequest/SQ-431', upstream: 'main', integrationBranch: 'main', base: sideBase });
+  assert.equal(range.ok, false);
+  assert.equal(range.reason, 'base_not_reachable');
+  assert.equal(range.baseOnTip, false);
+  assert.deepEqual(range.behindRemote, []);
+  assert.match(range.message || '', /not an ancestor of the submitted commit/);
+
+  const message = submissionRangeFailureMessage({ ref: 'SQ-431', dispatch: { baseCommit: sideBase } }, range, 'refs/sidequest/SQ-431');
+  assert.match(message, /Recreate the ticket work from/);
+  assert.doesNotMatch(message, /local \S+ is behind|do not recreate/);
 });

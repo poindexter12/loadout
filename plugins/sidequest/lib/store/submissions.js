@@ -849,6 +849,18 @@ ${verify.outputTail}` : null
           message: `${ticket.ref} integration refused; recorded expected upstream ${scopeValidation.upstreamCommit} is no longer reachable from target branch ${targetBranch}. Rework and submit a fresh candidate against current main, or when the work is verified, have the orchestrator record delivery through groomClose with deliveryCommit.`
         };
       }
+      const behindRemote = Array.isArray(scopeValidation.behindRemote) ? scopeValidation.behindRemote : [];
+      if (scopeValidation.reason === "base_not_reachable" && behindRemote.length) {
+        const localBranch = String(scopeValidation.integrationBranch || integrationBranch || "the integration branch");
+        return {
+          ok: false,
+          reason: scopeValidation.reason,
+          outside,
+          ticket,
+          scopeValidation,
+          message: `${ticket.ref} integration refused; base_not_reachable: local ${localBranch} is behind ${behindRemote.join(", ")}, which already holds submission base ${scopeValidation.base}. Fast-forward local ${localBranch} to ${behindRemote[0]} (from the worktree that has it checked out when a fetch into it refuses), then call integrate again with the same refs. Do not rework or recreate the candidate.`
+        };
+      }
       const scopeFailure = scopeValidation.message || (scopeValidation.reason === "missing_scope_snapshot" ? `${ticket.ref} submission has no admitted scope snapshot.` : outside.length ? `${ticket.ref} integration refused; submitted range changes paths outside its admitted scope: ${outside.join(", ")}.` : `${ticket.ref} integration refused; submitted range validation failed: ${scopeValidation.reason || "unknown"}.`);
       return {
         ok: false,
