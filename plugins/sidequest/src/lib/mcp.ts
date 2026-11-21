@@ -71,7 +71,10 @@ const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 // Raised from 24950 for groomClose landingCommits and deliveryMethod "attested" (SQ-407, 147 bytes)
 // while preserving the 2.5KB reserve. Without them an orchestrator closing work that landed by rebase,
 // fold, or later edits had no legal move but a false "abandoned".
-const MCP_TOOLS_LIST_MAX_BYTES = 25100;
+// Raised from 25100 for the awaiting-user status (SQ-416, 64 bytes: one enum value in list, update,
+// release and submit) while preserving the 2.5KB reserve. An orchestrator filtering or reading a
+// parked ticket has to find the status in the schema, not learn it from a refusal.
+const MCP_TOOLS_LIST_MAX_BYTES = 25170;
 const MCP_TOOLS_LIST_HEADROOM_BYTES = 2500;
 
 function serverVersion() {

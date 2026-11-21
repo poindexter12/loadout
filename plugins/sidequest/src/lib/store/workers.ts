@@ -170,6 +170,8 @@ function reconcileSession(sessionId?: any, opts?: any) {
       });
       if (res && res.ok) {
         released.push(t.ref);
+        // A park detached by SessionEnd stays awaiting-user; its park comment already says so (US-8).
+        if (res.ticket && res.ticket.status === 'awaiting-user') continue;
         try {
           addComment(c.slug, c.ticketId, {
             by: 'sidequest',

@@ -86,7 +86,7 @@ function ticketRank(ticket: Ticket, released: Release): number {
   if (released) return 3;
   if (ticket.submission && !ticket.submission.integratedAt) return 1;
   if (ticket.status === 'done') return 2;
-  if (ticket.status === 'doing' || ticket.status === 'awaiting-oracle') return 1;
+  if (ticket.status === 'doing' || ticket.status === 'awaiting-user' || ticket.status === 'awaiting-oracle') return 1;
   return 0;
 }
 

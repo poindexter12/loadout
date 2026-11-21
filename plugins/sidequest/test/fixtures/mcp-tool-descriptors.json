@@ -47,6 +47,7 @@
           "enum": [
             "todo",
             "doing",
+            "awaiting-user",
             "awaiting-oracle",
             "done"
           ]
@@ -444,6 +445,7 @@
           "enum": [
             "todo",
             "doing",
+            "awaiting-user",
             "awaiting-oracle",
             "done"
           ]
@@ -985,6 +987,7 @@
           "enum": [
             "todo",
             "doing",
+            "awaiting-user",
             "awaiting-oracle",
             "done"
           ]
@@ -1212,6 +1215,7 @@
           "enum": [
             "todo",
             "doing",
+            "awaiting-user",
             "awaiting-oracle",
             "done"
           ]
