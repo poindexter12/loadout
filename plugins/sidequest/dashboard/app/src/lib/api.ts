@@ -1,4 +1,4 @@
-import type { ActivityItem, Category, Health, JsonRecord, NotificationPayload, Project, QuestionAnswer, QuestionDetail, QuestionRow, RoutingCatalog, RoutingPreview, RoutingProfile, Story, Ticket } from './types';
+import type { ActivityItem, Category, Health, JsonRecord, NotificationPayload, Project, QuestionAnswer, QuestionAnswered, QuestionDetail, QuestionRow, RoutingCatalog, RoutingPreview, RoutingProfile, Story, Ticket } from './types';
 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -83,6 +83,7 @@ export class ApiClient {
   questions(values: Query = {}) { return this.request<{ questions: QuestionRow[] }>('GET', `/api/questions${query(values)}`); }
   question(qid: string, project: string) { return this.request<{ question: QuestionDetail }>('GET', `/api/questions/${path(qid)}${query({ project })}`); }
   questionAnswer(qid: string, project: string) { return this.request<QuestionAnswer>('GET', `/api/questions/${path(qid)}/answer${query({ project })}`); }
+  answerQuestion(qid: string, project: string, body: { text: string } | { decline: true }) { return this.request<QuestionAnswered>('POST', `/api/questions/${path(qid)}/answer${query({ project })}`, body); }
   activity(values: Query = {}) { return this.request<{ activity: ActivityItem[] }>('GET', `/api/activity${query(values)}`); }
   markNotificationsRead(body: { id: string } | { all: true }) { return this.request<JsonRecord>('POST', '/api/notifications/read', body); }
   dismissNotification(id: string) { return this.request<JsonRecord>('DELETE', `/api/notifications/${path(id)}`); }
