@@ -358,7 +358,13 @@ function annotateReminders(tickets?: any) {
  * The list and the detail never carry answer text, `preview` or `bodyRef`
  * (story decision D7). The answer body is a separate request so a list or a
  * detail panel cannot leak a long answer into a view that only wanted the
- * question. The answer POST is US-8 Q9b, not this file's job yet.
+ * question.
+ *
+ *   POST /api/questions/<qid>/answer    record the user's answer (US-8 Q9b)
+ *
+ * The POST is the one write here. It runs the `answer` board tool's own
+ * handler with via:"dashboard", so first-writer-wins, the unpark and the
+ * delivery rules are the tool's, not a copy (decision U3).
  *
  * Reads never refold per request. Each project's active segment keeps an
  * in-memory fold that advanceFold extends by only the new bytes while the
@@ -708,12 +714,106 @@ function questionAnswer(q?: any, qid?: any) {
   };
 }
 
+// The answer tool lives in the MCP layer, which pulls in most of the plugin, so
+// the dashboard loads it on the first POST rather than at startup.
+let answerToolHandler: any = null;
+function answerTool() {
+  if (!answerToolHandler) {
+    const tool = require('./mcp-questions').tools.find((candidate?: any) => candidate.name === 'answer');
+    if (!tool) throw new Error('the answer board tool is missing');
+    answerToolHandler = tool.handler;
+  }
+  return answerToolHandler;
+}
+
+// A dashboard answer has no Claude Code session behind it. The dashboard
+// process may have inherited the session id of whoever launched it, and the
+// answer tool stamps the recorded event with the runtime session, so hide it
+// for the one synchronous call rather than credit that session with the answer.
+const SESSION_ENV_KEYS = ['CLAUDE_CODE_SESSION_ID', 'CLAUDE_SESSION_ID'];
+function withoutSessionIdentity(run: () => any) {
+  const saved = SESSION_ENV_KEYS.map((key) => [key, process.env[key]] as const);
+  for (const key of SESSION_ENV_KEYS) delete process.env[key];
+  try {
+    return run();
+  } finally {
+    for (const [key, value] of saved) if (value !== undefined) process.env[key] = value;
+  }
+}
+
+const ANSWER_REFUSAL_STATUS: Record<string, number> = {
+  already_answered: 409,
+  no_such_question: 409,
+  answer_empty: 400,
+  answer_too_long: 400,
+  question_log_busy: 503,
+};
+
+class AnswerRefusal extends QuestionRequestError {
+  body: any;
+  constructor(status: number, body: any) {
+    super(status, body.error);
+    this.body = body;
+  }
+}
+
+// A sentence for the person who answered, built from the answer tool's own result: a live or held
+// executor gets the answer piggybacked on its next board call (Q4), and the orchestrating session
+// sees the unpark on the board and resumes a stopped executor with the returned SendMessage.
+function answerDelivery(result?: any) {
+  const parts = [result.send
+    ? `${result.send.to} holds ${result.ref}'s claim and gets this answer on its next board call. If it has stopped, the orchestrating session resumes it with the SendMessage below.`
+    : `No executor holds ${result.ref}. The answer rides in the briefing of its next dispatch.`];
+  if (result.status === 'awaiting-user') parts.push(`${result.ref} still waits on other questions: ${(result.openForTicket || []).join(', ')}.`);
+  return parts.join(' ');
+}
+
+// POST /api/questions/<qid>/answer?project= with {text} or {decline:true}.
+// First writer wins: a second, different answer is refused 409 and the first
+// stands. Repeating the recorded answer exactly is an idempotent 200. The
+// dashboard never supersedes an answer; that stays the orchestrating session's.
+function postQuestionAnswer(q?: any, qid?: any, body?: any) {
+  const { slug, state } = locateQuestion(q, qid);
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new QuestionRequestError(400, 'the body must be a JSON object with text or decline');
+  if (body.supersedes != null) throw new QuestionRequestError(400, 'the dashboard does not supersede an answer; the first answer stands');
+  if (body.text != null && typeof body.text !== 'string') throw new QuestionRequestError(400, 'text must be a string');
+  if (body.decline != null && typeof body.decline !== 'boolean') throw new QuestionRequestError(400, 'decline must be true or false');
+  const decline = body.decline === true;
+  if (decline && typeof body.text === 'string' && body.text.trim()) throw new QuestionRequestError(400, 'give text or decline, not both');
+  if (!store.getTicket(slug, state.ref)) throw new QuestionRequestError(404, `ticket ${state.ref} is no longer on board ${slug}`);
+  const result = withoutSessionIdentity(() => answerTool()({
+    ref: state.ref,
+    project: slug,
+    question: state.qid,
+    text: decline ? null : body.text,
+    decline,
+    via: 'dashboard',
+  }));
+  if (!result.ok) {
+    let error = result.message || result.reason;
+    if (result.reason === 'already_answered') {
+      error = `${state.ref} ${state.seq} is already answered (${result.aid}${result.via ? ` via ${result.via}` : ''}). The first answer stands; reload to see it.`;
+    }
+    throw new AnswerRefusal(ANSWER_REFUSAL_STATUS[result.reason] || 400, {
+      error,
+      reason: result.reason,
+      qid: state.qid,
+      ...(result.aid ? { aid: result.aid } : {}),
+      ...(result.max != null ? { max: result.max, length: result.length } : {}),
+    });
+  }
+  // The tool's own `instruction` is addressed to a model; the dashboard gets a
+  // sentence for the person instead. `send` stays so the page can show it.
+  const { instruction: _instruction, ...recorded } = result;
+  return { ...recorded, delivery: answerDelivery(result) };
+}
+
 function sendQuestionResponse(res?: any, build?: any) {
   try {
     sendJson(res, 200, build());
   } catch (error: any) {
     if (error instanceof QuestionRequestError) {
-      sendJson(res, error.status, { error: error.message });
+      sendJson(res, error.status, error instanceof AnswerRefusal ? error.body : { error: error.message });
       return;
     }
     throw error;
@@ -1218,6 +1318,17 @@ async function handle(req?: any, res?: any) {
   const questionAnswerMatch = /^\/api\/questions\/([^/]+)\/answer$/.exec(pathname);
   if (req.method === 'GET' && questionAnswerMatch) {
     sendQuestionResponse(res, () => questionAnswer(q, questionAnswerMatch[1]));
+    return;
+  }
+  if (req.method === 'POST' && questionAnswerMatch) {
+    let body: any;
+    try {
+      body = await readJsonBody(req);
+    } catch (_: any) {
+      sendJson(res, 400, { error: 'invalid JSON body' });
+      return;
+    }
+    sendQuestionResponse(res, () => postQuestionAnswer(q, questionAnswerMatch[1], body));
     return;
   }
 

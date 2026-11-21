@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import type { BoardState } from '../../state/board.svelte';
   import type { ActivityItem, QuestionDetail, QuestionRow } from '../../types';
+  import { answerRefusal, answerRequest, canAnswer, togglePick } from './answer';
 
   let { state: board }: { state: BoardState } = $props();
   let tab = $state<'questions' | 'activity'>('questions');
@@ -14,6 +15,11 @@
   let detailLoading = $state(false);
   let answer = $state<string | null>(null);
   let answerLoading = $state(false);
+  let picked = $state<string[]>([]);
+  let note = $state('');
+  let submitting = $state(false);
+  let submitError = $state('');
+  let delivery = $state('');
 
   const project = $derived(board.selectedProject === 'all' ? 'all' : board.selectedProject);
 
@@ -51,10 +57,45 @@
     }
   }
 
+  function resetForm() {
+    picked = [];
+    note = '';
+    submitError = '';
+    delivery = '';
+  }
+
+  async function reloadSelected() {
+    if (!selected) return;
+    selected = (await board.api.question(selected.qid, selected.project)).question;
+  }
+
+  async function submitAnswer(decline: boolean) {
+    if (!selected || submitting) return;
+    const body = decline ? { decline: true as const } : answerRequest(picked, note);
+    if (!body) { submitError = 'Pick an option or write an answer first.'; return; }
+    submitting = true;
+    submitError = '';
+    try {
+      const recorded = await board.api.answerQuestion(selected.qid, selected.project, body);
+      delivery = recorded.delivery;
+      picked = [];
+      note = '';
+      await reloadSelected();
+      void load();
+    } catch (caught) {
+      const refusal = answerRefusal(caught);
+      submitError = refusal.message;
+      if (refusal.answeredElsewhere) { await reloadSelected().catch(() => {}); void load(); }
+    } finally {
+      submitting = false;
+    }
+  }
+
   async function openQuestion(row: QuestionRow) {
     selectedQid = row.qid;
     detailLoading = true;
     answer = null;
+    resetForm();
     try {
       selected = (await board.api.question(row.qid, row.project)).question;
       globalThis.location.hash = `/questions/${row.qid}`;
@@ -70,6 +111,7 @@
     selected = null;
     selectedQid = null;
     answer = null;
+    resetForm();
     globalThis.location.hash = '/questions';
   }
 
@@ -145,10 +187,30 @@
           {:else}<button onclick={() => void revealAnswer()} disabled={answerLoading}>{answerLoading ? 'Loading answer…' : 'Show answer'}</button>{/if}
         </section>
       {/if}
+      {#if delivery}<p class="delivery" role="status">{delivery}</p>{/if}
+      {#if canAnswer(selected)}
+        <form class="answer-form" aria-label="Answer this question" onsubmit={(event) => { event.preventDefault(); void submitAnswer(false); }}>
+          <h3>Answer</h3>
+          {#if selected.options?.length}
+            <div class="choices" role="group" aria-label="Options">
+              {#each selected.options as option (option.label)}
+                <label class="choice"><input type={selected.multiSelect ? 'checkbox' : 'radio'} name="answer-option" checked={picked.includes(option.label)} onchange={() => picked = togglePick(picked, option.label, selected?.multiSelect ?? false)} disabled={submitting} /><span><strong>{option.label}</strong>{#if option.description}<small>{option.description}</small>{/if}</span></label>
+              {/each}
+            </div>
+          {/if}
+          <label class="note"><span>{selected.options?.length ? 'Add a note (optional)' : 'Your answer'}</span><textarea bind:value={note} rows="4" disabled={submitting}></textarea></label>
+          {#if submitError}<p class="error" role="alert">{submitError}</p>{/if}
+          <div class="actions">
+            <button type="submit" class="primary" disabled={submitting}>{submitting ? 'Sending…' : 'Send answer'}</button>
+            <button type="button" onclick={() => void submitAnswer(true)} disabled={submitting} title={selected.default ? `The executor proceeds with its default: ${selected.default}` : 'The executor proceeds with its stated default'}>Decline</button>
+          </div>
+          <p class="meta">The first answer stands. A running executor gets it on its next board call.</p>
+        </form>
+      {:else if submitError}<p class="error" role="alert">{submitError}</p>{/if}
     {/if}
   </aside>
 {/if}
 
 <style>
-  .questions-view { max-width: 68rem; } .view-header, .detail header { display:flex; justify-content:space-between; gap:1rem; align-items:start; } h2, p { margin:0; } .eyebrow { color:var(--text-muted); font-size:.75rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; } h2 { margin-top:.2rem; font-family:var(--font-serif); font-size:1.5rem; } button { font:inherit; cursor:pointer; } .view-header > button, .detail header > button, .answer button { border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); color:var(--text); padding:.45rem .65rem; } .tabs { display:flex; gap:.25rem; margin:1.25rem 0 .75rem; border-bottom:1px solid var(--border); } .tabs button { border:0; border-bottom:2px solid transparent; background:transparent; color:var(--text-muted); padding:.55rem .8rem; } .tabs button.active { border-color:var(--accent); color:var(--accent); font-weight:700; } .question-list, .activity-list { border-top:1px solid var(--border); } .question-row { width:100%; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:1rem; padding:1rem .25rem; border:0; border-bottom:1px solid var(--border); background:transparent; color:var(--text); text-align:left; } .question-row:hover { background:var(--surface-muted); } .question-copy { display:grid; gap:.3rem; min-width:0; } .question-copy strong { line-height:1.35; } .question-copy span, .meta, .activity-list p { color:var(--text-muted); font-size:.84rem; line-height:1.4; } .question-state { display:grid; justify-items:end; align-content:start; gap:.35rem; color:var(--text-muted); font-size:.78rem; text-transform:capitalize; } .question-state b.open { color:var(--accent); } time { color:var(--text-muted); font-size:.78rem; white-space:nowrap; } .activity-list article { display:grid; grid-template-columns:5rem minmax(0,1fr); gap:1rem; padding:1rem .25rem; border-bottom:1px solid var(--border); } .activity-list strong { line-height:1.35; } .activity-list p { margin-top:.25rem; } .empty, .error { color:var(--text-muted); padding:1.2rem .25rem; } .error { color:var(--danger, #b64747); } .detail { position:fixed; z-index:12; right:1rem; top:1rem; bottom:1rem; width:min(34rem, calc(100vw - 2rem)); overflow:auto; padding:1.25rem; background:var(--bg-deep); border:1px solid var(--border-strong); box-shadow:0 1rem 3rem color-mix(in srgb, var(--bg) 55%, transparent); } .question-text { margin:1.25rem 0; line-height:1.55; white-space:pre-wrap; } ul { padding-left:1.2rem; line-height:1.5; } .meta { margin-top:1rem; } .answer { margin-top:1.25rem; padding-top:1rem; border-top:1px solid var(--border); } .answer h3 { margin:0 0 .6rem; } .answer p { white-space:pre-wrap; line-height:1.55; } @media (max-width:640px) { .question-row { grid-template-columns:1fr; } .question-state { justify-items:start; grid-auto-flow:column; justify-content:start; } }
+  .questions-view { max-width: 68rem; } .view-header, .detail header { display:flex; justify-content:space-between; gap:1rem; align-items:start; } h2, p { margin:0; } .eyebrow { color:var(--text-muted); font-size:.75rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; } h2 { margin-top:.2rem; font-family:var(--font-serif); font-size:1.5rem; } button { font:inherit; cursor:pointer; } .view-header > button, .detail header > button, .answer button { border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); color:var(--text); padding:.45rem .65rem; } .tabs { display:flex; gap:.25rem; margin:1.25rem 0 .75rem; border-bottom:1px solid var(--border); } .tabs button { border:0; border-bottom:2px solid transparent; background:transparent; color:var(--text-muted); padding:.55rem .8rem; } .tabs button.active { border-color:var(--accent); color:var(--accent); font-weight:700; } .question-list, .activity-list { border-top:1px solid var(--border); } .question-row { width:100%; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:1rem; padding:1rem .25rem; border:0; border-bottom:1px solid var(--border); background:transparent; color:var(--text); text-align:left; } .question-row:hover { background:var(--surface-muted); } .question-copy { display:grid; gap:.3rem; min-width:0; } .question-copy strong { line-height:1.35; } .question-copy span, .meta, .activity-list p { color:var(--text-muted); font-size:.84rem; line-height:1.4; } .question-state { display:grid; justify-items:end; align-content:start; gap:.35rem; color:var(--text-muted); font-size:.78rem; text-transform:capitalize; } .question-state b.open { color:var(--accent); } time { color:var(--text-muted); font-size:.78rem; white-space:nowrap; } .activity-list article { display:grid; grid-template-columns:5rem minmax(0,1fr); gap:1rem; padding:1rem .25rem; border-bottom:1px solid var(--border); } .activity-list strong { line-height:1.35; } .activity-list p { margin-top:.25rem; } .empty, .error { color:var(--text-muted); padding:1.2rem .25rem; } .error { color:var(--danger, #b64747); } .detail { position:fixed; z-index:12; right:1rem; top:1rem; bottom:1rem; width:min(34rem, calc(100vw - 2rem)); overflow:auto; padding:1.25rem; background:var(--bg-deep); border:1px solid var(--border-strong); box-shadow:0 1rem 3rem color-mix(in srgb, var(--bg) 55%, transparent); } .question-text { margin:1.25rem 0; line-height:1.55; white-space:pre-wrap; } ul { padding-left:1.2rem; line-height:1.5; } .meta { margin-top:1rem; } .answer { margin-top:1.25rem; padding-top:1rem; border-top:1px solid var(--border); } .answer h3 { margin:0 0 .6rem; } .answer p { white-space:pre-wrap; line-height:1.55; } .answer-form { display:grid; gap:.75rem; margin-top:1.25rem; padding-top:1rem; border-top:1px solid var(--border); } .answer-form h3 { margin:0; } .choices { display:grid; gap:.4rem; } .choice { display:grid; grid-template-columns:auto minmax(0,1fr); gap:.6rem; align-items:start; padding:.55rem .65rem; border:1px solid var(--border); border-radius:var(--radius); cursor:pointer; } .choice:has(input:checked) { border-color:var(--accent); } .choice span { display:grid; gap:.2rem; } .choice small { color:var(--text-muted); font-size:.82rem; } .note { display:grid; gap:.35rem; font-size:.84rem; color:var(--text-muted); } .note textarea { font:inherit; color:var(--text); background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:.5rem .6rem; resize:vertical; } .actions { display:flex; gap:.5rem; } .actions button { border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); color:var(--text); padding:.45rem .75rem; } .actions button.primary { background:var(--accent); border-color:var(--accent); color:var(--bg); font-weight:700; } .actions button:disabled { opacity:.6; cursor:default; } .delivery { margin-top:1rem; padding:.6rem .7rem; border-left:3px solid var(--accent); background:var(--surface-muted); font-size:.86rem; line-height:1.45; } @media (max-width:640px) { .question-row { grid-template-columns:1fr; } .question-state { justify-items:start; grid-auto-flow:column; justify-content:start; } }
 </style>
