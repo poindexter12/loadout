@@ -983,6 +983,169 @@ test('SQ-417 archived questions list from their segment index, and their detail 
   assert.strictEqual((await fetchJson(started.port, `/api/questions/${asked.qid}/answer?project=${slug}`)).text, 'INLINE-ANSWER-SQ417 archived');
 });
 
+/* ------------------------------------------------------------------ *
+ *  SQ-424 (US-8 Q9b): answering from the dashboard
+ * ------------------------------------------------------------------ */
+
+const { pendingAnswerHolder, attachPendingAnswers } = require('../lib/mcp-questions.js');
+let answerLaunches = 0;
+
+// A board ticket with a launched, bound and claimed dispatch, so the answer has a live executor to
+// reach and markDispatchStopped can park it held.
+function answerFixture(name?: any) {
+  const { slug, dir } = questionProject(name);
+  const category = store.getCategory('codebase-exploration');
+  store.setCategory(Object.assign({}, category, { route: { model: 'sonnet', effort: 'medium' }, fallback: null }));
+  const ticket = store.createTicket(slug, {
+    title: `dashboard answer ${name}`,
+    description: 'Where: dashboard answer fixture. Contract: answer a question from the dashboard. Verify: inspect the question log.',
+    category: 'codebase-exploration',
+    files: ['lib/fixture.js'],
+    source: 'cli',
+  });
+  const sessionId = `dashboard-answer-${++answerLaunches}-${Date.now()}`;
+  const prepared = store.prepareDispatch(slug, ticket.ref, { sessionId, sharedTree: false });
+  const executor = prepared.ticket.dispatchExecutor;
+  const by = `dashboard-answer-worker-${ticket.id}`;
+  const agentName = `sq-${ticket.ref.toLowerCase()}-dashboard`;
+  assert.strictEqual(store.recordDispatchLaunch(slug, ticket.ref, { token: prepared.token, executor, sessionId, agentName }).ok, true);
+  assert.strictEqual(store.bindDispatchAgent(sessionId, executor, by, agentName).ok, true);
+  const claimed = store.claimTicket(slug, ticket.ref, by, { token: prepared.token, executor, source: 'mcp' });
+  assert.strictEqual(claimed.ok, true, claimed.message);
+  const ask = (text?: any) => {
+    const asked = askedOk(questionLog.askQuestion(dir, { ref: ticket.ref, ticketId: ticket.id, agent: agentName, header: 'Schema', text, blocking: true }));
+    askedOk(questionLog.recordSent(dir, { qid: asked.qid, to: 'main' }));
+    return asked;
+  };
+  return { slug, dir, ticket, by, agentName, sessionId, executor, ask };
+}
+
+function postAnswer(port?: any, slug?: any, qid?: any, body?: any) {
+  return requestJson(port, 'POST', `/api/questions/${qid}/answer?project=${slug}`, body);
+}
+
+test('SQ-424 POST /api/questions/<qid>/answer records via dashboard through the answer tool, and the held executor gets it on its next board call', { concurrency: false }, async (t?: any) => {
+  const fx = answerFixture('post');
+  const asked = fx.ask('Which schema should the migration target?');
+  const priorSession = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'dashboard-launcher-session';
+  const started = await start(await availablePort());
+  t.after(() => {
+    started.server.close();
+    if (priorSession === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = priorSession;
+  });
+
+  const posted = await postAnswer(started.port, fx.slug, asked.qid, { text: 'Target v2.' });
+  assert.strictEqual(posted.status, 200, JSON.stringify(posted.body));
+  assert.strictEqual(posted.body.ok, true);
+  assert.deepStrictEqual([posted.body.qid, posted.body.ref, posted.body.seq, posted.body.via, posted.body.declined], [asked.qid, fx.ticket.ref, 'Q1', 'dashboard', false]);
+  assert.strictEqual(posted.body.status, 'doing', 'a live claim stays doing');
+  assert.strictEqual(posted.body.send.to, fx.agentName, 'the same SendMessage the answer tool returns for a live executor');
+  assert.ok(posted.body.send.message.includes('Target v2.'));
+  assert.strictEqual(posted.body.instruction, undefined, 'the model-facing instruction is not shown to a person');
+  assert.match(posted.body.delivery, new RegExp(`${fx.agentName} holds ${fx.ticket.ref}'s claim`));
+  assert.strictEqual(process.env.CLAUDE_CODE_SESSION_ID, 'dashboard-launcher-session', 'the hidden session id is restored');
+
+  const state = questionLog.findQuestion(fx.dir, asked.qid);
+  assert.strictEqual(state.answered.via, 'dashboard');
+  assert.strictEqual(state.answered.session, null, 'a dashboard answer is not credited to the session that launched the dashboard');
+  assert.strictEqual(state.answered.text, 'Target v2.');
+
+  // Q4's piggyback: the claim holder's next board-tool reply carries the answer, once.
+  const holder = pendingAnswerHolder('pulse', { project: fx.slug, ref: fx.ticket.ref, by: fx.by });
+  assert.ok(holder, 'the claim holder is found');
+  const reply = attachPendingAnswers({ ok: true }, holder);
+  assert.deepStrictEqual(reply.answers.map((answer?: any) => [answer.qid, answer.aid, answer.via]), [[asked.qid, posted.body.aid, 'dashboard']]);
+  assert.strictEqual(attachPendingAnswers({ ok: true }, holder).answers, undefined, 'delivered once per aid');
+
+  const detail = await fetchJson(started.port, `/api/questions/${asked.qid}?project=${fx.slug}`);
+  assert.deepStrictEqual([detail.question.state, detail.question.answer.aid, detail.question.answer.via], ['answered', posted.body.aid, 'dashboard']);
+});
+
+test('SQ-424 dashboard answers are first-writer-wins: a different second answer is refused 409 and the first stands', async (t?: any) => {
+  const fx = answerFixture('first-writer');
+  const asked = fx.ask('Which region?');
+  const started = await start(await availablePort());
+  t.after(() => started.server.close());
+
+  const first = await postAnswer(started.port, fx.slug, asked.qid, { text: 'eu-west' });
+  assert.strictEqual(first.status, 200, JSON.stringify(first.body));
+  const repeat = await postAnswer(started.port, fx.slug, asked.qid, { text: 'eu-west' });
+  assert.strictEqual(repeat.status, 200, 'resubmitting the recorded answer is idempotent');
+  assert.deepStrictEqual([repeat.body.aid, repeat.body.idempotent], [first.body.aid, true]);
+
+  const second = await postAnswer(started.port, fx.slug, asked.qid, { text: 'us-east' });
+  assert.strictEqual(second.status, 409);
+  assert.deepStrictEqual([second.body.reason, second.body.aid, second.body.qid], ['already_answered', first.body.aid, asked.qid]);
+  assert.match(second.body.error, /already answered .*The first answer stands/);
+  const declined = await postAnswer(started.port, fx.slug, asked.qid, { decline: true });
+  assert.strictEqual(declined.status, 409, 'a decline after an answer is refused the same way');
+  const superseding = await postAnswer(started.port, fx.slug, asked.qid, { text: 'us-east', supersedes: first.body.aid });
+  assert.strictEqual(superseding.status, 400, 'the dashboard never supersedes');
+
+  const state = questionLog.findQuestion(fx.dir, asked.qid);
+  assert.strictEqual(state.answered.aid, first.body.aid);
+  assert.strictEqual(state.answered.text, 'eu-west');
+  assert.deepStrictEqual(state.superseded || [], []);
+});
+
+test('SQ-424 a dashboard answer to the last blocking question unparks a held park; a decline records declined', async (t?: any) => {
+  const fx = answerFixture('unpark');
+  const first = fx.ask('Which schema?');
+  const second = fx.ask('Which region?');
+  assert.strictEqual(store.markDispatchStopped(fx.sessionId, fx.executor, fx.by, fx.agentName).ok, true);
+  assert.strictEqual(store.getTicket(fx.slug, fx.ticket.ref).status, 'awaiting-user');
+  const started = await start(await availablePort());
+  t.after(() => started.server.close());
+
+  const partial = await postAnswer(started.port, fx.slug, first.qid, { text: 'v2' });
+  assert.strictEqual(partial.status, 200, JSON.stringify(partial.body));
+  assert.strictEqual(partial.body.status, 'awaiting-user');
+  assert.match(partial.body.delivery, new RegExp(`still waits on other questions: ${second.qid}`));
+
+  const last = await postAnswer(started.port, fx.slug, second.qid, { decline: true });
+  assert.strictEqual(last.status, 200, JSON.stringify(last.body));
+  assert.deepStrictEqual([last.body.status, last.body.declined, last.body.via], ['doing', true, 'dashboard']);
+  assert.strictEqual(last.body.send.to, fx.agentName, 'a held park still has its executor to resume');
+  const after = store.getTicket(fx.slug, fx.ticket.ref);
+  assert.deepStrictEqual([after.status, after.claim.by, after.park], ['doing', fx.by, undefined]);
+});
+
+test('SQ-424 dashboard answer POST rejects malformed requests without recording anything', async (t?: any) => {
+  const fx = answerFixture('reject');
+  const asked = fx.ask('Which schema?');
+  const started = await start(await availablePort());
+  t.after(() => started.server.close());
+
+  for (const [body, status, pattern] of [
+    [{ text: 42 }, 400, /text must be a string/],
+    [{ decline: 'yes' }, 400, /decline must be true or false/],
+    [{ text: 'v2', decline: true }, 400, /text or decline, not both/],
+    [{ text: '   ' }, 400, /./],
+    [{}, 400, /./],
+    [null, 400, /./],
+    [['v2'], 400, /must be a JSON object/],
+  ] as any[]) {
+    const refused = await postAnswer(started.port, fx.slug, asked.qid, body);
+    assert.strictEqual(refused.status, status, `${JSON.stringify(body)} -> ${JSON.stringify(refused.body)}`);
+    assert.match(refused.body.error, pattern);
+  }
+  assert.strictEqual((await postAnswer(started.port, fx.slug, 'not-a-qid', { text: 'v2' })).status, 400);
+  assert.strictEqual((await postAnswer(started.port, fx.slug, questionLog.newQuestionId(), { text: 'v2' })).status, 404);
+  const raw = await new Promise<any>((resolve?: any, reject?: any) => {
+    const req = http.request({ host: '127.0.0.1', port: started.port, path: `/api/questions/${asked.qid}/answer?project=${fx.slug}`, method: 'POST', headers: { 'Content-Type': 'application/json' }, timeout: 1000 }, (res?: any) => {
+      let text = '';
+      res.on('data', (chunk?: any) => (text += chunk));
+      res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(text) }));
+    });
+    req.on('error', reject);
+    req.end('{not json');
+  });
+  assert.deepStrictEqual([raw.status, raw.body.error], [400, 'invalid JSON body']);
+  assert.strictEqual(questionLog.findQuestion(fx.dir, asked.qid).answered, null, 'nothing was recorded');
+});
+
 test('listenOn walks past EADDRINUSE and Windows-excluded EACCES ports', async () => {
   const refusals = new Map([[50000, 'EACCES'], [50001, 'EACCES'], [50002, 'EADDRINUSE']]);
   const port = await listenOn(fakeServer(refusals), 50000, '127.0.0.1', 700);

@@ -29,6 +29,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { spawnSync } = require("node:child_process");
+const { packagesMissingDependencies, dependenciesNotInstalledEvidence } = require("./dependency-preflight.js");
 const defaultVerificationTimeoutMilliseconds = 10 * 60 * 1e3;
 const DEFAULT_OUTPUT_TAIL_BYTES = 16 * 1024;
 const COMMAND_NOT_FOUND_EXIT_CODES = /* @__PURE__ */ new Set([127, 9009]);
@@ -218,6 +219,31 @@ function failedResult(requirement, status, command, logPath, reason, exitCode, t
     failureIdentities: Object.freeze([identity])
   });
 }
+function dependencyPreflightRefusal(requirement, command, cwd, logPath) {
+  let missing;
+  try {
+    missing = packagesMissingDependencies(command, cwd);
+  } catch {
+    return null;
+  }
+  if (!missing.length) return null;
+  const evidence = dependenciesNotInstalledEvidence(command, missing);
+  try {
+    fs.writeFileSync(logPath, `[sidequest] ${evidence}
+`);
+  } catch {
+  }
+  return Object.freeze({
+    kind: requirement.kind,
+    status: "toolchain_missing",
+    evidence,
+    command,
+    logPath,
+    exitCode: null,
+    outputTail: evidence,
+    failureIdentities: Object.freeze(["toolchain_missing:dependencies-not-installed"])
+  });
+}
 function runProcessVerification(requirement, options = {}) {
   const command = String(requirement.command || "").trim();
   if (!command) {
@@ -232,6 +258,10 @@ function runProcessVerification(requirement, options = {}) {
   const logPath = options.logPath || defaultLogPath();
   const timeoutMilliseconds = options.timeoutMilliseconds || defaultVerificationTimeoutMilliseconds;
   const outputTailBytes = options.outputTailBytes || DEFAULT_OUTPUT_TAIL_BYTES;
+  if (options.dependencyPreflight !== false) {
+    const refusal = dependencyPreflightRefusal(requirement, command, options.cwd || process.cwd(), logPath);
+    if (refusal) return refusal;
+  }
   const temporary = temporaryScript(command);
   const { scriptPath, shell } = temporary;
   let outcome = null;

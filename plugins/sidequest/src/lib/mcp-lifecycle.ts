@@ -346,6 +346,7 @@ function sharedTreeSubmissionBoundaries(slug: string, ticket: any): Array<{ ref:
 function submissionRangeRemedy(ticket: any, range: any, gitRef: string): string {
   const reason = String(range.reason || '').trim();
   const pinnedBase = dispatchBaseMessage(ticket);
+  const behindRemote: string[] = Array.isArray(range.behindRemote) ? range.behindRemote.map(String).filter(Boolean) : [];
   const approvedBoundary = Array.isArray(range.approvedBoundaries)
     ? range.approvedBoundaries.find((boundary: any) => Array.isArray(range.approvedBases) && range.approvedBases.includes(boundary.commit))
     : null;
@@ -370,7 +371,12 @@ function submissionRangeRemedy(ticket: any, range: any, gitRef: string): string 
     unrelated_history: `rebuild only this ticket's work from ${pinnedBase}, update ${gitRef}, and resubmit.`,
     missing_base: `restore the recorded base commit, or rebuild only this ticket's work from ${pinnedBase}, then resubmit.`,
     empty_range: `the submitted commit has no work beyond its base. Submit the commit that contains this ticket's work, or use the explicit no-op closeout when no work was produced.`,
-    base_not_reachable: `the supplied base no longer reaches the submitted commit. Recreate the ticket work from ${pinnedBase}, preserve only this ticket's commits, update ${gitRef}, and resubmit.`,
+    // SQ-431: a base already on a remote-tracking ref means the local branch
+    // is behind, not that the range is broken; recreating intact work there is
+    // destructive. Only the genuine case keeps the rebuild remedy.
+    base_not_reachable: behindRemote.length
+      ? `local ${String(range.integrationBranch || 'integration branch')} is behind ${behindRemote.join(', ')}, which already holds the base. Fast-forward local ${String(range.integrationBranch || 'integration branch')} to it and retry with the same commit and base; do not recreate the work.`
+      : `the supplied base no longer reaches the submitted commit. Recreate the ticket work from ${pinnedBase}, preserve only this ticket's commits, update ${gitRef}, and resubmit.`,
     unrecognized_base: unrecognizedBaseRemedy,
     range_changed: `the stored submission range changed. Preserve the original submission for the orchestrator to reconcile; do not replace it by syncing to a branch tip.`,
     no_op_changed: `the stored no-op state changed. Preserve the original submission for the orchestrator to reconcile; do not replace it by syncing to a branch tip.`,

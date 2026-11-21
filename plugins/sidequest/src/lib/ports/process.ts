@@ -7,6 +7,7 @@ const os = require('node:os') as typeof import('node:os');
 const path = require('node:path') as typeof import('node:path');
 const { randomUUID } = require('node:crypto') as typeof import('node:crypto');
 const { spawnSync } = require('node:child_process') as typeof import('node:child_process');
+const { packagesMissingDependencies, dependenciesNotInstalledEvidence } = require('./dependency-preflight.js') as typeof import('./dependency-preflight.js');
 
 export type ProcessVerificationOptions = Readonly<{
   cwd?: string;
@@ -14,6 +15,9 @@ export type ProcessVerificationOptions = Readonly<{
   logPath?: string;
   outputTailBytes?: number;
   environment?: NodeJS.ProcessEnv;
+  // SQ-428: refuse before running when a package the command runs scripts in has no installed
+  // dependencies. On by default; false runs the command regardless.
+  dependencyPreflight?: boolean;
 }>;
 
 export type VerificationProcessPort = Readonly<{
@@ -267,6 +271,35 @@ function failedResult(requirement: VerificationRequirement, status: 'failed_suit
   });
 }
 
+// SQ-428: a worktree without installed dependencies is an environment problem, not a code defect.
+// Classify it as toolchain_missing (which no gate treats as a candidate rejection) and say what to
+// install, instead of running scripts that fail on missing packages.
+function dependencyPreflightRefusal(requirement: VerificationRequirement, command: string, cwd: string, logPath: string): VerificationResult | null {
+  let missing: ReturnType<typeof packagesMissingDependencies>;
+  try {
+    missing = packagesMissingDependencies(command, cwd);
+  } catch {
+    return null;
+  }
+  if (!missing.length) return null;
+  const evidence = dependenciesNotInstalledEvidence(command, missing);
+  try {
+    fs.writeFileSync(logPath, `[sidequest] ${evidence}\n`);
+  } catch {
+    // The returned evidence carries the refusal when the log cannot be written.
+  }
+  return Object.freeze({
+    kind: requirement.kind,
+    status: 'toolchain_missing',
+    evidence,
+    command,
+    logPath,
+    exitCode: null,
+    outputTail: evidence,
+    failureIdentities: Object.freeze(['toolchain_missing:dependencies-not-installed']),
+  });
+}
+
 export function runProcessVerification(requirement: VerificationRequirement, options: ProcessVerificationOptions = {}): VerificationResult {
   const command = String(requirement.command || '').trim();
   if (!command) {
@@ -281,6 +314,10 @@ export function runProcessVerification(requirement: VerificationRequirement, opt
   const logPath = options.logPath || defaultLogPath();
   const timeoutMilliseconds = options.timeoutMilliseconds || defaultVerificationTimeoutMilliseconds;
   const outputTailBytes = options.outputTailBytes || DEFAULT_OUTPUT_TAIL_BYTES;
+  if (options.dependencyPreflight !== false) {
+    const refusal = dependencyPreflightRefusal(requirement, command, options.cwd || process.cwd(), logPath);
+    if (refusal) return refusal;
+  }
   const temporary = temporaryScript(command);
   const { scriptPath, shell } = temporary;
   let outcome: import('node:child_process').SpawnSyncReturns<Buffer> | null = null;

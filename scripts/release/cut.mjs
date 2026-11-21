@@ -37,7 +37,9 @@ tag, then pushes the plugin tags separately.
   --skip-tests             Do not run the changed plugins' suites
   --force-local-tests      Run the changed plugins' suites even when Test passed on the pinned commit.
                            Also the answer when Test passed there without running a released plugin's
-                           suite: the cut refuses that window rather than read the green as coverage
+                           suite: the cut refuses that window rather than read the green as coverage,
+                           and with this flag a normal window runs only the suites CI skipped (a
+                           hotfix still runs every suite)
   --no-merge               The tree is already prepared; skip the fast-forward merge
   --no-branch-check        Allow cutting from a branch other than --publish-branch
   --allow-dirty            Tolerate unstaged or untracked files outside the paths the release writes
@@ -852,8 +854,8 @@ export function assertParentCiPassed(
     const error = new Error(
       `Test workflow run ${run.databaseId} for ${commit} concluded success without running these plugin suites: ${detail}. ` +
       "A commit touching none of a plugin's watched paths short-circuits its leg, so that success says nothing " +
-      'about the plugins this window releases; refusing to publish. Retry with --force-local-tests to run them ' +
-      'locally, or --ci-override "<reason>" when you have other evidence.',
+      'about the plugins this window releases; refusing to publish. Retry with --force-local-tests to run only ' +
+      'those skipped suites locally, or --ci-override "<reason>" when you have other evidence.',
     );
     error.suiteCoverage = { uncovered, runId: run.databaseId };
     throw error;
@@ -1095,6 +1097,7 @@ export async function cut(options = {}) {
           commit: pinned,
           conclusion: 'success',
           uncovered: error.suiteCoverage.uncovered,
+          runId: error.suiteCoverage.runId ?? null,
           error: error.message,
         };
       } else if (ciOverrideReason) {
@@ -1213,7 +1216,22 @@ export async function cut(options = {}) {
       if (localSuitesSkipped) {
         log(`Test CI on the pinned commit ${pinned} passed; skipping local plugin suites. Pass --force-local-tests to run them.`);
       }
-      if (!skipTests && !localSuitesSkipped && plan.suites.length > 0) {
+      // A coverage gap narrows the local run to the gap. The suites CI did run on this exact commit
+      // already passed there, so rerunning them adds a load-sensitive second opinion that can only
+      // refuse a window CI cleared. A hotfix releases cherry-picks rather than the pinned commit,
+      // so the pin's run covers nothing it ships and every suite still runs locally.
+      const coveredByCi = !skipTests && mode === 'normal' && ci?.status === 'uncovered' && ci.commit === pinned
+        ? plan.suites.filter((suite) => !ci.uncovered.includes(suite.plugin))
+        : [];
+      if (coveredByCi.length > 0) {
+        const run = ci.runId ? `Test workflow run ${ci.runId}` : 'the Test workflow run';
+        log(
+          `${run} on the pinned commit ${pinned} ran and passed the suites for ` +
+          `${coveredByCi.map((suite) => suite.plugin).join(', ')}; skipping them locally and running only ` +
+          `${ci.uncovered.join(', ')}.`,
+        );
+      }
+      if (!skipTests && !localSuitesSkipped && plan.suites.length > coveredByCi.length) {
         // The one line a SIGKILLed cut leaves behind, so its window can still be undone.
         log(
           `running suites on release commit ${commit} with local tags ${plan.tags.join(', ')}; ` +
@@ -1223,6 +1241,7 @@ export async function cut(options = {}) {
       }
       if (!skipTests && !localSuitesSkipped) {
         for (const suite of plan.suites) {
+          if (coveredByCi.includes(suite)) continue;
           const result = runSuite(suite);
           await stopIfInterrupted();
           if (result.code !== 0) {

@@ -1055,6 +1055,21 @@ function validateIntegrationSubmission(slug?: any, idOrRef?: any, opts?: any) {
         message: `${ticket.ref} integration refused; recorded expected upstream ${scopeValidation.upstreamCommit} is no longer reachable from target branch ${targetBranch}. Rework and submit a fresh candidate against current main, or when the work is verified, have the orchestrator record delivery through groomClose with deliveryCommit.`,
       };
     }
+    const behindRemote: string[] = Array.isArray((scopeValidation as any).behindRemote) ? (scopeValidation as any).behindRemote : [];
+    if (scopeValidation.reason === 'base_not_reachable' && behindRemote.length) {
+      // SQ-431: the candidate still descends from a base the remote already
+      // holds; only the local branch is behind. Rework would discard intact,
+      // possibly already merged, work, so the remedy is a fast-forward.
+      const localBranch = String((scopeValidation as any).integrationBranch || integrationBranch || 'the integration branch');
+      return {
+        ok: false,
+        reason: scopeValidation.reason,
+        outside,
+        ticket,
+        scopeValidation,
+        message: `${ticket.ref} integration refused; base_not_reachable: local ${localBranch} is behind ${behindRemote.join(', ')}, which already holds submission base ${(scopeValidation as any).base}. Fast-forward local ${localBranch} to ${behindRemote[0]} (from the worktree that has it checked out when a fetch into it refuses), then call integrate again with the same refs. Do not rework or recreate the candidate.`,
+      };
+    }
     const scopeFailure = scopeValidation.message || (scopeValidation.reason === 'missing_scope_snapshot'
       ? `${ticket.ref} submission has no admitted scope snapshot.`
       : outside.length
@@ -4897,7 +4912,7 @@ function assembleSubmissionWave(slug?: any, refs?: any, opts?: any) {
       const worktreeSetup = String(boardConfig(slug)?.worktreeSetup || '').trim();
       const setupEvidence = worktreeSetup
         ? `Configured worktree setup ${JSON.stringify(worktreeSetup)} should provide that command before the gate runs.`
-        : 'No worktree setup is configured to provide the missing command.';
+        : 'No worktree setup is configured to provide the missing command or dependencies; board_config worktreeSetup or worktreeDependencyPaths can provision them for every worktree.';
       return {
         ok: false,
         reason: 'assembled_wave_environment_problem',
