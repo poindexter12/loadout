@@ -78,6 +78,18 @@ The inbox collects comments, reminders, ticket creation, and status activity acr
 
 *Synthetic demo data showing several unread comment notifications from different tickets.*
 
+Questions raised by background executors have their own Questions view. The list shows the question text, ticket reference, asker, whether it blocks progress, and whether it is open or already answered. It never includes answer text. Select a row to open its detail page, where you can read the full question, review its options and default, and see the activity trail.
+
+![Sidequest questions view with an open synthetic executor question](../../../assets/screenshots/sidequest-questions.png)
+
+*Synthetic demo data showing an open question raised by a background executor.*
+
+The detail page is also where you answer. Choose an option or enter free text, then submit your decision or decline it to use the stated default. The first answer wins, whether it comes from the dashboard or the terminal. A dashboard answer is delivered through the same route as `answer`, so the executor can resume its held wait or receive the decision on its next dispatch.
+
+![Sidequest question detail with the answer form](../../../assets/screenshots/sidequest-question-detail.png)
+
+*Synthetic demo data showing the question detail and answer form.*
+
 Open a ticket to edit its fields and read the working context in one place. The detail view keeps a scheduled reminder, dependency links, and the full comment thread beside the ticket fields.
 
 ![Sidequest ticket detail with a populated reminder, dependency link, story, and comment thread](../../../assets/screenshots/sidequest-ticket-detail.png)
