@@ -5,6 +5,8 @@
     "sidequest-kanban.png": "Synthetic three-project Sidequest board with 25 active tickets.",
     "sidequest-filtered-board.png": "Synthetic board filtered to six normal-priority mobile tickets.",
     "sidequest-notifications.png": "Synthetic notification inbox with comment activity across boards.",
+    "sidequest-questions.png": "Synthetic questions view with an open background-executor decision.",
+    "sidequest-question-detail.png": "Synthetic question detail with options and the answer form.",
     "sidequest-settings.png": "Synthetic Sidequest settings dialog with routing and notification controls.",
     "sidequest-archive.png": "Synthetic archive view with nine tickets from three boards.",
     "sidequest-ticket-detail.png": "Synthetic ticket detail with a reminder, dependency link, and comment thread.",
