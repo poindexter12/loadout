@@ -453,3 +453,67 @@ test('a participant reassembled into a new wave opens that wave its own PR', asy
   assert.deepEqual({ number: reopened.pr.number, branch: reopened.pr.branch }, { number: 101, branch: 'sidequest/wave/wave-second' });
   assert.equal(port.creates().length, 2);
 });
+
+// A reworked participant's fresh candidate: the same ticket claimed and submitted again.
+function resubmitCandidate(board: Board, ref: string, file: string) {
+  git(['checkout', '--detach', board.base], board.repo);
+  fs.writeFileSync(path.join(board.repo, file), `${file} reworked\n`);
+  git(['add', file], board.repo);
+  git(['commit', '-m', `rework ${file}`], board.repo);
+  const commit = git(['rev-parse', 'HEAD'], board.repo);
+  git(['checkout', 'main'], board.repo);
+  const gitRef = `refs/sidequest/${ref}`;
+  git(['update-ref', gitRef, commit], board.repo);
+  const target = store.integrationTarget(board.slug);
+  const range = commitScope.submissionRange(board.repo, { commit, gitRef, upstream: target.upstream, integrationBranch: target.branch });
+  assert.equal(range.ok, true, JSON.stringify(range));
+  const claimed = store.claimTicket(board.slug, ref, 'worker', { direct: true });
+  assert.equal(claimed.ok, true, claimed.message || claimed.reason);
+  const recorded = Object.assign({}, range, { integrationMode: target.mode, integrationBranch: target.branch });
+  const submitted = store.submitTicket(board.slug, ref, 'worker', { commit, gitRef, range: recorded, verify: MANUAL_VERIFY, source: 'test' });
+  assert.equal(submitted.ok, true, submitted.message || submitted.reason);
+}
+
+// SQ-437: wave PR #98 closed unmerged, only one participant was reworked, and a
+// fresh joint wave then refused wave_pr_closed_unmerged naming #98, because the
+// un-reworked participant still carried #98 into the new wave. A PR belongs to
+// the wave that opened it, whether or not its close was reconciled first.
+for (const reconciledFirst of [false, true]) {
+  const when = reconciledFirst ? 'reconciled' : 'never reconciled';
+  test(`SQ-437: a new wave opens its own PR instead of inheriting an earlier wave's closed PR (close ${when} before the rework)`, async () => {
+    const board = makeBoard(`inherit-${reconciledFirst ? 'reconciled' : 'stale'}`);
+    const port = fakePort(98);
+    const { refs, pr } = await openWave(board, ['nu.txt', 'xi.txt'], 'wave-first', port);
+    assert.equal(pr.number, 98);
+    port.report({ state: 'CLOSED' });
+    if (reconciledFirst) assert.equal((await viaStore(board, port, refs)).reason, 'wave_pr_closed_unmerged');
+    const views = port.views().length;
+    const [kept, reworked] = refs as [string, string];
+    const rework = store.reworkSubmission(board.slug, reworked, { by: 'worker', review: 'PR #98 release guard', reason: 'release guard failed' });
+    assert.equal(rework.ok, true, rework.message || rework.reason);
+    resubmitCandidate(board, reworked, 'xi.txt');
+    assemble(board, refs, 'wave-second');
+
+    assert.equal(store.getTicket(board.slug, kept).submission.integration.pr.number, 98, 'fixture: the un-reworked participant still carries PR #98');
+    assert.equal(store.readWavePr(board.slug, 'wave-second'), null, 'PR #98 belongs to wave-first, never to wave-second');
+    assert.deepEqual(store.findAwaitingMergeWaves(board.slug), [], 'no wave awaits PR #98 any more');
+
+    const delivered = await viaStore(board, port, refs);
+    assert.equal(delivered.ok, true, `${delivered.reason}: ${delivered.message}`);
+    assert.equal(delivered.state, 'awaiting-merge');
+    assert.equal(delivered.existing, undefined, 'a newly assembled wave opens a new PR');
+    assert.deepEqual({ number: delivered.pr.number, branch: delivered.pr.branch }, { number: 99, branch: 'sidequest/wave/wave-second' });
+    assert.equal(port.creates().length, 2);
+    assert.equal(port.views().length, views, 'PR #98 is never re-read for wave-second');
+    for (const ref of refs) {
+      const integration = store.getTicket(board.slug, ref).submission.integration;
+      assert.deepEqual(
+        { outcome: integration.outcome, number: integration.pr.number, branch: integration.pr.branch, reason: integration.reason, completedAt: integration.completedAt },
+        { outcome: 'awaiting-merge', number: 99, branch: 'sidequest/wave/wave-second', reason: undefined, completedAt: undefined },
+        ref,
+      );
+    }
+    assert.deepEqual(store.findAwaitingMergeWaves(board.slug).map((wave: any) => [wave.waveId, wave.pr.number, wave.participants]), [['wave-second', 99, refs.slice().sort()]]);
+    assert.equal(store.readWavePr(board.slug, 'wave-second').number, 99);
+  });
+}

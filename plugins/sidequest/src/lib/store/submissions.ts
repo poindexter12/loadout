@@ -73,6 +73,57 @@ function wavePullRequestText(repo: string, tickets: any[]) {
   return { title, body };
 }
 
+const GIT_SUBCOMMAND_GROUPS = new Set(['worktree', 'remote', 'stash', 'submodule', 'notes']);
+
+// The git arguments behind a failed call: the ones runRecordedGit stamped, or
+// the spawned argv with its leading `-c key=value` config pairs dropped.
+function failedGitArgs(error: any): string[] {
+  if (Array.isArray(error?.sidequestGit?.args)) return error.sidequestGit.args.map(String);
+  const argv = Array.isArray(error?.spawnargs) ? error.spawnargs.slice(1).map(String) : [];
+  while (argv[0] === '-c' && argv.length > 1) argv.splice(0, 2);
+  return argv;
+}
+
+function gitCommandLabel(args: string[]) {
+  if (!args.length) return 'git';
+  const [first, second] = args;
+  return GIT_SUBCOMMAND_GROUPS.has(first!) && second && !second.startsWith('-') ? `git ${first} ${second}` : `git ${first}`;
+}
+
+// Git progress meters ("Updating files:  45% (430/955)") redraw with carriage
+// returns. Keep only what a terminal would finally show on each line, then drop
+// the meters themselves, so a refusal never carries a wall of percentages.
+const GIT_PROGRESS_LINE_RE = /^[A-Za-z][A-Za-z ]*:\s+\d{1,3}% \(\d+\/\d+\)/;
+
+function stripGitProgress(text: any) {
+  return String(text || '')
+    .split('\n')
+    .map((line: string) => {
+      const frames = line.split('\r').filter((frame: string) => frame.trim());
+      return (frames[frames.length - 1] || '').trim();
+    })
+    .filter((line: string) => line && !GIT_PROGRESS_LINE_RE.test(line))
+    .join('\n')
+    .trim();
+}
+
+// SQ-435: a git child killed by its timeout (or any signal) used to surface as
+// whatever stderr it had written, which for a checkout is only progress text.
+// Name the step, the budget and the signal first; keep any real output after.
+function integrationGitError(error: any) {
+  const output = stripGitProgress(error?.stderr) || stripGitProgress(error?.stdout);
+  const killedBy = typeof error?.signal === 'string' && error.signal ? error.signal : '';
+  const timedOut = error?.code === 'ETIMEDOUT';
+  if (timedOut || killedBy) {
+    const label = gitCommandLabel(failedGitArgs(error));
+    const budget = Number(error?.sidequestGit?.timeoutMs);
+    const after = budget > 0 ? ` after ${Math.round(budget / 1000)}s` : '';
+    const cause = timedOut ? `${label} timed out${after} (killed by ${killedBy || 'SIGTERM'})` : `${label} was killed by ${killedBy}`;
+    return output ? `${cause}. Last git output: ${output}` : `${cause}.`;
+  }
+  return output || stripGitProgress(error?.message || error);
+}
+
 function createSubmissions(dependencies: any) {
   const { EXECUTOR_VERIFY_MAX, INTEGRATION_VERIFY_OUTPUT_TAIL_BYTES, MANUAL_VERIFY_PREFIX, acquireLock, addComment, appendReworkEvent, artifactWorkingState, autoReleasedClaimMessage, attestationErrors, boardConfig, boundedExcerptForSubmission, commitScope, completionTreeCheck, coerceStatus, createComment, crypto, dirtyPathKey, dispatchState, executionScope, ensureDir, execFileSync, fs, getTicket, integrationTarget, integrationTargetCommit, listTickets, manualVerify, normalizeDeliveryMode, normalizeIntegrationBranch, normalizeIntegrationVerifyTimeoutMs, nullableText, path, prepareComment, projectDir, putTicket, queueEventNotification, readMeta, recordedReviewPass, recordLifecycleAttempt, releaseLock, resolveDeliveryConfig, setDispatchTerminal, spawnSync, stampDispatchEvent, ticketLockPath, transaction, unregisterClaim, verifyCommandErrors, verifyCommandError, withTicketLock, transitionAttempt, attemptDiagnostic } = dependencies;
   const boundedExcerpt = boundedExcerptForSubmission;
@@ -654,19 +705,50 @@ function submissionGitRef(ticket?: any) {
   return `refs/sidequest/${ticket.ref}`;
 }
 
-function integrationGit(repo: string, args: string[]) {
-  return execFileSync('git', ['-c', 'core.editor=true', ...args], {
-    cwd: repo,
-    encoding: 'utf8',
-    env: { ...process.env, GIT_EDITOR: 'true', GIT_SEQUENCE_EDITOR: 'true' },
-    timeout: 120_000,
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
+const INTEGRATION_GIT_TIMEOUT_MS = 120_000;
+// SQ-435: `git worktree add` checks out the whole tree (955 files here), which
+// outran the 120s default on a host at load ~35 and was killed mid-checkout.
+// Only worktree creation gets the longer budget; every other call keeps 120s.
+const INTEGRATION_WORKTREE_ADD_TIMEOUT_MS = 600_000;
+
+// Tests shrink the worktree budget to exercise the timeout path in seconds.
+function integrationWorktreeAddTimeoutMs() {
+  const override = Number(process.env.SIDEQUEST_TEST_WORKTREE_ADD_TIMEOUT_MS);
+  return Number.isInteger(override) && override > 0 ? override : INTEGRATION_WORKTREE_ADD_TIMEOUT_MS;
 }
 
-function integrationGitError(error: any) {
-  return String(error?.stderr || error?.stdout || error?.message || error || '').trim();
+// Runs git and, on failure, stamps the error with the subcommand and budget so
+// integrationGitError can say "timed out after Ns" instead of echoing stderr.
+function runRecordedGit(repo: string, argv: string[], args: string[], env: any, timeoutMs: number) {
+  try {
+    return execFileSync('git', argv, {
+      cwd: repo,
+      encoding: 'utf8',
+      env,
+      timeout: timeoutMs,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+  } catch (error: any) {
+    if (error && typeof error === 'object') error.sidequestGit = { args, timeoutMs };
+    throw error;
+  }
+}
+
+function integrationGit(repo: string, args: string[], options: { timeoutMs?: number } = {}) {
+  return runRecordedGit(
+    repo,
+    ['-c', 'core.editor=true', ...args],
+    args,
+    { ...process.env, GIT_EDITOR: 'true', GIT_SEQUENCE_EDITOR: 'true' },
+    options.timeoutMs || INTEGRATION_GIT_TIMEOUT_MS,
+  );
+}
+
+// `git worktree add` for an integration scratch tree: quiet (no progress or
+// "Preparing worktree" chatter) and on the longer checkout budget.
+function addIntegrationWorktree(repo: string, args: string[]) {
+  return integrationGit(repo, ['worktree', 'add', '--quiet', ...args], { timeoutMs: integrationWorktreeAddTimeoutMs() });
 }
 
 function unmergedIntegrationPaths(repo: string) {
@@ -1797,7 +1879,7 @@ function targetBranchMergedIntoHead(repo: string, branch: string, deliveryCommit
 function verifyInScratchWorktree(repo: string, commit: string, run: (cwd: string) => any) {
   const scratch = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'sq-delivery-verify-'));
   try {
-    integrationGit(repo, ['worktree', 'add', '--detach', '--force', scratch, commit]);
+    addIntegrationWorktree(repo, ['--detach', '--force', scratch, commit]);
     return run(scratch);
   } finally {
     try { integrationGit(repo, ['worktree', 'remove', '--force', scratch]); } catch (_) { /* pruned below */ }
@@ -2835,14 +2917,7 @@ function prPortFailureCause(error: any) {
 // Git against the delivery remote: never prompts for credentials, so a missing
 // login fails fast into pr_delivery_unavailable instead of hanging.
 function remoteGit(repo: string, args: string[]) {
-  return execFileSync('git', args, {
-    cwd: repo,
-    encoding: 'utf8',
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    timeout: 120_000,
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
+  return runRecordedGit(repo, args, args, { ...process.env, GIT_TERMINAL_PROMPT: '0' }, INTEGRATION_GIT_TIMEOUT_MS);
 }
 
 // Integration failures the reconcile records against a wave's PR. The PR stays
@@ -2851,18 +2926,28 @@ function remoteGit(repo: string, args: string[]) {
 const PR_RECONCILE_FAILURES = new Set(['wave_ci_failed', 'wave_pr_closed_unmerged']);
 const PR_MERGED_STATE = 'merged';
 
+// A PR belongs to the wave that opened it, and every recorded PR carries that
+// wave's branch (validateWavePullRequest enforces it). A participant
+// reassembled into a newer wave still carries the older wave's record, so a
+// wave's PR is matched by branch, never by the participant's current wave id
+// alone: an earlier wave's PR, closed unmerged or not, never binds a new wave (SQ-437).
+function isWavesPr(pr: any, waveId: any) {
+  const branch = waveBranchName(waveId);
+  return typeof branch === 'string' && !!pr && pr.branch === branch;
+}
+
 // A pending submission whose recorded PR decides its delivery: awaiting merge,
-// refused by the reconcile, or merged but not yet closed. A reconcile record
-// binds only while the participant is still in the wave that opened the PR; a
+// refused by the reconcile, or merged but not yet closed. Any of these binds
+// only while the participant is still in the wave that opened the PR; a
 // participant reassembled into a new wave delivers through that wave's own PR.
 function holdsWavePr(ticket: any) {
   const integration = ticket?.submission?.integration;
   if (!pendingSubmission(ticket) || !integration?.pr) return false;
+  if (!isWavesPr(integration.pr, ticket.submission.wave?.id)) return false;
   if (integration.outcome === AWAITING_MERGE_OUTCOME) return true;
-  const reconciled = integration.outcome === 'failed'
+  return integration.outcome === 'failed'
     ? PR_RECONCILE_FAILURES.has(integration.reason)
     : integration.mode === 'pr' && (integration.outcome === 'delivered' || integration.outcome === 'verified');
-  return reconciled && integration.pr.branch === waveBranchName(ticket.submission.wave?.id);
 }
 
 function awaitingMergeResult(slug: any, waveId: string, participants: string[], pr: any, message: string, extra: any = {}) {
@@ -3024,7 +3109,7 @@ async function reconcileWavePrLocked(slug: any, requested: string[], channel: Pr
         pr: closedPr,
         ticket: tickets[0],
         ...(tickets.length === 1 ? {} : { tickets }),
-        message: `PR #${pr.number} (${pr.url}) for wave ${waveId} was closed without merging; nothing was delivered. ${participants.join(', ')} stay pending: rework them with a fresh candidate or close them with supersede_submission after an integrated replacement. If the PR is reopened, integrate re-reads it.`,
+        message: `PR #${pr.number} (${pr.url}) for wave ${waveId} was closed without merging; nothing was delivered. ${participants.join(', ')} stay pending. To deliver them again, assemble a new wave (integrate with wave, then integrate): it opens a new PR on its own branch, and PR #${pr.number} stays with wave ${waveId}. Rework only a participant whose candidate caused the close; accepted candidates need no rework. Reopening PR #${pr.number} helps only if its branch still holds what should land; integrate then re-reads it.`,
       });
     }
 
@@ -3181,7 +3266,7 @@ function buildPrWave(repo: string, base: string, candidates: any[]) {
   const worktree = path.join(parent, 'wave');
   let added = false;
   try {
-    integrationGit(repo, ['worktree', 'add', '--detach', worktree, base]);
+    addIntegrationWorktree(repo, ['--detach', worktree, base]);
     added = true;
     for (const candidate of candidates) {
       if (candidate.submission.noOp) continue;
@@ -3196,12 +3281,12 @@ function buildPrWave(repo: string, base: string, candidates: any[]) {
   } catch (error: any) {
     return { ok: false as const, conflict: false, conflictedPaths: [] as string[], message: integrationGitError(error) };
   } finally {
-    if (added) {
-      try {
-        integrationGit(repo, ['worktree', 'remove', '--force', worktree]);
-      } catch (_) {
-        // rmSync and prune below still clear it.
-      }
+    try {
+      // A `worktree add` killed mid-checkout leaves its registration locked
+      // ("initializing"), which prune skips; the second --force removes it.
+      integrationGit(repo, ['worktree', 'remove', '--force', ...(added ? [] : ['--force']), worktree]);
+    } catch (_) {
+      // Never registered, or already gone: rmSync and prune below still clear it.
     }
     try {
       fs.rmSync(parent, { recursive: true, force: true });
@@ -3449,7 +3534,13 @@ async function integrateSubmissionPr(slug: any, refs: string[], channel: PrDeliv
       const built = buildPrWave(repo, base, candidates);
       lockLease.refresh();
       if (!built.ok) {
-        if (!built.conflict) return Object.assign({}, scope, { ok: false, reason: 'wave_delivery_error', message: built.message });
+        if (!built.conflict) {
+          return Object.assign({}, scope, {
+            ok: false,
+            reason: 'wave_delivery_error',
+            message: `Wave ${wave.id} could not be built in its temporary worktree: ${built.message} Nothing was pushed, no PR was opened, and no ticket changed.`,
+          });
+        }
         if (singleton) {
           return integrationFailure(slug, tickets[0], {
             reason: 'merge_failed',
@@ -5143,7 +5234,8 @@ function awaitingMergeParticipants(slug: any, waveId: string, pr: any) {
     if (!AWAITING_MERGE_PRIOR_OUTCOMES.has(integration.outcome) || integration.deliveredAt || integration.resultingHead) {
       return { ok: false, reason: 'wave_integration_settled', message: `${ticket.ref} already records integration outcome ${JSON.stringify(integration.outcome || 'delivered')}; wave ${waveId} cannot move to awaiting-merge.`, ref: ticket.ref };
     }
-    if (integration.outcome === AWAITING_MERGE_OUTCOME && integration.pr && integration.pr.number !== pr.number) {
+    // Only this wave's own open PR can conflict; an earlier wave's record is replaced.
+    if (integration.outcome === AWAITING_MERGE_OUTCOME && isWavesPr(integration.pr, waveId) && integration.pr.number !== pr.number) {
       return { ok: false, reason: 'wave_pr_mismatch', message: `Wave ${waveId} is already awaiting PR #${integration.pr.number}; refusing to record PR #${pr.number} over it.`, pr: integration.pr };
     }
   }
@@ -5164,8 +5256,12 @@ function markWaveAwaitingMerge(slug?: any, waveId?: any, pr?: any) {
     const tickets = (checked as any).tickets;
     for (const ticket of tickets) {
       const previous = ticket.submission.integration || {};
-      const awaitingMergeAt = previous.outcome === AWAITING_MERGE_OUTCOME && previous.awaitingMergeAt ? previous.awaitingMergeAt : now;
-      ticket.submission.integration = Object.assign({}, previous, { outcome: AWAITING_MERGE_OUTCOME, pr: { ...record }, awaitingMergeAt });
+      // An earlier wave's PR record is that wave's history: its failure fields
+      // and awaiting-merge time do not carry onto this wave's PR (SQ-437).
+      const earlierWave = !!previous.pr && !isWavesPr(previous.pr, id);
+      const kept = earlierWave ? withoutReconcileFailure(previous) : previous;
+      const awaitingMergeAt = !earlierWave && previous.outcome === AWAITING_MERGE_OUTCOME && previous.awaitingMergeAt ? previous.awaitingMergeAt : now;
+      ticket.submission.integration = Object.assign({}, kept, { outcome: AWAITING_MERGE_OUTCOME, pr: { ...record }, awaitingMergeAt });
       // The PR is durable now; the interrupted-open record has done its job (SQ-374).
       if (ticket.submission.wave) delete ticket.submission.wave.prOpening;
       ticket.updatedAt = now;
@@ -5181,7 +5277,9 @@ function markWaveAwaitingMerge(slug?: any, waveId?: any, pr?: any) {
 function findAwaitingMergeWaves(slug?: any) {
   const waves = new Map<string, { waveId: string; participants: string[]; pr: any }>();
   const tickets = listTickets(slug)
-    .filter((ticket: any) => pendingSubmission(ticket) && ticket.submission.integration?.outcome === AWAITING_MERGE_OUTCOME && ticket.submission.wave?.id)
+    .filter((ticket: any) => pendingSubmission(ticket)
+      && ticket.submission.integration?.outcome === AWAITING_MERGE_OUTCOME
+      && isWavesPr(ticket.submission.integration.pr, ticket.submission.wave?.id))
     .sort(byTicketRef);
   for (const ticket of tickets) {
     const waveId = String(ticket.submission.wave.id);
@@ -5193,12 +5291,14 @@ function findAwaitingMergeWaves(slug?: any) {
 }
 
 // The PR recorded for one wave, or null. A pending participant's record wins
-// over one kept on an already-closed participant.
+// over one kept on an already-closed participant. A participant reassembled
+// into this wave may still carry an earlier wave's PR; that one is not this
+// wave's and is never returned for it (SQ-437).
 function readWavePr(slug?: any, waveId?: any) {
   const id = typeof waveId === 'string' ? waveId.trim() : '';
   if (!id) return null;
   const holders = listTickets(slug)
-    .filter((ticket: any) => ticket?.submission?.wave?.id === id && ticket.submission.integration?.pr)
+    .filter((ticket: any) => ticket?.submission?.wave?.id === id && isWavesPr(ticket.submission.integration?.pr, id))
     .sort((a: any, b: any) => Number(pendingSubmission(b)) - Number(pendingSubmission(a)) || byTicketRef(a, b));
   return holders.length ? { ...holders[0].submission.integration.pr } : null;
 }
@@ -5226,5 +5326,6 @@ function submissionsPayload(slug?: any) {
 
 // githubText and wavePullRequestText are exported for the PR-text sanitizer
 // tests: they are pure text builders, and the text they return is exactly what
-// `gh pr create` is handed.
-module.exports = { createSubmissions, githubText, wavePullRequestText };
+// `gh pr create` is handed. integrationGitError is exported for the same reason:
+// it is the pure formatter behind every integration git refusal message.
+module.exports = { createSubmissions, githubText, wavePullRequestText, integrationGitError };

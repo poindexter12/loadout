@@ -32,6 +32,8 @@ const { generatedDashboards } = createRequire(import.meta.url)(
 const { MODEL_PRICES_PER_MILLION, gatewayModelCostTargets, gatewayTotalCostExpression } = createRequire(import.meta.url)(
   path.join(repoDir, 'plugins', 'observability', 'observability', 'sinks', 'grafana', 'model-prices.js'),
 );
+const questionLog = createRequire(import.meta.url)(path.join(repoDir, 'plugins', 'sidequest', 'lib', 'store', 'question-log.js'));
+let syntheticQuestionId;
 
 const FIXTURE = Object.freeze({
   project: 'acme-webshop',
@@ -355,6 +357,25 @@ async function seedSidequest(tempHome, tempRoot) {
     const cli = projectClis.get(project.slug);
     for (const ticket of project.tickets.filter((candidate) => candidate.archived)) cli(['archive', refs.get(ticket.key).ref]);
   }
+  const questionTicket = refs.get('cart-summary');
+  const questionDir = questionLog.questionLogDir(FIXTURE.project, tempHome);
+  const question = questionLog.askQuestion(questionDir, {
+    ref: questionTicket.ref,
+    ticketId: `ticket-${questionTicket.ref}`,
+    session: 'demo-session',
+    origin: 'runtime',
+    ownerSession: 'demo-session',
+    agent: 'demo-executor',
+    header: 'Checkout',
+    text: 'Should the cart summary keep the promotion label above the total on narrow screens?',
+    options: [
+      { label: 'Keep it above', description: 'Preserve the current reading order.' },
+      { label: 'Move it below', description: 'Give the total more visual emphasis.' },
+    ],
+    default: 'Keep it above',
+  });
+  assert.equal(question.ok, true, `Synthetic question fixture should be recorded: ${JSON.stringify(question)}`);
+  syntheticQuestionId = question.qid;
   return path.join(tempRoot, FIXTURE.project);
 }
 
@@ -960,7 +981,15 @@ async function captureSidequest(browser, port) {
   const notificationInbox = page.locator('section.inbox');
   await notificationInbox.evaluate((element) => { element.style.height = `${Math.ceil(element.getBoundingClientRect().height)}px`; });
   await capture('sidequest-notifications.png', notificationInbox);
-  await page.getByRole('button', { name: 'Notifications' }).click();
+  await page.getByRole('button', { name: 'Questions', exact: true }).click();
+  const questionsView = page.locator('section.questions-view');
+  await questionsView.waitFor();
+  await capture('sidequest-questions.png', questionsView);
+  assert.ok(syntheticQuestionId, 'Synthetic question id should be available for the detail capture');
+  await questionsView.getByRole('button', { name: /Checkout/ }).click();
+  await page.getByRole('complementary', { name: 'Question detail' }).waitFor();
+  await capture('sidequest-question-detail.png', page.getByRole('complementary', { name: 'Question detail' }));
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
 
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   const settingsDialog = page.getByRole('dialog', { name: 'Settings' });
