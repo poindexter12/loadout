@@ -117,8 +117,8 @@ Read-only files or changes warn before dispatch. Resolve or override.
 `sidequest add -t "Contact form does not send" -d "..." -p high -l bug --category <id>` — read the
 live taxonomy (`category_list` MCP / `sidequest category list --json`), choose by description, and
 stamp `--category`; use its fallback only when no category fits. `--complexity` is legacy ambiguity
-fallback; never set `--model`/`--effort`. Use `--file`, `--story`, `--anchors`, and exact `--verify` as
-needed; scope and authoring details: `references/ticket-authoring.md`.
+fallback; never set `--model`/`--effort`. Use `--file`, `--story`, `--anchors`, exact `--verify`, and
+`--issue` (closes at release) as needed; scope/authoring: `references/ticket-authoring.md`.
 
 Write developer-to-developer descriptions with evidence that cheaper executors can act on. For the
 required details and direct-route boundary, see `references/ticket-authoring.md`.

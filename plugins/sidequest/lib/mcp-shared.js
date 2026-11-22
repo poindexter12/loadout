@@ -198,7 +198,7 @@ const TOOL_DESCRIPTION_OVERRIDES = {
   next: "Next.",
   scopeRequest: "Scope.",
   commit: "Commit scope.",
-  add: "File ticket; review binds candidate.",
+  add: "File ticket; review binds candidate. Work from a GitHub issue: pass issue so it closes at release.",
   update: "Update scope.",
   rework: "repair unbound; bound needs oracle.",
   supersede_submission: "candidate rejection permits supersession.",

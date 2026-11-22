@@ -45,6 +45,9 @@ test('audit report renders every section from injected board, git, and GitHub ev
   const output = formatAudit(report);
   assert.match(output, /STALE BOARD TICKETS \(1\)/);
   assert.match(output, /UNTRACKED ISSUES \(1\)/);
+  // SQ-438: every untracked line carries the exact import command, in text and JSON alike.
+  assert.match(output, /owner\/repo#4 untracked issue — https:\/\/github\.com\/owner\/repo\/issues\/4; import: sidequest add --issue owner\/repo#4 --unclassified/);
+  assert.equal(report.untrackedIssues[0].importCommand, 'sidequest add --issue owner/repo#4 --unclassified');
   assert.match(output, /LINKED DRIFT \(1\)/);
   assert.match(output, /WARNINGS \(0\)/);
 });
