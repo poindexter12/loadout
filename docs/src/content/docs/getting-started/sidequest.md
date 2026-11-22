@@ -190,6 +190,7 @@ PR delivery never silently falls back to a local merge. Common outcomes are:
 - `wave_pr_closed_unmerged`: the PR was closed without merging. Reopen or replace it according to your repository policy, then re-integrate the wave or assemble a new one.
 - `pr_delivery_unavailable`: Sidequest could not use `gh`, the configured remote, or GitHub authentication. Install or authenticate `gh`, fix the remote or permissions, and retry; it does not switch to local delivery.
 - `wave_merge_unreachable`: GitHub reports a merge, but the merge commit is not yet reachable from the configured target branch. Wait for the remote to catch up, then run `integrate` again.
+- `wave_delivery_error`: the wave could not be built in its temporary worktree, so nothing was pushed and no PR was opened. The message names the git step that failed. If it says the step timed out or was killed by a signal, the machine was overloaded, and it is safe to run `integrate` again once load drops. Any other git failure needs its cause fixed first.
 
 Optional destination settings can be supplied together:
 
