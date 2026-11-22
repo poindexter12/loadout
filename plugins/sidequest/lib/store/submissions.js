@@ -44,6 +44,38 @@ function wavePullRequestText(repo, tickets) {
   ].join("\n");
   return { title, body };
 }
+const GIT_SUBCOMMAND_GROUPS = /* @__PURE__ */ new Set(["worktree", "remote", "stash", "submodule", "notes"]);
+function failedGitArgs(error) {
+  if (Array.isArray(error?.sidequestGit?.args)) return error.sidequestGit.args.map(String);
+  const argv = Array.isArray(error?.spawnargs) ? error.spawnargs.slice(1).map(String) : [];
+  while (argv[0] === "-c" && argv.length > 1) argv.splice(0, 2);
+  return argv;
+}
+function gitCommandLabel(args) {
+  if (!args.length) return "git";
+  const [first, second] = args;
+  return GIT_SUBCOMMAND_GROUPS.has(first) && second && !second.startsWith("-") ? `git ${first} ${second}` : `git ${first}`;
+}
+const GIT_PROGRESS_LINE_RE = /^[A-Za-z][A-Za-z ]*:\s+\d{1,3}% \(\d+\/\d+\)/;
+function stripGitProgress(text) {
+  return String(text || "").split("\n").map((line) => {
+    const frames = line.split("\r").filter((frame) => frame.trim());
+    return (frames[frames.length - 1] || "").trim();
+  }).filter((line) => line && !GIT_PROGRESS_LINE_RE.test(line)).join("\n").trim();
+}
+function integrationGitError(error) {
+  const output = stripGitProgress(error?.stderr) || stripGitProgress(error?.stdout);
+  const killedBy = typeof error?.signal === "string" && error.signal ? error.signal : "";
+  const timedOut = error?.code === "ETIMEDOUT";
+  if (timedOut || killedBy) {
+    const label = gitCommandLabel(failedGitArgs(error));
+    const budget = Number(error?.sidequestGit?.timeoutMs);
+    const after = budget > 0 ? ` after ${Math.round(budget / 1e3)}s` : "";
+    const cause = timedOut ? `${label} timed out${after} (killed by ${killedBy || "SIGTERM"})` : `${label} was killed by ${killedBy}`;
+    return output ? `${cause}. Last git output: ${output}` : `${cause}.`;
+  }
+  return output || stripGitProgress(error?.message || error);
+}
 function createSubmissions(dependencies) {
   const { EXECUTOR_VERIFY_MAX, INTEGRATION_VERIFY_OUTPUT_TAIL_BYTES, MANUAL_VERIFY_PREFIX, acquireLock, addComment, appendReworkEvent, artifactWorkingState, autoReleasedClaimMessage, attestationErrors, boardConfig, boundedExcerptForSubmission, commitScope, completionTreeCheck, coerceStatus, createComment, crypto, dirtyPathKey, dispatchState, executionScope, ensureDir, execFileSync, fs, getTicket, integrationTarget, integrationTargetCommit, listTickets, manualVerify, normalizeDeliveryMode, normalizeIntegrationBranch, normalizeIntegrationVerifyTimeoutMs, nullableText, path, prepareComment, projectDir, putTicket, queueEventNotification, readMeta, recordedReviewPass, recordLifecycleAttempt, releaseLock, resolveDeliveryConfig, setDispatchTerminal, spawnSync, stampDispatchEvent, ticketLockPath, transaction, unregisterClaim, verifyCommandErrors, verifyCommandError, withTicketLock, transitionAttempt, attemptDiagnostic } = dependencies;
   const boundedExcerpt = boundedExcerptForSubmission;
@@ -508,18 +540,38 @@ Expires: ${checkpoint.expiresAt}`;
   function submissionGitRef(ticket) {
     return `refs/sidequest/${ticket.ref}`;
   }
-  function integrationGit(repo, args) {
-    return execFileSync("git", ["-c", "core.editor=true", ...args], {
-      cwd: repo,
-      encoding: "utf8",
-      env: { ...process.env, GIT_EDITOR: "true", GIT_SEQUENCE_EDITOR: "true" },
-      timeout: 12e4,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"]
-    }).trim();
+  const INTEGRATION_GIT_TIMEOUT_MS = 12e4;
+  const INTEGRATION_WORKTREE_ADD_TIMEOUT_MS = 6e5;
+  function integrationWorktreeAddTimeoutMs() {
+    const override = Number(process.env.SIDEQUEST_TEST_WORKTREE_ADD_TIMEOUT_MS);
+    return Number.isInteger(override) && override > 0 ? override : INTEGRATION_WORKTREE_ADD_TIMEOUT_MS;
   }
-  function integrationGitError(error) {
-    return String(error?.stderr || error?.stdout || error?.message || error || "").trim();
+  function runRecordedGit(repo, argv, args, env, timeoutMs) {
+    try {
+      return execFileSync("git", argv, {
+        cwd: repo,
+        encoding: "utf8",
+        env,
+        timeout: timeoutMs,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"]
+      }).trim();
+    } catch (error) {
+      if (error && typeof error === "object") error.sidequestGit = { args, timeoutMs };
+      throw error;
+    }
+  }
+  function integrationGit(repo, args, options = {}) {
+    return runRecordedGit(
+      repo,
+      ["-c", "core.editor=true", ...args],
+      args,
+      { ...process.env, GIT_EDITOR: "true", GIT_SEQUENCE_EDITOR: "true" },
+      options.timeoutMs || INTEGRATION_GIT_TIMEOUT_MS
+    );
+  }
+  function addIntegrationWorktree(repo, args) {
+    return integrationGit(repo, ["worktree", "add", "--quiet", ...args], { timeoutMs: integrationWorktreeAddTimeoutMs() });
   }
   function unmergedIntegrationPaths(repo) {
     try {
@@ -1451,7 +1503,7 @@ ${verify.outputTail}` : null
   function verifyInScratchWorktree(repo, commit, run) {
     const scratch = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "sq-delivery-verify-"));
     try {
-      integrationGit(repo, ["worktree", "add", "--detach", "--force", scratch, commit]);
+      addIntegrationWorktree(repo, ["--detach", "--force", scratch, commit]);
       return run(scratch);
     } finally {
       try {
@@ -2318,14 +2370,7 @@ ${verify.outputTail}` : null
     return String(error?.message || error || "gh failed");
   }
   function remoteGit(repo, args) {
-    return execFileSync("git", args, {
-      cwd: repo,
-      encoding: "utf8",
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-      timeout: 12e4,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"]
-    }).trim();
+    return runRecordedGit(repo, args, args, { ...process.env, GIT_TERMINAL_PROMPT: "0" }, INTEGRATION_GIT_TIMEOUT_MS);
   }
   const PR_RECONCILE_FAILURES = /* @__PURE__ */ new Set(["wave_ci_failed", "wave_pr_closed_unmerged"]);
   const PR_MERGED_STATE = "merged";
@@ -2612,7 +2657,7 @@ ${verify.outputTail}` : null
     const worktree = path.join(parent, "wave");
     let added = false;
     try {
-      integrationGit(repo, ["worktree", "add", "--detach", worktree, base]);
+      addIntegrationWorktree(repo, ["--detach", worktree, base]);
       added = true;
       for (const candidate of candidates) {
         if (candidate.submission.noOp) continue;
@@ -2627,11 +2672,9 @@ ${verify.outputTail}` : null
     } catch (error) {
       return { ok: false, conflict: false, conflictedPaths: [], message: integrationGitError(error) };
     } finally {
-      if (added) {
-        try {
-          integrationGit(repo, ["worktree", "remove", "--force", worktree]);
-        } catch (_) {
-        }
+      try {
+        integrationGit(repo, ["worktree", "remove", "--force", ...added ? [] : ["--force"], worktree]);
+      } catch (_) {
       }
       try {
         fs.rmSync(parent, { recursive: true, force: true });
@@ -2833,7 +2876,13 @@ ${verify.outputTail}` : null
         const built = buildPrWave(repo, base, candidates);
         lockLease.refresh();
         if (!built.ok) {
-          if (!built.conflict) return Object.assign({}, scope, { ok: false, reason: "wave_delivery_error", message: built.message });
+          if (!built.conflict) {
+            return Object.assign({}, scope, {
+              ok: false,
+              reason: "wave_delivery_error",
+              message: `Wave ${wave.id} could not be built in its temporary worktree: ${built.message} Nothing was pushed, no PR was opened, and no ticket changed.`
+            });
+          }
           if (singleton) {
             return integrationFailure(slug, tickets[0], {
               reason: "merge_failed",
@@ -4361,4 +4410,4 @@ ${verify.outputTail}` : null
   }
   return { DEFAULT_CHECKPOINT_TTL_MIN, MAX_CHECKPOINT_TTL_MIN, checkpointTtlMs, checkpointProjection, oracleProjection, checkpointTicket, submissionReadiness, submissionProjection, pendingSubmission, submissionUsesGit, workingTreeVerification, verifyIntegration, validateIntegrationSubmission, recordDeliveredSubmission, recordAbandonedSubmission, integrateSubmission, integrateSubmissionWave, closeSubmissionAsSuperseded, submissionOwnershipFailure, submitTicket, recordVerificationCapture, recordSubmissionRejection, reconcileSubmissionRejections, reworkSubmission, clearSubmission, assembleSubmissionWave, recordSubmissionWaveDelivery, markWaveAwaitingMerge, findAwaitingMergeWaves, readWavePr, setGitHubPrPort, submissionsPayload };
 }
-module.exports = { createSubmissions, githubText, wavePullRequestText };
+module.exports = { createSubmissions, githubText, wavePullRequestText, integrationGitError };

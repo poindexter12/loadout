@@ -422,6 +422,80 @@ test('MCP pr_delivery_unavailable refusal keeps its cause and carries next-step 
   }
 });
 
+// SQ-435: an integration git child killed by its timeout or a signal names that
+// cause, not the progress meter it happened to be drawing when it died.
+test('integration git errors name the timeout or signal and drop carriage-return progress', () => {
+  const { integrationGitError } = require('../lib/store/submissions.js');
+  const progress = 'Updating files:  10% (96/955)\rUpdating files:  45% (430/955)\rUpdating files:  61% (583/955)\r';
+  const timedOut = Object.assign(new Error('spawnSync git ETIMEDOUT'), {
+    code: 'ETIMEDOUT',
+    signal: 'SIGTERM',
+    status: null,
+    stderr: progress,
+    sidequestGit: { args: ['worktree', 'add', '--quiet', '--detach', '/tmp/sidequest-wave-x/wave', 'abc123'], timeoutMs: 120_000 },
+  });
+  assert.equal(integrationGitError(timedOut), 'git worktree add timed out after 120s (killed by SIGTERM).');
+
+  const killed = Object.assign(new Error('Command failed'), {
+    signal: 'SIGKILL',
+    status: null,
+    stderr: `Preparing worktree (detached HEAD abc1234)\n${progress}`,
+    spawnargs: ['git', '-c', 'core.editor=true', 'merge', '--no-ff', '--no-edit', 'abc123'],
+  });
+  assert.equal(integrationGitError(killed), 'git merge was killed by SIGKILL. Last git output: Preparing worktree (detached HEAD abc1234)');
+
+  const failed = Object.assign(new Error('Command failed'), {
+    status: 128,
+    signal: null,
+    stderr: 'Updating files:  50% (1/2)\rUpdating files: 100% (2/2), done.\nfatal: not a valid object name: nope\n',
+  });
+  assert.equal(integrationGitError(failed), 'fatal: not a valid object name: nope');
+});
+
+test('a timed-out wave worktree checkout refuses wave_delivery_error naming the timeout, pushes nothing, and retries cleanly (SQ-435)', async () => {
+  const board = makeBoard('worktree-timeout');
+  const candidate = submitCandidate(board, 'omicron.txt');
+  // As in the incident: the wave is already assembled and gate_passed, and
+  // integrate is re-called without `wave` to deliver it.
+  assemble(board, [candidate.ref], 'wave-worktree-timeout');
+  // The hook runs inside `git worktree add`: it draws a progress meter, then
+  // outlives the shrunken budget. exec + /dev/null so the orphan holds no pipe.
+  const hook = path.join(board.repo, '.git', 'hooks', 'post-checkout');
+  fs.writeFileSync(hook, "#!/bin/sh\nprintf 'Updating files:  10%% (1/10)\\rUpdating files:  50%% (5/10)\\r' >&2\nexec sleep 3 >/dev/null 2>&1\n", { mode: 0o755 });
+  const port = fakePort({ firstNumber: 41 });
+  const previousDir = process.env.CLAUDE_PROJECT_DIR;
+  const previousTimeout = process.env.SIDEQUEST_TEST_WORKTREE_ADD_TIMEOUT_MS;
+  process.env.CLAUDE_PROJECT_DIR = board.repo;
+  process.env.SIDEQUEST_TEST_WORKTREE_ADD_TIMEOUT_MS = '1000';
+  try {
+    const before = snapshot(board, candidate.ref);
+    const refused: any = await withPort(port, () => callTool('integrate', { project: board.slug, ref: candidate.ref, by: 'pr-integrator' }));
+    assert.equal(refused.ok, false);
+    assert.equal(refused.reason, 'wave_delivery_error');
+    assert.match(refused.message, /git worktree add timed out after 1s \(killed by SIGTERM\)/);
+    assert.match(refused.message, /Nothing was pushed, no PR was opened, and no ticket changed/);
+    assert.doesNotMatch(refused.message, /Updating files|%|\r/);
+    assert.match(refused.guidance, /safe to re-call integrate on the same refs, without wave, once load drops/);
+    assert.equal(port.calls.length, 0, 'no GitHub call');
+    assert.equal(git(['ls-remote', '--heads', board.remote, 'refs/heads/sidequest/wave/*'], board.repo), '', 'no wave branch reached the remote');
+    assert.equal(worktreeCount(board.repo), 1, 'the killed checkout leaves no worktree registered');
+    assert.deepEqual(JSON.parse(snapshot(board, candidate.ref)), JSON.parse(before), 'no ticket changed');
+
+    // Load drops: the same call now opens the PR.
+    fs.rmSync(hook);
+    delete process.env.SIDEQUEST_TEST_WORKTREE_ADD_TIMEOUT_MS;
+    const opened: any = await withPort(port, () => callTool('integrate', { project: board.slug, ref: candidate.ref, by: 'pr-integrator' }));
+    assert.equal(opened.ok, true, opened.message || opened.reason);
+    assert.equal(opened.state, 'awaiting-merge');
+    assert.equal(opened.pr.number, 41);
+  } finally {
+    if (previousDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = previousDir;
+    if (previousTimeout === undefined) delete process.env.SIDEQUEST_TEST_WORKTREE_ADD_TIMEOUT_MS;
+    else process.env.SIDEQUEST_TEST_WORKTREE_ADD_TIMEOUT_MS = previousTimeout;
+  }
+});
+
 test('CLI integrate opens the PR through gh and reports awaiting merge', () => {
   const board = makeBoard('cli');
   const candidate = submitCandidate(board, 'nu.txt');
