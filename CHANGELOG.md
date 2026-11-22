@@ -8,6 +8,22 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v4.20.0 (2026-11-22)
+
+### sidequest 5.14.0 → 5.15.0
+
+#### Features
+
+- Overlapping candidates that pin different verify commands now assemble as one wave whose gate runs every participant's command, instead of deadlocking between candidate_overlap and wave_verifier_mismatch (SQ-436)
+  A singleton `integrate` was refused `candidate_overlap` ("assemble them in one wave"), and the joint wave was refused `wave_verifier_mismatch` ("split the wave"), so the only exit was to rework every participant onto one union command and redispatch them all. A wave gate no longer needs one identical verifier. When every participant pins a runnable command, the assembled gate runs each distinct command once, in participant order, and stops at the first one that is not accepted. Its evidence names the participants whose verifier failed and how many verifiers were left unrun. Local-mode delivery runs the same union on the merged tree, where it used to run only the first participant's verifier. `wave_verifier_mismatch` now fires only when a participant pins evidence the board cannot run (manual or attestation) and the others pin something different. It names those participants and the in-place exit, `update({ref, verify, verifyKind:"command"})`, with no rework or redispatch. Neither refusal tells an agent to split overlapping candidates any more.
+
+#### Fixes
+
+- PR-delivery wave builds give `git worktree add` a 10-minute quiet checkout budget, and a git step killed by its timeout or a signal now says so instead of showing only progress text (SQ-435)
+  On a loaded host, `integrate` in PR delivery mode refused `wave_delivery_error` while building the wave, and the whole message was git's `Updating files: NN% (x/955)` progress output, cut off part way. The temporary worktree checkout had run past the fixed 120-second git timeout and been killed, and the error formatter returned stderr ahead of the timeout. Creating an integration worktree (the PR wave build and the delivery-verification scratch tree) now runs `git worktree add --quiet` with a 600-second budget; every other integration git call keeps 120 seconds. When any integration git call is killed, the message names the step, the budget and the signal, for example `git worktree add timed out after 600s (killed by SIGTERM).`, and carriage-return progress meters are stripped from git output everywhere. The `wave_delivery_error` refusal now states that nothing was pushed, no PR was opened and no ticket changed, and in PR mode it carries a `guidance` field saying a timeout or signal kill is safe to retry on the same refs once load drops. A checkout killed mid-way no longer leaves its locked worktree registration behind.
+- A newly assembled wave opens its own PR instead of inheriting an earlier wave's closed-unmerged PR and refusing wave_pr_closed_unmerged (SQ-437)
+  When a wave PR was closed unmerged and only some of its participants were reworked, a fresh wave assembled from the same tickets refused `wave_pr_closed_unmerged`, naming the old PR. An un-reworked participant still carried that PR on its submission, and the board bound it to the new wave by the participant's current wave id. The only exit was a code-unchanged rework and redispatch of every accepted participant. A wave's PR is now matched by its own branch (`sidequest/wave/<waveId>`), so an earlier wave's PR, closed or not, never binds a newer wave: the lookup, the awaiting-merge listing, the delivery reconcile and the PR-mismatch guard all ignore it, and the new wave opens a fresh PR on its own branch. Recording the new PR also drops the earlier wave's failure reason and completion time. The `wave_pr_closed_unmerged` guidance and refusal message now name the exit that works, which is to assemble a new wave and rework only a participant whose candidate caused the close. They no longer say that rework of every participant is required.
+
 ## v4.19.0 (2026-11-21)
 
 ### quartermaster 0.12.1 → 0.12.2
