@@ -2926,18 +2926,28 @@ function remoteGit(repo: string, args: string[]) {
 const PR_RECONCILE_FAILURES = new Set(['wave_ci_failed', 'wave_pr_closed_unmerged']);
 const PR_MERGED_STATE = 'merged';
 
+// A PR belongs to the wave that opened it, and every recorded PR carries that
+// wave's branch (validateWavePullRequest enforces it). A participant
+// reassembled into a newer wave still carries the older wave's record, so a
+// wave's PR is matched by branch, never by the participant's current wave id
+// alone: an earlier wave's PR, closed unmerged or not, never binds a new wave (SQ-437).
+function isWavesPr(pr: any, waveId: any) {
+  const branch = waveBranchName(waveId);
+  return typeof branch === 'string' && !!pr && pr.branch === branch;
+}
+
 // A pending submission whose recorded PR decides its delivery: awaiting merge,
-// refused by the reconcile, or merged but not yet closed. A reconcile record
-// binds only while the participant is still in the wave that opened the PR; a
+// refused by the reconcile, or merged but not yet closed. Any of these binds
+// only while the participant is still in the wave that opened the PR; a
 // participant reassembled into a new wave delivers through that wave's own PR.
 function holdsWavePr(ticket: any) {
   const integration = ticket?.submission?.integration;
   if (!pendingSubmission(ticket) || !integration?.pr) return false;
+  if (!isWavesPr(integration.pr, ticket.submission.wave?.id)) return false;
   if (integration.outcome === AWAITING_MERGE_OUTCOME) return true;
-  const reconciled = integration.outcome === 'failed'
+  return integration.outcome === 'failed'
     ? PR_RECONCILE_FAILURES.has(integration.reason)
     : integration.mode === 'pr' && (integration.outcome === 'delivered' || integration.outcome === 'verified');
-  return reconciled && integration.pr.branch === waveBranchName(ticket.submission.wave?.id);
 }
 
 function awaitingMergeResult(slug: any, waveId: string, participants: string[], pr: any, message: string, extra: any = {}) {
@@ -3099,7 +3109,7 @@ async function reconcileWavePrLocked(slug: any, requested: string[], channel: Pr
         pr: closedPr,
         ticket: tickets[0],
         ...(tickets.length === 1 ? {} : { tickets }),
-        message: `PR #${pr.number} (${pr.url}) for wave ${waveId} was closed without merging; nothing was delivered. ${participants.join(', ')} stay pending: rework them with a fresh candidate or close them with supersede_submission after an integrated replacement. If the PR is reopened, integrate re-reads it.`,
+        message: `PR #${pr.number} (${pr.url}) for wave ${waveId} was closed without merging; nothing was delivered. ${participants.join(', ')} stay pending. To deliver them again, assemble a new wave (integrate with wave, then integrate): it opens a new PR on its own branch, and PR #${pr.number} stays with wave ${waveId}. Rework only a participant whose candidate caused the close; accepted candidates need no rework. Reopening PR #${pr.number} helps only if its branch still holds what should land; integrate then re-reads it.`,
       });
     }
 
@@ -5224,7 +5234,8 @@ function awaitingMergeParticipants(slug: any, waveId: string, pr: any) {
     if (!AWAITING_MERGE_PRIOR_OUTCOMES.has(integration.outcome) || integration.deliveredAt || integration.resultingHead) {
       return { ok: false, reason: 'wave_integration_settled', message: `${ticket.ref} already records integration outcome ${JSON.stringify(integration.outcome || 'delivered')}; wave ${waveId} cannot move to awaiting-merge.`, ref: ticket.ref };
     }
-    if (integration.outcome === AWAITING_MERGE_OUTCOME && integration.pr && integration.pr.number !== pr.number) {
+    // Only this wave's own open PR can conflict; an earlier wave's record is replaced.
+    if (integration.outcome === AWAITING_MERGE_OUTCOME && isWavesPr(integration.pr, waveId) && integration.pr.number !== pr.number) {
       return { ok: false, reason: 'wave_pr_mismatch', message: `Wave ${waveId} is already awaiting PR #${integration.pr.number}; refusing to record PR #${pr.number} over it.`, pr: integration.pr };
     }
   }
@@ -5245,8 +5256,12 @@ function markWaveAwaitingMerge(slug?: any, waveId?: any, pr?: any) {
     const tickets = (checked as any).tickets;
     for (const ticket of tickets) {
       const previous = ticket.submission.integration || {};
-      const awaitingMergeAt = previous.outcome === AWAITING_MERGE_OUTCOME && previous.awaitingMergeAt ? previous.awaitingMergeAt : now;
-      ticket.submission.integration = Object.assign({}, previous, { outcome: AWAITING_MERGE_OUTCOME, pr: { ...record }, awaitingMergeAt });
+      // An earlier wave's PR record is that wave's history: its failure fields
+      // and awaiting-merge time do not carry onto this wave's PR (SQ-437).
+      const earlierWave = !!previous.pr && !isWavesPr(previous.pr, id);
+      const kept = earlierWave ? withoutReconcileFailure(previous) : previous;
+      const awaitingMergeAt = !earlierWave && previous.outcome === AWAITING_MERGE_OUTCOME && previous.awaitingMergeAt ? previous.awaitingMergeAt : now;
+      ticket.submission.integration = Object.assign({}, kept, { outcome: AWAITING_MERGE_OUTCOME, pr: { ...record }, awaitingMergeAt });
       // The PR is durable now; the interrupted-open record has done its job (SQ-374).
       if (ticket.submission.wave) delete ticket.submission.wave.prOpening;
       ticket.updatedAt = now;
@@ -5262,7 +5277,9 @@ function markWaveAwaitingMerge(slug?: any, waveId?: any, pr?: any) {
 function findAwaitingMergeWaves(slug?: any) {
   const waves = new Map<string, { waveId: string; participants: string[]; pr: any }>();
   const tickets = listTickets(slug)
-    .filter((ticket: any) => pendingSubmission(ticket) && ticket.submission.integration?.outcome === AWAITING_MERGE_OUTCOME && ticket.submission.wave?.id)
+    .filter((ticket: any) => pendingSubmission(ticket)
+      && ticket.submission.integration?.outcome === AWAITING_MERGE_OUTCOME
+      && isWavesPr(ticket.submission.integration.pr, ticket.submission.wave?.id))
     .sort(byTicketRef);
   for (const ticket of tickets) {
     const waveId = String(ticket.submission.wave.id);
@@ -5274,12 +5291,14 @@ function findAwaitingMergeWaves(slug?: any) {
 }
 
 // The PR recorded for one wave, or null. A pending participant's record wins
-// over one kept on an already-closed participant.
+// over one kept on an already-closed participant. A participant reassembled
+// into this wave may still carry an earlier wave's PR; that one is not this
+// wave's and is never returned for it (SQ-437).
 function readWavePr(slug?: any, waveId?: any) {
   const id = typeof waveId === 'string' ? waveId.trim() : '';
   if (!id) return null;
   const holders = listTickets(slug)
-    .filter((ticket: any) => ticket?.submission?.wave?.id === id && ticket.submission.integration?.pr)
+    .filter((ticket: any) => ticket?.submission?.wave?.id === id && isWavesPr(ticket.submission.integration?.pr, id))
     .sort((a: any, b: any) => Number(pendingSubmission(b)) - Number(pendingSubmission(a)) || byTicketRef(a, b));
   return holders.length ? { ...holders[0].submission.integration.pr } : null;
 }
