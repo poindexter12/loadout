@@ -13,7 +13,9 @@ import './shared/sqlite-budget.js';
 import { readStdin, stringField } from './shared/input.js';
 import { writeDeny } from './shared/output.js';
 
-// The plugin's board server, or the same server registered directly as `sidequest`.
+// The plugin's board server, or the same server registered directly as `sidequest`. The PreToolUse
+// matcher in hooks/hooks.json must name every tool this accepts, or the guard never runs for it (SQ-440);
+// test/hooks-guards.test.ts holds the two in agreement.
 const ANSWER_TOOL = /^mcp__(?:plugin_sidequest_board|sidequest)__answer$/;
 
 function main(): void {
