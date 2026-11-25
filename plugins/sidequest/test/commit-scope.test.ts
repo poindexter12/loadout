@@ -72,6 +72,7 @@ const commitScope = require('../lib/commit-scope.js') as {
   workingPaths(cwd: string): string[];
   unscopedWorkingPaths(cwd: string, files: unknown): string[];
   preserveCommitRef(cwd: string, commit: string, gitRef: string): { ok: boolean; reason?: string; commit?: string; gitRef?: string };
+  repinSubmissionRef(cwd: string, gitRef: unknown, commit: unknown, approve: (tip: string) => unknown): { ok: boolean; moved?: boolean; reason?: string; from?: string; to?: string; gitRef?: string };
 };
 
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
@@ -1381,6 +1382,43 @@ function commitFile(root: string, file: string, body: string): string {
   git(root, ['commit', '-q', '-m', `add ${file}`]);
   return git(root, ['rev-parse', 'HEAD']);
 }
+
+test('SQ-456: repinSubmissionRef moves the ticket ref only on an approved candidate, then submissionRange accepts it', () => {
+  const root = repo();
+  const main = branchOf(root);
+  const base = git(root, ['rev-parse', 'HEAD']);
+  git(root, ['checkout', '-q', '-b', 'sq-456-work']);
+  const oldTip = commitFile(root, 'plugins/sidequest/repin-a.js', 'a\n');
+  const candidate = commitFile(root, 'plugins/sidequest/repin-b.js', 'b\n');
+  const gitRef = 'refs/sidequest/SQ-456';
+  pin(root, gitRef, oldTip);
+  const rangeOptions = { commit: candidate, gitRef, base, upstream: main };
+
+  const before = commitScope.submissionRange(root, rangeOptions);
+  assert.equal(before.ok, false);
+  assert.equal(before.reason, 'tip_mismatch');
+
+  const asked: string[] = [];
+  const refused = commitScope.repinSubmissionRef(root, gitRef, candidate, (tip) => { asked.push(tip); return null; });
+  assert.deepEqual(refused, { ok: true, moved: false });
+  assert.deepEqual(asked, [candidate], 'the approval is asked about the resolved candidate');
+  assert.equal(git(root, ['rev-parse', gitRef]), oldTip, 'an unapproved candidate leaves the ref where it was');
+  assert.equal(commitScope.submissionRange(root, rangeOptions).reason, 'tip_mismatch');
+
+  const missing = commitScope.repinSubmissionRef(root, 'refs/sidequest/SQ-456-missing', candidate, () => { throw new Error('a missing ref is never approved'); });
+  assert.deepEqual(missing, { ok: true, moved: false });
+  assert.throws(() => execFileSync('git', ['rev-parse', '--verify', '--quiet', 'refs/sidequest/SQ-456-missing'], { cwd: root, stdio: 'ignore' }), 'a missing ref is not created');
+
+  const moved = commitScope.repinSubmissionRef(root, gitRef, candidate, () => ({ affectedGate: 'verification_capture_required' }));
+  assert.deepEqual(moved, { ok: true, moved: true, gitRef, from: oldTip, to: candidate });
+  assert.equal(git(root, ['rev-parse', gitRef]), candidate);
+  const after = commitScope.submissionRange(root, rangeOptions);
+  assert.equal(after.ok, true, after.message);
+  assert.deepEqual(after.commits, [oldTip, candidate]);
+
+  const settled = commitScope.repinSubmissionRef(root, gitRef, candidate, () => { throw new Error('a ref already at the candidate is never re-approved'); });
+  assert.deepEqual(settled, { ok: true, moved: false });
+});
 
 test('SQ-431: a merged candidate revalidates against origin/main while local main is behind it', () => {
   const root = repo();

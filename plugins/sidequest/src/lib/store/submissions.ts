@@ -124,6 +124,70 @@ function integrationGitError(error: any) {
   return output || stripGitProgress(error?.message || error);
 }
 
+// The verification helpers below read only the ticket record, so they live outside
+// createSubmissions: waivedSubmissionCandidate needs them without a store instance.
+
+// A submission that has not been consumed by a done transition yet — the
+// ticket is parked for the publish transaction, not for another executor.
+function pendingSubmission(t?: any) {
+  return !!(t && t.submission && (t.submission.commit || t.submission.sourceRevision) && !t.submission.integratedAt);
+}
+
+// Which verify the next verification runs. A live dispatch's pin always wins
+// (update keeps it in step with the ticket verify). Once that dispatch is
+// terminal, an orchestrator re-pin of the pending submission
+// (update({ref, verify}), recorded in ticket.verificationAmendments) wins over
+// the requirement pinned at dispatch. A fresh submission drops the re-pin.
+function pinnedVerificationRequirement(ticket: any) {
+  const liveDispatch = ticket.dispatch && typeof ticket.dispatch === 'object' && !ticket.dispatch.terminalAt;
+  const repinned = !liveDispatch && pendingSubmission(ticket) ? ticket.submission?.verificationRequirement : null;
+  if (repinned && typeof repinned === 'object') return repinned;
+  const pinned = ticket.dispatch?.verificationRequirement || ticket.dispatch?.lifecycleAttempt?.verificationRequirement || ticket.lifecycleAttempt?.verificationRequirement;
+  if (pinned && typeof pinned === 'object') return pinned;
+  const legacyCommand = String(ticket.executorVerify || ticket.submission?.verify || '').trim();
+  if (!legacyCommand) {
+    return verificationRequirement({ kind: 'custom', evidence: 'legacy project verifier was not recorded' });
+  }
+  return verificationRequirement({
+    kind: classifyVerificationKind(legacyCommand, ticket.executorVerifyKind),
+    command: legacyCommand,
+    evidence: legacyCommand,
+    artifact: ticket.executorAttestationArtifact,
+  });
+}
+
+function recordedVerificationCaptures(ticket: any) {
+  return Array.isArray(ticket?.verificationCaptures) ? ticket.verificationCaptures : [];
+}
+
+// SQ-179: the ticket thread carries orchestrator capture waivers; the claim holder and the
+// submitter are excluded as authors so an executor can never waive its own capture.
+function captureWaiverOptions(ticket: any, by?: any) {
+  return {
+    comments: Array.isArray(ticket?.comments) ? ticket.comments : [],
+    excludedAuthors: [ticket?.claim?.by, by].map((author) => String(author || '').trim()).filter(Boolean),
+  };
+}
+
+// SQ-456: the capture waiver that admits `commit` at submit, or null. It answers one
+// question for the board's ticket-ref repin: has an orchestrator waived a capture of
+// exactly this candidate, for the pinned command and the live dispatch attempt? So it
+// asks the same commandVerificationResult that submit admission asks, with the same
+// excluded authors, and adds what a repin needs on top: `by` holds the live claim, no
+// submission is parked, and the candidate is the capture's own commit (no release-
+// fragment carry). A passed capture is not a waiver, so it never moves the ref either.
+function waivedSubmissionCandidate(ticket: any, by: unknown, commit: unknown) {
+  const submitter = String(by || '').trim();
+  if (!ticket || !submitter || String(ticket.claim?.by || '').trim() !== submitter || pendingSubmission(ticket)) return null;
+  const candidate = String(commit || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{40,64}$/.test(candidate)) return null;
+  const requirement = pinnedVerificationRequirement(ticket);
+  if (!requirement?.command || requirement.kind === 'attestation' || requirement.kind === 'manual') return null;
+  const verification = commandVerificationResult(requirement, requirement.command, recordedVerificationCaptures(ticket), ticket.ref, { source: 'git', value: candidate }, String(ticket.dispatchNonce || ''), captureWaiverOptions(ticket, submitter));
+  const result = verification?.result;
+  return result?.status === 'skipped' && result.waiver ? result.waiver : null;
+}
+
 function createSubmissions(dependencies: any) {
   const { EXECUTOR_VERIFY_MAX, INTEGRATION_VERIFY_OUTPUT_TAIL_BYTES, MANUAL_VERIFY_PREFIX, acquireLock, addComment, appendReworkEvent, artifactWorkingState, autoReleasedClaimMessage, attestationErrors, boardConfig, boundedExcerptForSubmission, commitScope, completionTreeCheck, coerceStatus, createComment, crypto, dirtyPathKey, dispatchState, executionScope, ensureDir, execFileSync, fs, getTicket, integrationTarget, integrationTargetCommit, listTickets, manualVerify, normalizeDeliveryMode, normalizeIntegrationBranch, normalizeIntegrationVerifyTimeoutMs, nullableText, path, prepareComment, projectDir, putTicket, queueEventNotification, readMeta, recordedReviewPass, recordLifecycleAttempt, releaseLock, resolveDeliveryConfig, setDispatchTerminal, spawnSync, stampDispatchEvent, ticketLockPath, transaction, unregisterClaim, verifyCommandErrors, verifyCommandError, withTicketLock, transitionAttempt, attemptDiagnostic } = dependencies;
   const boundedExcerpt = boundedExcerptForSubmission;
@@ -695,11 +759,6 @@ function submissionRangeMetadata(range?: any, commit?: any) {
   );
 }
 
-// A submission that has not been consumed by a done transition yet — the
-// ticket is parked for the publish transaction, not for another executor.
-function pendingSubmission(t?: any) {
-  return !!(t && t.submission && (t.submission.commit || t.submission.sourceRevision) && !t.submission.integratedAt);
-}
 
 function submissionGitRef(ticket?: any) {
   return `refs/sidequest/${ticket.ref}`;
@@ -769,42 +828,6 @@ function integrationVerifyLogPath(slug: any, ticket: any) {
   const dir = String(dispatchState(ticket)?.evidenceDirectory || '').trim() || path.join(projectDir(slug), 'verification', safeRef);
   ensureDir(dir);
   return path.join(dir, `${Date.now()}-${crypto.randomBytes(4).toString('hex')}.log`);
-}
-
-// Which verify the next verification runs. A live dispatch's pin always wins
-// (update keeps it in step with the ticket verify). Once that dispatch is
-// terminal, an orchestrator re-pin of the pending submission
-// (update({ref, verify}), recorded in ticket.verificationAmendments) wins over
-// the requirement pinned at dispatch. A fresh submission drops the re-pin.
-function pinnedVerificationRequirement(ticket: any) {
-  const liveDispatch = ticket.dispatch && typeof ticket.dispatch === 'object' && !ticket.dispatch.terminalAt;
-  const repinned = !liveDispatch && pendingSubmission(ticket) ? ticket.submission?.verificationRequirement : null;
-  if (repinned && typeof repinned === 'object') return repinned;
-  const pinned = ticket.dispatch?.verificationRequirement || ticket.dispatch?.lifecycleAttempt?.verificationRequirement || ticket.lifecycleAttempt?.verificationRequirement;
-  if (pinned && typeof pinned === 'object') return pinned;
-  const legacyCommand = String(ticket.executorVerify || ticket.submission?.verify || '').trim();
-  if (!legacyCommand) {
-    return verificationRequirement({ kind: 'custom', evidence: 'legacy project verifier was not recorded' });
-  }
-  return verificationRequirement({
-    kind: classifyVerificationKind(legacyCommand, ticket.executorVerifyKind),
-    command: legacyCommand,
-    evidence: legacyCommand,
-    artifact: ticket.executorAttestationArtifact,
-  });
-}
-
-function recordedVerificationCaptures(ticket: any) {
-  return Array.isArray(ticket?.verificationCaptures) ? ticket.verificationCaptures : [];
-}
-
-// SQ-179: the ticket thread carries orchestrator capture waivers; the claim holder and the
-// submitter are excluded as authors so an executor can never waive its own capture.
-function captureWaiverOptions(ticket: any, by?: any) {
-  return {
-    comments: Array.isArray(ticket?.comments) ? ticket.comments : [],
-    excludedAuthors: [ticket?.claim?.by, by].map((author) => String(author || '').trim()).filter(Boolean),
-  };
 }
 
 // SQ-203 (#20): a mismatch refusal has to show which bytes differ, or it reads as a
@@ -5338,4 +5361,4 @@ function submissionsPayload(slug?: any) {
 // tests: they are pure text builders, and the text they return is exactly what
 // `gh pr create` is handed. integrationGitError is exported for the same reason:
 // it is the pure formatter behind every integration git refusal message.
-module.exports = { createSubmissions, githubText, wavePullRequestText, integrationGitError };
+module.exports = { createSubmissions, githubText, wavePullRequestText, integrationGitError, waivedSubmissionCandidate };

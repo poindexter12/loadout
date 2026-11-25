@@ -41,6 +41,7 @@ __export(commit_scope_exports, {
   preserveCommitRef: () => preserveCommitRef,
   rangePaths: () => rangePaths,
   releaseFragmentOwner: () => releaseFragmentOwner,
+  repinSubmissionRef: () => repinSubmissionRef,
   repoRoot: () => repoRoot,
   scopeKey: () => import_scope_match2.scopeKey,
   scopedPaths: () => import_scope_match2.scopedPaths,
@@ -503,6 +504,19 @@ function scopedWorkPending(cwd, files, options) {
     return { ok: false, reason: "git_error", message: errorMessage(error) };
   }
 }
+function repinSubmissionRef(cwd, gitRef, commit, approve) {
+  const ref = String(gitRef || "").trim();
+  if (!ref) return { ok: true, moved: false };
+  const tip = resolvedCommit(cwd, commit);
+  if (!tip.ok) return { ok: true, moved: false };
+  const refValue = gitResult(cwd, ["rev-parse", "--verify", "--quiet", ref]);
+  const refTip = resolvedCommit(cwd, ref);
+  if (!refValue.ok || !refTip.ok || refTip.value === tip.value) return { ok: true, moved: false };
+  if (!approve(tip.value)) return { ok: true, moved: false };
+  const updated = gitResult(cwd, ["update-ref", "-m", `sidequest: repin ${ref} to waived candidate`, ref, tip.value, refValue.value]);
+  if (!updated.ok) return { ok: false, reason: "git_error", message: updated.message, gitRef: ref, from: refTip.value, to: tip.value };
+  return { ok: true, moved: true, gitRef: ref, from: refTip.value, to: tip.value };
+}
 function submissionRange(cwd, options) {
   const opts = isRecord(options) ? options : {};
   const gitRef = String(opts.gitRef || "").trim();
@@ -755,6 +769,7 @@ function commitScoped(cwd, message, files, options) {
   preserveCommitRef,
   rangePaths,
   releaseFragmentOwner,
+  repinSubmissionRef,
   repoRoot,
   scopeKey,
   scopedPaths,

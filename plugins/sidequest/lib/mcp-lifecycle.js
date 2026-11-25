@@ -60,6 +60,7 @@ const {
 const { sourceRevisionBaseline } = require("./source-revision-capability");
 const backupRefs = require("./backup-refs");
 const { prDeliveryGuidance } = require("./refusal-guidance");
+const { waivedSubmissionCandidate } = require("./store/submissions.js");
 function pruneDoneBackupRefs(slug, projectPath) {
   try {
     const result = backupRefs.pruneBackupRefs(projectPath, (ref) => store.getTicket(slug, ref)?.status === "done");
@@ -265,7 +266,10 @@ function submissionRangeRemedy(ticket, range, gitRef) {
     missing_git_ref: `${gitRef} is missing or does not point to the submitted commit. Run \`git update-ref ${gitRef} <commit>\`, then resubmit.`,
     missing_upstream: `fetch or recreate the recorded integration ref, then resubmit the preserved commit without changing its base.`,
     missing_commit: `preserve the work commit, restore it in this worktree, update ${gitRef}, and resubmit.`,
-    tip_mismatch: `${gitRef} points to a different commit. Point it back at the submitted commit with \`git update-ref ${gitRef} <commit>\`, then resubmit.`,
+    // SQ-456: executors are guarded from writing refs/sidequest, so this remedy must not
+    // send them there. The board repins the ticket ref itself when an orchestrator capture
+    // waiver binds exactly the submitted candidate; anything else is a wrong candidate.
+    tip_mismatch: `${gitRef} points to ${String(range.refTip || "a different commit")}, not the submitted commit${range.tip ? ` ${range.tip}` : ""}, and no orchestrator capture waiver binds the submitted commit. Do not hand-edit refs/sidequest. Resubmit the commit ${gitRef} already names if that is the verified candidate. If the candidate really changed, run the pinned verify-capture wrapper on it and resubmit; if that capture keeps failing only from host load, keep the claim and ask the orchestrator to post a capture waiver for this candidate, and the board repins ${gitRef} when you resubmit.`,
     missing_recorded_upstream: `fetch the recorded upstream commit, then resubmit the preserved commit without changing its base.`,
     expected_upstream_diverged: `preserve the submission for orchestrator reconciliation; do not replace it by syncing to a branch tip.`,
     unrelated_history: `rebuild only this ticket's work from ${pinnedBase}, update ${gitRef}, and resubmit.`,
@@ -312,8 +316,14 @@ function submissionRoot(meta, worktree, commit, gitRef) {
     return repository;
   }
 }
+function repinWaivedSubmissionRef(ticket, root, commit, gitRef, by) {
+  if (!by || !ticket?.ref || gitRef !== `refs/sidequest/${ticket.ref}`) return null;
+  const repinned = commitScope.repinSubmissionRef(root, gitRef, commit, (tip) => waivedSubmissionCandidate(ticket, by, tip));
+  return repinned.moved || !repinned.ok ? repinned : null;
+}
 function collectGitSubmissionFacts(options) {
   const { slug, ticket, root, commit, gitRef, base } = options;
+  const repin = repinWaivedSubmissionRef(ticket, root, commit, gitRef, options.by);
   const dispatchTarget = ticket.dispatch && ticket.dispatch.integrationTarget;
   let target = null;
   let targetFailure = null;
@@ -352,7 +362,8 @@ function collectGitSubmissionFacts(options) {
   const surfaces = { declared: scope, admitted: scope, changed: range?.ok ? range.changedPaths : [], pending: [] };
   const excludedScopePaths = [];
   if (!range?.ok) {
-    surfaces.diagnostic = { code: range?.reason || "integration_target_unavailable", message: range ? submissionRangeFailureMessage(ticket, range, gitRef) : targetFailure.message, retryable: true };
+    const repinFailure = repin && !repin.ok ? ` The board found an orchestrator capture waiver for ${repin.to} but could not repin ${gitRef} from ${repin.from}: ${boundedSubmissionText(String(repin.message || repin.reason))}. Keep the claim and resubmit; if it repeats, comment this refusal for the orchestrator.` : "";
+    surfaces.diagnostic = { code: range?.reason || "integration_target_unavailable", message: `${range ? submissionRangeFailureMessage(ticket, range, gitRef) : targetFailure.message}${repinFailure}`, retryable: true };
   } else {
     const pending = commitScope.scopedWorkPending(root, scope, { base: range.base });
     if (!pending.ok) {
@@ -386,6 +397,7 @@ function collectGitSubmissionFacts(options) {
     target,
     range,
     scope,
+    ...repin ? { repin } : {},
     admissionFacts: {
       admittedScope: store.executionScope(slug, ticket),
       scope,
@@ -940,7 +952,7 @@ const tools = [
         throw new Error(`submit: refused ${ticket.ref}; verify embeds this worktree path. Run verification from the repo root and use repo-relative paths.`);
       }
       const verify = String(args.verify || "").trim();
-      const collected = collectGitSubmissionFacts({ slug, ticket, root, commit, gitRef, base: args.base });
+      const collected = collectGitSubmissionFacts({ slug, ticket, root, commit, gitRef, base: args.base, by });
       const { target, range, scope } = collected;
       const unscopedPaths = ticket.dispatch?.sharedTree === true ? commitScope.unscopedWorkingPaths(root, scope) : [];
       const res = store.submitTicket(slug, args.ref, by, {
@@ -957,7 +969,8 @@ const tools = [
         sessionId: sessionOf(args)
       });
       if (res.ok) closeDispatchExecutor(ticket);
-      return mutationAck(slug, res);
+      const repinned = collected.repin?.moved ? `The board repinned ${gitRef} from ${collected.repin.from} to the waived candidate ${collected.repin.to}.` : "";
+      return mutationAck(slug, repinned && res && typeof res === "object" ? Object.assign({}, res, { advisory: [res.advisory, repinned].filter(Boolean).join(" ") }) : res);
     }
   },
   {

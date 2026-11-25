@@ -270,6 +270,65 @@ test('SQ-179: an orchestrator capture waiver admits a load-only failed capture; 
   }
 });
 
+test('SQ-456: a capture waiver for exactly the submitted candidate repins the ticket ref; no waiver or another candidate keeps tip_mismatch', async () => {
+  cleanBranch();
+  const command = 'node -e "process.exit(1)"';
+  const files = ['lib/repin-old.js', 'lib/repin-new.js', 'lib/repin-later.js'];
+  const t = addTicket('waived resubmit repin', { executorVerify: command, files });
+  const by = 'waived-repin-worker';
+  const gitRef = `refs/sidequest/${t.ref}`;
+  const base = git(['rev-parse', 'HEAD']);
+  assert.strictEqual(store.claimTicket(slug, t.ref, by, { direct: true, reason: 'The submission fixture requires a local direct claim.' }).ok, true);
+  const commitLib = (file: string) => {
+    fs.mkdirSync(path.join(PROJECT_DIR, 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(PROJECT_DIR, file), `${file}\n`);
+    git(['add', file]);
+    git(['commit', '-m', `${t.ref} ${file}`]);
+    return git(['rev-parse', 'HEAD']);
+  };
+  const oldTip = commitLib('lib/repin-old.js');
+  pin(t, oldTip);
+  const candidate = commitLib('lib/repin-new.js');
+  const submit = (commit: string) => callMcp('submit', { project: PROJECT_DIR, ref: t.ref, by, commit, base, worktree: PROJECT_DIR, verify: command, body: 'Changed lib/repin-*.js. Capture failed only from host load and was waived.' });
+
+  const capture = await runVerifyCapture(command, PROJECT_DIR);
+  try {
+    assert.strictEqual(capture.status, 'failed_suite');
+    const recorded = recordCapture({ project: PROJECT_DIR, ticket: t.ref }, capture, PROJECT_DIR);
+    assert.strictEqual(recorded.ok, true, recorded.message);
+
+    const unwaived = await submit(candidate);
+    assert.strictEqual(unwaived.ok, false);
+    assert.strictEqual(unwaived.reason, 'tip_mismatch');
+    assert.strictEqual(git(['rev-parse', gitRef]), oldTip, 'without a waiver the ticket ref does not move');
+    assert.match(unwaived.message, /Do not hand-edit refs\/sidequest/);
+    assert.ok(!unwaived.message.includes('git update-ref'), unwaived.message);
+    assert.ok(unwaived.message.includes(oldTip) && unwaived.message.includes(candidate), unwaived.message);
+    assert.strictEqual(store.getTicket(slug, t.ref).claim.by, by);
+
+    store.addComment(slug, t.ref, { by: 'orchestrator', body: `[sidequest:capture-waiver] capture=${recorded.capture.id} signature=failed_suite:exit-1 authority=joe; port race while three sibling full suites ran, rerun passed at load 2` });
+
+    const later = commitLib('lib/repin-later.js');
+    const otherCandidate = await submit(later);
+    assert.strictEqual(otherCandidate.ok, false);
+    assert.strictEqual(otherCandidate.reason, 'tip_mismatch');
+    assert.strictEqual(git(['rev-parse', gitRef]), oldTip, 'a waiver bound to another candidate does not move the ref');
+    assert.strictEqual(store.getTicket(slug, t.ref).claim.by, by);
+
+    git(['reset', '--hard', candidate]);
+    const waived = await submit(candidate);
+    assert.strictEqual(waived.ok, true, waived.message);
+    assert.strictEqual(git(['rev-parse', gitRef]), candidate, 'the board repinned the ticket ref to the waived candidate');
+    assert.ok(String(waived.advisory || '').includes(`repinned ${gitRef} from ${oldTip} to the waived candidate ${candidate}`), JSON.stringify(waived));
+    const submission = store.getTicket(slug, t.ref).submission;
+    assert.strictEqual(submission.commit, candidate);
+    assert.strictEqual(submission.verificationResult.status, 'skipped');
+    assert.strictEqual(submission.verificationResult.waiver.affectedGate, 'verification_capture_required');
+  } finally {
+    fs.rmSync(capture.logPath, { force: true });
+  }
+});
+
 test('SQ-179: capture waivers bind only a timeout or failed_suite capture of the same candidate, command, and dispatch attempt', () => {
   const { commandVerificationResult } = require('../src/lib/kernel/verification.ts');
   const requirement = { kind: 'command', command: 'npm test', evidenceContract: 'npm test' };
