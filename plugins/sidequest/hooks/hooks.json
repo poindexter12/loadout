@@ -90,7 +90,7 @@
         ]
       },
       {
-        "matcher": "mcp__plugin_sidequest_board__answer",
+        "matcher": "mcp__plugin_sidequest_board__answer|mcp__sidequest__answer",
         "hooks": [
           {
             "type": "command",

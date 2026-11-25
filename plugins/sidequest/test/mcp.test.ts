@@ -969,7 +969,14 @@ test('the build budget report itemizes the served MCP descriptors', () => {
   const report = mcp.toolDescriptorByteReport();
   assert.equal(report.maxBytes, mcp.MCP_TOOLS_LIST_MAX_BYTES);
   assert.equal(report.reserveBytes, mcp.MCP_TOOLS_LIST_HEADROOM_BYTES);
-  assert.equal(report.tools[0].name, 'update');
+  // Which tool is largest moves as descriptors grow (update until SQ-438 gave add its issue field),
+  // so measure the served descriptors independently rather than pinning a name.
+  const served = mcp.toolDescriptors().map((tool: any) => ({ name: tool.name, bytes: Buffer.byteLength(JSON.stringify(tool), 'utf8') }));
+  assert.equal(report.tools.length, served.length);
+  assert.deepEqual(report.tools.map((tool: any) => tool.name).sort(), served.map((tool: any) => tool.name).sort());
+  const largest = Math.max(...served.map((tool: any) => tool.bytes));
+  assert.equal(report.tools[0].bytes, largest);
+  assert.ok(served.some((tool: any) => tool.name === report.tools[0].name && tool.bytes === largest));
   assert.ok(report.tools.every((tool: any, index: number) => index === 0 || report.tools[index - 1].bytes >= tool.bytes));
 });
 

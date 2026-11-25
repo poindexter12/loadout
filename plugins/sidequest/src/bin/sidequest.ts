@@ -19,7 +19,7 @@ const ARRAY_FLAG_ALIASES: Record<string, string> = { files: 'file', labels: 'lab
 const BOOLEAN_FLAGS = new Set(['json', 'brief', 'open', 'help', 'force', 'done', 'archived', 'all', 'dry-run', 'yolo', 'wave', 'unclassified', 'enabled', 'disabled', 'no-fallback', 'global', 'clear', 'steal', 'shared-tree', 'direct', 'sweep', 'yes', 'integration', 'skip-verify', 'contract-waiver', 'full', 'rotate', 'worktree-isolation', 'auto-approve-test-scope', 'high-stakes', 'working-tree-delivery', 'external-deliverable', 'unverified-transport', 'allow-repeat-failure', 'allow-unscoped', 'no-process', 'no-worktree', 'review', 'abandon-submission', 'apply', 'render']);
 const COMMON_FLAGS = new Set(['help', 'json', 'project', 'source']);
 const COMMAND_FLAGS: Record<string, string[]> = {
-  add: ['title', 'desc', 'description', 'body', 'body-file', 'priority', 'status', 'category', 'unclassified', 'complexity', 'why', 'high-stakes', 'label', 'image', 'file', 'produces', 'changes', 'consumes', 'contract-waiver', 'readonly', 'working-tree-delivery', 'external-deliverable', 'anchors', 'verify-kind', 'attestation-artifact', 'verify', 'story', 'route-model', 'route-effort', 'route', 'model', 'effort', 'review-ref', 'review-commit', 'review-source', 'review-revision', 'dry-run', 'name'],
+  add: ['title', 'desc', 'description', 'body', 'body-file', 'priority', 'status', 'category', 'unclassified', 'complexity', 'why', 'high-stakes', 'label', 'image', 'file', 'produces', 'changes', 'consumes', 'contract-waiver', 'readonly', 'working-tree-delivery', 'external-deliverable', 'anchors', 'verify-kind', 'attestation-artifact', 'verify', 'story', 'route-model', 'route-effort', 'route', 'model', 'effort', 'review-ref', 'review-commit', 'review-source', 'review-revision', 'dry-run', 'name', 'issue'],
   list: ['status', 'archived', 'brief', 'limit', 'cursor', 'all'],
   pulse: [],
   changes: ['since'],
@@ -207,7 +207,7 @@ function parseArgs(argv: any) {
 
 
 const HELP_COMMANDS: any = {
-  add: 'sidequest add -t "title" (--category <id> | --complexity 1-10 --why "motivation" | --unclassified) [--file <path>]... [--route-model <model> --route-effort <effort>] [-d desc|--body-file path] [-p low|normal|high|urgent] [--high-stakes] [-l label]... [--produces name]... [--changes name]... [--consumes name]... [--contract-waiver] [--readonly true|false] [--working-tree-delivery] [--external-deliverable] [-i image]... [-s todo|doing|done] [--dry-run] [--json]   (--file declares write scope; a write ticket without it is refused at dispatch)',
+  add: 'sidequest add -t "title" (--category <id> | --complexity 1-10 --why "motivation" | --unclassified) [--file <path>]... [--route-model <model> --route-effort <effort>] [-d desc|--body-file path] [-p low|normal|high|urgent] [--high-stakes] [-l label]... [--produces name]... [--changes name]... [--consumes name]... [--contract-waiver] [--readonly true|false] [--working-tree-delivery] [--external-deliverable] [-i image]... [-s todo|doing|done] [--issue <#N|owner/repo#N|url>] [--dry-run] [--json]   (--issue imports and links a GitHub issue, so it closes at release; --file declares write scope; a write ticket without it is refused at dispatch)',
   list: 'sidequest list [--status todo|doing|awaiting-user|awaiting-oracle|done] [--archived] [--json] [--brief] [--limit N] [--cursor <nextCursor>] [--all]  (defaults to active tickets; --status done or --all includes done)',
   pulse: 'sidequest pulse <SQ-n> [--project <path-or-slug>]',
   changes: 'sidequest changes [--since <iso>] [--project <path-or-slug>]',
@@ -376,6 +376,7 @@ Native Agent dispatch (routed work stays in this conversation):
     Defaults to \$CLAUDE_CODE_SESSION_ID when --session is omitted.
   sidequest audit [--apply] [--json] [--project <path-or-slug>]   report stale board tickets, untracked GitHub issues, and linked issue drift; --apply changes only explicitly linked GitHub issues
   sidequest issue <link|unlink|list> [REF] [<url|#N>]   link GitHub issues to a ticket; use \`issue_link\` from MCP
+  sidequest add --issue <#N|owner/repo#N|url> --category <id>   file a ticket from a GitHub issue (title/description default from it) and link it in one step
   sidequest claims sweep [--project <path-or-slug>]  audit residual claims after terminal failures already release their exact claim,
     then two activity-based backstops: no board activity for SIDEQUEST_CLAIM_IDLE_MIN (default 60m) with no live executor
     associated, or SIDEQUEST_CLAIM_ABANDON_MIN (default 1440m) for a death nothing observed. A running executor's claim is

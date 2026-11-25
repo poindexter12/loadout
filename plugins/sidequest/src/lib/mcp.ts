@@ -83,7 +83,10 @@ const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 // Raised from 27180 for needsInput on add and update (US-8 Q8, SQ-422: 234 bytes) while preserving
 // the 2.5KB reserve (story contract U2). An orchestrator filing work that needs the user has to find
 // the field in the schema; without it the ticket dispatches and the executor guesses the decision.
-const MCP_TOOLS_LIST_MAX_BYTES = 27414;
+// Raised from 27414 for issue on add and the add/issue_link pointers (SQ-438: 256 bytes) while
+// preserving the 2.5KB reserve. Issue-driven work that is filed without the link never closes its
+// issue at release, so the field has to be discoverable from the schema alone.
+const MCP_TOOLS_LIST_MAX_BYTES = 27670;
 const MCP_TOOLS_LIST_HEADROOM_BYTES = 2500;
 
 function serverVersion() {
@@ -333,6 +336,7 @@ const MCP_SCHEMA_PROPERTY_DESCRIPTIONS: Record<string, Record<string, string>> =
     complexity: 'Legacy score; why required.',
     verify: ATTESTATION_VERIFY_CONTRACT,
     needsInput: 'Question for the user, up to 1500 bytes: files awaiting-user; dispatch refuses until answered or declined.',
+    issue: '#N, owner/repo#N or URL: gh fills title/description, links it. Refused if closed, already linked, or gh fails.',
   },
   claim: { force: 'Operator-only.' },
   update: {

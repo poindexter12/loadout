@@ -210,7 +210,15 @@ sidequest issue link SQ-123 https://github.com/owner/repo/issues/42
 
 Use `sidequest issue list SQ-123` to see the links and `sidequest issue unlink SQ-123 <url|#N>` to remove one. A link is explicit: Sidequest never treats a ticket title, a comment, or a `TRACKS` convention as permission to change an issue.
 
-`sidequest audit` is report-only by default. It summarizes four things: board tickets whose fix looks landed, open GitHub issues with no ticket, linked issues whose state or labels differ from the board, and any unavailable GitHub or Git evidence. `sidequest audit --apply` performs only the proposed actions for **linked** issues. It never changes unlinked issues, creates tickets, or closes board tickets.
+When the work starts from an issue, import it instead of filing and linking separately:
+
+```text
+sidequest add --issue owner/repo#42 --category coding.normal
+```
+
+`--issue` takes `#N`, `owner/repo#N`, or the issue URL. Sidequest reads the issue with `gh`, uses its title as the ticket title and its URL plus body as the description (an explicit `-t` or `-d` wins; an explicit description still gets the issue URL appended), creates the ticket, and records the same link `issue link` would, in one step. Agents pass `issue` to the `add` MCP tool. The import refuses and creates nothing when the issue is closed, when it is already linked to a ticket on this board (the refusal names that ticket), or when `gh` is missing, unauthenticated, or cannot read the issue.
+
+`sidequest audit` is report-only by default. It summarizes four things: board tickets whose fix looks landed, open GitHub issues with no ticket, linked issues whose state or labels differ from the board, and any unavailable GitHub or Git evidence. Each open issue with no ticket is listed with its import command, `sidequest add --issue owner/repo#N --unclassified`, ready to run; classify the new ticket before dispatching it. `sidequest audit --apply` performs only the proposed actions for **linked** issues. It never changes unlinked issues, creates tickets, or closes board tickets.
 
 For a linked issue, todo tickets leave it open with no Sidequest status label. Doing, awaiting-user, awaiting-oracle, and pending-submission work is open with `status:in-progress`; done but unreleased work is open with `status:in-testing`. When every linked ticket is released, Sidequest removes those status labels, posts one release marker comment, and closes the issue. Applying the same audit again is safe: existing labels and release comments are not duplicated.
 
