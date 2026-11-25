@@ -1851,7 +1851,7 @@ ${verify.outputTail}` : null
           content = { ok: true, evidence: "forge_squash_merge" };
         }
       }
-      const equivalenceApplies = equivalentLanding && !workingTreeDelivery && !String(opts.deliveryInteractionCommit || "").trim();
+      const equivalenceApplies = equivalentLanding && !String(opts.deliveryInteractionCommit || "").trim();
       if (!content.ok && equivalenceApplies) {
         const landed = equivalentLandedDelivery(repo, ticket, {
           landingCommits,
@@ -1884,13 +1884,14 @@ ${verify.outputTail}` : null
         if (!reviewed.applicable && workingTreeDelivery && !checkoutCarriesTarget) return checkoutRefusal;
         if (!reviewed.applicable) {
           const requested = String(opts.deliveryInteractionCommit || "").trim();
-          const hint = requested ? ` deliveryInteractionCommit ${reviewed.interactionCommit || requested} is not a descendant of pinned candidate ${candidate}, so it cannot stand in for the candidate content; name the reviewed commit made on top of ${candidate}.` : ` If the delivery carries a reviewed fix committed on top of the pinned candidate (for example a squash of candidate plus review fix), name that reviewed descendant of ${candidate} as deliveryInteractionCommit; it may change submitted paths only, and the delivery is then checked against its content.${workingTreeDelivery ? "" : equivalenceHint()}`;
+          const hint = requested ? ` deliveryInteractionCommit ${reviewed.interactionCommit || requested} is not a descendant of pinned candidate ${candidate}, so it cannot stand in for the candidate content; name the reviewed commit made on top of ${candidate}.` : ` If the delivery carries a reviewed fix committed on top of the pinned candidate (for example a squash of candidate plus review fix), name that reviewed descendant of ${candidate} as deliveryInteractionCommit; it may change submitted paths only, and the delivery is then checked against its content.${workingTreeDelivery && !equivalenceApplies ? "" : equivalenceHint()}`;
+          const missingWhere = workingTreeDelivery ? `neither the integration working tree nor any commit on ${landedWhere} holds pinned candidate ${deliveryCommit}'s content` : `${deliveryCommit} does not preserve the submitted candidate content`;
           return {
             ok: false,
             reason: "delivery_content_missing",
             ticket,
             missingCommits: content.missing,
-            message: `${ticket.ref} reconciliation refused: ${deliveryCommit} does not preserve the submitted candidate content for ${content.missing.join(", ")}.${hint}`
+            message: `${ticket.ref} reconciliation refused: ${missingWhere} for ${content.missing.join(", ")}.${hint}`
           };
         }
         if (!reviewed.ok) {

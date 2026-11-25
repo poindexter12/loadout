@@ -5,6 +5,7 @@ import {
   test,
   assert,
   fs,
+  os,
   path,
   store,
   mcp,
@@ -173,6 +174,139 @@ test('SQ-322: a squash-landed reviewed descendant closes through deliveryInterac
   assert.equal(delivered.integration.deliveryIdentity.landingCommit, squash);
   assert.equal(delivered.integration.deliveryIdentity.interaction.commit, interaction);
   assert.equal(delivered.integration.contentEvidence, 'landed_candidate_content:reviewed_candidate_descendant');
+});
+
+// SQ-453 (work-board SQ-392): the orchestrator folds a pinned candidate into one landing commit
+// together with another ticket's work and regenerates a shared derived file. No commit on main ever
+// holds the candidate's exact content, the landing is no clean forge squash (it touches another
+// path), and the checkout holds the regenerated file, so the working-tree check can never pass. A
+// manual groomClose naming the ticket's own pinned candidate must still reach the landed-history
+// equivalence routes rather than dead-ending in delivery_content_missing.
+const FOLD_INDEX_LINES = ['l1', 'l2', 'l3', 'l4', 'l5', 'l6', 'l7', 'l8'];
+
+function foldedRegeneratedLanding(label: string) {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), `sq-advance-${label}-`));
+  git(['init', '-b', 'main'], repo);
+  git(['config', 'user.name', 'Sidequest Test'], repo);
+  git(['config', 'user.email', 'sidequest-test@example.invalid'], repo);
+  fs.writeFileSync(path.join(repo, 'README.md'), 'advance fixture\n');
+  fs.writeFileSync(path.join(repo, '.gitignore'), '.claude/*\n');
+  fs.writeFileSync(path.join(repo, 'index.txt'), `${FOLD_INDEX_LINES.join('\n')}\n`);
+  git(['add', '.'], repo);
+  git(['commit', '-m', 'base'], repo);
+  const executor = path.join(repo, '.claude', 'worktrees', 'agent-fold');
+  git(['worktree', 'add', '-b', 'worktree-agent-fold', executor, 'main'], repo);
+  const candidateIndex = [...FOLD_INDEX_LINES.slice(0, 4), 'feature', ...FOLD_INDEX_LINES.slice(4)];
+  fs.writeFileSync(path.join(executor, 'feature.txt'), 'executor work\n');
+  fs.writeFileSync(path.join(executor, 'index.txt'), `${candidateIndex.join('\n')}\n`);
+  git(['add', 'feature.txt', 'index.txt'], executor);
+  git(['commit', '-m', 'candidate feature plus its index entry'], executor);
+  const submitted = head(executor);
+  const fixture = { repo, executor, submitted, target: { mode: 'local', branch: 'main', upstream: 'main' } };
+  const { slug } = store.ensureProject(repo);
+  const ticket = store.createTicket(slug, {
+    title: `folded regenerated landing ${label}`,
+    category: 'codebase-exploration',
+    description: 'A pinned candidate folded with another ticket and a regenerated index.',
+    files: ['feature.txt', 'index.txt'],
+  });
+  submitFixture(slug, ticket, fixture);
+  // One landing commit: this candidate, another ticket's file, and index.txt regenerated for both.
+  fs.writeFileSync(path.join(repo, 'feature.txt'), 'executor work\n');
+  fs.writeFileSync(path.join(repo, 'other.txt'), 'another ticket\n');
+  fs.writeFileSync(path.join(repo, 'index.txt'), `${[...candidateIndex, 'other'].join('\n')}\n`);
+  git(['add', 'feature.txt', 'other.txt', 'index.txt'], repo);
+  git(['commit', '-m', 'stacked delivery of two candidates, index regenerated'], repo);
+  const fold = head(repo);
+  return { fixture, slug, ticket, fold };
+}
+
+test('SQ-453: a manual groomClose of the pinned candidate closes from the landed history when the checkout holds regenerated content', () => {
+  const { fixture, slug, ticket, fold } = foldedRegeneratedLanding('fold-manual');
+  assert.equal(git(['rev-parse', `refs/sidequest/${ticket.ref}`], fixture.repo), fixture.submitted);
+  assert.notEqual(fs.readFileSync(path.join(fixture.repo, 'index.txt'), 'utf8'), git(['show', `${fixture.submitted}:index.txt`], fixture.repo) + '\n');
+
+  // Without named landing commits nothing on main proves the fold, but the refusal now names the
+  // landed-history routes instead of omitting them for a manual delivery.
+  const unnamed = store.completeTicketAsControlPlane(slug, ticket.ref, {
+    purpose: 'delivery',
+    by: 'orchestrator',
+    reason: 'Folded into the stacked delivery; index.txt regenerated.',
+    deliveryCommit: fixture.submitted,
+    deliveryMethod: 'manual',
+  });
+  assert.equal(unnamed.ok, false);
+  assert.equal(unnamed.reason, 'delivery_content_missing');
+  assert.match(String(unnamed.message), /landingCommits/);
+  assert.match(String(unnamed.message), /deliveryMethod "attested"/);
+  assert.match(String(unnamed.message), new RegExp(fold));
+
+  const delivered = store.completeTicketAsControlPlane(slug, ticket.ref, {
+    purpose: 'delivery',
+    by: 'orchestrator',
+    reason: 'Folded into the stacked delivery; index.txt regenerated.',
+    deliveryCommit: fixture.submitted,
+    deliveryMethod: 'manual',
+    landingCommits: [fold],
+  });
+  assert.equal(delivered.ok, true, delivered.message);
+  const stored = store.getTicket(slug, ticket.ref);
+  assert.equal(stored.status, 'done');
+  const integration = stored.submission.integration;
+  assert.equal(integration.deliveryCommit, fixture.submitted);
+  assert.equal(integration.contentEvidence, 'landed_diff_equivalent');
+  assert.equal(integration.deliveryIdentity.kind, 'landed-diff-equivalent');
+  assert.equal(integration.deliveryIdentity.method, 'manual');
+  assert.deepEqual(integration.deliveryIdentity.landingCommits, [fold]);
+  assert.equal(integration.contentCommit, fold);
+  assert.equal(integration.outcome, 'verified');
+});
+
+test('SQ-453: genuine mismatches still refuse a manual delivery, and integrate keeps its exact-content contract', () => {
+  const { fixture, slug, ticket, fold } = foldedRegeneratedLanding('fold-refused');
+  // integrate (no equivalence opt-in) never reaches the landed-history routes for a manual delivery.
+  const integrate = store.recordDeliveredSubmission(slug, ticket.ref, {
+    target: store.integrationTarget(slug),
+    deliveryCommit: fixture.submitted,
+    deliveryMethod: 'manual',
+    landingCommits: [fold],
+    reason: 'integrate may not take landing commits.',
+  });
+  assert.equal(integrate.ok, false);
+  assert.equal(integrate.reason, 'landing_commits_unsupported');
+  const integrateUnnamed = store.recordDeliveredSubmission(slug, ticket.ref, {
+    target: store.integrationTarget(slug),
+    deliveryCommit: fixture.submitted,
+    deliveryMethod: 'manual',
+    reason: 'integrate checks the working tree exactly.',
+  });
+  assert.equal(integrateUnnamed.ok, false);
+  assert.equal(integrateUnnamed.reason, 'delivery_content_missing');
+
+  // A named landing commit that does not carry the candidate's diff proves nothing.
+  const unrelatedEdit = commitFile(fixture.repo, 'index.txt', 'rewritten without the candidate entry\n');
+  const unproven = store.completeTicketAsControlPlane(slug, ticket.ref, {
+    purpose: 'delivery',
+    by: 'orchestrator',
+    reason: 'Names a commit that rewrote index.txt without the candidate.',
+    deliveryCommit: fixture.submitted,
+    deliveryMethod: 'manual',
+    landingCommits: [unrelatedEdit],
+  });
+  assert.equal(unproven.ok, false);
+  assert.equal(unproven.reason, 'landed_equivalence_unproven');
+
+  // A reachable delivery that is not the pinned candidate and lacks its content still refuses.
+  const nonCandidate = store.completeTicketAsControlPlane(slug, ticket.ref, {
+    purpose: 'delivery',
+    by: 'orchestrator',
+    reason: 'Names the current tip, which no longer carries the candidate.',
+    deliveryCommit: unrelatedEdit,
+    deliveryMethod: 'manual',
+  });
+  assert.equal(nonCandidate.ok, false);
+  assert.equal(nonCandidate.reason, 'delivery_content_missing');
+  assert.notEqual(store.getTicket(slug, ticket.ref).status, 'done');
 });
 
 // SQ-158: groomClose's manual delivery targets a wave branch, but by the time
