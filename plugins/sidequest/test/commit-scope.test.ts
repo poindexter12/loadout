@@ -1413,7 +1413,7 @@ test('SQ-456: repinSubmissionRef moves the ticket ref only on an approved candid
   assert.deepEqual(moved, { ok: true, moved: true, gitRef, from: oldTip, to: candidate });
   assert.equal(git(root, ['rev-parse', gitRef]), candidate);
   const after = commitScope.submissionRange(root, rangeOptions);
-  assert.equal(after.ok, true, after.message);
+  assert.equal(after.ok, true, `repinned range was refused: ${after.reason}`);
   assert.deepEqual(after.commits, [oldTip, candidate]);
 
   const settled = commitScope.repinSubmissionRef(root, gitRef, candidate, () => { throw new Error('a ref already at the candidate is never re-approved'); });
