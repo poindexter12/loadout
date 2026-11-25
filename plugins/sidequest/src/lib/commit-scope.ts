@@ -579,6 +579,28 @@ export function scopedWorkPending(cwd: string, files: unknown, options?: unknown
   }
 }
 
+// SQ-456: a resubmit whose ticket ref still names an earlier tip is refused
+// tip_mismatch, and executors are guarded from writing refs/sidequest, so only
+// the board can move it. `approve` is the board's judgement that the submitted
+// candidate is exactly the one an orchestrator waived; this only does the Git
+// half. The move is a compare-and-swap on the value it observed, so a
+// concurrent writer makes it fail instead of being overwritten. A missing ref,
+// an unresolvable commit, a ref already at the candidate, or a refused
+// approval leaves the ref untouched for submissionRange to judge as before.
+export function repinSubmissionRef(cwd: string, gitRef: unknown, commit: unknown, approve: (tip: string) => unknown) {
+  const ref = String(gitRef || '').trim();
+  if (!ref) return { ok: true as const, moved: false as const };
+  const tip = resolvedCommit(cwd, commit);
+  if (!tip.ok) return { ok: true as const, moved: false as const };
+  const refValue = gitResult(cwd, ['rev-parse', '--verify', '--quiet', ref]);
+  const refTip = resolvedCommit(cwd, ref);
+  if (!refValue.ok || !refTip.ok || refTip.value === tip.value) return { ok: true as const, moved: false as const };
+  if (!approve(tip.value)) return { ok: true as const, moved: false as const };
+  const updated = gitResult(cwd, ['update-ref', '-m', `sidequest: repin ${ref} to waived candidate`, ref, tip.value, refValue.value]);
+  if (!updated.ok) return { ok: false as const, reason: 'git_error', message: updated.message, gitRef: ref, from: refTip.value, to: tip.value };
+  return { ok: true as const, moved: true as const, gitRef: ref, from: refTip.value, to: tip.value };
+}
+
 export function submissionRange(cwd: string, options: unknown) {
   const opts = isRecord(options) ? options : {};
   const gitRef = String(opts.gitRef || '').trim();
