@@ -4290,6 +4290,66 @@ function parseGitHubIssue(slug?: any, input?: any) {
   return { provider: 'github', repo, number, url: `https://github.com/${repo}/issues/${number}` };
 }
 
+const ISSUE_IMPORT_GH_TIMEOUT_MS = 30_000;
+
+function issueImportRefusal(reason: string, message: string, guidance: string) {
+  return Object.assign(new Error(`${message} ${guidance}`), { reason, guidance });
+}
+
+function defaultIssueImportGh(program: string, arguments_: string[]) {
+  return execFileSync(program, arguments_, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, timeout: ISSUE_IMPORT_GH_TIMEOUT_MS, killSignal: 'SIGKILL', maxBuffer: 8 * 1024 * 1024 });
+}
+
+// SQ-438: the intake half of issue tracking. Every refusal runs before the ticket exists, so a gh
+// failure, a closed issue or an existing link never leaves a ticket behind; the link is written
+// through addExternalLink, the same row issue_link writes and the release audit reads.
+function createTicketFromIssue(slug?: any, fields: any = {}, issueInput?: any, reviewTarget?: any, options: any = {}) {
+  const link = parseGitHubIssue(slug, issueInput);
+  const label = `${link.repo}#${link.number}`;
+  const existing = listExternalLinks(slug, {}).filter((row?: any) => row.provider === 'github' && row.repo === link.repo && row.number === link.number);
+  if (existing.length) {
+    const owners = existing.map((row?: any) => {
+      const ticket = getTicket(slug, row.ticketId);
+      return `${row.ref}${ticket ? ` (${ticket.status})` : ''}`;
+    });
+    throw issueImportRefusal('issue_already_linked', `add: ${label} is already linked to ${owners.join(', ')}; no ticket was created.`,
+      `Work it on ${existing[0].ref}. To relate another ticket to the same issue on purpose, file without issue and call issue_link on it.`);
+  }
+  const gh = typeof options.gh === 'function' ? options.gh : defaultIssueImportGh;
+  let issue: any = null;
+  let fetchError = '';
+  try {
+    issue = JSON.parse(String(gh('gh', ['issue', 'view', String(link.number), '--repo', link.repo, '--json', 'number,state,title,body,url'])));
+  } catch (error: any) {
+    fetchError = String(error?.stderr || error?.message || error || 'gh failed').replace(/\s+/g, ' ').trim().slice(0, 300);
+  }
+  if (!issue || typeof issue !== 'object' || Number(issue.number) !== link.number) {
+    throw issueImportRefusal('issue_fetch_failed', `add: could not read ${label} with gh${fetchError ? ` (${fetchError})` : ''}; no ticket was created.`,
+      'Check that gh is installed and authenticated (gh auth status) and that the issue exists, then retry; or file without issue.');
+  }
+  if (String(issue.state || '').toUpperCase() !== 'OPEN') {
+    throw issueImportRefusal('issue_closed', `add: ${label} is ${String(issue.state || 'not open').toLowerCase()}; a closed issue is not work to import. No ticket was created.`,
+      'Reopen it on GitHub first if the work is real, or file without issue.');
+  }
+  const url = typeof issue.url === 'string' && issue.url.trim() ? issue.url.trim() : link.url;
+  const body = String(issue.body || '').trim();
+  const explicitTitle = String(fields.title || '').trim();
+  const explicitDescription = String(fields.description || '').trim();
+  const description = explicitDescription
+    ? (explicitDescription.includes(url) ? explicitDescription : `${explicitDescription}\n\nGitHub issue: ${url}`)
+    : `GitHub issue: ${url}${body ? `\n\n${body}` : ''}`;
+  const created = createTicket(slug, Object.assign({}, fields, { title: explicitTitle || String(issue.title || '').trim() || label, description }), reviewTarget);
+  let recorded;
+  try {
+    recorded = addExternalLink(slug, created.ref, link);
+  } catch (error: unknown) {
+    // Never leave a half-linked ticket: the ticket exists only together with its link.
+    try { deleteTicket(slug, created.ref, { allowLiveClaimDeletion: true }); } catch (_) { /* surfaced by the rethrow */ }
+    throw error;
+  }
+  return { ticket: created, link: recorded };
+}
+
 module.exports = {
   VALID_STATUS,
   VALID_PRIORITY,
@@ -4443,6 +4503,7 @@ module.exports = {
   removeExternalLink,
   listExternalLinks,
   parseGitHubIssue,
+  createTicketFromIssue,
   createTicket,
   updateTicket,
   deleteTicket,

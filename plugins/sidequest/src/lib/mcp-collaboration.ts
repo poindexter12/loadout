@@ -265,7 +265,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: 'issue_link',
-    description: 'Link a ticket to a GitHub ISSUE. Linked issues will have their status mirrored and be closed on release by sidequest audit --apply.',
+    description: 'Link an existing ticket to a GitHub ISSUE; to file new work from an issue, use add with issue. Linked issues will have their status mirrored and be closed on release by sidequest audit --apply.',
     inputSchema: {
       type: 'object',
       properties: {

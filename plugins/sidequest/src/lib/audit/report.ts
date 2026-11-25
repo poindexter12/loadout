@@ -128,7 +128,7 @@ function auditReport(input: AuditInput, apply = false): AuditReport {
 
   return Object.freeze({
     staleBoardTickets: Object.freeze(staleBoardTickets || []),
-    untrackedIssues: plan.untrackedIssues,
+    untrackedIssues: Object.freeze(plan.untrackedIssues.map((issue: any) => Object.freeze({ ...issue, importCommand: importCommand(issue) }))),
     linkedDrift: plan.linkedDrift,
     issueMirror: apply ? Object.freeze([]) : mirror.creations,
     warnings: Object.freeze([...new Set(warnings)]),
@@ -191,10 +191,18 @@ function actions(drift: any): string {
   return (drift.actions || []).map((action: any) => action.type === 'addLabel' || action.type === 'removeLabel' ? `${action.type} ${action.label}` : action.type).join(', ');
 }
 
+// Runnable verbatim: --unclassified satisfies add's classification gate, and the ticket is then
+// classified (update category) before dispatch like any other deliberately unclassified filing.
+function importCommand(issue: any): string {
+  return `sidequest add --issue ${issue.repo}#${issue.number} --unclassified`;
+}
+
 function formatAudit(report: AuditReport): string {
   const sections: Array<[string, readonly any[], (item: any) => string]> = [
     ['STALE BOARD TICKETS', report.staleBoardTickets, (item) => `${item.ref} ${trunc(item.title || '')} — ${(item.commits || []).map((commit: any) => commit.sha).join(', ') || 'landed fix'}`],
-    ['UNTRACKED ISSUES', report.untrackedIssues, (item) => `${item.repo}#${item.number} ${trunc(item.title || '')} — https://github.com/${item.repo}/issues/${item.number}`],
+    // SQ-438: report-only, but never a dead end. owner/repo#N rather than #N, because a bare #N
+    // starts a shell comment and an untracked issue can come from a linked repo other than origin.
+    ['UNTRACKED ISSUES', report.untrackedIssues, (item) => `${item.repo}#${item.number} ${trunc(item.title || '')} — https://github.com/${item.repo}/issues/${item.number}; import: ${importCommand(item)}`],
     ['LINKED DRIFT', report.linkedDrift, (item) => `${(item.refs || []).join(', ')} — https://github.com/${item.repo}/issues/${item.number}; proposed: ${actions(item)}`],
     // The dry run prints the exact sanitized title and the body it would post, so
     // a human can read the first mirror before it reaches a public tracker.

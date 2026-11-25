@@ -11,7 +11,7 @@ const { tools: routingTools } = require("./mcp-routing");
 const { tools: questionTools, pendingAnswerHolder, attachPendingAnswers, attachPulseQuestions } = require("./mcp-questions");
 const SERVER_NAME = "sidequest";
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18";
-const MCP_TOOLS_LIST_MAX_BYTES = 27414;
+const MCP_TOOLS_LIST_MAX_BYTES = 27670;
 const MCP_TOOLS_LIST_HEADROOM_BYTES = 2500;
 function serverVersion() {
   try {
@@ -249,7 +249,8 @@ const MCP_SCHEMA_PROPERTY_DESCRIPTIONS = {
   add: {
     complexity: "Legacy score; why required.",
     verify: ATTESTATION_VERIFY_CONTRACT,
-    needsInput: "Question for the user, up to 1500 bytes: files awaiting-user; dispatch refuses until answered or declined."
+    needsInput: "Question for the user, up to 1500 bytes: files awaiting-user; dispatch refuses until answered or declined.",
+    issue: "#N, owner/repo#N or URL: gh fills title/description, links it. Refused if closed, already linked, or gh fails."
   },
   claim: { force: "Operator-only." },
   update: {

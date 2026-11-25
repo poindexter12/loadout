@@ -630,7 +630,7 @@ var require_report = __commonJS({
       else if (apply && mirror.creations.length) warnings.push("issue mirror has creations but no link writer; no issues were created.");
       return Object.freeze({
         staleBoardTickets: Object.freeze(staleBoardTickets || []),
-        untrackedIssues: plan.untrackedIssues,
+        untrackedIssues: Object.freeze(plan.untrackedIssues.map((issue) => Object.freeze({ ...issue, importCommand: importCommand(issue) }))),
         linkedDrift: plan.linkedDrift,
         issueMirror: apply ? Object.freeze([]) : mirror.creations,
         warnings: Object.freeze([...new Set(warnings)]),
@@ -687,10 +687,15 @@ var require_report = __commonJS({
     function actions(drift) {
       return (drift.actions || []).map((action) => action.type === "addLabel" || action.type === "removeLabel" ? `${action.type} ${action.label}` : action.type).join(", ");
     }
+    function importCommand(issue) {
+      return `sidequest add --issue ${issue.repo}#${issue.number} --unclassified`;
+    }
     function formatAudit(report) {
       const sections = [
         ["STALE BOARD TICKETS", report.staleBoardTickets, (item) => `${item.ref} ${trunc(item.title || "")} — ${(item.commits || []).map((commit) => commit.sha).join(", ") || "landed fix"}`],
-        ["UNTRACKED ISSUES", report.untrackedIssues, (item) => `${item.repo}#${item.number} ${trunc(item.title || "")} — https://github.com/${item.repo}/issues/${item.number}`],
+        // SQ-438: report-only, but never a dead end. owner/repo#N rather than #N, because a bare #N
+        // starts a shell comment and an untracked issue can come from a linked repo other than origin.
+        ["UNTRACKED ISSUES", report.untrackedIssues, (item) => `${item.repo}#${item.number} ${trunc(item.title || "")} — https://github.com/${item.repo}/issues/${item.number}; import: ${importCommand(item)}`],
         ["LINKED DRIFT", report.linkedDrift, (item) => `${(item.refs || []).join(", ")} — https://github.com/${item.repo}/issues/${item.number}; proposed: ${actions(item)}`],
         // The dry run prints the exact sanitized title and the body it would post, so
         // a human can read the first mirror before it reaches a public tracker.

@@ -162,12 +162,14 @@ const REVIEW_TARGET_PROP = {
 // US-8 Q8 (plan §2.7): classification at filing. The descriptor carries the short form from
 // mcp.ts; these full forms are the source text it condenses.
 const NEEDS_INPUT_ADD_DESCRIPTION = 'The question (up to 1500 bytes) the user must answer before any executor starts. The ticket is filed awaiting-user with the question in the log, and dispatch refuses it until answer records the user\'s answer, or answer({decline:true}) lets the executor ask at runtime. Cannot be combined with status.';
+// SQ-438: the intake half of issue tracking; the release audit closes a linked issue, never ticket done.
+const ISSUE_ADD_DESCRIPTION = 'GitHub issue this work comes from (#N, owner/repo#N, or URL). add reads it with gh, defaults title and description from it (explicit values win), and records the same link issue_link writes, so sidequest audit --apply closes the issue at release. Refused, with no ticket created, when the issue is closed, already linked on this board, or gh cannot read it.';
 const NEEDS_INPUT_UPDATE_DESCRIPTION = 'Same as add: parks a todo ticket nobody holds awaiting-user on this question. Refused for a claimed, parked or non-todo ticket; a live executor asks with ask instead.';
 
 const tools: ToolDefinition[] = [
   {
     name: 'add',
-    description: 'File a new ticket. Choose category from the returned taxonomy and pass it here, or use legacy complexity + why. Set route only when the user explicitly requests a model for this one ticket; it never changes the category route. model/effort are never set directly. description is a developer-to-developer spec (Where / Contract / Bounds / Verify), passed as a normal string (real newlines fine — no shell escaping). Pass needsInput when the ticket cannot start without a user decision: it is filed awaiting-user and dispatch refuses it until the question is answered or declined.',
+    description: 'File a new ticket. Choose category from the returned taxonomy and pass it here, or use legacy complexity + why. Set route only when the user explicitly requests a model for this one ticket; it never changes the category route. model/effort are never set directly. description is a developer-to-developer spec (Where / Contract / Bounds / Verify), passed as a normal string (real newlines fine — no shell escaping). Pass needsInput when the ticket cannot start without a user decision: it is filed awaiting-user and dispatch refuses it until the question is answered or declined. When the work comes from a GitHub issue, pass issue (title becomes optional) so the ticket is linked and the issue closes at release.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -203,11 +205,12 @@ const tools: ToolDefinition[] = [
         },
         unclassified: { type: 'boolean', description: 'Deliberately defer classification until an update before dispatch.' },
         needsInput: { type: 'string', description: NEEDS_INPUT_ADD_DESCRIPTION },
+        issue: { type: 'string', description: ISSUE_ADD_DESCRIPTION },
       },
-      required: ['title'],
     },
     handler(args) {
-      if (!args.title || !String(args.title).trim()) throw new Error('add: title is required.');
+      const fromIssue = args.issue != null && String(args.issue).trim() !== '';
+      if (!fromIssue && (!args.title || !String(args.title).trim())) throw new Error('add: title is required unless issue names the GitHub issue to import.');
       if (args.model != null || args.effort != null) throw new Error('add: model/effort are not set directly — use category or complexity + why.');
       const { slug, meta } = resolveProject(args.project);
       // Only when the oracle itself is happy, so a caller who asked for a different kind is not
@@ -236,7 +239,7 @@ const tools: ToolDefinition[] = [
       if (!category && complexity == null && !args.unclassified) throw new Error('add: pass category, legacy complexity + why, or unclassified:true.');
       if (complexity != null && (!args.why || String(args.why).trim().length < 20)) throw new Error('add: why is required with complexity (min 20 chars).');
       if (args.storyId !== undefined) validateStoryId(args.storyId);
-      const created = store.createTicket(slug, {
+      const fields = {
         title: args.title,
         description: args.description || '',
         priority: args.priority,
@@ -262,13 +265,26 @@ const tools: ToolDefinition[] = [
         needsInput: args.needsInput,
         needsInputSession: sessionOf(args),
         source: 'mcp',
-      }, args.reviewTarget);
+      };
+      let created;
+      let issueLink = null;
+      if (fromIssue) {
+        try {
+          const imported = store.createTicketFromIssue(slug, fields, args.issue, args.reviewTarget);
+          created = imported.ticket;
+          issueLink = imported.link;
+        } catch (error: any) {
+          if (!error?.reason) throw error;
+          return { ok: false, project: slug, reason: error.reason, message: error.message, guidance: error.guidance };
+        }
+      } else created = store.createTicket(slug, fields, args.reviewTarget);
       const ticket = store.getTicket(slug, created.ref) || created;
       const warnings = store.ticketReferenceWarnings(slug, ticket.title, ticket.description);
       warnings.push(...store.ticketCategoryWarnings(ticket));
       warnings.push(...store.ticketPlanningWarnings(ticket, meta.path));
       const presentedWarnings = store.presentWarnings(ticket, warnings, sessionOf(args));
       return mutationAck(slug, { ok: true, ticket }, Object.assign(
+        issueLink ? { issueLink } : {},
         presentedWarnings.length ? { warnings: presentedWarnings } : {},
         sameBasenameSiblingDetails(slug, ticket, meta.path, 'add'),
       ));

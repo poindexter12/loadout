@@ -21,10 +21,14 @@ How to run both, in practice:
    nothing about how you parallelize or route the work.
 3. **Record findings on the sidequest ticket**, not just in the PR — root cause, `file:line`, what
    you ruled out — so a later agent (or you, post-compaction) can pick it up.
-4. For a GitHub issue that should track this ticket's delivery, **link it** with the `issue_link`
-   MCP tool (or `sidequest issue link <REF> <url|#N>`). Do not leave a `TRACKS <url>` convention
-   or manually promise to close it: `sidequest audit --apply` mirrors status only for explicitly
-   linked issues and closes them only after release.
+4. When the work comes from a GitHub issue, **file it with `issue`** (`add` MCP tool, or
+   `sidequest add --issue <#N|owner/repo#N|url>`): one step fetches the issue with `gh`, defaults
+   title and description from it, and records the link, so it closes at release. The import refuses,
+   creating nothing, when the issue is closed, already linked on this board, or `gh` cannot read it.
+   For an existing ticket, **link it** with the `issue_link` MCP tool (or
+   `sidequest issue link <REF> <url|#N>`). Do not leave a `TRACKS <url>` convention or manually
+   promise to close it: `sidequest audit --apply` mirrors status only for explicitly linked issues
+   and closes them only after release. The audit's UNTRACKED ISSUES lines print the import command.
 5. When the work lands, prepare a sanitized external tracker or PR update. Post it only when an
    existing user or team authorization applies to that public action. Otherwise leave the prepared
    update as a local handoff; sanitation controls content, not posting authority.
