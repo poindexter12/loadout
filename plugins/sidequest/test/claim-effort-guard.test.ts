@@ -478,12 +478,16 @@ test('fresh redispatch briefing includes every comment added after preparation a
 });
 test('briefing rejects invalid, terminal, and prior-dispatch tokens without leaking ticket content', () => {
   const slug = store.ensureProject(PROJ).slug;
-  const assertRefused = (ref: string, tokenFile: string, secret: string) => {
+  // SQ-455: each refusal names its own outcome, so pin the exact reason and agent-facing text
+  // instead of one shared "dispatch token was refused" string.
+  const assertRefused = (ref: string, tokenFile: string, secret: string, reason: string, message: string) => {
     const result = runCli(['briefing', ref, '--token-file', tokenFile]);
     assert.equal(result.status, 1);
-    assert.match(result.stdout + result.stderr, /dispatch token was refused/);
+    assert.equal(store.readDispatchBriefing(slug, ref, undefined, tokenFile).reason, reason);
+    assert.equal(result.stderr, `sidequest: briefing: ${message}\n`);
     assert.doesNotMatch(result.stdout + result.stderr, new RegExp(secret));
   };
+  const superseded = (ref: string, tokenFile: string) => `the token in ${tokenFile} does not match ${ref}'s current dispatch. ${ref}'s current dispatch uses a different token file, so a later dispatch superseded this launch. Retrying will not help and this launch must not ask for another dispatch: stop without claiming and report the superseded launch to the orchestrator, which holds ${ref}'s current dispatch.`;
 
   const invalid = store.createTicket(slug, {
     title: 'Invalid token packet',
@@ -491,7 +495,8 @@ test('briefing rejects invalid, terminal, and prior-dispatch tokens without leak
     category: 'guard.codex',
   });
   const invalidDispatch = store.prepareDispatch(slug, invalid.ref, { allowUnscoped: true });
-  assertRefused(invalid.ref, writeDispatchTokenFile('definitely-invalid-token', 'invalid-briefing'), 'invalid-token-secret-測試');
+  const invalidTokenFile = writeDispatchTokenFile('definitely-invalid-token', 'invalid-briefing');
+  assertRefused(invalid.ref, invalidTokenFile, 'invalid-token-secret-測試', 'token_mismatch', superseded(invalid.ref, invalidTokenFile));
 
   const terminal = store.createTicket(slug, {
     title: 'Terminal token packet',
@@ -504,7 +509,9 @@ test('briefing rejects invalid, terminal, and prior-dispatch tokens without leak
     executor: terminalDispatch.ticket.dispatchExecutor,
   }).ok, true);
   assert.equal(store.releaseTicket(slug, terminal.ref, 'terminal-worker', { status: 'todo' }).ok, true);
-  assertRefused(terminal.ref, terminalDispatch.ticket.dispatch.tokenFile, 'terminal-token-secret-測試');
+  // Releasing the claim clears the dispatch, so the old token file has nothing left to redeem.
+  assertRefused(terminal.ref, terminalDispatch.ticket.dispatch.tokenFile, 'terminal-token-secret-測試', 'no_dispatch',
+    `${terminal.ref} has no prepared dispatch, so there is no briefing to redeem. A fresh dispatch of ${terminal.ref} is needed.`);
 
   const prior = store.createTicket(slug, {
     title: 'Prior token packet',
@@ -514,7 +521,8 @@ test('briefing rejects invalid, terminal, and prior-dispatch tokens without leak
   const first = store.prepareDispatch(slug, prior.ref, { allowUnscoped: true });
   const second = store.prepareDispatch(slug, prior.ref, { allowUnscoped: true });
   assert.notEqual(first.token, second.token);
-  assertRefused(prior.ref, writeDispatchTokenFile(first.token, 'prior-briefing'), 'prior-token-secret-測試');
+  const priorTokenFile = writeDispatchTokenFile(first.token, 'prior-briefing');
+  assertRefused(prior.ref, priorTokenFile, 'prior-token-secret-測試', 'token_mismatch', superseded(prior.ref, priorTokenFile));
   const current = runCli(['briefing', prior.ref, '--token-file', second.ticket.dispatch.tokenFile]);
   assert.equal(current.status, 0, current.stderr);
   assert.match(current.stdout, /prior-token-secret-測試/);

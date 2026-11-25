@@ -107,11 +107,14 @@ async function cmdBriefing(opts: any, positional: any) {
   }
   const result = store.readDispatchBriefing(slug, idOrRef, undefined, opts['token-file']);
   if (!result.ok) {
+    // SQ-455: every token failure carries its own reason and message from readDispatchBriefing
+    // (no_dispatch, token_file_missing, token_file_unreadable, token_file_invalid, token_mismatch),
+    // each saying whether a fresh redispatch is needed. Only not_found and stale are worded here.
     const message = result.reason === 'not_found'
       ? `no ticket "${idOrRef}".`
       : result.reason === 'stale'
         ? 'dispatch is no longer current; re-run dispatch for a current spawn.'
-        : 'dispatch token was refused or its token file was unavailable. Re-run the exact briefing command from this executor prompt; do not re-run dispatch.';
+        : result.message || `dispatch token was refused (${result.reason || 'unknown'}).`;
     fail(`briefing: ${message}`);
   }
   const briefing = agentsync.withProjectIdentity(agentsync.renderTicketBriefing(result.ticket, result.token, slug, meta.path), meta.path);
