@@ -240,7 +240,7 @@
   },
   {
     "name": "add",
-    "description": "File ticket; review binds candidate.",
+    "description": "File ticket; review binds candidate. Work from a GitHub issue: pass issue so it closes at release.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -410,11 +410,12 @@
         "needsInput": {
           "type": "string",
           "description": "Question for the user, up to 1500 bytes: files awaiting-user; dispatch refuses until answered or declined."
+        },
+        "issue": {
+          "type": "string",
+          "description": "#N, owner/repo#N or URL: gh fills title/description, links it. Refused if closed, already linked, or gh fails."
         }
-      },
-      "required": [
-        "title"
-      ]
+      }
     }
   },
   {
@@ -1476,7 +1477,7 @@
   },
   {
     "name": "issue_link",
-    "description": "Link a ticket to a GitHub ISSUE.",
+    "description": "Link an existing ticket to a GitHub ISSUE; to file new work from an issue, use add with issue.",
     "inputSchema": {
       "type": "object",
       "properties": {

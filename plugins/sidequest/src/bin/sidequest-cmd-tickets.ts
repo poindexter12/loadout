@@ -72,7 +72,8 @@ function categoryEchoLine(ticket: any) {
 }
 
 function validatedAddInput(opts: any) {
-  if (!opts.title) fail('add: --title is required (e.g. sidequest add -t "Contact form does not send")');
+  if (opts.issue === true || (opts.issue != null && !String(opts.issue).trim())) fail('add: --issue needs a GitHub issue (#N, owner/repo#N, or URL).');
+  if (!opts.title && opts.issue == null) fail('add: --title is required unless --issue names the GitHub issue to import (e.g. sidequest add -t "Contact form does not send")');
   guardDirectRouting(opts);
   const complexity = store.coerceComplexity(opts.complexity);
   const category = opts.category == null ? null : String(opts.category).trim().toLowerCase();
@@ -159,7 +160,8 @@ async function addPreview(opts: any, category: any, complexity: any) {
     ? String(opts.priority).toLowerCase()
     : 'normal';
   return {
-    title: String(opts.title).trim().slice(0, 300) || 'Untitled',
+    title: String(opts.title || '').trim().slice(0, 300) || (opts.issue != null ? `(from GitHub issue ${opts.issue})` : 'Untitled'),
+    ...(opts.issue != null ? { issue: String(opts.issue) } : {}),
     description: String(description ?? opts.desc ?? opts.description ?? opts.body ?? '').trim(),
     status: String(opts.status || 'todo').toLowerCase(),
     priority,
@@ -204,7 +206,7 @@ async function cmdAdd(opts: any) {
   const category = input.category == null ? null : categoryIdOrFail(slug, input.category);
   const route = ticketRouteFromOpts(opts);
   const warnings: any = [];
-  const created = store.createTicket(slug, {
+  const fields = {
     title: opts.title,
     description: description ?? opts.desc ?? opts.description ?? '',
     priority: opts.priority,
@@ -229,7 +231,24 @@ async function cmdAdd(opts: any) {
     route,
     source: opts.source || 'cli',
     onAssetError: (src: any) => warnings.push(`could not attach image: ${src}`),
-  }, reviewTargetFromOpts(opts));
+  };
+  let created;
+  let issueLink: any = null;
+  if (opts.issue != null) {
+    try {
+      const imported = store.createTicketFromIssue(slug, fields, opts.issue, reviewTargetFromOpts(opts));
+      created = imported.ticket;
+      issueLink = imported.link;
+    } catch (error: any) {
+      if (!error?.reason) throw error;
+      if (opts.json) {
+        process.stdout.write(JSON.stringify({ ok: false, project: slug, reason: error.reason, message: error.message, guidance: error.guidance }, null, 2) + '\n');
+        process.exitCode = 1;
+        return;
+      }
+      fail(error.message);
+    }
+  } else created = store.createTicket(slug, fields, reviewTargetFromOpts(opts));
   // Re-read through getTicket so the returned ticket carries its derived
   // model/effort (stamped from complexity at read time) for display/JSON.
   const ticket = store.getTicket(slug, created.ref) || created;
@@ -239,7 +258,7 @@ async function cmdAdd(opts: any) {
   warnings.splice(0, warnings.length, ...store.presentWarnings(ticket, warnings));
 
   if (opts.json) {
-    process.stdout.write(JSON.stringify({ ok: true, project: slug, projectName: meta.name, ticket, category: categoryEcho(ticket), warnings }, null, 2) + '\n');
+    process.stdout.write(JSON.stringify({ ok: true, project: slug, projectName: meta.name, ticket, category: categoryEcho(ticket), ...(issueLink ? { issueLink } : {}), warnings }, null, 2) + '\n');
     return;
   }
   const pr = PRIORITY_MARK[ticket.priority] ? ` ${PRIORITY_MARK[ticket.priority]}` : '';
@@ -249,6 +268,7 @@ async function cmdAdd(opts: any) {
   console.log(`✓ ${ticket.ref}${pr}  "${ticket.title}"  [${ticket.status}/${ticket.priority}]${imgs}${st}${modelMark(ticket)}  — ${meta.name}`);
   const categoryLine = categoryEchoLine(ticket);
   if (categoryLine) console.log(categoryLine);
+  if (issueLink) console.log(`  linked ${issueLink.url} (closes at release via sidequest audit --apply)`);
   for (const w of warnings) console.log(`  ! ${w}`);
   const info = store.readServerInfo();
   if (info && info.url) console.log(`  board: ${info.url}`);
