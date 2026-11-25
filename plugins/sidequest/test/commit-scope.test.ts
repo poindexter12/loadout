@@ -69,6 +69,8 @@ const commitScope = require('../lib/commit-scope.js') as {
     diagnosis?: Partial<{ implicitDeletions: readonly string[]; unlinkedRejected: readonly string[] }>,
   ): string;
   headCommit(cwd: string): string | null;
+  workingPaths(cwd: string): string[];
+  unscopedWorkingPaths(cwd: string, files: unknown): string[];
   preserveCommitRef(cwd: string, commit: string, gitRef: string): { ok: boolean; reason?: string; commit?: string; gitRef?: string };
 };
 
@@ -1459,4 +1461,22 @@ test('SQ-431: a base the submitted commit does not descend from stays a genuine 
   const message = submissionRangeFailureMessage({ ref: 'SQ-431', dispatch: { baseCommit: sideBase } }, range, 'refs/sidequest/SQ-431');
   assert.match(message, /Recreate the ticket work from/);
   assert.doesNotMatch(message, /local \S+ is behind|do not recreate/);
+});
+
+test('SQ-452: working-tree inspection reads git status output larger than the 1 MiB default buffer', () => {
+  const root = repo();
+  const bulk = path.join(root, 'untracked-' + 'd'.repeat(180));
+  fs.mkdirSync(bulk);
+  const count = 5000;
+  for (let index = 0; index < count; index++) {
+    fs.writeFileSync(path.join(bulk, `${'f'.repeat(60)}-${String(index).padStart(5, '0')}.txt`), '');
+  }
+  fs.writeFileSync(path.join(root, 'README.md'), 'changed\n');
+  const statusBytes = execFileSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: root, maxBuffer: 64 * 1024 * 1024 }).length;
+  assert.ok(statusBytes > 1024 * 1024, `fixture status output exceeds 1 MiB (${statusBytes} bytes)`);
+  const paths = commitScope.workingPaths(root);
+  assert.equal(paths.length, count + 1, 'every untracked file and the tracked edit are reported');
+  assert.ok(paths.includes('README.md'), 'the tracked modification is reported');
+  assert.ok(paths.includes(`untracked-${'d'.repeat(180)}/${'f'.repeat(60)}-04999.txt`), 'individual untracked files are reported');
+  assert.deepEqual(commitScope.unscopedWorkingPaths(root, ['README.md', `untracked-${'d'.repeat(180)}/`]), [], 'scope inspection over the large tree does not throw');
 });
