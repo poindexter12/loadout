@@ -76,6 +76,46 @@ function integrationGitError(error) {
   }
   return output || stripGitProgress(error?.message || error);
 }
+function pendingSubmission(t) {
+  return !!(t && t.submission && (t.submission.commit || t.submission.sourceRevision) && !t.submission.integratedAt);
+}
+function pinnedVerificationRequirement(ticket) {
+  const liveDispatch = ticket.dispatch && typeof ticket.dispatch === "object" && !ticket.dispatch.terminalAt;
+  const repinned = !liveDispatch && pendingSubmission(ticket) ? ticket.submission?.verificationRequirement : null;
+  if (repinned && typeof repinned === "object") return repinned;
+  const pinned = ticket.dispatch?.verificationRequirement || ticket.dispatch?.lifecycleAttempt?.verificationRequirement || ticket.lifecycleAttempt?.verificationRequirement;
+  if (pinned && typeof pinned === "object") return pinned;
+  const legacyCommand = String(ticket.executorVerify || ticket.submission?.verify || "").trim();
+  if (!legacyCommand) {
+    return verificationRequirement({ kind: "custom", evidence: "legacy project verifier was not recorded" });
+  }
+  return verificationRequirement({
+    kind: classifyVerificationKind(legacyCommand, ticket.executorVerifyKind),
+    command: legacyCommand,
+    evidence: legacyCommand,
+    artifact: ticket.executorAttestationArtifact
+  });
+}
+function recordedVerificationCaptures(ticket) {
+  return Array.isArray(ticket?.verificationCaptures) ? ticket.verificationCaptures : [];
+}
+function captureWaiverOptions(ticket, by) {
+  return {
+    comments: Array.isArray(ticket?.comments) ? ticket.comments : [],
+    excludedAuthors: [ticket?.claim?.by, by].map((author) => String(author || "").trim()).filter(Boolean)
+  };
+}
+function waivedSubmissionCandidate(ticket, by, commit) {
+  const submitter = String(by || "").trim();
+  if (!ticket || !submitter || String(ticket.claim?.by || "").trim() !== submitter || pendingSubmission(ticket)) return null;
+  const candidate = String(commit || "").trim().toLowerCase();
+  if (!/^[0-9a-f]{40,64}$/.test(candidate)) return null;
+  const requirement = pinnedVerificationRequirement(ticket);
+  if (!requirement?.command || requirement.kind === "attestation" || requirement.kind === "manual") return null;
+  const verification = commandVerificationResult(requirement, requirement.command, recordedVerificationCaptures(ticket), ticket.ref, { source: "git", value: candidate }, String(ticket.dispatchNonce || ""), captureWaiverOptions(ticket, submitter));
+  const result = verification?.result;
+  return result?.status === "skipped" && result.waiver ? result.waiver : null;
+}
 function createSubmissions(dependencies) {
   const { EXECUTOR_VERIFY_MAX, INTEGRATION_VERIFY_OUTPUT_TAIL_BYTES, MANUAL_VERIFY_PREFIX, acquireLock, addComment, appendReworkEvent, artifactWorkingState, autoReleasedClaimMessage, attestationErrors, boardConfig, boundedExcerptForSubmission, commitScope, completionTreeCheck, coerceStatus, createComment, crypto, dirtyPathKey, dispatchState, executionScope, ensureDir, execFileSync, fs, getTicket, integrationTarget, integrationTargetCommit, listTickets, manualVerify, normalizeDeliveryMode, normalizeIntegrationBranch, normalizeIntegrationVerifyTimeoutMs, nullableText, path, prepareComment, projectDir, putTicket, queueEventNotification, readMeta, recordedReviewPass, recordLifecycleAttempt, releaseLock, resolveDeliveryConfig, setDispatchTerminal, spawnSync, stampDispatchEvent, ticketLockPath, transaction, unregisterClaim, verifyCommandErrors, verifyCommandError, withTicketLock, transitionAttempt, attemptDiagnostic } = dependencies;
   const boundedExcerpt = boundedExcerptForSubmission;
@@ -534,9 +574,6 @@ Expires: ${checkpoint.expiresAt}`;
       integrationBranch ? { integrationBranch } : {}
     );
   }
-  function pendingSubmission(t) {
-    return !!(t && t.submission && (t.submission.commit || t.submission.sourceRevision) && !t.submission.integratedAt);
-  }
   function submissionGitRef(ticket) {
     return `refs/sidequest/${ticket.ref}`;
   }
@@ -589,32 +626,6 @@ Expires: ${checkpoint.expiresAt}`;
     const dir = String(dispatchState(ticket)?.evidenceDirectory || "").trim() || path.join(projectDir(slug), "verification", safeRef);
     ensureDir(dir);
     return path.join(dir, `${Date.now()}-${crypto.randomBytes(4).toString("hex")}.log`);
-  }
-  function pinnedVerificationRequirement(ticket) {
-    const liveDispatch = ticket.dispatch && typeof ticket.dispatch === "object" && !ticket.dispatch.terminalAt;
-    const repinned = !liveDispatch && pendingSubmission(ticket) ? ticket.submission?.verificationRequirement : null;
-    if (repinned && typeof repinned === "object") return repinned;
-    const pinned = ticket.dispatch?.verificationRequirement || ticket.dispatch?.lifecycleAttempt?.verificationRequirement || ticket.lifecycleAttempt?.verificationRequirement;
-    if (pinned && typeof pinned === "object") return pinned;
-    const legacyCommand = String(ticket.executorVerify || ticket.submission?.verify || "").trim();
-    if (!legacyCommand) {
-      return verificationRequirement({ kind: "custom", evidence: "legacy project verifier was not recorded" });
-    }
-    return verificationRequirement({
-      kind: classifyVerificationKind(legacyCommand, ticket.executorVerifyKind),
-      command: legacyCommand,
-      evidence: legacyCommand,
-      artifact: ticket.executorAttestationArtifact
-    });
-  }
-  function recordedVerificationCaptures(ticket) {
-    return Array.isArray(ticket?.verificationCaptures) ? ticket.verificationCaptures : [];
-  }
-  function captureWaiverOptions(ticket, by) {
-    return {
-      comments: Array.isArray(ticket?.comments) ? ticket.comments : [],
-      excludedAuthors: [ticket?.claim?.by, by].map((author) => String(author || "").trim()).filter(Boolean)
-    };
   }
   const CAPTURE_COMMAND_DISPLAY_MAX = 1200;
   const CAPTURE_COMMAND_DIFF_CONTEXT = 24;
@@ -4417,4 +4428,4 @@ ${verify.outputTail}` : null
   }
   return { DEFAULT_CHECKPOINT_TTL_MIN, MAX_CHECKPOINT_TTL_MIN, checkpointTtlMs, checkpointProjection, oracleProjection, checkpointTicket, submissionReadiness, submissionProjection, pendingSubmission, submissionUsesGit, workingTreeVerification, verifyIntegration, validateIntegrationSubmission, recordDeliveredSubmission, recordAbandonedSubmission, integrateSubmission, integrateSubmissionWave, closeSubmissionAsSuperseded, submissionOwnershipFailure, submitTicket, recordVerificationCapture, recordSubmissionRejection, reconcileSubmissionRejections, reworkSubmission, clearSubmission, assembleSubmissionWave, recordSubmissionWaveDelivery, markWaveAwaitingMerge, findAwaitingMergeWaves, readWavePr, setGitHubPrPort, submissionsPayload };
 }
-module.exports = { createSubmissions, githubText, wavePullRequestText, integrationGitError };
+module.exports = { createSubmissions, githubText, wavePullRequestText, integrationGitError, waivedSubmissionCandidate };
