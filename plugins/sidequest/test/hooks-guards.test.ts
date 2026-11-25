@@ -637,6 +637,41 @@ test('US-8 Q6: answer is refused from any subagent agent_id and allowed for the 
   }), null, 'other board tools are untouched');
 });
 
+// SQ-440: the guard is only as strong as the hooks.json matcher that routes calls to it. A matcher naming
+// one namespace let a directly registered board server (`mcp__sidequest__*`) reach `answer` unguarded.
+// Claude Code reads a matcher of only letters, digits, `_` and `|` as exact names, anything else as a
+// regex; the regex is anchored here so the check can only be stricter than the runtime.
+function hookMatcherMatches(matcher: string, toolName: string): boolean {
+  if (matcher === '' || matcher === '*') return true;
+  if (/^[A-Za-z0-9_|]+$/.test(matcher)) return matcher.split('|').includes(toolName);
+  return new RegExp(`^(?:${matcher})$`).test(toolName);
+}
+
+test('SQ-440: every tool name the answer guard denies is routed to it by its hooks.json matcher', () => {
+  const config = JSON.parse(fs.readFileSync(path.join(HOOKS, 'hooks.json'), 'utf8'));
+  const entries = config.hooks.PreToolUse.filter((entry: any) =>
+    entry.hooks.some((hook: any) => String(hook.command).includes('/hooks/guard-answer-caller.js')));
+  assert.equal(entries.length, 1, 'exactly one PreToolUse entry runs guard-answer-caller.js');
+  const matcher = String(entries[0].matcher);
+
+  // The board server's own name (src/lib/mcp.ts SERVER_NAME) and the plugin's `board` server key.
+  const candidates = ['plugin_sidequest_board', 'sidequest'].flatMap((ns) =>
+    ['answer', 'ask', 'claim'].map((tool) => `mcp__${ns}__${tool}`));
+  const handled = candidates.filter((toolName) => denyReason(runHookOutput(GUARD_ANSWER, {
+    tool_name: toolName,
+    agent_id: 'sq-440-executor-agent',
+    tool_input: { ref: 'SQ-1', text: 'self answer' },
+  })));
+  assert.deepStrictEqual(handled, ['mcp__plugin_sidequest_board__answer', 'mcp__sidequest__answer'],
+    'the guard denies answer under both registrations and nothing else');
+  for (const toolName of handled) {
+    assert.ok(hookMatcherMatches(matcher, toolName), `hooks.json matcher "${matcher}" routes ${toolName} to the answer guard`);
+  }
+  for (const toolName of candidates.filter((name) => !handled.includes(name))) {
+    assert.ok(!hookMatcherMatches(matcher, toolName), `hooks.json matcher "${matcher}" does not spawn the guard for ${toolName}`);
+  }
+});
+
 test('US-8 Q6: guard-peer-message refuses a marker naming no question and any answer marker sent by an executor', () => {
   const fx = guardQuestionFixture('peer');
   const send = (message: string, extra: Record<string, unknown> = {}) => runHookOutput(GUARD_PEER, {
