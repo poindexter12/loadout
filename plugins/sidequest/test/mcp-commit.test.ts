@@ -30,6 +30,7 @@ import {
   stageLongOutOfScopeChangeSet,
   repoWithDirectories,
   isolatedDispatch,
+  fixtureState,
 } from './_mcp-fixture.js';
 
 test('MCP commit truncates out-of-scope comments and retains successful commits on comment failures', async () => {
@@ -645,6 +646,38 @@ test('dispatch returns a stable executor, one spawn prompt, and a token', async 
   assert.equal(readonlyDispatch.spawn.subagent_type, 'sidequest-exec-codex-readonly-gpt-5-6-terra-high');
   assert.equal(readonlyDispatch.spawn.description, 'Terra, high · friendly readonly dispatch');
   assert.doesNotMatch(readonlyDispatch.spawn.description, /\[sidequest-route/);
+});
+
+// SQ-454: the ordinary dispatch branch dropped `worktree`, so sharedTree admission checked the
+// server's own cwd. Run the handler from a foreign repository and name the project checkout.
+test('MCP dispatch passes worktree through to shared-tree admission instead of the server cwd (SQ-454)', async () => {
+  const projectRoot = createGitWorktree();
+  const project = store.ensureProject(projectRoot).slug;
+  const foreign = createGitWorktree();
+  const ticket = store.createTicket(project, {
+    title: 'shared-tree dispatch with a named checkout', description: DISPATCH_DESCRIPTION,
+    files: ['README.md'], complexity: 3, labels: ['direct-ok'], complexityWhy: 'named checkout fixture',
+  });
+  const previous = fixtureState.mcpDispatchCwd;
+  fixtureState.mcpDispatchCwd = foreign;
+  try {
+    const cwdOnly = await callToolRaw('dispatch', { project: projectRoot, ref: ticket.ref, sharedTree: true });
+    assert.equal(cwdOnly.isError, true);
+    assert.match(cwdOnly.content[0].text, /sharedTree:true requires the spawning runtime to be rooted in the declared project checkout/);
+
+    const named = await callTool('dispatch', { project: projectRoot, ref: ticket.ref, sharedTree: true, worktree: projectRoot, full: true });
+    assert.equal(named.spawn.isolation, undefined, 'a shared-tree spawn carries no isolation');
+    const dispatch = store.getTicket(project, ticket.ref).dispatch;
+    assert.equal(dispatch.sharedTree, true);
+    assert.equal(dispatch.spawnCheckout, fs.realpathSync.native(projectRoot), 'the dispatch binds the named checkout');
+
+    const foreignNamed = await callToolRaw('dispatch', { project: projectRoot, ref: ticket.ref, sharedTree: true, worktree: foreign });
+    assert.equal(foreignNamed.isError, true);
+    assert.match(foreignNamed.content[0].text, /is not a checkout of the registered project .*another repository/);
+  } finally {
+    fixtureState.mcpDispatchCwd = previous;
+    store.releaseTicket(project, ticket.ref, 'sq-454-cleanup', { force: true, status: 'todo', source: 'test' });
+  }
 });
 
 export {};

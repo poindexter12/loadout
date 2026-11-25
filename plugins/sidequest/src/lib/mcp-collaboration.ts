@@ -335,7 +335,7 @@ const tools: ToolDefinition[] = [
         recoveryEvidence: { type: 'string', description: 'Observed failure evidence. With claimHolder, executor, and worktree, recover that live isolated claim without releasing it.' },
         recoveryTaskId: { type: 'string', description: 'The failed task id from a host task-failure notification. When it matches the bound runtime of the unclaimed attempt being retired, recoveryEvidence applies at once instead of waiting out the claim-idle backstop.' },
         claimHolder: { type: 'string', description: 'The exact by identity holding the live claim being recovered.' },
-        worktree: { type: 'string', description: 'The resumed executor\'s linked worktree path for live-claim recovery.' },
+        worktree: { type: 'string', description: 'Plain dispatch: the project checkout this session spawns from, checked in place of server cwd; other paths refused. With claimHolder: the resumed linked worktree.' },
         full: { type: 'boolean', description: 'Include token, executor, and recovery details. Warnings ride the compact result too; if any are cut, warningsOmitted and warningsRetrieval say so.' },
       },
       required: ['ref'],
@@ -359,6 +359,7 @@ const tools: ToolDefinition[] = [
         : store.prepareDispatch(slug, args.ref, {
           sessionId,
           runtimeCwd: process.cwd(),
+          ...(typeof args.worktree === 'string' && args.worktree.trim() ? { worktree: args.worktree } : {}),
           ...(Object.hasOwn(args, 'sharedTree') ? { sharedTree: args.sharedTree === true } : {}),
           allowRepeatFailure: args.allowRepeatFailure === true,
           allowUnscoped: args.allowUnscoped === true,
