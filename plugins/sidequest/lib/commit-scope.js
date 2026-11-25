@@ -69,8 +69,9 @@ function isRecord(value) {
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
+const GIT_OUTPUT_MAX_BUFFER = 64 * 1024 * 1024;
 function git(cwd, args) {
-  return (0, import_node_child_process.execFileSync)("git", args, { cwd, encoding: "utf8", windowsHide: true });
+  return (0, import_node_child_process.execFileSync)("git", args, { cwd, encoding: "utf8", windowsHide: true, maxBuffer: GIT_OUTPUT_MAX_BUFFER });
 }
 function gitResult(cwd, args) {
   try {
@@ -89,7 +90,8 @@ function patchIds(cwd, args) {
         cwd,
         encoding: "utf8",
         input: patches,
-        windowsHide: true
+        windowsHide: true,
+        maxBuffer: GIT_OUTPUT_MAX_BUFFER
       }).trim()
     };
   } catch (error) {

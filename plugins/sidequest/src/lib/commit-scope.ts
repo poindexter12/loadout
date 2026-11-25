@@ -16,8 +16,15 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+// Node's default 1 MiB maxBuffer throws ENOBUFS on a shared tree with large
+// untracked directories, and every working-tree inspection then refuses
+// regardless of the ticket's own changes (SQ-452). workingPaths cannot scope
+// git status by pathspec: its callers (unscoped and foreign-fragment checks,
+// dispatch dirty baselines) need the whole tree's state.
+const GIT_OUTPUT_MAX_BUFFER = 64 * 1024 * 1024;
+
 function git(cwd: string, args: readonly string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
+  return execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true, maxBuffer: GIT_OUTPUT_MAX_BUFFER });
 }
 
 function gitResult(cwd: string, args: readonly string[]): GitResult {
@@ -39,6 +46,7 @@ function patchIds(cwd: string, args: readonly string[]): GitResult {
         encoding: 'utf8',
         input: patches,
         windowsHide: true,
+        maxBuffer: GIT_OUTPUT_MAX_BUFFER,
       }).trim(),
     };
   } catch (error) {
