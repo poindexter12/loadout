@@ -416,6 +416,50 @@ function sharedTreeRuntimeRefusal(ticket?: any, projectPath?: any, runtimeCwd?: 
   return `prepare dispatch: refused ${ticket.ref}; sharedTree:true requires the spawning runtime to be rooted in the declared project checkout ${projectPath}, but this runtime is rooted in ${foreignRoot}. A shared-tree spawn carries no isolation and no cwd, so the executor would inherit ${foreignRoot} and fail its worktree preflight. ${remedy}`;
 }
 
+// SQ-454: an ordinary (non-recovery) dispatch's `worktree` names the checkout this session spawns
+// from. It used to be dropped, so shared-tree admission checked the board server's own cwd instead.
+// It must resolve to the registered project's shared checkout: a shared-tree executor inherits that
+// root and its briefing names it, and an isolated dispatch provisions its own worktree, so a linked
+// worktree here is a request the board cannot honour and is refused rather than ignored. Returns the
+// canonical checkout root that the dispatch binds.
+function namedDispatchCheckout(ticket?: any, projectPath?: any, worktree?: any, sharedTree = false): string {
+  const requested = String(worktree || '').trim();
+  const project = String(projectPath || '').trim();
+  const refused = `prepare dispatch: refused ${ticket.ref}; worktree "${requested}"`;
+  if (!path.isAbsolute(requested)) throw new Error(`${refused} must be an absolute path to the checkout of ${project}.`);
+  if (!fs.existsSync(requested)) throw new Error(`${refused} does not exist. Pass the absolute path of ${project}, or omit worktree.`);
+  let paths: { repository: string; worktree: string; commonGitDirectory: string; repositoryGitDirectory: string } | null = null;
+  try {
+    const repository = canonicalPath(gitOutput(project, ['rev-parse', '--show-toplevel']));
+    const named = canonicalPath(gitOutput(requested, ['rev-parse', '--show-toplevel']));
+    paths = {
+      repository,
+      worktree: named,
+      commonGitDirectory: gitDirectory(named, gitOutput(named, ['rev-parse', '--git-common-dir'])),
+      repositoryGitDirectory: gitDirectory(repository, gitOutput(repository, ['rev-parse', '--git-common-dir'])),
+    };
+  } catch (_: unknown) {
+    paths = null;
+  }
+  if (!paths) {
+    const canonicalProject = project && fs.existsSync(project) ? canonicalPath(project) : project;
+    if (!project || gitCheckoutRoot(project) || canonicalPath(requested) !== canonicalProject) {
+      throw new Error(`${refused} is not a Git checkout of the registered project ${project}. Pass the absolute path of ${project}, or omit worktree.`);
+    }
+    return canonicalProject;
+  }
+  if (paths.commonGitDirectory !== paths.repositoryGitDirectory) {
+    throw new Error(`${refused} is not a checkout of the registered project ${project}; it resolves to ${paths.worktree}, another repository. Pass the absolute path of ${project}, or dispatch the ticket on the board that owns ${paths.worktree}.`);
+  }
+  if (paths.worktree !== paths.repository) {
+    const remedy = sharedTree
+      ? `sharedTree:true binds the shared checkout ${paths.repository}; pass worktree:"${paths.repository}", or omit sharedTree so the board provisions an isolated worktree.`
+      : `An ordinary dispatch provisions its own isolated worktree; omit worktree, or resume a live claim in ${paths.worktree} with claimHolder, recoveryEvidence and worktree.`;
+    throw new Error(`${refused} is a linked worktree of ${project} (${paths.worktree}), not its shared checkout ${paths.repository}. ${remedy}`);
+  }
+  return paths.repository;
+}
+
 function dispatchPreparationAttribution(opts?: any) {
   return {
     sessionId: opts?.sessionId ? String(opts.sessionId) : null,
@@ -2134,7 +2178,11 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
         + 'Re-dispatch with sharedTree:false on a board with worktree isolation enabled, or clear the ticket\'s baseRef.');
     }
     const namedBaseCommit = namedBaseRef ? resolveTicketBaseRef(String(projectPath || ''), t.ref, namedBaseRef) : null;
-    const runtimeRefusal = sharedTree ? sharedTreeRuntimeRefusal(t, projectPath, opts.runtimeCwd, Boolean(worktreeIsolation)) : null;
+    // SQ-454: a named checkout replaces the server's cwd as the runtime shared-tree admission checks.
+    const namedCheckout = opts.worktree != null && String(opts.worktree).trim()
+      ? namedDispatchCheckout(t, projectPath, opts.worktree, sharedTree)
+      : null;
+    const runtimeRefusal = sharedTree ? sharedTreeRuntimeRefusal(t, projectPath, namedCheckout || opts.runtimeCwd, Boolean(worktreeIsolation)) : null;
     if (runtimeRefusal) throw new Error(runtimeRefusal);
     t.dispatchNonce = mintDispatchToken();
     const category = getCategory(ticketCategory(t), { project: slug });
@@ -2251,6 +2299,7 @@ function prepareDispatch(slug?: any, idOrRef?: any, opts?: any) {
           preparedBy: dispatchPreparationAttribution(opts),
           ...(preparedPluginInstall && preparedPluginIdentity ? { preparedCompatibility: { pluginInstall: preparedPluginInstall, identity: preparedPluginIdentity } } : {}),
           sharedTree,
+          ...(namedCheckout ? { spawnCheckout: namedCheckout } : {}),
           ...(worktreeWarning ? { worktreeWarning } : {}),
           ...(pythonIoEncoding.written ? { pythonIoEncoding } : {}),
           ...(opts.dispatchSkew ? { dispatchSkew: opts.dispatchSkew } : {}),

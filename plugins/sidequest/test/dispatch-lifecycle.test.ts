@@ -258,6 +258,58 @@ test('shared-tree dispatch from a session rooted in another repository is refuse
   }
 });
 
+// SQ-454: an ordinary dispatch's worktree was dropped, so sharedTree admission checked the spawning
+// process cwd instead of the named checkout. It now binds the named checkout and refuses any path
+// that is not the registered project's shared checkout.
+test('ordinary dispatch binds a named worktree and shared-tree admission checks it instead of the runtime cwd (SQ-454)', () => {
+  const foreignRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-named-worktree-foreign-'));
+  execFileSync('git', ['init', '--quiet', '-b', 'main'], { cwd: foreignRepo });
+  const notGit = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-named-worktree-plain-'));
+  const linkedWorktree = path.join(os.tmpdir(), `sq-named-worktree-linked-${Date.now()}`);
+  execFileSync('git', ['worktree', 'add', '--detach', linkedWorktree, 'HEAD'], { cwd: PROJECT });
+  const canonicalProject = fs.realpathSync.native(PROJECT);
+  const ticket = createFixture('named worktree dispatch');
+  try {
+    // The runtime is foreign, which alone is refused; the named project checkout wins and is bound.
+    const shared = store.prepareDispatch(slug, ticket.ref, { sharedTree: true, runtimeCwd: foreignRepo, worktree: PROJECT });
+    assert.equal(shared.ok, true);
+    assert.equal(shared.ticket.dispatch.sharedTree, true);
+    assert.equal(shared.ticket.dispatch.spawnCheckout, canonicalProject);
+    assert.equal(store.releaseTicket(slug, ticket.ref, 'sq454-shared-cleanup', { force: true, status: 'todo', source: 'test' }).ok, true);
+
+    // A subdirectory canonicalizes to its checkout root.
+    const projectSubdir = path.join(PROJECT, 'sq454-subdir');
+    fs.mkdirSync(projectSubdir, { recursive: true });
+    const isolated = store.prepareDispatch(slug, ticket.ref, { runtimeCwd: foreignRepo, worktree: projectSubdir });
+    assert.equal(isolated.ok, true);
+    assert.equal(isolated.ticket.dispatch.spawnCheckout, canonicalProject);
+    assert.equal(store.releaseTicket(slug, ticket.ref, 'sq454-isolated-cleanup', { force: true, status: 'todo', source: 'test' }).ok, true);
+    fs.rmSync(projectSubdir, { recursive: true, force: true });
+
+    const refusals: Array<[any, RegExp]> = [
+      [{ sharedTree: true, runtimeCwd: PROJECT, worktree: linkedWorktree }, /is a linked worktree of .* not its shared checkout .*sharedTree:true binds the shared checkout/],
+      [{ sharedTree: false, runtimeCwd: PROJECT, worktree: linkedWorktree }, /is a linked worktree of .* not its shared checkout/],
+      [{ sharedTree: true, runtimeCwd: PROJECT, worktree: foreignRepo }, /is not a checkout of the registered project .*another repository/],
+      [{ sharedTree: true, runtimeCwd: PROJECT, worktree: notGit }, /is not a Git checkout of the registered project/],
+      [{ sharedTree: true, runtimeCwd: PROJECT, worktree: path.join(notGit, 'missing') }, /does not exist/],
+      [{ sharedTree: true, runtimeCwd: PROJECT, worktree: 'relative/checkout' }, /must be an absolute path/],
+    ];
+    const refused = createFixture('named worktree refusals');
+    for (const [opts, pattern] of refusals) {
+      assert.throws(() => store.prepareDispatch(slug, refused.ref, opts), (error: any) => {
+        assert.match(error.message, new RegExp(`^prepare dispatch: refused ${refused.ref}; worktree `));
+        assert.match(error.message, pattern);
+        return true;
+      });
+      assert.equal(store.getTicket(slug, refused.ref).dispatchNonce, null, `a refused dispatch mints no token: ${opts.worktree}`);
+    }
+  } finally {
+    execFileSync('git', ['worktree', 'remove', '--force', linkedWorktree], { cwd: PROJECT });
+    fs.rmSync(foreignRepo, { recursive: true, force: true });
+    fs.rmSync(notGit, { recursive: true, force: true });
+  }
+});
+
 test('recovery evidence on a ticket with nothing in flight says to dispatch plainly (SQ-309)', () => {
   const ticket = createFixture('recovery evidence with nothing in flight');
   assert.throws(
