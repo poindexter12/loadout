@@ -2298,7 +2298,12 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
     // in named landing commits (landed_diff_equivalent), or, last, an orchestrator attestation over
     // named landing commits that touch the candidate's paths. Each landing must be on landedHead.
     // Only a groomClose closure (equivalentLanding) reaches these routes; integrate stays exact.
-    const equivalenceApplies = equivalentLanding && !workingTreeDelivery && !String(opts.deliveryInteractionCommit || '').trim();
+    // SQ-453: that includes a manual (working-tree) groomClose, which by the delivery_not_pinned
+    // guard above always names the ticket's own pinned candidate. When neither the mutable checkout
+    // nor any landed commit holds its exact content (a fold with another ticket's work, or a
+    // regenerated derived file), the landed history is still the proof; the candidate's own tree
+    // never is, since it trivially matches itself whether or not the work ever landed.
+    const equivalenceApplies = equivalentLanding && !String(opts.deliveryInteractionCommit || '').trim();
     if (!content.ok && equivalenceApplies) {
       const landed: any = equivalentLandedDelivery(repo, ticket, {
         landingCommits,
@@ -2334,13 +2339,18 @@ function recordDeliveredSubmission(slug?: any, idOrRef?: any, opts?: any) {
         const requested = String(opts.deliveryInteractionCommit || '').trim();
         const hint = requested
           ? ` deliveryInteractionCommit ${reviewed.interactionCommit || requested} is not a descendant of pinned candidate ${candidate}, so it cannot stand in for the candidate content; name the reviewed commit made on top of ${candidate}.`
-          : ` If the delivery carries a reviewed fix committed on top of the pinned candidate (for example a squash of candidate plus review fix), name that reviewed descendant of ${candidate} as deliveryInteractionCommit; it may change submitted paths only, and the delivery is then checked against its content.${workingTreeDelivery ? '' : equivalenceHint()}`;
+          : ` If the delivery carries a reviewed fix committed on top of the pinned candidate (for example a squash of candidate plus review fix), name that reviewed descendant of ${candidate} as deliveryInteractionCommit; it may change submitted paths only, and the delivery is then checked against its content.${workingTreeDelivery && !equivalenceApplies ? '' : equivalenceHint()}`;
+        // SQ-453: a working-tree delivery names the pinned candidate itself, which always holds its
+        // own content; what is missing is that content in the checkout and on the target's history.
+        const missingWhere = workingTreeDelivery
+          ? `neither the integration working tree nor any commit on ${landedWhere} holds pinned candidate ${deliveryCommit}'s content`
+          : `${deliveryCommit} does not preserve the submitted candidate content`;
         return {
           ok: false,
           reason: 'delivery_content_missing',
           ticket,
           missingCommits: content.missing,
-          message: `${ticket.ref} reconciliation refused: ${deliveryCommit} does not preserve the submitted candidate content for ${content.missing.join(', ')}.${hint}`,
+          message: `${ticket.ref} reconciliation refused: ${missingWhere} for ${content.missing.join(', ')}.${hint}`,
         };
       }
       if (!reviewed.ok) {
