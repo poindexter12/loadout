@@ -262,19 +262,76 @@ function removeDispatchTokenFile(ticket?: any) {
   try { fs.unlinkSync(file); } catch (error: any) { if (error?.code !== 'ENOENT') throw error; }
 }
 
-function dispatchTokenFromFile(file?: any) {
+// SQ-455: the structured outcome of reading a dispatch token file. Claim and the other token
+// checks only need the token or null (dispatchTokenFromFile), but the briefing refusal has to tell
+// a missing or unreadable file apart from an empty or malformed one, because each needs a different
+// next step and an executor that cannot tell them apart cannot tell whether to ask for a redispatch.
+function readDispatchTokenFile(file?: any): any {
   const tokenFile = String(file || '').trim();
-  if (!tokenFile) return null;
+  if (!tokenFile) return { status: 'missing', file: null, code: null };
+  let raw: string;
   try {
-    const token = fs.readFileSync(tokenFile, 'utf8').trim();
-    return token && !/[\r\n]/.test(token) ? token : null;
-  } catch (_) {
-    return null;
+    raw = fs.readFileSync(tokenFile, 'utf8');
+  } catch (error: any) {
+    const code = error?.code || null;
+    return code === 'ENOENT' || code === 'ENOTDIR'
+      ? { status: 'missing', file: tokenFile, code }
+      : { status: 'unreadable', file: tokenFile, code };
   }
+  const token = raw.trim();
+  if (!token) return { status: 'empty', file: tokenFile, code: null };
+  if (/[\r\n]/.test(token)) return { status: 'malformed', file: tokenFile, code: null };
+  return { status: 'ok', file: tokenFile, token };
+}
+
+function dispatchTokenFromFile(file?: any) {
+  const outcome = readDispatchTokenFile(file);
+  return outcome.status === 'ok' ? outcome.token : null;
 }
 
 function dispatchTokenForRequest(token?: any, tokenFile?: any) {
   return token == null || token === '' ? dispatchTokenFromFile(tokenFile) : token;
+}
+
+// SQ-455: the agent-facing briefing refusal for every token failure, one reason per outcome. Each
+// message says whether retrying the briefing can work and whether a fresh redispatch is needed.
+// A token file path other than the current dispatch's own means a later dispatch superseded this
+// launch: the orchestrator already holds the current dispatch, so this launch must stop rather
+// than ask for another one.
+function briefingTokenRefusal(ticket: any, state: any, outcome: any) {
+  const ref = ticket.ref;
+  const file = outcome.file;
+  const currentFile = typeof state?.tokenFile === 'string' && state.tokenFile ? state.tokenFile : null;
+  const superseded = !!(file && currentFile && path.resolve(file) !== path.resolve(currentFile));
+  const supersededNext = `${ref}'s current dispatch uses a different token file, so a later dispatch superseded this launch. Retrying will not help and this launch must not ask for another dispatch: stop without claiming and report the superseded launch to the orchestrator, which holds ${ref}'s current dispatch.`;
+  const redispatchNext = `Retrying this briefing will not help: a fresh redispatch of ${ref} is needed.`;
+  const base = { ok: false, tokenFile: file, ...(outcome.code ? { code: outcome.code } : {}) };
+  if (outcome.status === 'missing') {
+    const what = file ? `dispatch token file ${file} does not exist.` : 'no dispatch token or token file was supplied.';
+    return { ...base, reason: 'token_file_missing', message: `${what} ${superseded ? supersededNext : redispatchNext}` };
+  }
+  if (outcome.status === 'unreadable') {
+    return {
+      ...base,
+      reason: 'token_file_unreadable',
+      message: `dispatch token file ${file} exists but could not be read (${outcome.code || 'unknown error'}). No redispatch is needed yet: restore read access to that exact path, then re-run the exact briefing command from this executor prompt.`,
+    };
+  }
+  if (outcome.status === 'empty' || outcome.status === 'malformed') {
+    const what = outcome.status === 'empty' ? 'is empty' : 'is malformed: it holds more than one line';
+    return {
+      ...base,
+      reason: 'token_file_invalid',
+      detail: outcome.status,
+      message: `dispatch token file ${file} ${what}, so it carries no redeemable token. ${superseded ? supersededNext : redispatchNext}`,
+    };
+  }
+  const source = file ? `the token in ${file}` : 'the supplied dispatch token';
+  return {
+    ...base,
+    reason: 'token_mismatch',
+    message: `${source} does not match ${ref}'s current dispatch. ${superseded ? supersededNext : `The credential was altered or overwritten. ${redispatchNext}`}`,
+  };
 }
 
 function dispatchState(ticket?: any) {
@@ -2460,11 +2517,23 @@ function readDispatchBriefing(slug?: any, idOrRef?: any, token?: any, tokenFile?
   const ticket = getTicket(slug, idOrRef);
   if (!ticket) return { ok: false, reason: 'not_found' };
   const state = dispatchState(ticket);
-  const receivedToken = dispatchTokenForRequest(token, tokenFile);
-  if (!state || !ticket.dispatchNonce) return { ok: false, reason: 'token' };
+  if (!state || !ticket.dispatchNonce) {
+    return {
+      ok: false,
+      reason: 'no_dispatch',
+      message: `${ticket.ref} has no prepared dispatch, so there is no briefing to redeem. A fresh dispatch of ${ticket.ref} is needed.`,
+    };
+  }
   if (state.terminalAt) return { ok: false, reason: 'stale' };
+  // SQ-455: keep the token-file read outcome instead of collapsing it to null, so the refusal can
+  // say which of missing, unreadable, empty, malformed, or a valid-but-mismatched nonce it was.
+  const outcome = token == null || token === ''
+    ? readDispatchTokenFile(tokenFile)
+    : { status: 'ok', file: null, token };
+  if (outcome.status !== 'ok') return briefingTokenRefusal(ticket, state, outcome);
+  const receivedToken = outcome.token;
   if (!dispatchTokenMatches(ticket.dispatchNonce, receivedToken)) {
-    return { ok: false, reason: 'token' };
+    return briefingTokenRefusal(ticket, state, { status: 'mismatch', file: outcome.file });
   }
   // The renderer still validates the resolved credential. Returning only the
   // ticket made every token-file briefing fail after authentication (SQ-1866).
