@@ -637,7 +637,10 @@ test('dispatch returns a stable executor, one spawn prompt, and a token', async 
     env: Object.assign({}, process.env, { SIDEQUEST_HOME, CLAUDE_PROJECT_DIR: PROJ }),
   });
   assert.equal(staleBriefing.status, 1);
-  assert.match(staleBriefing.stderr, /dispatch token was refused/);
+  // SQ-455: a stale copy of the adopted dispatch's token is a mismatch from a superseded launch.
+  const instantRef = addedInstant.ref;
+  assert.equal(store.readDispatchBriefing(slug, instantRef, undefined, staleInstantTokenFile).reason, 'token_mismatch');
+  assert.equal(staleBriefing.stderr, `sidequest: briefing: the token in ${staleInstantTokenFile} does not match ${instantRef}'s current dispatch. ${instantRef}'s current dispatch uses a different token file, so a later dispatch superseded this launch. Retrying will not help and this launch must not ask for another dispatch: stop without claiming and report the superseded launch to the orchestrator, which holds ${instantRef}'s current dispatch.\n`);
   assert.doesNotMatch(JSON.stringify(adopted), /ephemeral/);
 
   store.setCategory({ id: 'dispatch-readonly-codex', name: 'Dispatch Readonly Codex', readonly: true, route: { model: 'codex-gpt-5-6-terra', effort: 'high' } });
