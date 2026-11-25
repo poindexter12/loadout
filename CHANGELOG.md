@@ -8,6 +8,19 @@ Releases before v3.208.0 predate this file and are not backfilled; `git log` is 
 those. Entries are generated from `.release/unreleased/*.md` by `scripts/release/cut.mjs`, so
 nothing here is hand-written.
 
+## v4.21.0 (2026-11-25)
+
+### sidequest 5.15.0 → 5.16.0
+
+#### Features
+
+- Import a GitHub issue into a new ticket and link it in one step, so issue-driven work closes its issue at release (SQ-438)
+  `add` now takes an optional `issue` (`#N`, `owner/repo#N`, or the issue URL), on the MCP tool and as `sidequest add --issue`. Sidequest reads the issue with `gh`, defaults the ticket title from it and the description to the issue URL plus body (an explicit title or description wins, and an explicit description still gets the URL appended), creates the ticket, and records the same link `issue_link` writes, so `sidequest audit --apply` mirrors its status and closes it at release. Closing still happens at release, not when the ticket is done. The import refuses and creates no ticket when the issue is closed, when the issue is already linked to a ticket on this board (the refusal names that ticket), or when `gh` is missing or cannot read the issue. Every UNTRACKED ISSUES line in `sidequest audit` now ends with its ready-to-run import command, `sidequest add --issue owner/repo#N --unclassified`, and the JSON report carries the same string as `importCommand`. The audit stays report-only, and `--apply` still never creates tickets. The `add` and `issue_link` tool descriptions and the sidequest skill's filing guidance point issue-driven work at `issue`.
+
+#### Fixes
+
+- Answer guard now also fires when the Sidequest board server is registered directly, so an executor cannot answer its own question through mcp__sidequest__answer (SQ-440)
+
 ## v4.20.0 (2026-11-22)
 
 ### sidequest 5.14.0 → 5.15.0
