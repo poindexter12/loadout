@@ -886,7 +886,7 @@ test('a resumed live claim re-mints its token and re-binds the linked worktree',
     execFileSync('git', ['worktree', 'add', '--detach', worktree, 'HEAD'], { cwd: PROJECT });
     markCheckoutInstance(worktree);
     fs.rmSync(prepared.ticket.dispatch.tokenFile);
-    assert.equal(store.readDispatchBriefing(slug, ticket.ref, undefined, prepared.ticket.dispatch.tokenFile).reason, 'token');
+    assert.equal(store.readDispatchBriefing(slug, ticket.ref, undefined, prepared.ticket.dispatch.tokenFile).reason, 'token_file_missing');
 
     const recovered = store.recoverLiveClaimDispatch(slug, ticket.ref, {
       by: claimHolder,
@@ -2941,7 +2941,102 @@ test('dispatch token files authenticate the briefing and claim without transcrib
     tokenFile,
     executor: prepared.ticket.dispatchExecutor,
   }).ok, true);
-  assert.equal(store.readDispatchBriefing(slug, ticket.ref, undefined, `${tokenFile}.missing`).reason, 'token');
+  assert.equal(store.readDispatchBriefing(slug, ticket.ref, undefined, `${tokenFile}.missing`).reason, 'token_file_missing');
+});
+
+// SQ-455: each token-file read outcome keeps its own reason and agent-facing refusal text through to
+// the briefing CLI, instead of every failure printing one "refused or unavailable" line.
+function runBriefingCli(ref: string, tokenFile: string) {
+  return spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'bin', 'sidequest.js'),
+    'briefing', ref, '--token-file', tokenFile, '--project', PROJECT,
+  ], { encoding: 'utf8', env: Object.assign({}, process.env, { SIDEQUEST_HOME, CLAUDE_PROJECT_DIR: PROJECT }) });
+}
+
+function assertBriefingRefusal(ref: string, tokenFile: string, reason: string, message: string) {
+  const result = store.readDispatchBriefing(slug, ref, undefined, tokenFile);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, reason);
+  assert.equal(result.message, message);
+  const cli = runBriefingCli(ref, tokenFile);
+  assert.notEqual(cli.status, 0, `briefing must refuse ${reason}: ${cli.stdout}`);
+  assert.ok(cli.stderr.includes(`briefing: ${message}`), `CLI must print the ${reason} refusal verbatim: ${cli.stderr}`);
+  return result;
+}
+
+test('briefing refuses a missing token file with its own reason and says a fresh redispatch is needed', () => {
+  const ticket = createFixture('briefing missing token file');
+  const prepared = store.prepareDispatch(slug, ticket.ref, { sessionId: `briefing-missing-${Date.now()}` });
+  const tokenFile = prepared.ticket.dispatch.tokenFile;
+  fs.rmSync(tokenFile);
+  assertBriefingRefusal(ticket.ref, tokenFile, 'token_file_missing',
+    `dispatch token file ${tokenFile} does not exist. Retrying this briefing will not help: a fresh redispatch of ${ticket.ref} is needed.`);
+});
+
+test('briefing refuses an unreadable token file without asking for a redispatch', { skip: process.getuid?.() === 0 }, () => {
+  const ticket = createFixture('briefing unreadable token file');
+  const prepared = store.prepareDispatch(slug, ticket.ref, { sessionId: `briefing-unreadable-${Date.now()}` });
+  const tokenFile = prepared.ticket.dispatch.tokenFile;
+  fs.chmodSync(tokenFile, 0o000);
+  try {
+    const result = assertBriefingRefusal(ticket.ref, tokenFile, 'token_file_unreadable',
+      `dispatch token file ${tokenFile} exists but could not be read (EACCES). No redispatch is needed yet: restore read access to that exact path, then re-run the exact briefing command from this executor prompt.`);
+    assert.equal(result.code, 'EACCES');
+  } finally {
+    fs.chmodSync(tokenFile, 0o600);
+  }
+  assert.equal(store.readDispatchBriefing(slug, ticket.ref, undefined, tokenFile).ok, true);
+});
+
+test('briefing refuses an empty or malformed token file as invalid and says a fresh redispatch is needed', () => {
+  const ticket = createFixture('briefing invalid token file');
+  const prepared = store.prepareDispatch(slug, ticket.ref, { sessionId: `briefing-invalid-${Date.now()}` });
+  const tokenFile = prepared.ticket.dispatch.tokenFile;
+  fs.writeFileSync(tokenFile, '  \n');
+  const empty = assertBriefingRefusal(ticket.ref, tokenFile, 'token_file_invalid',
+    `dispatch token file ${tokenFile} is empty, so it carries no redeemable token. Retrying this briefing will not help: a fresh redispatch of ${ticket.ref} is needed.`);
+  assert.equal(empty.detail, 'empty');
+  fs.writeFileSync(tokenFile, `${prepared.token}\n${prepared.token}\n`);
+  const malformed = assertBriefingRefusal(ticket.ref, tokenFile, 'token_file_invalid',
+    `dispatch token file ${tokenFile} is malformed: it holds more than one line, so it carries no redeemable token. Retrying this briefing will not help: a fresh redispatch of ${ticket.ref} is needed.`);
+  assert.equal(malformed.detail, 'malformed');
+});
+
+test('briefing refuses a valid token from a superseded dispatch as a mismatch and tells the launch to stop', () => {
+  const ticket = createFixture('briefing superseded token file');
+  const sessionId = `briefing-superseded-${Date.now()}`;
+  const first = store.prepareDispatch(slug, ticket.ref, { sessionId });
+  const oldTokenFile = first.ticket.dispatch.tokenFile;
+  const second = store.prepareDispatch(slug, ticket.ref, { sessionId: `${sessionId}-next` });
+  assert.notEqual(second.ticket.dispatch.tokenFile, oldTokenFile);
+  const supersededNext = `${ticket.ref}'s current dispatch uses a different token file, so a later dispatch superseded this launch. Retrying will not help and this launch must not ask for another dispatch: stop without claiming and report the superseded launch to the orchestrator, which holds ${ticket.ref}'s current dispatch.`;
+  // The redispatch removes the superseded token file, so the old launch first sees it missing, and
+  // is told it was superseded rather than asked to request yet another dispatch.
+  assert.equal(fs.existsSync(oldTokenFile), false);
+  assertBriefingRefusal(ticket.ref, oldTokenFile, 'token_file_missing',
+    `dispatch token file ${oldTokenFile} does not exist. ${supersededNext}`);
+  // A surviving copy of the superseded nonce is valid as a token but not this dispatch's: a mismatch.
+  fs.writeFileSync(oldTokenFile, `${first.token}\n`);
+  assertBriefingRefusal(ticket.ref, oldTokenFile, 'token_mismatch',
+    `the token in ${oldTokenFile} does not match ${ticket.ref}'s current dispatch. ${supersededNext}`);
+  fs.rmSync(oldTokenFile);
+  assert.equal(store.readDispatchBriefing(slug, ticket.ref, undefined, second.ticket.dispatch.tokenFile).ok, true);
+});
+
+test('briefing refuses an overwritten current token file as a mismatch and says a fresh redispatch is needed', () => {
+  const ticket = createFixture('briefing overwritten token file');
+  const prepared = store.prepareDispatch(slug, ticket.ref, { sessionId: `briefing-overwritten-${Date.now()}` });
+  const tokenFile = prepared.ticket.dispatch.tokenFile;
+  fs.writeFileSync(tokenFile, 'aaaa-aaaa-aaaa-aaaa-aaaa-aaaa-aaaa-aaaa\n');
+  assertBriefingRefusal(ticket.ref, tokenFile, 'token_mismatch',
+    `the token in ${tokenFile} does not match ${ticket.ref}'s current dispatch. The credential was altered or overwritten. Retrying this briefing will not help: a fresh redispatch of ${ticket.ref} is needed.`);
+});
+
+test('briefing refuses a ticket with no prepared dispatch and says a fresh dispatch is needed', () => {
+  const ticket = createFixture('briefing without dispatch');
+  const tokenFile = path.join(SIDEQUEST_HOME, `${ticket.ref}-never-dispatched.token`);
+  assertBriefingRefusal(ticket.ref, tokenFile, 'no_dispatch',
+    `${ticket.ref} has no prepared dispatch, so there is no briefing to redeem. A fresh dispatch of ${ticket.ref} is needed.`);
 });
 
 test('dispatch token files reject altered credentials with recovery guidance', () => {

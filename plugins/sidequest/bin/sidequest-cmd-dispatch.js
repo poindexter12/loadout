@@ -97,7 +97,7 @@ async function cmdBriefing(opts, positional) {
   }
   const result = store.readDispatchBriefing(slug, idOrRef, void 0, opts["token-file"]);
   if (!result.ok) {
-    const message = result.reason === "not_found" ? `no ticket "${idOrRef}".` : result.reason === "stale" ? "dispatch is no longer current; re-run dispatch for a current spawn." : "dispatch token was refused or its token file was unavailable. Re-run the exact briefing command from this executor prompt; do not re-run dispatch.";
+    const message = result.reason === "not_found" ? `no ticket "${idOrRef}".` : result.reason === "stale" ? "dispatch is no longer current; re-run dispatch for a current spawn." : result.message || `dispatch token was refused (${result.reason || "unknown"}).`;
     fail(`briefing: ${message}`);
   }
   const briefing = agentsync.withProjectIdentity(agentsync.renderTicketBriefing(result.ticket, result.token, slug, meta.path), meta.path);
